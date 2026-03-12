@@ -95,18 +95,39 @@ def _apply_overrides(config: TrainConfig, overrides: List[str]):
         setattr(obj, field_name, value)
 
 
+def _coerce_types(dc_class, raw_dict: dict) -> dict:
+    """Coerce raw YAML values to match dataclass field types.
+
+    PyYAML safe_load treats scientific notation (e.g. 6e-4) as strings.
+    This converts them to the correct type based on the dataclass annotation.
+    """
+    import dataclasses
+    field_types = {f.name: f.type for f in dataclasses.fields(dc_class)}
+    coerced = {}
+    for k, v in raw_dict.items():
+        expected = field_types.get(k)
+        if expected == float and isinstance(v, str):
+            v = float(v)
+        elif expected == int and isinstance(v, str):
+            v = int(v)
+        elif expected == bool and isinstance(v, str):
+            v = v.lower() in ("true", "1", "yes")
+        coerced[k] = v
+    return coerced
+
+
 def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig:
     with open(path) as f:
         raw = yaml.safe_load(f)
 
     config = TrainConfig(
         max_seq_len=raw.get("max_seq_len", 1024),
-        model=ModelConfig(**{k: v for k, v in raw.get("model", {}).items()}),
-        data=DataConfig(**{k: v for k, v in raw.get("data", {}).items()}),
-        training=TrainingConfig(**{k: v for k, v in raw.get("training", {}).items()}),
-        optimizer=OptimizerConfig(**{k: v for k, v in raw.get("optimizer", {}).items()}),
-        scheduler=SchedulerConfig(**{k: v for k, v in raw.get("scheduler", {}).items()}),
-        logging=LoggingConfig(**{k: v for k, v in raw.get("logging", {}).items()}),
+        model=ModelConfig(**_coerce_types(ModelConfig, raw.get("model", {}))),
+        data=DataConfig(**_coerce_types(DataConfig, raw.get("data", {}))),
+        training=TrainingConfig(**_coerce_types(TrainingConfig, raw.get("training", {}))),
+        optimizer=OptimizerConfig(**_coerce_types(OptimizerConfig, raw.get("optimizer", {}))),
+        scheduler=SchedulerConfig(**_coerce_types(SchedulerConfig, raw.get("scheduler", {}))),
+        logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
     )
 
     if overrides:
