@@ -22,13 +22,14 @@ class MultiHeadAttention(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, n_heads, T, d_head)
         q, k, v = qkv.unbind(0)
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.d_head))
-        causal_mask = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1)
-        att = att.masked_fill(causal_mask, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
+        # Use PyTorch's scaled_dot_product_attention (flash attention when available)
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=True,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+        )
 
-        out = (att @ v).transpose(1, 2).reshape(B, T, C)
+        out = out.transpose(1, 2).reshape(B, T, C)
         return self.resid_dropout(self.out_proj(out))
 
 
