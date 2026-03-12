@@ -1,0 +1,59 @@
+import pytest
+import os
+import tempfile
+import numpy as np
+import torch
+from src.utils.config import TrainConfig, ModelConfig, DataConfig, TrainingConfig, OptimizerConfig, SchedulerConfig, LoggingConfig
+from src.training.trainer import Trainer
+
+
+def _tiny_config(tmp_dir):
+    """Config for a tiny model that trains in seconds."""
+    tokens = np.arange(4096, dtype=np.uint16)
+    train_path = os.path.join(tmp_dir, "train.bin")
+    val_path = os.path.join(tmp_dir, "val.bin")
+    tokens.tofile(train_path)
+    tokens[:512].tofile(val_path)
+
+    return TrainConfig(
+        max_seq_len=64,
+        model=ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=4096, dropout=0.0),
+        data=DataConfig(dataset="test", tokenizer_path="", data_dir=tmp_dir, val_split=0.01, num_workers=0),
+        training=TrainingConfig(
+            batch_size=4, gradient_accumulation_steps=1, max_steps=5,
+            mixed_precision="no", activation_checkpointing=False,
+            grad_clip=1.0, checkpoint_dir=os.path.join(tmp_dir, "ckpt"),
+            checkpoint_every=3, eval_every=3, eval_steps=2,
+        ),
+        optimizer=OptimizerConfig(name="adamw", lr=1e-3, weight_decay=0.0, betas=[0.9, 0.95]),
+        scheduler=SchedulerConfig(name="cosine", warmup_steps=1, min_lr=1e-4),
+        logging=LoggingConfig(wandb_project="test", wandb_run_name="test", log_every=1),
+    )
+
+
+def test_trainer_runs_without_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _tiny_config(tmp)
+        trainer = Trainer(config, wandb_enabled=False)
+        trainer.train()
+        assert trainer.step == 5
+
+
+def test_trainer_saves_checkpoint():
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _tiny_config(tmp)
+        trainer = Trainer(config, wandb_enabled=False)
+        trainer.train()
+        ckpt_dir = os.path.join(tmp, "ckpt")
+        assert os.path.exists(os.path.join(ckpt_dir, "step_3.pt"))
+
+
+def test_trainer_loss_decreases():
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _tiny_config(tmp)
+        config.training.max_steps = 20
+        config.training.eval_every = 100
+        config.training.checkpoint_every = 100
+        trainer = Trainer(config, wandb_enabled=False)
+        trainer.train()
+        assert trainer.loss_history[0] > trainer.loss_history[-1]
