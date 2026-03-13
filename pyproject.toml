@@ -2,7 +2,7 @@
 name = "pretrain"
 version = "0.1.0"
 description = "Pretraining experiments — different architectures, datasets, hyperparameters"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "torch>=2.9",
     "tokenizers>=0.22",
