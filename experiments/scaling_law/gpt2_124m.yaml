@@ -17,12 +17,12 @@ data:
 
 training:
   batch_size: 4
-  gradient_accumulation_steps: 15
-  max_steps: 100000
+  gradient_accumulation_steps: 8
+  max_steps: 80000
   mixed_precision: "bf16"
   activation_checkpointing: true
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/"
+  checkpoint_dir: "checkpoints/scaling_law/gpt2_124m/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -39,6 +39,6 @@ scheduler:
   min_lr: 6e-5
 
 logging:
-  wandb_project: "pretrain"
-  wandb_run_name: "gpt2-small-openwebtext"
+  wandb_project: "pretrain-scaling-law"
+  wandb_run_name: "gpt2-124m"
   log_every: 10

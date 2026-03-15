@@ -73,8 +73,8 @@ GPT-2 (MHA) is the baseline. All experiments compare against it.
 
 ```
 pretrain/
-├── configs/                  # Base configs (YAML)
-│   └── gpt2_small.yaml      # GPT-2 124M baseline
+├── configs/                  # Standard configs (paper baselines)
+│   └── gpt2_124m.yaml       # GPT-2 124M baseline
 ├── src/
 │   ├── model/                # Model architectures
 │   │   ├── components.py     # Shared blocks (attention, MLP, norms)
@@ -95,7 +95,8 @@ pretrain/
 │   ├── train_tokenizer.py    # Train custom BPE tokenizer
 │   ├── preprocess_data.py    # Tokenize dataset → .bin files
 │   └── eval.py               # Standalone evaluation
-├── experiments/              # Architecture experiments (see below)
+├── experiments/              # Self-contained experiments (configs + results)
+│   └── scaling_law/         # Kaplan/Chinchilla IsoLoss reproduction
 ├── tests/
 └── pyproject.toml
 ```
@@ -109,13 +110,13 @@ uv sync
 nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 # Or step by step
-uv run python scripts/train_tokenizer.py --config configs/gpt2_small.yaml
-uv run python scripts/preprocess_data.py --config configs/gpt2_small.yaml
-uv run python scripts/train.py --config configs/gpt2_small.yaml
-uv run python scripts/eval.py --config configs/gpt2_small.yaml --checkpoint checkpoints/step_50000.pt
+uv run python scripts/train_tokenizer.py --config configs/gpt2_124m.yaml
+uv run python scripts/preprocess_data.py --config configs/gpt2_124m.yaml
+uv run python scripts/train.py --config configs/gpt2_124m.yaml
+uv run python scripts/eval.py --config configs/gpt2_124m.yaml --checkpoint checkpoints/step_50000.pt
 
 # CLI overrides
-uv run python scripts/train.py --config configs/gpt2_small.yaml --optimizer.lr 3e-4
+uv run python scripts/train.py --config configs/gpt2_124m.yaml --optimizer.lr 6e-4
 ```
 
 ## Experiments
@@ -124,30 +125,32 @@ All architecture experiments live in `experiments/`. Each experiment is self-con
 
 ```
 experiments/
+├── scaling_law/
+│   ├── README.md              # Hypothesis, setup, results
+│   ├── gpt2_16m.yaml          # Experiment-specific configs
+│   ├── gpt2_30m.yaml
+│   ├── gpt2_55m.yaml
+│   ├── gpt2_124m.yaml
+│   └── results/               # W&B exports, plots
 ├── gqa_attention/
-│   ├── README.md         # Hypothesis, setup, results
-│   ├── config.yaml       # Inherits from base + overrides
-│   └── attention.py      # GQA implementation
-├── moe_transformer/
 │   ├── README.md
 │   ├── config.yaml
-│   └── moe_layer.py
+│   └── attention.py           # Custom component
 └── ...
 ```
 
 ### Running an experiment
 
 ```bash
-uv run python scripts/train.py --config experiments/gqa_attention/config.yaml
+uv run python scripts/train.py --config experiments/scaling_law/gpt2_16m.yaml
 ```
 
 ### Experiment workflow
 
-1. Create `experiments/<name>/` with a `config.yaml` that inherits from a base config
-2. Implement the custom component (attention, layer, model)
-3. Train and compare against baseline on W&B
-4. Record results in the experiment's `README.md`
-5. If results are good, graduate the code into `src/`
+1. Create `experiments/<name>/` with configs, custom code, and a `README.md`
+2. Train and compare against baseline on W&B
+3. Record results in the experiment's `README.md` and `results/`
+4. If results are good, graduate the code into `src/` and config into `configs/`
 
 ## Adding a New Architecture
 
@@ -179,7 +182,7 @@ Data is preprocessed once and reused across all experiments.
 | Gradient clipping | `max_norm=1.0` |
 | Activation checkpointing | Trade compute for VRAM |
 | Checkpointing | Full state saved to `.pt`, resume from any checkpoint |
-| W&B logging | Loss, perplexity, lr, grad norm, tokens/sec |
+| W&B logging | Loss, perplexity, FLOPs, lr, grad norm, tokens/sec |
 
 ## Dependencies
 
