@@ -37,6 +37,13 @@ GPT-2 (MHA) is the baseline. All experiments compare against it.
 | State Space (Mamba) | Planned | S4/Mamba — the RNN strikes back |
 | Hyena | Planned | Long convolutions as attention replacement |
 
+### Dataset
+
+| Experiment | Status | Description |
+|---|---|---|
+| Coding Corpus | Planned | Train model on coding data (e.g., The Stack) — compare against OpenWebText baseline |
+| Multi-language | Planned | Train on multi-language corpora — cross-lingual transfer and tokenizer efficiency |
+
 ### Infra & Kernel Speedups
 
 | Experiment | Status | Description |
@@ -46,6 +53,19 @@ GPT-2 (MHA) is the baseline. All experiments compare against it.
 | Fused MLP | Planned | Fused GeLU / SwiGLU MLP kernel — one read, one write |
 | Fused LayerNorm / RMSNorm | Planned | Triton fused norm kernels — eliminate extra memory passes |
 | Fused Cross-Entropy | Planned | Fused logit + softmax + loss — skip materializing logits |
+| Custom Optimizer | Planned | Implement AdamW and Muon from scratch — custom weight decay, momentum, Newton-style updates |
+| Custom Tokenizer | Planned | Byte-level BPE tokenizer from scratch — no HF dependency |
+| FP8/FP4 Training | Planned | Low-precision training — measure throughput gains vs. loss quality tradeoff |
+
+### Evaluation
+
+| Experiment | Status | Description |
+|---|---|---|
+| Scaling Law | Planned | Reproduce Chinchilla/Kaplan scaling laws — sweep model size vs. tokens vs. compute |
+| Tokenizer Quality | Planned | Measure compression ratio and fertility across corpora (English, code, multi-language) |
+| Training Efficiency | Planned | Compare tokens/sec, peak VRAM, and FLOPs utilization across architectures and kernels |
+| Weight Visualization | Planned | Layer weight distribution and gradient flow — detect vanishing/exploding gradients |
+| Attention Visualization | Planned | Attention score heatmaps — inspect head specialization and pattern formation |
 
 > Results are posted weekly. Check the `experiments/` folder for write-ups and W&B links.
 
