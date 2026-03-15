@@ -16,8 +16,8 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 32
-  gradient_accumulation_steps: 1
+  batch_size: 4
+  gradient_accumulation_steps: 8
   max_steps: 10000
   mixed_precision: "bf16"
   activation_checkpointing: false
