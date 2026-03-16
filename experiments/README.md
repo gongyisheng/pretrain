@@ -10,7 +10,7 @@ Each experiment is a self-contained folder with:
 1. Create a folder: `experiments/<name>/`
 2. Write a `config.yaml` that inherits from a base:
    ```yaml
-   base_config: "configs/gpt2_small.yaml"
+   base_config: "configs/gpt2_124m.yaml"
    overrides:
      optimizer_module: "experiments/<name>/optimizer.py"
    optimizer:

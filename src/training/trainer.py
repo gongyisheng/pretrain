@@ -27,7 +27,18 @@ class Trainer:
         # Model
         self.model = build_model(config).to(self.device)
         n_params = sum(p.numel() for p in self.model.parameters())
-        print(f"Model: {config.model.arch} | {n_params / 1e6:.1f}M parameters | device={self.device}")
+        self.n_non_emb_params = n_params - sum(
+            p.numel() for name, p in self.model.named_parameters()
+            if "emb" in name
+        )
+        self.tokens_per_step = (
+            config.training.batch_size
+            * config.training.gradient_accumulation_steps
+            * config.max_seq_len
+        )
+        self.total_tokens = 0
+        print(f"Model: {config.model.arch} | {n_params / 1e6:.1f}M params "
+              f"({self.n_non_emb_params / 1e6:.1f}M non-embedding) | device={self.device}")
 
         # Data
         train_path = os.path.join(config.data.data_dir, "train.bin")
@@ -119,6 +130,7 @@ class Trainer:
             self.scheduler.step()
 
             self.step += 1
+            self.total_tokens += self.tokens_per_step
             self.loss_history.append(accum_loss)
 
             # Logging
@@ -126,9 +138,12 @@ class Trainer:
                 elapsed = time.time() - t_last_log
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
                 lr = self.optimizer.param_groups[0]["lr"]
+                flops = 6 * self.n_non_emb_params * self.total_tokens
                 self.logger.log({
                     "train/loss": accum_loss,
                     "train/perplexity": min(float(torch.exp(torch.tensor(accum_loss))), 1e6),
+                    "train/flops": flops,
+                    "train/total_tokens": self.total_tokens,
                     "lr": lr,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "tokens_per_sec": tokens_per_sec,
@@ -216,6 +231,7 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.scaler.load_state_dict(checkpoint["grad_scaler"])
         self.step = checkpoint["step"]
+        self.total_tokens = self.step * self.tokens_per_step
 
         rng = checkpoint.get("rng_states", {})
         if "python" in rng:

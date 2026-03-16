@@ -40,5 +40,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain"
-  wandb_run_name: "gpt2-small-openwebtext"
+  wandb_run_name: "gpt2-124m"
   log_every: 10

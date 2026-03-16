@@ -1,0 +1,44 @@
+max_seq_len: 1024
+
+model:
+  arch: "gpt2"
+  n_layers: 4
+  n_heads: 4
+  d_model: 256
+  vocab_size: 50257
+  dropout: 0.1
+
+data:
+  dataset: "openwebtext"
+  tokenizer_path: "tokenizers/custom_bpe_50k"
+  data_dir: "data/"
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  max_steps: 20000
+  mixed_precision: "bf16"
+  activation_checkpointing: false
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/scaling_law/gpt2_16m/"
+  checkpoint_every: 2500
+  eval_every: 500
+  eval_steps: 200
+
+optimizer:
+  name: "adamw"
+  lr: 1e-3
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 500
+  min_lr: 1e-4
+
+logging:
+  wandb_project: "pretrain-scaling-law"
+  wandb_run_name: "gpt2-16m"
+  log_every: 10

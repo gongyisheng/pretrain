@@ -13,7 +13,7 @@ rm -f data/all_tokens.bin
 
 # Only preprocess if train.bin doesn't exist
 if [ ! -f data/train.bin ]; then
-    python scripts/preprocess_data.py --config configs/gpt2_small.yaml
+    python scripts/preprocess_data.py --config configs/gpt2_124m.yaml
     echo "Preprocessing complete at: $(date)"
 else
     echo "data/train.bin already exists, skipping preprocessing"
@@ -22,7 +22,7 @@ fi
 echo ""
 echo "=== Step 2: Training GPT-2 ==="
 echo "Started at: $(date)"
-python scripts/train.py --config configs/gpt2_small.yaml
+python scripts/train.py --config configs/gpt2_124m.yaml
 
 echo ""
 echo "=== Pipeline complete ==="
