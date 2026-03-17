@@ -37,10 +37,10 @@ class Qwen3Model(nn.Module):
                 n_kv_heads=config.n_kv_heads,
                 d_ff=config.d_ff,
                 dropout=config.dropout,
-                attn_res=config.attn_res,
-                layer_idx=i + 1,
-                attn_res_block_size=config.attn_res_block_size,
                 qk_norm=config.qk_norm,
+                attn_res=config.attn_res,
+                attn_res_block_size=config.attn_res_block_size,
+                layer_idx=i + 1,
             )
             for i in range(config.n_layers)
         ])

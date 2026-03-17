@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-for config in gpt2_16m gpt2_30m gpt2_55m gpt2_124m; do
+for config in gpt2_d512_l4 gpt2_d512_l8 gpt2_d512_l12 gpt2_d512_l16 gpt2_d512_l24; do
     echo "=== ${config} ==="
     echo "Started at: $(date)"
     python scripts/train.py --config "experiments/attn_res/${config}.yaml"

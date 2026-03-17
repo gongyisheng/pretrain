@@ -3,12 +3,12 @@ max_seq_len: 1024
 model:
   arch: "gpt2"
   n_layers: 12
-  n_heads: 12
-  d_model: 768
+  n_heads: 8
+  d_model: 512
   vocab_size: 50257
-  dropout: 0.1
+  dropout: 0.0
   attn_res: true
-  attn_res_block_size: 2  # boundaries at layers 2, 4, ..., 12 → 6 blocks
+  attn_res_block_size: 1  # boundaries at layers 2, 4, ..., 12 → 6 blocks
 
 data:
   dataset: "openwebtext"
@@ -20,27 +20,27 @@ data:
 training:
   batch_size: 4
   gradient_accumulation_steps: 8
-  max_steps: 160000
+  max_steps: 80000
   mixed_precision: "bf16"
-  activation_checkpointing: true
+  activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/attn_res/gpt2_124m/"
+  checkpoint_dir: "checkpoints/attn_res/gpt2_d512_l12/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
 
 optimizer:
   name: "adamw"
-  lr: 6e-4
+  lr: 8e-4
   weight_decay: 0.1
   betas: [0.9, 0.95]
 
 scheduler:
   name: "cosine"
-  warmup_steps: 2000
-  min_lr: 6e-5
+  warmup_steps: 1500
+  min_lr: 8e-5
 
 logging:
   wandb_project: "pre-train-attn-res"
-  wandb_run_name: "gpt2-124m"
+  wandb_run_name: "gpt2-d512-l12"
   log_every: 10
