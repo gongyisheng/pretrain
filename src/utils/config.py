@@ -12,10 +12,14 @@ class ModelConfig:
     d_ff: int = 0  # 0 means 4 * d_model, set in post_init
     vocab_size: int = 50257
     dropout: float = 0.1
+    n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
+    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
 
     def __post_init__(self):
         if self.d_ff == 0:
             self.d_ff = 4 * self.d_model
+        if self.n_kv_heads == 0:
+            self.n_kv_heads = self.n_heads
 
 
 @dataclass
