@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.utils.checkpoint
+from tqdm import tqdm
 
 from src.model.registry import build_model
 from src.data.dataset import PretrainDataset
@@ -100,6 +101,7 @@ class Trainer:
         t_last_log = time.time()
         tokens_since_log = 0
 
+        pbar = tqdm(total=cfg.max_steps, initial=self.step, desc="Training", dynamic_ncols=True)
         while self.step < cfg.max_steps:
             self.optimizer.zero_grad()
 
@@ -132,6 +134,7 @@ class Trainer:
             self.step += 1
             self.total_tokens += self.tokens_per_step
             self.loss_history.append(accum_loss)
+            pbar.update(1)
 
             # Logging
             if self.step % self.config.logging.log_every == 0:
@@ -148,6 +151,7 @@ class Trainer:
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "tokens_per_sec": tokens_per_sec,
                 }, step=self.step)
+                pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
                 print(f"step {self.step}/{cfg.max_steps} | loss={accum_loss:.4f} | lr={lr:.2e} | tok/s={tokens_per_sec:.0f}")
                 t_last_log = time.time()
                 tokens_since_log = 0
@@ -162,6 +166,7 @@ class Trainer:
             if self.step % cfg.checkpoint_every == 0:
                 self._save_checkpoint()
 
+        pbar.close()
         self.logger.finish()
         print(f"Training complete. Final step: {self.step}")
 
