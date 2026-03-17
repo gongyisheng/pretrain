@@ -228,9 +228,9 @@ def _block_attn_res(
     Returns:
         Attention-weighted combination of all blocks + x, shape (B, S, D)
     """
-    V = torch.stack(attn_res_ctx + [x])                                                # (N+1, B, S, D)
-    K = norm(V)                                                                # (N+1, B, S, D)
-    logits = torch.einsum('d, nbsd -> nbs', proj.weight.squeeze(0), K)        # (N+1, B, S)
-    weights = logits.softmax(0)                                                # normalized over blocks
-    return torch.einsum('nbs, nbsd -> bsd', weights, V)                       # (B, S, D)
+    V = torch.stack(attn_res_ctx + [x])        # (N+1, B, S, D)
+    K = norm(V)                                # (N+1, B, S, D)
+    logits = K @ proj.weight.view(-1)          # (N+1, B, S)
+    weights = logits.softmax(0)                # normalized over blocks
+    return (weights.unsqueeze(-1) * V).sum(0)  # (B, S, D)
 
