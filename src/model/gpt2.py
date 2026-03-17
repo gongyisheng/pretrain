@@ -6,17 +6,8 @@ from src.utils.config import ModelConfig
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        d_ff: int,
-        dropout: float,
-        attn_res: bool = False,
-        layer_idx: int = 0,
-        block_size: int = 2,
-    ):
-        super().__init__(d_model, attn_res, layer_idx, block_size)
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float, **kwargs):
+        super().__init__(d_model, **kwargs)
         self.ln1 = nn.LayerNorm(d_model)
         self.attn = MultiHeadAttention(d_model, n_heads, dropout)
         self.ln2 = nn.LayerNorm(d_model)
@@ -46,7 +37,7 @@ class GPT2Model(nn.Module):
                 dropout=config.dropout,
                 attn_res=config.attn_res,
                 layer_idx=i + 1,
-                block_size=config.attn_res_block_size,
+                attn_res_block_size=config.attn_res_block_size,
             )
             for i in range(config.n_layers)
         ])
@@ -79,7 +70,7 @@ class GPT2Model(nn.Module):
                 x, attn_res_ctx = block(x, attn_res_ctx)
         else:
             for block in self.blocks:
-                x, _ = block(x)
+                x = block(x)
 
         x = self.ln_f(x)
         return self.lm_head(x)

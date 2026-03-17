@@ -11,11 +11,12 @@ class ModelConfig:
     d_model: int = 768
     d_ff: int = 0  # 0 means 4 * d_model, set in post_init
     vocab_size: int = 50257
-    dropout: float = 0.1
+    dropout: float = 0.0
     attn_res: bool = False        # enable Block Attention Residuals (works with any arch)
     attn_res_block_size: int = 2  # number of full layers per block for AttnRes
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
     rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
+    qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
 
     def __post_init__(self):
         if self.d_ff == 0:
