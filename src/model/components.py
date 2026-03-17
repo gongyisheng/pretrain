@@ -64,6 +64,7 @@ class MultiHeadAttention(nn.Module):
         k = self.k_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
         v = self.v_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
 
+        # Use PyTorch's scaled_dot_product_attention (flash attention when available)
         out = F.scaled_dot_product_attention(
             q, k, v,
             is_causal=True,
@@ -160,16 +161,76 @@ class SwiGluFFN(nn.Module):
 
 # --- Transformer Block ---
 
-class TransformerBlock(nn.Module):
-    """Pre-LayerNorm transformer block."""
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float = 0.1):
-        super().__init__()
-        self.ln1 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_heads, dropout)
-        self.ln2 = nn.LayerNorm(d_model)
-        self.ffn = GeluFFN(d_model, d_ff, dropout)
+class BaseTransformerBlock(nn.Module):
+    """Base transformer block with optional AttnRes support.
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
-        x = x + self.ffn(self.ln2(x))
-        return x
+    Subclasses implement attn_sublayer() and ffn_sublayer().
+    The residual logic (standard or AttnRes) lives here once for all architectures.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        attn_res: bool = False,
+        layer_idx: int = 0,   # 1-indexed; only used when attn_res=True
+        block_size: int = 2,  # only used when attn_res=True
+    ):
+        super().__init__()
+        self.attn_res = attn_res
+        if attn_res:
+            self.layer_idx = layer_idx
+            self.block_size = block_size
+            self.attn_res_proj = nn.Linear(d_model, 1, bias=False)
+            self.attn_res_norm = RMSNorm(d_model)
+            self.mlp_res_proj = nn.Linear(d_model, 1, bias=False)
+            self.mlp_res_norm = RMSNorm(d_model)
+
+    def attn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def forward(self, x: torch.Tensor, attn_res_ctx=None) -> tuple:
+        if attn_res_ctx is None:
+            # Standard residual path
+            x = x + self.attn_sublayer(x)
+            x = x + self.ffn_sublayer(x)
+        else:
+            # AttnRes path: sublayers receive aggregated h instead of raw x
+            h = _block_attn_res(attn_res_ctx, x, self.attn_res_proj, self.attn_res_norm)
+            if self.layer_idx % self.block_size == 0:
+                attn_res_ctx = attn_res_ctx + [x]  # seal current partial block; new list, no mutation
+                x = None
+            attn_out = self.attn_sublayer(h)
+            x = x + attn_out if x is not None else attn_out
+
+            h = _block_attn_res(attn_res_ctx, x, self.mlp_res_proj, self.mlp_res_norm)
+            x = x + self.ffn_sublayer(h)
+
+        return x, attn_res_ctx
+
+
+def _block_attn_res(
+    attn_res_ctx: list,
+    x: torch.Tensor,
+    proj: nn.Linear,
+    norm: RMSNorm,
+) -> torch.Tensor:
+    """Compute block-level attention residual.
+
+    Args:
+        attn_res_ctx: list of finalized block tensors, each shape (B, S, D)
+        x:   current partial block (hidden state), shape (B, S, D)
+        proj: Linear(d_model, 1, bias=False) — learned query vector w_l
+        norm: RMSNorm applied to keys before attention
+
+    Returns:
+        Attention-weighted combination of all blocks + x, shape (B, S, D)
+    """
+    V = torch.stack(attn_res_ctx + [x])                                                # (N+1, B, S, D)
+    K = norm(V)                                                                # (N+1, B, S, D)
+    logits = torch.einsum('d, nbsd -> nbs', proj.weight.squeeze(0), K)        # (N+1, B, S)
+    weights = logits.softmax(0)                                                # normalized over blocks
+    return torch.einsum('nbs, nbsd -> bsd', weights, V)                       # (B, S, D)
+

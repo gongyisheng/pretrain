@@ -1,0 +1,46 @@
+max_seq_len: 1024
+
+model:
+  arch: "gpt2"
+  n_layers: 8
+  n_heads: 8
+  d_model: 512
+  vocab_size: 50257
+  dropout: 0.1
+  attn_res: true
+  attn_res_block_size: 2  # boundaries at layers 2, 4, 6, 8 → 4 blocks
+
+data:
+  dataset: "openwebtext"
+  tokenizer_path: "tokenizers/custom_bpe_50k"
+  data_dir: "data/"
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  max_steps: 70000
+  mixed_precision: "bf16"
+  activation_checkpointing: false
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/attn_res/gpt2_55m/"
+  checkpoint_every: 5000
+  eval_every: 1000
+  eval_steps: 200
+
+optimizer:
+  name: "adamw"
+  lr: 6e-4
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 1500
+  min_lr: 6e-5
+
+logging:
+  wandb_project: "pre-train-attn-res"
+  wandb_run_name: "gpt2-55m"
+  log_every: 10

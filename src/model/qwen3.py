@@ -1,13 +1,11 @@
 import torch
 import torch.nn as nn
 
-from src.model.components import GroupedQueryAttention, RMSNorm, SwiGluFFN
+from src.model.components import BaseTransformerBlock, GroupedQueryAttention, RMSNorm, SwiGluFFN
 from src.utils.config import ModelConfig
 
 
-class Qwen3TransformerBlock(nn.Module):
-    """Pre-RMSNorm transformer block with GQA, SwiGLU FFN, and RoPE."""
-
+class Qwen3TransformerBlock(BaseTransformerBlock):
     def __init__(
         self,
         d_model: int,
@@ -17,17 +15,21 @@ class Qwen3TransformerBlock(nn.Module):
         dropout: float,
         max_seq_len: int,
         rope_theta: float,
+        attn_res: bool = False,
+        layer_idx: int = 0,
+        block_size: int = 2,
     ):
-        super().__init__()
+        super().__init__(d_model, attn_res, layer_idx, block_size)
         self.ln1 = RMSNorm(d_model)
         self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout, max_seq_len, rope_theta)
         self.ln2 = RMSNorm(d_model)
         self.ffn = SwiGluFFN(d_model, d_ff, dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
-        x = x + self.ffn(self.ln2(x))
-        return x
+    def attn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
+        return self.attn(self.ln1(x))
+
+    def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
+        return self.ffn(self.ln2(x))
 
 
 class Qwen3Model(nn.Module):
@@ -48,8 +50,11 @@ class Qwen3Model(nn.Module):
                 dropout=config.dropout,
                 max_seq_len=max_seq_len,
                 rope_theta=config.rope_theta,
+                attn_res=config.attn_res,
+                layer_idx=i + 1,
+                block_size=config.attn_res_block_size,
             )
-            for _ in range(config.n_layers)
+            for i in range(config.n_layers)
         ])
 
         self.ln_f = RMSNorm(config.d_model)
@@ -71,8 +76,13 @@ class Qwen3Model(nn.Module):
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         x = self.drop(self.token_emb(idx))
 
-        for block in self.blocks:
-            x = block(x)
+        if self.config.attn_res:
+            attn_res_ctx = []
+            for block in self.blocks:
+                x, attn_res_ctx = block(x, attn_res_ctx)
+        else:
+            for block in self.blocks:
+                x, _ = block(x)
 
         x = self.ln_f(x)
         return self.lm_head(x)
