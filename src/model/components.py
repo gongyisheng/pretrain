@@ -208,13 +208,14 @@ class BaseTransformerBlock(nn.Module):
         layer_idx: int = 0,
         attn_res: bool = False,
         attn_res_block_size: int = 1,
+        attn_res_norm: str = "rmsnorm",
     ):
         super().__init__()
         self.attn_res = attn_res
         if attn_res:
             self.layer_idx = layer_idx
             self.attn_res_block_size = attn_res_block_size
-            norm_cls = nn.LayerNorm if kwargs.get("attn_res_norm") == "layernorm" else RMSNorm
+            norm_cls = nn.LayerNorm if attn_res_norm == "layernorm" else RMSNorm
             self.attn_res_proj = nn.Linear(d_model, 1, bias=False)
             self.attn_res_norm = norm_cls(d_model)
             self.mlp_res_proj = nn.Linear(d_model, 1, bias=False)
