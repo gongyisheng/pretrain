@@ -231,7 +231,7 @@ class Trainer:
             },
         }
         torch.save(checkpoint, path)
-        print(f"  [ckpt] saved to {path}")
+        print(f"[ckpt] saved to {path}")
 
     def _load_checkpoint(self, path: str):
         print(f"Resuming from {path}")
