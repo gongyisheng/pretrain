@@ -101,7 +101,7 @@ class Trainer:
         t_last_log = time.time()
         tokens_since_log = 0
 
-        pbar = tqdm(total=cfg.max_steps, initial=self.step, desc="Training", dynamic_ncols=True)
+        pbar = tqdm(total=cfg.max_steps, initial=self.step, desc="[train]", dynamic_ncols=True)
         while self.step < cfg.max_steps:
             self.optimizer.zero_grad()
 
@@ -187,7 +187,7 @@ class Trainer:
         avg_loss = total_loss / max(n_batches, 1)
         ppl = min(float(torch.exp(torch.tensor(avg_loss))), 1e6)
         self.logger.log({"val/loss": avg_loss, "val/perplexity": ppl}, step=self.step)
-        print(f"  [eval] val_loss={avg_loss:.4f} | val_ppl={ppl:.2f}")
+        print(f"\n[eval] val_loss={avg_loss:.4f} | val_ppl={ppl:.2f}")
 
         self._generate_sample()
         self.model.train()
