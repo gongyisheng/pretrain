@@ -152,7 +152,6 @@ class Trainer:
                     "tokens_per_sec": tokens_per_sec,
                 }, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
-                print(f"step {self.step}/{cfg.max_steps} | loss={accum_loss:.4f} | lr={lr:.2e} | tok/s={tokens_per_sec:.0f}")
                 t_last_log = time.time()
                 tokens_since_log = 0
 
@@ -168,7 +167,6 @@ class Trainer:
 
         pbar.close()
         self.logger.finish()
-        print(f"Training complete. Final step: {self.step}")
 
     @torch.no_grad()
     def _evaluate(self):
