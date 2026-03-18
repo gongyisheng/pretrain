@@ -77,7 +77,7 @@ class Trainer:
                 block.forward = make_ckpt_forward(block)
 
         # Tokenizer
-        self.tokenizer = load_tokenizer(config.tokenizer_path)
+        self.tokenizer = load_tokenizer(config.data.tokenizer_path)
 
         # Logger
         self.logger = WandbLogger(config, enabled=wandb_enabled)
