@@ -8,7 +8,7 @@ model:
   vocab_size: 50257
   dropout: 0.0
   attn_res: true
-  attn_res_block_size: 1  # boundaries at layers 2, 4, ..., 16 → 8 blocks
+  attn_res_block_size: 2  # boundaries at layers 0, 2, ..., 14 → 8 blocks
 
 data:
   dataset: "openwebtext"

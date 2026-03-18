@@ -229,18 +229,26 @@ class BaseTransformerBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, attn_res_ctx=None, **kwargs) -> tuple:
         if self.attn_res:
-            # AttnRes path: sublayers receive aggregated h instead of raw x
-            h = _block_attn_res(attn_res_ctx, x, self.attn_res_proj, self.attn_res_norm)
-            x = x + self.attn_sublayer(h, **kwargs)
+            partial_block = x
 
-            h = _block_attn_res(attn_res_ctx, x, self.mlp_res_proj, self.mlp_res_norm)
-            x = x + self.ffn_sublayer(h)
+            # compute h before attn using current partial_block as current-block rep
+            h = _block_attn_res(attn_res_ctx, partial_block, self.attn_res_proj, self.attn_res_norm)
 
-            # seal after full layer (attn + FFN) is processed
+            # seal at block boundary before processing attn; seeds blocks with embedding at layer 0
             if self.layer_idx % self.attn_res_block_size == 0:
-                attn_res_ctx = attn_res_ctx + [x]
+                attn_res_ctx = attn_res_ctx + [partial_block]
+                partial_block = None
 
-            return x, attn_res_ctx
+            attn_out = self.attn_sublayer(h, **kwargs)
+            partial_block = partial_block + attn_out if partial_block is not None else attn_out
+
+            # compute h before FFN
+            h = _block_attn_res(attn_res_ctx, partial_block, self.mlp_res_proj, self.mlp_res_norm)
+
+            mlp_out = self.ffn_sublayer(h)
+            partial_block = partial_block + mlp_out
+
+            return partial_block, attn_res_ctx
         else:
             # Standard residual path
             x = x + self.attn_sublayer(x, **kwargs)
