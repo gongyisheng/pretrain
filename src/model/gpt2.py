@@ -37,6 +37,7 @@ class GPT2Model(nn.Module):
                 dropout=config.dropout,
                 attn_res=config.attn_res,
                 attn_res_block_size=config.attn_res_block_size,
+                attn_res_norm=config.attn_res_norm,
                 layer_idx=i + 1,
             )
             for i in range(config.n_layers)

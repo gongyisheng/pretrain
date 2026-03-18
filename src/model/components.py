@@ -214,10 +214,11 @@ class BaseTransformerBlock(nn.Module):
         if attn_res:
             self.layer_idx = layer_idx
             self.attn_res_block_size = attn_res_block_size
+            norm_cls = nn.LayerNorm if kwargs.get("attn_res_norm") == "layernorm" else RMSNorm
             self.attn_res_proj = nn.Linear(d_model, 1, bias=False)
-            self.attn_res_norm = RMSNorm(d_model)
+            self.attn_res_norm = norm_cls(d_model)
             self.mlp_res_proj = nn.Linear(d_model, 1, bias=False)
-            self.mlp_res_norm = RMSNorm(d_model)
+            self.mlp_res_norm = norm_cls(d_model)
 
     def attn_sublayer(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         raise NotImplementedError
