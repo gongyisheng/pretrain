@@ -62,6 +62,24 @@ else
 fi
 rm -f "$MARKER"
 
+# Test 6: command runs only after watched PID is gone (ordering check)
+RESULT_FILE=$(mktemp)
+sleep 2 &
+WATCHED_PID=$!
+# The command checks whether the watched PID still exists when it runs
+"$SCRIPT" "$WATCHED_PID" bash -c "kill -0 $WATCHED_PID 2>/dev/null && echo still_alive || echo already_dead" > "$RESULT_FILE" 2>&1 &
+WATCHER_PID=$!
+
+wait "$WATCHED_PID"
+wait "$WATCHER_PID"
+
+if grep -q "already_dead" "$RESULT_FILE"; then
+    pass "command runs only after watched PID is gone"
+else
+    fail "command runs only after watched PID is gone (got: $(cat $RESULT_FILE))"
+fi
+rm -f "$RESULT_FILE"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
