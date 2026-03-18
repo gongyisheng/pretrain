@@ -229,14 +229,15 @@ class BaseTransformerBlock(nn.Module):
         if self.attn_res:
             # AttnRes path: sublayers receive aggregated h instead of raw x
             h = _block_attn_res(attn_res_ctx, x, self.attn_res_proj, self.attn_res_norm)
-            if self.layer_idx % self.attn_res_block_size == 0:
-                attn_res_ctx = attn_res_ctx + [x]  # seal current partial block; new list, no mutation
-                x = None
-            attn_out = self.attn_sublayer(h, **kwargs)
-            x = x + attn_out if x is not None else attn_out
+            x = x + self.attn_sublayer(h, **kwargs)
 
             h = _block_attn_res(attn_res_ctx, x, self.mlp_res_proj, self.mlp_res_norm)
             x = x + self.ffn_sublayer(h)
+
+            # seal after full layer (attn + FFN) is processed
+            if self.layer_idx % self.attn_res_block_size == 0:
+                attn_res_ctx = attn_res_ctx + [x]
+
             return x, attn_res_ctx
         else:
             # Standard residual path
