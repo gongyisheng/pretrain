@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from src.model.registry import build_model
 from src.data.dataset import PretrainDataset
+from src.data.tokenizer import load_tokenizer
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.utils.config import TrainConfig
@@ -74,6 +75,9 @@ class Trainer:
                         return torch.utils.checkpoint.checkpoint(b._original_forward, x, use_reentrant=False)
                     return ckpt_forward
                 block.forward = make_ckpt_forward(block)
+
+        # Tokenizer
+        self.tokenizer = load_tokenizer(config.tokenizer_path)
 
         # Logger
         self.logger = WandbLogger(config, enabled=wandb_enabled)
@@ -196,16 +200,19 @@ class Trainer:
     def _generate_sample(self, max_new_tokens: int = 50):
         """Generate a short text sample for qualitative monitoring."""
         self.model.eval()
+        # <|endoftext|> (token 0) acts as BOS, prompting the model to start a new document
         idx = torch.zeros((1, 1), dtype=torch.long, device=self.device)
         for _ in range(max_new_tokens):
+            # truncate context to max_seq_len if generation grows long
             idx_cond = idx[:, -self.config.max_seq_len:]
             logits = self.model(idx_cond)
-            logits = logits[:, -1, :]
+            logits = logits[:, -1, :]  # take last token's logits
             probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
+            next_token = torch.multinomial(probs, num_samples=1)  # sample from distribution
             idx = torch.cat([idx, next_token], dim=1)
         token_ids = idx[0].tolist()
-        self.logger.log_text("generated_tokens", str(token_ids[:60]), step=self.step)
+        generated_text = self.tokenizer.decode(token_ids)
+        self.logger.log_text("generated_text", generated_text, step=self.step)
 
     def _save_checkpoint(self):
         path = os.path.join(self.config.training.checkpoint_dir, f"step_{self.step}.pt")
