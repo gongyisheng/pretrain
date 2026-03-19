@@ -32,6 +32,9 @@ data/
 tokenizers/
 wandb/
 
+# Benchmark results
+benchmark/results/
+
 # logs
 nohup.out
 *.log
