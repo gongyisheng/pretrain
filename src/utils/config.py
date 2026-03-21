@@ -72,6 +72,19 @@ class LoggingConfig:
 
 
 @dataclass
+class SpikeConfig:
+    enabled: bool = False
+    grad_norm_threshold: float = 0.0    # dump per-param grad norms when grad_norm exceeds this
+    save_checkpoint: bool = False       # also save a full checkpoint at the spike step
+    max_checkpoints: int = 10           # keep only top-N spikes by grad norm
+
+
+@dataclass
+class DebugConfig:
+    spike: SpikeConfig = field(default_factory=SpikeConfig)
+
+
+@dataclass
 class TrainConfig:
     max_seq_len: int = 1024
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -80,6 +93,7 @@ class TrainConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    debug: DebugConfig = field(default_factory=DebugConfig)
 
     def to_dict(self):
         return asdict(self)
@@ -136,6 +150,9 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         optimizer=OptimizerConfig(**_coerce_types(OptimizerConfig, raw.get("optimizer", {}))),
         scheduler=SchedulerConfig(**_coerce_types(SchedulerConfig, raw.get("scheduler", {}))),
         logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
+        debug=DebugConfig(
+            spike=SpikeConfig(**_coerce_types(SpikeConfig, raw.get("debug", {}).get("spike", {}))),
+        ),
     )
 
     if overrides:

@@ -13,6 +13,7 @@ from src.data.dataset import PretrainDataset
 from src.data.tokenizer import load_tokenizer
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
+from src.training.debug import SpikeDebugger
 from src.utils.config import TrainConfig
 
 
@@ -84,6 +85,9 @@ class Trainer:
 
         # Checkpoint dir
         os.makedirs(config.training.checkpoint_dir, exist_ok=True)
+
+        # Debug
+        self.spike_debugger = SpikeDebugger(config.debug.spike, config.training.checkpoint_dir)
 
         # Resume
         if resume_from:
@@ -159,6 +163,14 @@ class Trainer:
                 t_last_log = time.time()
                 tokens_since_log = 0
 
+            # Debug: spike detection
+            if self.config.debug.spike.enabled:
+                self.spike_debugger.on_step(
+                    grad_norm, self.step, self.model,
+                    save_checkpoint_fn=lambda: self._save_checkpoint(suffix="spike") or
+                        os.path.join(cfg.checkpoint_dir, f"step_{self.step}_spike.pt"),
+                )
+
             accum_loss = 0.0
 
             # Evaluation
@@ -214,8 +226,9 @@ class Trainer:
         generated_text = self.tokenizer.decode(token_ids)
         self.logger.log_text("generated_text", generated_text, step=self.step)
 
-    def _save_checkpoint(self):
-        path = os.path.join(self.config.training.checkpoint_dir, f"step_{self.step}.pt")
+    def _save_checkpoint(self, suffix: str = ""):
+        name = f"step_{self.step}_{suffix}.pt" if suffix else f"step_{self.step}.pt"
+        path = os.path.join(self.config.training.checkpoint_dir, name)
         checkpoint = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
@@ -249,8 +262,8 @@ class Trainer:
         if "numpy" in rng:
             np.random.set_state(rng["numpy"])
         if "torch" in rng:
-            torch.random.set_rng_state(rng["torch"])
+            torch.random.set_rng_state(rng["torch"].cpu().to(torch.uint8).contiguous())
         if "cuda" in rng and rng["cuda"] is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state(rng["cuda"])
+            torch.cuda.set_rng_state(rng["cuda"].cpu().to(torch.uint8).contiguous())
 
         print(f"Resumed at step {self.step}")

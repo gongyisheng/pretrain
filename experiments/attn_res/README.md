@@ -44,6 +44,25 @@ python scripts/train.py --config experiments/attn_res/gpt2_16m.yaml
 bash experiments/attn_res/run.sh
 ```
 
+## Debug
+
+```bash
+# Resume from a checkpoint, run a few steps, capture spikes with a new W&B run
+python scripts/train.py --config experiments/attn_res/gpt2_d512_l12.yaml \
+    --resume checkpoints/attn_res/gpt2_d512_l12/step_25000.pt \
+    --training.max_steps=29999 \
+    --logging.wandb_run_name=debug-spike-gpt2-d512-l12 \
+    --debug.spike.enabled=true \
+    --debug.spike.grad_norm_threshold=5.0 \
+    --debug.spike.save_checkpoint=true
+
+# Inspect per-weight stats of a checkpoint
+python scripts/debug_weight_stats.py --ckpt checkpoints/attn_res/gpt2_d256_l4/step_10000.pt
+
+# Inspect optimizer state (grad_norm, noise, snr, eff_step) of a checkpoint
+python scripts/debug_optim.py --ckpt checkpoints/attn_res/gpt2_d256_l4/step_10000.pt
+```
+
 ## W&B
 
 Project: `pre-train-attn-res`. Compare against `pretrain-scaling-law` runs of the same size.
