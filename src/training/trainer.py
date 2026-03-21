@@ -67,6 +67,11 @@ class Trainer:
         self.amp_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(enabled=(self.use_amp and self.amp_dtype == torch.float16))
 
+        # torch.compile — fuses kernels via Triton JIT (requires PyTorch 2.0+)
+        if config.training.compile:
+            self.model = torch.compile(self.model)
+            print("[trainer] torch.compile enabled")
+
         # Activation checkpointing
         if config.training.activation_checkpointing:
             for block in self.model.blocks:
@@ -109,8 +114,9 @@ class Trainer:
         t_last_log = time.time()
         tokens_since_log = 0
 
-        pbar = tqdm(total=cfg.max_steps, initial=self.step, desc="[train]", dynamic_ncols=True)
-        while self.step < cfg.max_steps:
+        stop_at = self.config.debug.max_steps if self.config.debug.max_steps > 0 else cfg.max_steps
+        pbar = tqdm(total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True)
+        while self.step < stop_at:
             self.optimizer.zero_grad()
 
             for micro_step in range(cfg.gradient_accumulation_steps):

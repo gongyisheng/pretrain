@@ -55,10 +55,20 @@ class CosineWarmupScheduler:
         return self.min_lr + 0.5 * (self.max_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
 
     def state_dict(self):
-        return {"current_step": self.current_step}
+        return {
+            "current_step": self.current_step,
+            "warmup_steps": self.warmup_steps,
+            "max_steps": self.max_steps,
+            "min_lr": self.min_lr,
+            "max_lr": self.max_lr,
+        }
 
     def load_state_dict(self, state_dict):
         self.current_step = state_dict["current_step"]
+        self.warmup_steps = state_dict.get("warmup_steps", self.warmup_steps)
+        self.max_steps = state_dict.get("max_steps", self.max_steps)
+        self.min_lr = state_dict.get("min_lr", self.min_lr)
+        self.max_lr = state_dict.get("max_lr", self.max_lr)
 
 
 def build_scheduler(optimizer, config: TrainConfig):

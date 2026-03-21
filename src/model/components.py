@@ -3,6 +3,65 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# --- Fused JIT kernels ---
+# Each decorated function is compiled by Triton on first call, fusing all
+# element-wise ops into a single GPU kernel (avoids redundant memory round-trips).
+
+@torch.compile
+def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """Fused: fp32 cast → pow2 → mean → rsqrt → scale → cast back."""
+    dtype = x.dtype
+    x = x.float()
+    x = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)
+    return weight * x.to(dtype)
+
+
+@torch.compile
+def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Fused: rotate-half → scale by cos/sin → add."""
+    d = x.shape[-1]
+    x1, x2 = x[..., : d // 2], x[..., d // 2 :]
+    return x * cos + torch.cat([-x2, x1], dim=-1) * sin
+
+
+@torch.compile
+def _swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Fused: silu(gate) * up in a single pass."""
+    return F.silu(gate) * up
+
+
+@torch.compile(dynamic=True)
+def _attn_res_aggregate_rmsnorm(
+    V: torch.Tensor, w_proj: torch.Tensor, norm_weight: torch.Tensor, eps: float
+) -> torch.Tensor:
+    """Fused: RMSNorm keys → dot-product logits → softmax → weighted sum.
+
+    Inlining the norm eliminates the K tensor write/read to HBM.
+    dynamic=True because N grows across layers.
+    """
+    dtype = V.dtype
+    vf = V.float()
+    K = (vf * torch.rsqrt(vf.pow(2).mean(-1, keepdim=True) + eps)).to(dtype) * norm_weight
+    logits  = (K * w_proj).sum(-1)         # (N, B, S)
+    weights = logits.softmax(0)            # (N, B, S)
+    return (weights.unsqueeze(-1) * V).sum(0)  # (B, S, D)
+
+
+@torch.compile(dynamic=True)
+def _attn_res_aggregate_layernorm(
+    V: torch.Tensor, w_proj: torch.Tensor,
+    norm_weight: torch.Tensor, norm_bias: torch.Tensor, eps: float
+) -> torch.Tensor:
+    """Fused: LayerNorm keys → dot-product logits → softmax → weighted sum."""
+    dtype = V.dtype
+    vf   = V.float()
+    mean = vf.mean(-1, keepdim=True)
+    K    = ((vf - mean) * torch.rsqrt((vf - mean).pow(2).mean(-1, keepdim=True) + eps)).to(dtype) * norm_weight + norm_bias
+    logits  = (K * w_proj).sum(-1)
+    weights = logits.softmax(0)
+    return (weights.unsqueeze(-1) * V).sum(0)
+
+
 # --- Norms ---
 
 class RMSNorm(nn.Module):
@@ -12,10 +71,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_model))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        x = x.to(torch.float32)
-        x = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return self.weight * x.to(dtype)
+        return _rms_norm(x, self.weight, self.eps)
 
 
 # --- RoPE ---
@@ -41,10 +97,7 @@ class RoPE(nn.Module):
         S = x.shape[2]
         cos = self.cos[:S][None, None, :, :].to(x.dtype)      # (1, 1, S, d_head)
         sin = self.sin[:S][None, None, :, :].to(x.dtype)      # (1, 1, S, d_head)
-        x1 = x[..., : self.d_head // 2]
-        x2 = x[..., self.d_head // 2 :]
-        rotated = torch.cat([-x2, x1], dim=-1)
-        return x * cos + rotated * sin
+        return _apply_rope(x, cos, sin)
 
 
 # --- Attention ---
@@ -123,14 +176,11 @@ class GroupedQueryAttention(nn.Module):
         q = rope(q)
         k = rope(k)
 
-        # Expand KV heads to match Q heads
-        k = k.repeat_interleave(self.n_groups, dim=1)  # (B, n_heads, S, d_head)
-        v = v.repeat_interleave(self.n_groups, dim=1)
-
         out = F.scaled_dot_product_attention(
             q, k, v,
             is_causal=True,
             dropout_p=self.attn_dropout.p if self.training else 0.0,
+            enable_gqa=True,
         )
 
         out = out.transpose(1, 2).reshape(B, S, H)
@@ -163,9 +213,9 @@ class SwiGluFFN(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = F.silu(self.gate_proj(x))
+        gate = self.gate_proj(x)
         up = self.up_proj(x)
-        x = self.down_proj(gate * up)
+        x = self.down_proj(_swiglu(gate, up))
         x = self.dropout(x)
         return x
 
@@ -176,7 +226,7 @@ def _block_attn_res(
     attn_res_ctx: list,
     x: torch.Tensor,
     proj: nn.Linear,
-    norm: RMSNorm,
+    norm: nn.Module,
 ) -> torch.Tensor:
     """Compute block-level attention residual.
 
@@ -184,16 +234,16 @@ def _block_attn_res(
         attn_res_ctx: list of finalized block tensors, each shape (B, S, D)
         x:   current partial block (hidden state), shape (B, S, D)
         proj: Linear(d_model, 1, bias=False) — learned query vector w_l
-        norm: RMSNorm applied to keys before attention
+        norm: RMSNorm or LayerNorm applied to keys before attention
 
     Returns:
         Attention-weighted combination of all blocks + x, shape (B, S, D)
     """
-    V = torch.stack(attn_res_ctx + [x])        # (N+1, B, S, D)
-    K = norm(V)                                # (N+1, B, S, D)
-    logits = K @ proj.weight.view(-1)          # (N+1, B, S)
-    weights = logits.softmax(0)                # normalized over blocks
-    return (weights.unsqueeze(-1) * V).sum(0)  # (B, S, D)
+    V = torch.stack(attn_res_ctx + [x])            # (N+1, B, S, D)
+    w = proj.weight.view(-1)
+    if isinstance(norm, nn.LayerNorm):
+        return _attn_res_aggregate_layernorm(V, w, norm.weight, norm.bias, norm.eps)
+    return _attn_res_aggregate_rmsnorm(V, w, norm.weight, norm.eps)
 
 class BaseTransformerBlock(nn.Module):
     """Base transformer block with optional AttnRes support.

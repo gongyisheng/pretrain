@@ -42,6 +42,7 @@ class TrainingConfig:
     max_steps: int = 100000
     mixed_precision: str = "bf16"
     activation_checkpointing: bool = False
+    compile: bool = False
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
     checkpoint_every: int = 5000
@@ -82,6 +83,7 @@ class SpikeConfig:
 @dataclass
 class DebugConfig:
     spike: SpikeConfig = field(default_factory=SpikeConfig)
+    max_steps: int = 0  # if > 0, stop training at this step (overrides training.max_steps without affecting the LR schedule)
 
 
 @dataclass

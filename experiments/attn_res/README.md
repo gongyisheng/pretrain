@@ -50,8 +50,8 @@ bash experiments/attn_res/run.sh
 # Resume from a checkpoint, run a few steps, capture spikes with a new W&B run
 python scripts/train.py --config experiments/attn_res/gpt2_d512_l12.yaml \
     --resume checkpoints/attn_res/gpt2_d512_l12/step_25000.pt \
-    --training.max_steps=29999 \
     --logging.wandb_run_name=debug-spike-gpt2-d512-l12 \
+    --debug.max_steps=29999 \
     --debug.spike.enabled=true \
     --debug.spike.grad_norm_threshold=5.0 \
     --debug.spike.save_checkpoint=true
