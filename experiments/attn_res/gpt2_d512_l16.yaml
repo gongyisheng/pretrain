@@ -41,6 +41,6 @@ scheduler:
   min_lr: 6e-5
 
 logging:
-  wandb_project: "pre-train-attn-res"
+  wandb_project: "pretrain-attn-res"
   wandb_run_name: "gpt2-d512-l16"
   log_every: 10

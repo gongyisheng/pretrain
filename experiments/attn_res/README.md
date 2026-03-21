@@ -65,7 +65,7 @@ python scripts/debug_optim.py --ckpt checkpoints/attn_res/gpt2_d256_l4/step_1000
 
 ## W&B
 
-Project: `pre-train-attn-res`. Compare against `pretrain-scaling-law` runs of the same size.
+Project: `pretrain-attn-res`. Compare against `pretrain-scaling-law` runs of the same size.
 
 Custom chart: X=`train/flops` (log scale), Y=`train/loss` (log scale), grouped by run.
 
