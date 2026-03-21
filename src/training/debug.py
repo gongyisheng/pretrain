@@ -51,7 +51,7 @@ class SpikeDebugger:
         if self.config.save_checkpoint:
             ckpt_path = save_checkpoint_fn()
 
-        print(f"[debug] grad norm spike {grad_norm_val:.4f} > {threshold} at step {step}, saved to {spike_path}")
+        print(f"[debug] grad norm spike {grad_norm_val:.4f} > {threshold} at step {step}")
 
         self._spike_checkpoints.append((grad_norm_val, spike_path, ckpt_path))
 
