@@ -11,11 +11,19 @@ class ModelConfig:
     d_model: int = 768
     d_ff: int = 0  # 0 means 4 * d_model, set in post_init
     vocab_size: int = 50257
-    dropout: float = 0.1
+    dropout: float = 0.0
+    attn_res: bool = False        # enable Block Attention Residuals (works with any arch)
+    attn_res_block_size: int = 2  # number of full layers per block for AttnRes
+    attn_res_norm: str = "rmsnorm"  # norm for attn_res keys: "rmsnorm" or "layernorm"
+    n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
+    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
+    qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
 
     def __post_init__(self):
         if self.d_ff == 0:
             self.d_ff = 4 * self.d_model
+        if self.n_kv_heads == 0:
+            self.n_kv_heads = self.n_heads
 
 
 @dataclass
@@ -34,6 +42,7 @@ class TrainingConfig:
     max_steps: int = 100000
     mixed_precision: str = "bf16"
     activation_checkpointing: bool = False
+    compile: bool = False
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
     checkpoint_every: int = 5000
@@ -47,6 +56,7 @@ class OptimizerConfig:
     lr: float = 6e-4
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
+    eps: float = 1e-8
 
 
 @dataclass
@@ -64,6 +74,19 @@ class LoggingConfig:
 
 
 @dataclass
+class SpikeConfig:
+    enabled: bool = False
+    grad_norm_threshold: float = 0.0    # save a full checkpoint when grad_norm exceeds this
+    max_checkpoints: int = 10           # keep only top-N spikes by grad norm
+
+
+@dataclass
+class DebugConfig:
+    spike: SpikeConfig = field(default_factory=SpikeConfig)
+    max_steps: int = 0  # if > 0, stop training at this step (overrides training.max_steps without affecting the LR schedule)
+
+
+@dataclass
 class TrainConfig:
     max_seq_len: int = 1024
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -72,6 +95,7 @@ class TrainConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    debug: DebugConfig = field(default_factory=DebugConfig)
 
     def to_dict(self):
         return asdict(self)
@@ -128,6 +152,9 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         optimizer=OptimizerConfig(**_coerce_types(OptimizerConfig, raw.get("optimizer", {}))),
         scheduler=SchedulerConfig(**_coerce_types(SchedulerConfig, raw.get("scheduler", {}))),
         logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
+        debug=DebugConfig(
+            spike=SpikeConfig(**_coerce_types(SpikeConfig, raw.get("debug", {}).get("spike", {}))),
+        ),
     )
 
     if overrides:

@@ -33,5 +33,6 @@ tokenizers/
 wandb/
 
 # logs
+logs/
 nohup.out
 *.log
