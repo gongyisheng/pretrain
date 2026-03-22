@@ -38,7 +38,7 @@ Extra parameters per layer: 2 × `Linear(d_model, 1)` + 2 × `RMSNorm(d_model)` 
 
 ```bash
 # Single run
-python scripts/train.py --config experiments/attn_res/gpt2_16m.yaml
+python scripts/train.py --config experiments/attn_res/gpt2_d512_l4.yaml
 
 # All sizes sequentially
 bash experiments/attn_res/run.sh
@@ -53,8 +53,7 @@ python scripts/train.py --config experiments/attn_res/gpt2_d512_l12.yaml \
     --logging.wandb_run_name=debug-spike-gpt2-d512-l12 \
     --debug.max_steps=29999 \
     --debug.spike.enabled=true \
-    --debug.spike.grad_norm_threshold=5.0 \
-    --debug.spike.save_checkpoint=true
+    --debug.spike.grad_norm_threshold=5.0
 
 # Inspect per-weight stats of a checkpoint
 python scripts/debug_weight_stats.py --ckpt checkpoints/attn_res/gpt2_d256_l4/step_10000.pt

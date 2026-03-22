@@ -25,6 +25,7 @@ def build_optimizer(model: torch.nn.Module, config: TrainConfig) -> torch.optim.
         param_groups,
         lr=config.optimizer.lr,
         betas=tuple(config.optimizer.betas),
+        eps=config.optimizer.eps,
     )
     return optimizer
 

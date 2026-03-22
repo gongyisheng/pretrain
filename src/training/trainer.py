@@ -173,8 +173,8 @@ class Trainer:
             if self.config.debug.spike.enabled:
                 self.spike_debugger.on_step(
                     grad_norm, self.step, self.model,
-                    save_checkpoint_fn=lambda: self._save_checkpoint(suffix="spike") or
-                        os.path.join(cfg.checkpoint_dir, f"step_{self.step}_spike.pt"),
+                    save_checkpoint_fn=lambda extra=None: self._save_checkpoint(suffix="spike", extra=extra),
+                    clip_value=cfg.grad_clip,
                 )
 
             accum_loss = 0.0
@@ -232,7 +232,7 @@ class Trainer:
         generated_text = self.tokenizer.decode(token_ids)
         self.logger.log_text("generated_text", generated_text, step=self.step)
 
-    def _save_checkpoint(self, suffix: str = ""):
+    def _save_checkpoint(self, suffix: str = "", extra: dict = None):
         name = f"step_{self.step}_{suffix}.pt" if suffix else f"step_{self.step}.pt"
         path = os.path.join(self.config.training.checkpoint_dir, name)
         checkpoint = {
@@ -249,8 +249,11 @@ class Trainer:
                 "cuda": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
             },
         }
+        if extra:
+            checkpoint.update(extra)
         torch.save(checkpoint, path)
         print(f"[ckpt] saved to {path}")
+        return path
 
     def _load_checkpoint(self, path: str):
         print(f"Resuming from {path}")

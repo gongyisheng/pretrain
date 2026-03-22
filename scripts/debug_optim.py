@@ -1,7 +1,8 @@
 """Per-parameter optimizer state analysis for debugging loss spikes.
 
-Loads a single checkpoint and shows per-parameter Adam statistics:
-  - grad_norm   : ||m_hat|| = ||m / (1 - beta1^t)||   — debiased gradient signal
+Loads a checkpoint and shows per-parameter Adam statistics:
+  - raw_grad    : ||grad|| at the spike step (only in spike checkpoints)
+  - grad_norm   : ||m_hat|| = ||m / (1 - beta1^t)||   — debiased gradient signal (EMA)
   - noise       : mean(sqrt(v_hat)) = mean(sqrt(v / (1-beta2^t))) — gradient noise scale
   - snr         : mean(m_hat^2 / (v_hat + eps))        — signal-to-noise ratio (low = noisy gradient)
   - eff_step    : ||m_hat / (sqrt(v_hat) + eps)||       — effective Adam update norm (proxy for param change magnitude)
@@ -9,7 +10,7 @@ Loads a single checkpoint and shows per-parameter Adam statistics:
 Usage:
     python scripts/debug_optim.py --ckpt <checkpoint.pt>
     python scripts/debug_optim.py --ckpt checkpoints/attn_res/gpt2_d512_l12/step_15000.pt
-    python scripts/debug_optim.py --ckpt checkpoints/attn_res/gpt2_d512_l12/step_15000.pt --sort eff_step --top 20
+    python scripts/debug_optim.py --ckpt checkpoints/attn_res/gpt2_d512_l12/step_15000_spike.pt --sort raw_grad
 """
 import argparse
 import math
@@ -74,9 +75,9 @@ def optim_stats(state: dict, beta1: float = 0.9, beta2: float = 0.95, eps: float
 def main():
     parser = argparse.ArgumentParser(description="Per-parameter Adam optimizer state analysis")
     parser.add_argument("--ckpt",  required=True, help="Checkpoint file (.pt)")
-    parser.add_argument("--sort",  default="eff_step",
-                        choices=["grad_norm", "noise", "snr", "eff_step", "name"],
-                        help="Sort by this stat (default: eff_step)")
+    parser.add_argument("--sort",  default=None,
+                        choices=["raw_grad", "grad_norm", "noise", "snr", "eff_step", "name"],
+                        help="Sort by this stat (default: raw_grad for spike checkpoints, eff_step otherwise)")
     parser.add_argument("--top",   type=int, default=0,
                         help="Show only top N rows (default: 0 = all)")
     parser.add_argument("--beta1", type=float, default=0.9)
@@ -88,12 +89,16 @@ def main():
     ckpt = load(args.ckpt)
     global_step = ckpt.get("step", "?")
 
-    model_sd  = ckpt.get("model", {})
-    opt_sd    = ckpt.get("optimizer", {})
+    model_sd   = ckpt.get("model", {})
+    opt_sd     = ckpt.get("optimizer", {})
+    raw_grads = ckpt.get("raw_grads")  # pre-clip per-param grad norms, present in spike checkpoints
 
     if "state" not in opt_sd:
         print("[!] No optimizer state found in checkpoint.")
         return
+
+    has_spike_info = raw_grads is not None
+    sort_by = args.sort or ("raw_grad" if has_spike_info else "eff_step")
 
     param_names = list(model_sd.keys())
     opt_state   = opt_sd["state"]
@@ -104,34 +109,37 @@ def main():
         s = optim_stats(param_state, beta1=args.beta1, beta2=args.beta2, eps=args.eps)
         if s is None:
             continue
+        if has_spike_info:
+            s["raw_grad"] = raw_grads.get(name, 0.0)
         rows.append((name, s))
 
-    if args.sort == "name":
+    if sort_by == "name":
         rows.sort(key=lambda r: r[0])
+    elif sort_by == "snr":
+        rows.sort(key=lambda r: r[1]["snr"])  # ascending: worst SNR first
     else:
-        rows.sort(key=lambda r: r[1][args.sort], reverse=(args.sort != "snr" or True))
-        # always descending: high eff_step/grad_norm/noise = interesting; high snr = good (show low first)
-        if args.sort == "snr":
-            rows.sort(key=lambda r: r[1]["snr"])  # ascending: worst SNR first
+        rows.sort(key=lambda r: r[1].get(sort_by, 0.0), reverse=True)
 
     display = rows[:args.top] if args.top > 0 else rows
 
     t_sample = rows[0][1]["step"] if rows else "?"
-    print(f"\nGlobal step: {global_step}  |  optimizer step: {t_sample}  |  {len(rows)} parameters")
+    spike_note = "  [spike checkpoint]" if has_spike_info else ""
+    print(f"\nGlobal step: {global_step}  |  optimizer step: {t_sample}  |  {len(rows)} parameters{spike_note}")
     print(f"beta1={args.beta1}  beta2={args.beta2}  eps={args.eps}")
-    print(f"Sorted by: {args.sort}{'  (ascending — worst SNR first)' if args.sort == 'snr' else '  (descending)'}\n")
+    print(f"Sorted by: {sort_by}{'  (ascending — worst SNR first)' if sort_by == 'snr' else '  (descending)'}\n")
 
-    hdr = (f"  {'parameter':<55} {'grad_norm':>10} {'noise':>10} {'snr':>10} {'eff_step':>10}  group")
+    cols = (["raw_grad"] if has_spike_info else []) + ["grad_norm", "noise", "snr", "eff_step"]
+    hdr = f"  {'parameter':<55} " + " ".join(f"{c:>10}" for c in cols) + "  group"
     print(hdr)
-    print("  " + "-" * 115)
+    print("  " + "-" * (len(hdr) - 2))
     for name, s in display:
         g = param_group(name)
-        print(f"  {name:<55} {s['grad_norm']:10.5f} {s['noise']:10.5f} {s['snr']:10.5f} {s['eff_step']:10.5f}  {g}")
+        vals = " ".join(f"{s[c]:10.5f}" for c in cols)
+        print(f"  {name:<55} {vals}  {g}")
 
     if args.top > 0 and args.top < len(rows):
         print(f"\n  ... ({len(rows) - args.top} more rows hidden, use --top 0 to show all)")
 
-    # Summary: global effective grad norm (approximate)
     total_eff_sq = sum(r[1]["eff_step"] ** 2 for r in rows)
     print(f"\n  Global eff_step norm (sqrt sum of squares): {math.sqrt(total_eff_sq):.5f}")
     print()

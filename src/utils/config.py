@@ -56,6 +56,7 @@ class OptimizerConfig:
     lr: float = 6e-4
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
+    eps: float = 1e-8
 
 
 @dataclass
@@ -75,8 +76,7 @@ class LoggingConfig:
 @dataclass
 class SpikeConfig:
     enabled: bool = False
-    grad_norm_threshold: float = 0.0    # dump per-param grad norms when grad_norm exceeds this
-    save_checkpoint: bool = False       # also save a full checkpoint at the spike step
+    grad_norm_threshold: float = 0.0    # save a full checkpoint when grad_norm exceeds this
     max_checkpoints: int = 10           # keep only top-N spikes by grad norm
 
 

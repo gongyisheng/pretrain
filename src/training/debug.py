@@ -4,22 +4,23 @@ from src.utils.config import SpikeConfig
 
 
 class SpikeDebugger:
-    """Tracks grad norm spikes during training and saves per-param grad norms and
-    optional full checkpoints, keeping only the top-K spikes by grad norm."""
+    """Tracks grad norm spikes during training and saves full checkpoints,
+    keeping only the top-K spikes by grad norm."""
 
     def __init__(self, config: SpikeConfig, checkpoint_dir: str):
         self.config = config
         self.checkpoint_dir = checkpoint_dir
-        self._spike_checkpoints = []  # list of (grad_norm, spike_path, ckpt_path)
+        self._spike_checkpoints = []  # list of (grad_norm, ckpt_path)
 
-    def on_step(self, grad_norm, step: int, model, save_checkpoint_fn) -> bool:
-        """Call after logging.
+    def on_step(self, grad_norm, step: int, model, save_checkpoint_fn, clip_value: float = 1.0) -> bool:
+        """Call after gradient clipping.
 
         Args:
-            grad_norm: scalar grad norm (Tensor or float)
+            grad_norm: pre-clip scalar grad norm (Tensor or float); returned by clip_grad_norm_
             step: current training step
-            model: the model (to read .grad from named_parameters)
+            model: the model (to read .grad from named_parameters, post-clip)
             save_checkpoint_fn: callable() -> str that saves a full checkpoint and returns its path
+            clip_value: grad_clip threshold used during training; used to reconstruct pre-clip norms
 
         Returns:
             True if a spike was detected and saved.
@@ -37,31 +38,24 @@ class SpikeDebugger:
                 grad_norm_val <= min(s[0] for s in self._spike_checkpoints):
             return False
 
-        # Save per-param grad norms
-        spike_data = {
-            name: param.grad.norm().item()
+        scale = grad_norm_val / clip_value if grad_norm_val > clip_value else 1.0
+        raw_grads = {
+            name: param.grad.norm().item() * scale
             for name, param in model.named_parameters()
             if param.grad is not None
         }
-        spike_path = os.path.join(self.checkpoint_dir, f"grad_spike_step_{step}.pt")
-        torch.save(spike_data, spike_path)
-
-        # Optionally save a full checkpoint
-        ckpt_path = None
-        if self.config.save_checkpoint:
-            ckpt_path = save_checkpoint_fn()
+        ckpt_path = save_checkpoint_fn(extra={"raw_grads": raw_grads})
 
         print(f"[debug] grad norm spike {grad_norm_val:.4f} > {threshold} at step {step}")
 
-        self._spike_checkpoints.append((grad_norm_val, spike_path, ckpt_path))
+        self._spike_checkpoints.append((grad_norm_val, ckpt_path))
 
         # Evict the lowest grad norm spike if over limit
         if len(self._spike_checkpoints) > max_n:
             self._spike_checkpoints.sort(key=lambda s: s[0])
             evicted = self._spike_checkpoints.pop(0)
-            for path in evicted[1:]:
-                if path and os.path.exists(path):
-                    os.remove(path)
+            if evicted[1] and os.path.exists(evicted[1]):
+                os.remove(evicted[1])
             print(f"[debug] evicted spike checkpoint with grad_norm={evicted[0]:.4f}")
 
         return True
