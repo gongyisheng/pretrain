@@ -21,14 +21,15 @@ Applied twice per layer (before self-attention and before MLP). Layers are group
 
 ## Models
 
-Same architecture and hyperparameters as the `scaling_law` baselines — only the residual connection is changed.
+Fixed width (d=512, 8 heads) across all runs — only depth varies.
 
 | Config | d_model | layers | heads | ~Params | block_size | blocks | LR |
 |---|---|---|---|---|---|---|---|
-| gpt2_16m | 256 | 4 | 4 | ~16M | 2 | 2 | 1e-3 |
-| gpt2_30m | 384 | 6 | 6 | ~30M | 2 | 3 | 8e-4 |
-| gpt2_55m | 512 | 8 | 8 | ~51M | 2 | 4 | 6e-4 |
-| gpt2_124m | 768 | 12 | 12 | ~124M | 2 | 6 | 6e-4 |
+| gpt2_d512_l4 | 512 | 4 | 8 | ~39M | 2 | 2 | 1e-3 |
+| gpt2_d512_l8 | 512 | 8 | 8 | ~51M | 2 | 4 | 8e-4 |
+| gpt2_d512_l12 | 512 | 12 | 8 | ~64M | 2 | 6 | 8e-4 |
+| gpt2_d512_l16 | 512 | 16 | 8 | ~77M | 2 | 8 | 6e-4 |
+| gpt2_d512_l20 | 512 | 20 | 8 | ~89M | 2 | 10 | 6e-4 |
 
 `block_size` = number of full transformer layers per block. Block boundaries fire when `layer_idx % block_size == 0`.
 

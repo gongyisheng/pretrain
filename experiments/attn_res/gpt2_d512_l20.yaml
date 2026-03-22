@@ -2,7 +2,7 @@ max_seq_len: 1024
 
 model:
   arch: "gpt2"
-  n_layers: 24
+  n_layers: 20
   n_heads: 8
   d_model: 512
   vocab_size: 50257
@@ -24,7 +24,7 @@ training:
   mixed_precision: "bf16"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/attn_res/gpt2_d512_l24/"
+  checkpoint_dir: "checkpoints/attn_res/gpt2_d512_l20/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -43,5 +43,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-attn-res"
-  wandb_run_name: "gpt2-d512-l24"
+  wandb_run_name: "gpt2-d512-l20"
   log_every: 10
