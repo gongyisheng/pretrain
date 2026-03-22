@@ -2,9 +2,9 @@ max_seq_len: 1024
 
 model:
   arch: "gpt2"
-  n_layers: 12
-  n_heads: 8
-  d_model: 512
+  n_layers: 6
+  n_heads: 6
+  d_model: 384
   vocab_size: 50257
   dropout: 0.0
 
@@ -18,33 +18,33 @@ data:
 training:
   batch_size: 4
   gradient_accumulation_steps: 8
-  max_steps: 80000
+  max_steps: 40000
   mixed_precision: "bf16"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/muon/gpt2_muon/"
+  checkpoint_dir: "checkpoints/muon/gpt2_30m_muon/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
 
 optimizer:
   name: "muon"
-  lr: 0.04              # matrix params (Muon)
-  muon_embed_lr: 0.6    # embedding params
-  muon_scalar_lr: 0.04  # scalar/bias params
+  lr: 0.04
+  muon_embed_lr: 0.6
+  muon_scalar_lr: 0.04
   betas: [0.9, 0.95]
   eps: 1e-6
   muon_momentum: 0.95
   muon_backend_steps: 5
   muon_momentum_warmup_start: 0.85
-  muon_momentum_warmup_steps: 1500
+  muon_momentum_warmup_steps: 1000
 
 scheduler:
   name: "cosine"
-  warmup_steps: 1500
-  min_lr: 0.004         # 10% of matrix lr
+  warmup_steps: 1000
+  min_lr: 0.004
 
 logging:
   wandb_project: "pretrain-muon"
-  wandb_run_name: "gpt2-muon"
+  wandb_run_name: "gpt2-30m-muon"
   log_every: 10

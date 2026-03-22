@@ -1,0 +1,50 @@
+max_seq_len: 1024
+
+model:
+  arch: "gpt2"
+  n_layers: 4
+  n_heads: 4
+  d_model: 256
+  vocab_size: 50257
+  dropout: 0.0
+
+data:
+  dataset: "openwebtext"
+  tokenizer_path: "tokenizers/custom_bpe_50k"
+  data_dir: "data/"
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  max_steps: 20000
+  mixed_precision: "bf16"
+  activation_checkpointing: false
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/muon/sweep/momentum_0.90/"
+  checkpoint_every: 2500
+  eval_every: 500
+  eval_steps: 200
+
+optimizer:
+  name: "muon"
+  lr: 0.04
+  muon_embed_lr: 0.6
+  muon_scalar_lr: 0.04
+  betas: [0.9, 0.95]
+  eps: 1e-6
+  muon_momentum: 0.90
+  muon_backend_steps: 5
+  muon_momentum_warmup_start: 0.85
+  muon_momentum_warmup_steps: 500
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 500
+  min_lr: 0.004
+
+logging:
+  wandb_project: "pretrain-muon-sweep"
+  wandb_run_name: "sweep-momentum-0.90"
+  log_every: 10

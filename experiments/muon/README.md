@@ -1,38 +1,47 @@
 # Muon vs AdamW
 
-Compare the Muon optimizer against AdamW on GPT-2 at fixed model size and compute budget.
+Compare the Muon optimizer against AdamW on GPT-2 across multiple scales, and sweep Muon's key hyperparameters.
 
 ## Hypothesis
 
-Muon's Newton-Schulz orthogonalization of matrix gradients should yield faster loss reduction per step than AdamW, since it normalizes update geometry across weight matrices of different scales.
+Muon's Newton-Schulz orthogonalization of matrix gradients should yield faster loss reduction per step than AdamW, since it normalizes update geometry across weight matrices of different scales. The advantage should be consistent across model sizes.
 
-## Setup
+## Scaling comparison
 
-Fixed model (d=512, 12 layers, 8 heads, ~64M params) and training budget (80k steps, batch=32k tokens). Only the optimizer differs between runs.
+Fixed training budget per size. Only the optimizer differs between paired runs.
 
-| Config | Optimizer | Matrix LR | Embed LR | Scalar LR |
-|---|---|---|---|---|
-| gpt2_adamw | AdamW | 8e-4 | 8e-4 | 8e-4 |
-| gpt2_muon | Muon | 0.04 | 0.6 | 0.04 |
+| Config | d_model | Layers | Heads | ~Params | Steps | AdamW LR | Muon matrix LR |
+|---|---|---|---|---|---|---|---|
+| gpt2_16m | 256 | 4 | 4 | ~16M | 20k | 1e-3 | 0.04 |
+| gpt2_30m | 384 | 6 | 6 | ~30M | 40k | 8e-4 | 0.04 |
+| gpt2_55m | 512 | 8 | 8 | ~55M | 70k | 6e-4 | 0.04 |
 
-Both runs use the same warmup (1500 steps), cosine decay to 10% of peak LR, and identical data order.
-
-## Run
+Muon also uses `muon_embed_lr=0.6` and `muon_scalar_lr=0.04` for the Adam sub-optimizers.
 
 ```bash
-# Individual runs
-python scripts/train.py --config experiments/muon/gpt2_adamw.yaml
-python scripts/train.py --config experiments/muon/gpt2_muon.yaml
-
-# Both sequentially
 bash experiments/muon/run.sh
 ```
 
-## W&B
+W&B project: `pretrain-muon`.
 
-Project: `pretrain-muon`. Compare `gpt2-adamw` vs `gpt2-muon` runs.
+## Param sweep (16M, Muon only)
 
-Suggested chart: X=`train/total_tokens`, Y=`val/loss`, grouped by run.
+One parameter varied at a time; all others held at default. The `gpt2_16m_muon.yaml` run serves as the baseline (default point).
+
+| Parameter | Values swept | Default |
+|---|---|---|
+| `lr` (matrix) | 0.01, 0.02, **0.04**, 0.08 | 0.04 |
+| `muon_momentum` | 0.85, 0.90, **0.95**, 0.98 | 0.95 |
+| `muon_backend_steps` | 3, **5**, 10 | 5 |
+| `muon_embed_lr` | 0.3, **0.6**, 1.0 | 0.6 |
+
+```bash
+# Run baseline first, then all sweep configs
+python scripts/train.py --config experiments/muon/gpt2_16m_muon.yaml
+bash experiments/muon/sweep/run.sh
+```
+
+W&B project: `pretrain-muon-sweep`.
 
 ## Results
 
