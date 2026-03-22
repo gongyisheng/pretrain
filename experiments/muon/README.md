@@ -24,25 +24,6 @@ bash experiments/muon/run.sh
 
 W&B project: `pretrain-muon`.
 
-## Param sweep (16M, Muon only)
-
-One parameter varied at a time; all others held at default. The `gpt2_16m_muon.yaml` run serves as the baseline (default point).
-
-| Parameter | Values swept | Default |
-|---|---|---|
-| `lr` (matrix) | 0.01, 0.02, **0.04**, 0.08 | 0.04 |
-| `muon_momentum` | 0.85, 0.90, **0.95**, 0.98 | 0.95 |
-| `muon_backend_steps` | 3, **5**, 10 | 5 |
-| `muon_embed_lr` | 0.3, **0.6**, 1.0 | 0.6 |
-
-```bash
-# Run baseline first, then all sweep configs
-python scripts/train.py --config experiments/muon/gpt2_16m_muon.yaml
-bash experiments/muon/sweep/run.sh
-```
-
-W&B project: `pretrain-muon-sweep`.
-
 ## Results
 
 TODO
