@@ -11,7 +11,7 @@ from tqdm import tqdm
 from src.model.registry import build_model
 from src.data.dataset import PretrainDataset
 from src.data.tokenizer import load_tokenizer
-from src.training.optimizer import build_optimizer, build_scheduler
+from src.training.optimizer import Muon, build_optimizers, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.utils.config import TrainConfig
@@ -59,8 +59,9 @@ class Trainer:
         )
 
         # Optimizer & scheduler
-        self.optimizer = build_optimizer(self.model, config)
-        self.scheduler = build_scheduler(self.optimizer, config)
+        self.optimizers = build_optimizers(self.model, config)
+        self.optimizer = self.optimizers[0]  # used for LR logging
+        self.scheduler = build_scheduler(self.optimizers, config)
 
         # Mixed precision
         self.use_amp = config.training.mixed_precision != "no" and self.device == "cuda"
@@ -117,7 +118,8 @@ class Trainer:
         stop_at = self.config.debug.max_steps if self.config.debug.max_steps > 0 else cfg.max_steps
         pbar = tqdm(total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True)
         while self.step < stop_at:
-            self.optimizer.zero_grad()
+            for opt in self.optimizers:
+                opt.zero_grad(set_to_none=True)
 
             for micro_step in range(cfg.gradient_accumulation_steps):
                 try:
@@ -138,10 +140,22 @@ class Trainer:
                 tokens_since_log += x.numel()
 
             # Gradient clipping
-            self.scaler.unscale_(self.optimizer)
+            for opt in self.optimizers:
+                self.scaler.unscale_(opt)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
 
-            self.scaler.step(self.optimizer)
+            # Muon momentum warmup
+            muon_cfg = self.config.optimizer
+            if muon_cfg.name == "muon" and muon_cfg.muon_momentum_warmup_steps > 0:
+                frac = min(self.step / muon_cfg.muon_momentum_warmup_steps, 1.0)
+                current_momentum = (1 - frac) * muon_cfg.muon_momentum_warmup_start + frac * muon_cfg.muon_momentum
+                for opt in self.optimizers:
+                    if isinstance(opt, Muon):
+                        for pg in opt.param_groups:
+                            pg["momentum"] = current_momentum
+
+            for opt in self.optimizers:
+                self.scaler.step(opt)
             self.scaler.update()
             self.scheduler.step()
 
@@ -237,7 +251,7 @@ class Trainer:
         path = os.path.join(self.config.training.checkpoint_dir, name)
         checkpoint = {
             "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
+            "optimizers": [opt.state_dict() for opt in self.optimizers],
             "scheduler": self.scheduler.state_dict(),
             "grad_scaler": self.scaler.state_dict(),
             "step": self.step,
@@ -259,7 +273,12 @@ class Trainer:
         print(f"Resuming from {path}")
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model"])
-        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        # Support both old single-optimizer checkpoints and new multi-optimizer format
+        if "optimizers" in checkpoint:
+            for opt, state in zip(self.optimizers, checkpoint["optimizers"]):
+                opt.load_state_dict(state)
+        elif "optimizer" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.scaler.load_state_dict(checkpoint["grad_scaler"])
         self.step = checkpoint["step"]

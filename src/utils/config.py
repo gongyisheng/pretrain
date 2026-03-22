@@ -57,6 +57,13 @@ class OptimizerConfig:
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
+    # Muon-specific (ignored when name != "muon")
+    muon_momentum: float = 0.95
+    muon_backend_steps: int = 5
+    muon_momentum_warmup_start: float = 0.85
+    muon_momentum_warmup_steps: int = 300
+    muon_embed_lr: float = 0.0   # 0 = use lr
+    muon_scalar_lr: float = 0.0  # 0 = use lr
 
 
 @dataclass
