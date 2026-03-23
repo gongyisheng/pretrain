@@ -1,7 +1,9 @@
 import torch
 import pytest
 from src.kernel.triton.rmsnorm import triton_rmsnorm_fwd, triton_rmsnorm_bwd, triton_rmsnorm
+from src.kernel.triton.swiglu import triton_swiglu_fwd, triton_swiglu_bwd, triton_swiglu
 from src.kernel.torch.rmsnorm import torch_rmsnorm
+from src.kernel.torch.swiglu import torch_swiglu
 
 
 torch.manual_seed(42)
@@ -53,3 +55,46 @@ def test_rmsnorm_autograd():
     assert w.grad is not None
     assert x.grad.shape == x.shape
     assert w.grad.shape == w.shape
+
+
+def test_swiglu_fwd():
+    M, N = 32, 768
+    gate = torch.randn(M, N, device='cuda', dtype=torch.bfloat16)
+    up = torch.randn(M, N, device='cuda', dtype=torch.bfloat16)
+
+    y_triton = triton_swiglu_fwd(gate, up)
+    y_ref = torch_swiglu(gate, up)
+
+    assert y_triton.dtype == y_ref.dtype == gate.dtype
+    assert torch.allclose(y_triton, y_ref, atol=1e-2, rtol=1e-2)
+
+
+def test_swiglu_bwd():
+    M, N = 32, 768
+    gate = torch.randn(M, N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    up = torch.randn(M, N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    dy = torch.randn(M, N, device='cuda', dtype=torch.bfloat16)
+
+    y_ref = torch_swiglu(gate, up)
+    y_ref.backward(dy)
+    dgate_ref = gate.grad.clone()
+    dup_ref = up.grad.clone()
+
+    dgate_triton, dup_triton = triton_swiglu_bwd(dy, gate.detach(), up.detach())
+
+    assert torch.allclose(dgate_triton, dgate_ref, atol=1e-2, rtol=1e-2)
+    assert torch.allclose(dup_triton, dup_ref, atol=1e-2, rtol=1e-2)
+
+
+def test_swiglu_autograd():
+    M, N = 32, 768
+    gate = torch.randn(M, N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    up = torch.randn(M, N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+
+    y = triton_swiglu(gate, up)
+    y.sum().backward()
+
+    assert gate.grad is not None
+    assert up.grad is not None
+    assert gate.grad.shape == gate.shape
+    assert up.grad.shape == up.shape
