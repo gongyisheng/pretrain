@@ -12,7 +12,7 @@ from src.kernel.torch.swiglu import torch_swiglu
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[512, 768, 1024, 2048, 4096],
+        x_vals=[512, 768, 1024, 2048, 4096, 8192, 16384],
         line_arg='provider',
         line_vals=['triton', 'torch_compile'],
         line_names=['Triton', 'torch.compile'],
@@ -37,7 +37,7 @@ def bench_swiglu_fwd(M, N, provider):
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[512, 768, 1024, 2048, 4096],
+        x_vals=[512, 768, 1024, 2048, 4096, 8192, 16384],
         line_arg='provider',
         line_vals=['triton', 'torch_compile'],
         line_names=['Triton', 'torch.compile'],
