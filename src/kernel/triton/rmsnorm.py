@@ -55,7 +55,10 @@ def triton_rmsnorm_fwd(x, weight, eps=1e-6):
     _rmsnorm_fwd_kernel[grid](x, weight, y, x.stride(0), N, eps, BLOCK_SIZE)
     return y
 
-
+# TODO: this kernel is ~X2-3 slower than torch.compile when N is small
+# need to split into two kernels
+# Kernel 1 (one program per row, same as now): compute dx and write per-row partial dw to a (M, N) buffer — no atomics.
+# Kernel 2 (one program per column): reduce the (M, N) buffer across M rows to get final dw of shape (N,).
 @triton.jit
 def _rmsnorm_bwd_kernel(
     DY_ptr,
@@ -91,12 +94,12 @@ def _rmsnorm_bwd_kernel(
     row_idx = tl.program_id(0)
     cols = tl.arange(0, BLOCK_SIZE)
     mask = cols < N
-    offset = row_idx * stride + cols
+    off = row_idx * stride + cols
 
-    dy = tl.load(DY_ptr + offset, mask=mask, other=0.0)
+    dy = tl.load(DY_ptr + off, mask=mask, other=0.0)
     dtype = dy.dtype
     dy = dy.to(tl.float32)
-    x = tl.load(X_ptr + offset, mask=mask, other=0.0).to(tl.float32)
+    x = tl.load(X_ptr + off, mask=mask, other=0.0).to(tl.float32)
     w = tl.load(W_ptr + cols, mask=mask, other=0.0).to(tl.float32)
 
     mean_sq = tl.sum(x * x) / N
@@ -106,7 +109,7 @@ def _rmsnorm_bwd_kernel(
     dy_w = dy * w
     dx = rrms * (dy_w - x_hat * tl.sum(dy_w * x_hat) / N)
 
-    tl.store(DX_ptr + offset, dx.to(dtype), mask=mask)
+    tl.store(DX_ptr + off, dx.to(dtype), mask=mask)
 
     dw = dy * x_hat
     tl.atomic_add(DW_ptr + cols, dw, mask=mask)
