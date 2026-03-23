@@ -36,4 +36,14 @@ In W&B: custom chart with X=`train/flops` (log scale), Y=`train/loss` (log scale
 
 ## Results
 
-TODO
+| FLOPs | Loss |
+|---|---|
+| 1e16 | 4.57 |
+| 2e16 | 4.39 |
+| 5e16 | 4.19 |
+| 1e17 | 4.05 |
+| 2e17 | 3.87 |
+| 5e17 | 3.77 |
+| 1e18 | 3.71 |
+
+![img](./results/scaling_law.png)
