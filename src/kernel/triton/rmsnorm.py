@@ -68,6 +68,26 @@ def _rmsnorm_bwd_kernel(
     eps,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """RMSNorm backward: compute dx and dw from upstream gradient dy, one row per program.
+
+    Shape contract:
+        DY: (M, N) — upstream gradient
+        X:  (M, N) — input saved from forward
+        W:  (N,)   — weight saved from forward
+        DX: (M, N) — gradient w.r.t. input
+        DW: (N,)   — gradient w.r.t. weight (accumulated via atomic_add across all rows)
+
+    Args:
+        DY_ptr: pointer to upstream gradient tensor
+        X_ptr: pointer to input tensor (saved from forward)
+        W_ptr: pointer to weight vector
+        DX_ptr: pointer to output gradient w.r.t. input
+        DW_ptr: pointer to output gradient w.r.t. weight (must be zeroed before launch)
+        stride: number of elements between consecutive rows (= N if contiguous)
+        N: hidden dimension (number of columns per row)
+        eps: epsilon for numerical stability in rsqrt
+        BLOCK_SIZE: tile width, must be power of 2 and >= N
+    """
     row_idx = tl.program_id(0)
     cols = tl.arange(0, BLOCK_SIZE)
     mask = cols < N
