@@ -30,11 +30,11 @@ def _rmsnorm_fwd_kernel(
         BLOCK_SIZE: tile width, must be power of 2 and >= N
     """
     row_idx = tl.program_id(0)
-    base_ptr = X_ptr + row_idx * stride
+    x_base_ptr = X_ptr + row_idx * stride
     cols = tl.arange(0, BLOCK_SIZE)
     mask = cols < N
 
-    x = tl.load(base_ptr + cols, mask=mask, other=0.0)
+    x = tl.load(x_base_ptr + cols, mask=mask, other=0.0)
     dtype = x.dtype
     x = x.to(tl.float32)
     mean_sq = tl.sum(x * x) / N
@@ -44,10 +44,16 @@ def _rmsnorm_fwd_kernel(
     tl.store(Y_ptr + row_idx * stride + cols, y, mask=mask)
 
 
-def triton_rmsnorm_fwd(x, weight, eps=1e-6):
+def triton_rmsnorm_fwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps=1e-6
+):
     """
     Launch function of rmsnorm fwd kernel
     """
+    x = x.contiguous()
+    weight = weight.contiguous()
     M, N = x.shape
     y = torch.empty_like(x)
     BLOCK_SIZE = triton.next_power_of_2(N)
@@ -115,7 +121,19 @@ def _rmsnorm_bwd_kernel(
     tl.atomic_add(DW_ptr + cols, dw, mask=mask)
 
 
-def triton_rmsnorm_bwd(dy, x, weight, eps=1e-6):                                                                                                                    
+def triton_rmsnorm_bwd(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps=1e-6
+):
+    """
+    Launch function of rmsnorm bwd kernel
+    """
+    dy = dy.contiguous()
+    x = x.contiguous()
+    weight = weight.contiguous()
+
     M, N = x.shape                                                               
     dx = torch.empty_like(x)                                                                                                                                        
     dw = torch.zeros_like(weight, dtype=torch.float32)  # fp32 for atomic_add accumulation
