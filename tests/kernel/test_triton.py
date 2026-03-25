@@ -3,9 +3,11 @@ import pytest
 from src.kernel.triton.rmsnorm import triton_rmsnorm_fwd, triton_rmsnorm_bwd, triton_rmsnorm
 from src.kernel.triton.swiglu import triton_swiglu_fwd, triton_swiglu_bwd, triton_swiglu
 from src.kernel.triton.rope import triton_rope_fwd, triton_rope_bwd, triton_rope
+from src.kernel.triton.layernorm import triton_layernorm_fwd, triton_layernorm_bwd, triton_layernorm
 from src.kernel.torch.rmsnorm import torch_rmsnorm
 from src.kernel.torch.swiglu import torch_swiglu
 from src.kernel.torch.rope import torch_rope
+from src.kernel.torch.layernorm import torch_layernorm
 
 
 torch.manual_seed(42)
@@ -151,3 +153,55 @@ def test_rope_autograd():
 
     assert x.grad is not None
     assert x.grad.shape == x.shape
+
+
+def test_layernorm_fwd():
+    M, N = 32, 768
+    eps = 1e-5
+    x = torch.randn(M, N, device='cuda', dtype=torch.bfloat16)
+    w = torch.randn(N, device='cuda', dtype=torch.bfloat16)
+    b = torch.randn(N, device='cuda', dtype=torch.bfloat16)
+
+    y_triton = triton_layernorm_fwd(x, w, b, eps)
+    y_ref = torch_layernorm(x, w, b, eps)
+
+    assert y_triton.dtype == y_ref.dtype == x.dtype
+    assert torch.allclose(y_triton, y_ref, atol=1e-2, rtol=1e-2)
+
+
+def test_layernorm_bwd():
+    M, N = 32, 768
+    eps = 1e-5
+    x = torch.randn(M, N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    w = torch.randn(N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    b = torch.randn(N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    dy = torch.randn(M, N, device='cuda', dtype=torch.bfloat16)
+
+    y_ref = torch_layernorm(x, w, b, eps)
+    y_ref.backward(dy)
+    dx_ref = x.grad.clone()
+    dw_ref = w.grad.clone()
+    db_ref = b.grad.clone()
+
+    dx_tri, dw_tri, db_tri = triton_layernorm_bwd(dy, x.detach(), w.detach(), eps)
+
+    assert torch.allclose(dx_tri, dx_ref, atol=1e-2, rtol=1e-2)
+    assert torch.allclose(dw_tri, dw_ref, atol=1e-1, rtol=1e-1)
+    assert torch.allclose(db_tri, db_ref, atol=1e-1, rtol=1e-1)
+
+
+def test_layernorm_autograd():
+    M, N = 32, 768
+    x = torch.randn(M, N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    w = torch.randn(N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    b = torch.randn(N, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+
+    y = triton_layernorm(x, w, b)
+    y.sum().backward()
+
+    assert x.grad is not None
+    assert w.grad is not None
+    assert b.grad is not None
+    assert x.grad.shape == x.shape
+    assert w.grad.shape == w.shape
+    assert b.grad.shape == b.shape
