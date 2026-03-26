@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run all scaling law experiments sequentially (smallest first)
-# Usage: nohup bash experiments/scaling_law/qwen3/run.sh > scaling_law_qwen3.log 2>&1 &
+# Usage: nohup bash experiments/scaling_law/qwen3/run.sh > logs/scaling_law_qwen3.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../../.."
