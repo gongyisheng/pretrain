@@ -21,7 +21,7 @@ data:
 training:
   batch_size: 4
   gradient_accumulation_steps: 8
-  max_steps: 160000
+  max_steps: 120000
   mixed_precision: "bf16"
   activation_checkpointing: false
   grad_clip: 1.0
