@@ -4,10 +4,12 @@ from src.kernel.triton.rmsnorm import triton_rmsnorm_fwd, triton_rmsnorm_bwd, tr
 from src.kernel.triton.swiglu import triton_swiglu_fwd, triton_swiglu_bwd, triton_swiglu
 from src.kernel.triton.rope import triton_rope_fwd, triton_rope_bwd, triton_rope
 from src.kernel.triton.layernorm import triton_layernorm_fwd, triton_layernorm_bwd, triton_layernorm
+from src.kernel.triton.flashattn import triton_flash_attn_fwd, triton_flash_attn_bwd, flash_attention
 from src.kernel.torch.rmsnorm import torch_rmsnorm
 from src.kernel.torch.swiglu import torch_swiglu
 from src.kernel.torch.rope import torch_rope
 from src.kernel.torch.layernorm import torch_layernorm
+from src.kernel.torch.flashattn import torch_flash_attn
 
 
 torch.manual_seed(42)
@@ -205,3 +207,70 @@ def test_layernorm_autograd():
     assert x.grad.shape == x.shape
     assert w.grad.shape == w.shape
     assert b.grad.shape == b.shape
+
+
+def _make_flashattn_inputs(B=2, n_heads=4, seq=64, d_head=64, dtype=torch.bfloat16):
+    q = torch.randn(B, n_heads, seq, d_head, device='cuda', dtype=dtype)
+    k = torch.randn(B, n_heads, seq, d_head, device='cuda', dtype=dtype)
+    v = torch.randn(B, n_heads, seq, d_head, device='cuda', dtype=dtype)
+    return q, k, v
+
+
+def test_flashattn_fwd():
+    q, k, v = _make_flashattn_inputs()
+
+    o_triton, L = triton_flash_attn_fwd(q, k, v, causal=True)
+    o_ref = torch_flash_attn(q, k, v, causal=True)
+
+    assert o_triton.dtype == o_ref.dtype == q.dtype
+    assert o_triton.shape == o_ref.shape
+    assert torch.allclose(o_triton, o_ref, atol=1e-2, rtol=1e-2)
+
+
+def test_flashattn_fwd_noncausal():
+    q, k, v = _make_flashattn_inputs()
+
+    o_triton, L = triton_flash_attn_fwd(q, k, v, causal=False)
+    o_ref = torch_flash_attn(q, k, v, causal=False)
+
+    assert torch.allclose(o_triton, o_ref, atol=1e-2, rtol=1e-2)
+
+
+def test_flashattn_bwd():
+    q, k, v = _make_flashattn_inputs()
+    q.requires_grad_(True)
+    k.requires_grad_(True)
+    v.requires_grad_(True)
+
+    o_ref = torch_flash_attn(q, k, v, causal=True)
+    do = torch.randn_like(o_ref)
+    o_ref.backward(do)
+    dq_ref = q.grad.clone()
+    dk_ref = k.grad.clone()
+    dv_ref = v.grad.clone()
+
+    o_triton, L = triton_flash_attn_fwd(q.detach(), k.detach(), v.detach(), causal=True)
+    dq_tri, dk_tri, dv_tri = triton_flash_attn_bwd(
+        q.detach(), k.detach(), v.detach(), o_triton, L, do, causal=True
+    )
+
+    assert torch.allclose(dq_tri, dq_ref, atol=1e-2, rtol=1e-2)
+    assert torch.allclose(dk_tri, dk_ref, atol=1e-2, rtol=1e-2)
+    assert torch.allclose(dv_tri, dv_ref, atol=1e-2, rtol=1e-2)
+
+
+def test_flashattn_autograd():
+    q, k, v = _make_flashattn_inputs()
+    q.requires_grad_(True)
+    k.requires_grad_(True)
+    v.requires_grad_(True)
+
+    o = flash_attention(q, k, v, causal=True)
+    o.sum().backward()
+
+    assert q.grad is not None
+    assert k.grad is not None
+    assert v.grad is not None
+    assert q.grad.shape == q.shape
+    assert k.grad.shape == k.shape
+    assert v.grad.shape == v.shape
