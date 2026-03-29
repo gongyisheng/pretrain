@@ -3,8 +3,20 @@ import os
 import tempfile
 import numpy as np
 import torch
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 from src.utils.config import TrainConfig, ModelConfig, DataConfig, TrainingConfig, OptimizerConfig, SchedulerConfig, LoggingConfig
 from src.training.trainer import Trainer
+
+
+def _make_tiny_tokenizer(path):
+    """Create a minimal BPE tokenizer for testing."""
+    tok = Tokenizer(models.BPE())
+    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tok.decoder = decoders.ByteLevel()
+    trainer = trainers.BpeTrainer(vocab_size=4096, special_tokens=["<|endoftext|>"])
+    tok.train_from_iterator(["hello world test data"] * 10, trainer=trainer)
+    os.makedirs(path, exist_ok=True)
+    tok.save(os.path.join(path, "tokenizer.json"))
 
 
 def _tiny_config(tmp_dir):
@@ -15,10 +27,13 @@ def _tiny_config(tmp_dir):
     tokens.tofile(train_path)
     tokens[:512].tofile(val_path)
 
+    tok_path = os.path.join(tmp_dir, "tokenizer")
+    _make_tiny_tokenizer(tok_path)
+
     return TrainConfig(
         max_seq_len=64,
         model=ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=4096, dropout=0.0),
-        data=DataConfig(dataset="test", tokenizer_path="", data_dir=tmp_dir, val_split=0.01, num_workers=0),
+        data=DataConfig(dataset="test", tokenizer_path=tok_path, data_dir=tmp_dir, val_split=0.01, num_workers=0),
         training=TrainingConfig(
             batch_size=4, gradient_accumulation_steps=1, max_steps=5,
             mixed_precision="no", activation_checkpointing=False,
