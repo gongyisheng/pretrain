@@ -2,32 +2,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# --- Backend selection ---
+# "torch" uses @torch.compile fused kernels; "triton" uses hand-written Triton kernels.
+# Kernel implementations live in src/kernel/{torch,triton}/.
 
-# --- Fused JIT kernels ---
-# Each decorated function is compiled by Triton on first call, fusing all
-# element-wise ops into a single GPU kernel (avoids redundant memory round-trips).
-
-@torch.compile
-def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    """Fused: fp32 cast → pow2 → mean → rsqrt → scale → cast back."""
-    dtype = x.dtype
-    x = x.float()
-    x = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)
-    return weight * x.to(dtype)
+_rmsnorm    = None
+_rope       = None
+_swiglu     = None
+_flash_attn = None
 
 
-@torch.compile
-def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Fused: rotate-half → scale by cos/sin → add."""
-    d = x.shape[-1]
-    x1, x2 = x[..., : d // 2], x[..., d // 2 :]
-    return x * cos + torch.cat([-x2, x1], dim=-1) * sin
-
-
-@torch.compile
-def _swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Fused: silu(gate) * up in a single pass."""
-    return F.silu(gate) * up
+def set_backend(backend: str):
+    global _rmsnorm, _rope, _swiglu, _flash_attn
+    if backend == "torch":
+        from src.kernel.torch.rmsnorm import torch_rmsnorm
+        from src.kernel.torch.rope import torch_rope
+        from src.kernel.torch.swiglu import torch_swiglu
+        from src.kernel.torch.flashattn import torch_flash_attn
+        _rmsnorm, _rope, _swiglu, _flash_attn = torch_rmsnorm, torch_rope, torch_swiglu, torch_flash_attn
+    elif backend == "triton":
+        from src.kernel.triton.rmsnorm import triton_rmsnorm
+        from src.kernel.triton.rope import triton_rope
+        from src.kernel.triton.swiglu import triton_swiglu
+        from src.kernel.triton.flashattn import triton_flash_attn
+        _rmsnorm, _rope, _swiglu, _flash_attn = triton_rmsnorm, triton_rope, triton_swiglu, triton_flash_attn
+    else:
+        raise ValueError(f"Unknown backend: {backend}. Use 'torch' or 'triton'.")
 
 
 @torch.compile(dynamic=True)
@@ -71,7 +71,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_model))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return _rms_norm(x, self.weight, self.eps)
+        return _rmsnorm(x, self.weight, self.eps)
 
 
 # --- RoPE ---
@@ -97,7 +97,7 @@ class RoPE(nn.Module):
         S = x.shape[2]
         cos = self.cos[:S][None, None, :, :].to(x.dtype)      # (1, 1, S, d_head)
         sin = self.sin[:S][None, None, :, :].to(x.dtype)      # (1, 1, S, d_head)
-        return _apply_rope(x, cos, sin)
+        return _rope(x, cos, sin)
 
 
 # --- Attention ---
@@ -122,12 +122,7 @@ class MultiHeadAttention(nn.Module):
         k = self.k_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
         v = self.v_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
 
-        # Use PyTorch's scaled_dot_product_attention (flash attention when available)
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            is_causal=True,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
-        )
+        out = _flash_attn(q, k, v, causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.resid_dropout(self.out_proj(out))
@@ -176,12 +171,10 @@ class GroupedQueryAttention(nn.Module):
         q = rope(q)
         k = rope(k)
 
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            is_causal=True,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
-            enable_gqa=True,
-        )
+        # Expand KV heads for GQA
+        k = k.repeat_interleave(self.n_groups, dim=1)
+        v = v.repeat_interleave(self.n_groups, dim=1)
+        out = _flash_attn(q, k, v, causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.resid_dropout(self.out_proj(out))

@@ -464,7 +464,7 @@ class FlashAttention(torch.autograd.Function):
         return dq, dk, dv, None, None
 
 
-def flash_attention(q, k, v, causal=True, sm_scale=None):
+def triton_flash_attn(q, k, v, causal=True, sm_scale=None):
     """Flash Attention with autograd support.
 
     Args:

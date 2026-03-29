@@ -42,7 +42,7 @@ class TrainingConfig:
     max_steps: int = 100000
     mixed_precision: str = "bf16"
     activation_checkpointing: bool = False
-    compile: bool = False
+    backend: str = "torch"  # "torch" (torch.compile) or "triton" (custom kernels)
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
     checkpoint_every: int = 5000

@@ -4,7 +4,7 @@ from src.kernel.triton.rmsnorm import triton_rmsnorm_fwd, triton_rmsnorm_bwd, tr
 from src.kernel.triton.swiglu import triton_swiglu_fwd, triton_swiglu_bwd, triton_swiglu
 from src.kernel.triton.rope import triton_rope_fwd, triton_rope_bwd, triton_rope
 from src.kernel.triton.layernorm import triton_layernorm_fwd, triton_layernorm_bwd, triton_layernorm
-from src.kernel.triton.flashattn import triton_flash_attn_fwd, triton_flash_attn_bwd, flash_attention
+from src.kernel.triton.flashattn import triton_flash_attn_fwd, triton_flash_attn_bwd, triton_flash_attn
 from src.kernel.torch.rmsnorm import torch_rmsnorm
 from src.kernel.torch.swiglu import torch_swiglu
 from src.kernel.torch.rope import torch_rope
@@ -265,7 +265,7 @@ def test_flashattn_autograd():
     k.requires_grad_(True)
     v.requires_grad_(True)
 
-    o = flash_attention(q, k, v, causal=True)
+    o = triton_flash_attn(q, k, v, causal=True)
     o.sum().backward()
 
     assert q.grad is not None
