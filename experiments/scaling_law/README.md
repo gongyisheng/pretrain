@@ -8,12 +8,28 @@ For a fixed compute budget, there exists an optimal (model size, tokens) pair. L
 
 ## Models
 
+### GPT-2
+
+Learned positional embeddings + LayerNorm + GELU FFN (d_ff=4×d_model) + MHA (full KV heads) + bias in all linear layers.
+
 | Config | d_model | layers | heads | ~Params | LR |
 |---|---|---|---|---|---|
 | gpt2_16m | 256 | 4 | 4 | ~16M | 1e-3 |
 | gpt2_30m | 384 | 6 | 6 | ~30M | 8e-4 |
 | gpt2_55m | 512 | 8 | 8 | ~51M | 6e-4 |
 | gpt2_124m | 768 | 12 | 12 | ~124M | 6e-4 |
+
+### Qwen3
+
+RoPE + RMSNorm + SwiGLU (d_ff=4×d_model) + GQA (n_kv_heads=n_heads/2) + qk_norm.
+Larger params than GPT-2 counterparts at same depth/width due to SwiGLU's extra gate matrix.
+
+| Config | d_model | layers | heads | kv_heads | ~Params | LR |
+|---|---|---|---|---|---|---|
+| qwen3_17m | 256 | 4 | 4 | 2 | ~17M | 1e-3 |
+| qwen3_33m | 384 | 6 | 6 | 3 | ~33M | 8e-4 |
+| qwen3_57m | 512 | 8 | 8 | 4 | ~57M | 6e-4 |
+| qwen3_145m | 768 | 12 | 12 | 6 | ~145M | 6e-4 |
 
 All share: same tokenizer (50K BPE), same data (OpenWebText), same seq_len (1024).
 
@@ -24,10 +40,11 @@ Logged to W&B as `train/flops` using `C = 6 * N_non_embedding * tokens`.
 ## Run
 
 ```bash
-uv run python scripts/train.py --config experiments/scaling_law/gpt2_16m.yaml
-uv run python scripts/train.py --config experiments/scaling_law/gpt2_30m.yaml
-uv run python scripts/train.py --config experiments/scaling_law/gpt2_55m.yaml
-uv run python scripts/train.py --config experiments/scaling_law/gpt2_124m.yaml
+# GPT-2
+nohup bash experiments/scaling_law/gpt2/run.sh > scaling_law_gpt2.log 2>&1 &
+
+# Qwen3
+nohup bash experiments/scaling_law/qwen3/run.sh > scaling_law_qwen3.log 2>&1 &
 ```
 
 ## Plot
