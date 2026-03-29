@@ -3,17 +3,6 @@ import triton
 import triton.language as tl
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 128}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 64}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 64}, num_warps=8, num_stages=3),
-    ],
-    key=['seq_q', 'seq_kv', 'd_head'],
-)
 @triton.jit
 def _flash_attn_fwd_kernel(
     Q_ptr,
@@ -121,7 +110,7 @@ def _flash_attn_fwd_kernel(
 
         v = tl.load(v_base + kv_offs[:, None] * stride_vs + d_offs[None, :] * stride_vd, mask=kv_mask, other=0.0)
         acc += tl.dot(p.to(v.dtype), v)
-    
+
     acc = acc / l_i[:, None]
     tl.store(o_base + q_offs[:, None] * stride_os + d_offs[None, :] * stride_od, acc, mask=q_mask)
     tl.store(L_ptr + batch_idx * (n_heads * seq_q) + head_idx * seq_q + q_offs, m_i + tl.log(l_i), mask=q_offs < seq_q)
@@ -155,14 +144,16 @@ def triton_flash_attn_fwd(
 
     if sm_scale is None:
         sm_scale = 1.0 / (d_head ** 0.5)
-    
+
     o = torch.empty_like(q)
     # log-sum-exp per query row, needed for backward
     L = torch.empty(batch, n_heads, seq_q, dtype=torch.float32, device=q.device)
 
     BLOCK_D = triton.next_power_of_2(d_head)
+    BLOCK_Q = 64
+    BLOCK_KV = 64
 
-    grid = lambda META: (triton.cdiv(seq_q, META['BLOCK_Q']), batch * n_heads)
+    grid = (triton.cdiv(seq_q, BLOCK_Q), batch * n_heads)
 
     _flash_attn_fwd_kernel[grid](
         q, k, v, o, L,
@@ -171,22 +162,12 @@ def triton_flash_attn_fwd(
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         n_heads, seq_q, seq_kv, d_head, causal, sm_scale,
-        BLOCK_D=BLOCK_D
+        BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, BLOCK_D=BLOCK_D,
+        num_warps=4, num_stages=2,
     )
     return o, L
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 128}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 64}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 64}, num_warps=8, num_stages=3),
-    ],
-    key=['seq_q', 'seq_kv', 'd_head'],
-)
 @triton.jit
 def _flash_attn_dk_dv_bwd_kernel(
     Q_ptr,
@@ -255,7 +236,7 @@ def _flash_attn_dk_dv_bwd_kernel(
         lower_bound = 0
     else:
         lower_bound = kv_start
-    
+
     for q_start in range(lower_bound, seq_q, BLOCK_Q):
         q_offs = q_start + tl.arange(0, BLOCK_Q)
         q_mask = (q_offs[:, None] < seq_q) & (d_offs[None, :] < d_head)
@@ -275,24 +256,13 @@ def _flash_attn_dk_dv_bwd_kernel(
         dp = tl.dot(do, tl.trans(v))
         ds = p * (dp - d[:, None]) * sm_scale
         dk_acc += tl.dot(tl.trans(ds.to(q.dtype)), q)
-    
+
     dk_base = dK_ptr + batch_idx * stride_dkb + head_idx * stride_dkh
     dv_base = dV_ptr + batch_idx * stride_dvb + head_idx * stride_dvh
     tl.store(dk_base + kv_offs[:, None] * stride_dks + d_offs[None, :] * stride_dkd, dk_acc, mask=kv_mask)
     tl.store(dv_base + kv_offs[:, None] * stride_dvs + d_offs[None, :] * stride_dvd, dv_acc, mask=kv_mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 128}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_Q': 64, 'BLOCK_KV': 64}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_Q': 128, 'BLOCK_KV': 64}, num_warps=8, num_stages=3),
-    ],
-    key=['seq_q', 'seq_kv', 'd_head'],
-)
 @triton.jit
 def _flash_attn_dq_bwd_kernel(
     Q_ptr,
@@ -402,21 +372,23 @@ def triton_flash_attn_bwd(
     v = v.contiguous()
     o = o.contiguous()
     do = do.contiguous()
-    
+
     batch, n_heads, seq_q, d_head = q.shape
     seq_kv = k.shape[2]
 
     if sm_scale is None:
         sm_scale = 1.0 / (d_head ** 0.5)
-    
+
     D = (do.float() * o.float()).sum(dim=-1)
     dq = torch.zeros_like(q)
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
 
     BLOCK_D = triton.next_power_of_2(d_head)
+    BLOCK_Q = 64
+    BLOCK_KV = 64
 
-    grid_dkdv = lambda META: (triton.cdiv(seq_kv, META['BLOCK_KV']), batch * n_heads)
+    grid_dkdv = (triton.cdiv(seq_kv, BLOCK_KV), batch * n_heads)
     _flash_attn_dk_dv_bwd_kernel[grid_dkdv](
         q, k, v, do, L, D, dk, dv,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -426,10 +398,11 @@ def triton_flash_attn_bwd(
         dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
         dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
         n_heads, seq_q, seq_kv, d_head, causal, sm_scale,
-        BLOCK_D=BLOCK_D
+        BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, BLOCK_D=BLOCK_D,
+        num_warps=4, num_stages=2,
     )
 
-    grid_dq = lambda META: (triton.cdiv(seq_q, META['BLOCK_Q']), batch * n_heads)
+    grid_dq = (triton.cdiv(seq_q, BLOCK_Q), batch * n_heads)
     _flash_attn_dq_bwd_kernel[grid_dq](
         q, k, v, do, L, D, dq,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -438,7 +411,8 @@ def triton_flash_attn_bwd(
         do.stride(0), do.stride(1), do.stride(2), do.stride(3),
         dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
         n_heads, seq_q, seq_kv, d_head, causal, sm_scale,
-        BLOCK_D=BLOCK_D
+        BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, BLOCK_D=BLOCK_D,
+        num_warps=4, num_stages=2,
     )
 
     return dq, dk, dv

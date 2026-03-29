@@ -71,8 +71,7 @@ class Trainer:
         self.amp_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(enabled=(self.use_amp and self.amp_dtype == torch.float16))
 
-        if config.training.backend == "torch":
-            self.model = torch.compile(self.model)
+        self.model = torch.compile(self.model)
         print(f"[trainer] backend={config.training.backend}")
 
         # Activation checkpointing

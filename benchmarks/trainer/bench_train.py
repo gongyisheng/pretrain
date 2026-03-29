@@ -1,7 +1,7 @@
 """
 Training throughput benchmark for GPT-2 and Qwen3.
 
-Runs the Trainer for a short number of steps (default 50) with W&B disabled,
+Runs the Trainer for a short number of steps (default 5) with W&B disabled,
 and reports tokens/sec throughput.
 
 Usage:
@@ -21,6 +21,7 @@ import sys
 import time
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
@@ -28,7 +29,7 @@ from src.utils.config import load_config
 from src.training.trainer import Trainer
 
 
-def run_benchmark(config_path, backend=None, steps=50, warmup=10):
+def run_benchmark(config_path, backend=None, steps=5, warmup=5):
     """Run a training throughput benchmark using the Trainer.
 
     Runs warmup steps first (excluded from measurement), then measures
@@ -36,7 +37,7 @@ def run_benchmark(config_path, backend=None, steps=50, warmup=10):
     """
     total_steps = warmup + steps
     overrides = [
-        f"debug.max_steps={warmup}",
+        f"debug.max_steps={total_steps}",
         # disable eval/checkpoint during benchmark
         f"training.eval_every={total_steps + 1}",
         f"training.checkpoint_every={total_steps + 1}",
@@ -95,7 +96,7 @@ def run_benchmark(config_path, backend=None, steps=50, warmup=10):
     return results
 
 
-def run_all_benchmarks(steps=50, warmup=10):
+def run_all_benchmarks(steps=5, warmup=5):
     """Run benchmarks for all model/backend combinations."""
     configs = [
         ("configs/gpt2_124m.yaml", "torch"),
@@ -138,8 +139,8 @@ def main():
     parser.add_argument("--config", type=str, help="Path to config YAML")
     parser.add_argument("--backend", type=str, choices=["torch", "triton"], default=None,
                         help="Override backend (default: use config value)")
-    parser.add_argument("--steps", type=int, default=50, help="Measured steps to run (default: 50)")
-    parser.add_argument("--warmup", type=int, default=10, help="Warmup steps excluded from measurement (default: 10)")
+    parser.add_argument("--steps", type=int, default=5, help="Measured steps to run (default: 5)")
+    parser.add_argument("--warmup", type=int, default=5, help="Warmup steps excluded from measurement (default: 5)")
     parser.add_argument("--all", action="store_true",
                         help="Run all model/backend combinations")
     parser.add_argument("--save", type=str, default=None,

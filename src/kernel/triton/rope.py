@@ -59,8 +59,8 @@ def _rope_fwd_kernel(
 
 
 def triton_rope_fwd(
-    x: torch.Tensor, 
-    cos: torch.Tensor, 
+    x: torch.Tensor,
+    cos: torch.Tensor,
     sin: torch.Tensor
 ):
     x = x.contiguous()
@@ -78,8 +78,8 @@ def triton_rope_fwd(
     BLOCK_SIZE = triton.next_power_of_2(d_head)
     grid = (num_rows,)
     _rope_fwd_kernel[grid](
-        x_flat, cos_flat, sin_flat, y_flat, 
-        x_flat.stride(0), cos_flat.stride(0), 
+        x_flat, cos_flat, sin_flat, y_flat,
+        x_flat.stride(0), cos_flat.stride(0),
         seq, d_head, BLOCK_SIZE
     )
     return y_flat.view(batch, n_heads, seq, d_head)
@@ -120,8 +120,8 @@ def _rope_bwd_kernel(
 
 
 def triton_rope_bwd(
-    dy: torch.Tensor, 
-    cos: torch.Tensor, 
+    dy: torch.Tensor,
+    cos: torch.Tensor,
     sin:torch.Tensor
 ):
     dy = dy.contiguous()
@@ -149,7 +149,7 @@ class TritonRoPE(torch.autograd.Function):
     def forward(ctx, x, cos, sin):
         ctx.save_for_backward(cos, sin)
         return triton_rope_fwd(x, cos, sin)
-    
+
     @staticmethod
     def backward(ctx, dy):
         cos, sin = ctx.saved_tensors

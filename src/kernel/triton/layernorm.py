@@ -37,7 +37,7 @@ def triton_layernorm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
-    eps = 1e-5,
+    eps=1e-6,
 ):
     x = x.contiguous()
     weight = weight.contiguous()
@@ -91,10 +91,10 @@ def _layernorm_bwd_kernel(
     tl.atomic_add(DW_ptr + cols, dy * x_hat, mask=mask)
 
 def triton_layernorm_bwd(
-    dy: torch.Tensor, 
-    x: torch.Tensor, 
-    weight: torch.Tensor, 
-    eps = 1e-6
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps=1e-6
 ):
     dy = dy.contiguous()
     x = x.contiguous()
@@ -112,14 +112,13 @@ def triton_layernorm_bwd(
     return dx, dw.to(weight.dtype), db.to(weight.dtype)
 
 
-
 class TritonLayerNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, bias, eps):
         ctx.save_for_backward(x, weight)
         ctx.eps = eps
         return triton_layernorm_fwd(x, weight, bias, eps)
-    
+
     @staticmethod
     def backward(ctx, dy):
         x, weight = ctx.saved_tensors

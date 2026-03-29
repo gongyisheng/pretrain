@@ -149,7 +149,7 @@ class TritonRMSNorm(torch.autograd.Function):
         ctx.save_for_backward(x, weight)
         ctx.eps = eps
         return triton_rmsnorm_fwd(x, weight, eps)
-    
+
     @staticmethod
     def backward(ctx, dy):
         x, weight = ctx.saved_tensors

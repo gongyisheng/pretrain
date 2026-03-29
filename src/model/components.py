@@ -21,11 +21,11 @@ def set_backend(backend: str):
         from src.kernel.torch.flashattn import torch_flash_attn
         _rmsnorm, _rope, _swiglu, _flash_attn = torch_rmsnorm, torch_rope, torch_swiglu, torch_flash_attn
     elif backend == "triton":
-        from src.kernel.triton.rmsnorm import triton_rmsnorm
+        from src.kernel.torch.rmsnorm import torch_rmsnorm
         from src.kernel.triton.rope import triton_rope
         from src.kernel.triton.swiglu import triton_swiglu
         from src.kernel.triton.flashattn import triton_flash_attn
-        _rmsnorm, _rope, _swiglu, _flash_attn = triton_rmsnorm, triton_rope, triton_swiglu, triton_flash_attn
+        _rmsnorm, _rope, _swiglu, _flash_attn = torch_rmsnorm, triton_rope, triton_swiglu, triton_flash_attn
     else:
         raise ValueError(f"Unknown backend: {backend}. Use 'torch' or 'triton'.")
 

@@ -79,8 +79,8 @@ def _swiglu_bwd_kernel(
 
 
 def triton_swiglu_bwd(
-    dy: torch.Tensor, 
-    gate: torch.Tensor, 
+    dy: torch.Tensor,
+    gate: torch.Tensor,
     up: torch.Tensor
 ):
     dy = dy.contiguous()
