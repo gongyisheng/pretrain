@@ -71,7 +71,9 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_model))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return _rmsnorm(x, self.weight, self.eps)
+        orig_shape = x.shape
+        out = _rmsnorm(x.view(-1, orig_shape[-1]), self.weight, self.eps)
+        return out.view(orig_shape)
 
 
 # --- RoPE ---

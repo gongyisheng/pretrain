@@ -134,11 +134,11 @@ def triton_rmsnorm_bwd(
     x = x.contiguous()
     weight = weight.contiguous()
 
-    M, N = x.shape                                                               
-    dx = torch.empty_like(x)                                                                                                                                        
+    M, N = x.shape
+    dx = torch.empty_like(x)
     dw = torch.zeros_like(weight, dtype=torch.float32)  # fp32 for atomic_add accumulation
-    BLOCK_SIZE = triton.next_power_of_2(N)                                                                                                                          
-    grid = (M,)                                                                                                                                                     
+    BLOCK_SIZE = triton.next_power_of_2(N)
+    grid = (M,)
     _rmsnorm_bwd_kernel[grid](dy, x, weight, dx, dw, x.stride(0), N, eps, BLOCK_SIZE)
     return dx, dw.to(weight.dtype)
 
