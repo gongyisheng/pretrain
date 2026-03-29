@@ -24,6 +24,13 @@ class Trainer:
         self.step = 0
         self.loss_history = []
 
+        # Enable TF32 for matmuls on Ampere+ GPUs
+        torch.set_float32_matmul_precision('high')
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
+
         # Seed for reproducibility
         self._seed(42)
 
@@ -107,6 +114,13 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
 
+    def _next_batch(self, train_iter):
+        try:
+            return next(train_iter), train_iter
+        except StopIteration:
+            train_iter = iter(self.train_loader)
+            return next(train_iter), train_iter
+
     def train(self):
         cfg = self.config.training
         self.model.train()
@@ -116,19 +130,40 @@ class Trainer:
         t_last_log = time.time()
         tokens_since_log = 0
 
+        # Data prefetch stream for overlapping H2D transfer with compute
+        prefetch_stream = torch.cuda.Stream() if self.device == "cuda" else None
+
         stop_at = self.config.debug.max_steps if self.config.debug.max_steps > 0 else cfg.max_steps
         pbar = tqdm(total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True)
         while self.step < stop_at:
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            # Accumulate loss as tensor to avoid CUDA sync every micro-step
+            accum_loss_tensor = torch.zeros(1, device=self.device)
+
+            # Prefetch first batch
+            (x_cpu, y_cpu), train_iter = self._next_batch(train_iter)
+            if prefetch_stream is not None:
+                with torch.cuda.stream(prefetch_stream):
+                    x = x_cpu.to(self.device, non_blocking=True)
+                    y = y_cpu.to(self.device, non_blocking=True)
+            else:
+                x, y = x_cpu.to(self.device), y_cpu.to(self.device)
 
             for micro_step in range(cfg.gradient_accumulation_steps):
-                try:
-                    x, y = next(train_iter)
-                except StopIteration:
-                    train_iter = iter(self.train_loader)
-                    x, y = next(train_iter)
+                # Wait for current batch transfer to complete
+                if prefetch_stream is not None:
+                    torch.cuda.current_stream().wait_stream(prefetch_stream)
 
-                x, y = x.to(self.device), y.to(self.device)
+                # Start prefetching next batch while computing
+                if micro_step < cfg.gradient_accumulation_steps - 1:
+                    (next_x_cpu, next_y_cpu), train_iter = self._next_batch(train_iter)
+                    if prefetch_stream is not None:
+                        with torch.cuda.stream(prefetch_stream):
+                            next_x = next_x_cpu.to(self.device, non_blocking=True)
+                            next_y = next_y_cpu.to(self.device, non_blocking=True)
+                    else:
+                        next_x, next_y = next_x_cpu.to(self.device), next_y_cpu.to(self.device)
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                     logits = self.model(x)
@@ -136,8 +171,15 @@ class Trainer:
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
-                accum_loss += loss.item()
+                accum_loss_tensor += loss.detach()
                 tokens_since_log += x.numel()
+
+                # Swap to prefetched batch
+                if micro_step < cfg.gradient_accumulation_steps - 1:
+                    x, y = next_x, next_y
+
+            # Single sync to get accumulated loss
+            accum_loss = accum_loss_tensor.item()
 
             # Gradient clipping
             self.scaler.unscale_(self.optimizer)

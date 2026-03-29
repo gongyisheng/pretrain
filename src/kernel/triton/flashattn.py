@@ -357,6 +357,46 @@ def _flash_attn_dq_bwd_kernel(
     tl.store(dq_base + q_offs[:, None] * stride_dqs + d_offs[None, :] * stride_dqd, dq_acc, mask=q_mask)
 
 
+@triton.jit
+def _flash_attn_D_kernel(
+    DO_ptr,
+    O_ptr,
+    D_ptr,
+    stride_dob,
+    stride_doh,
+    stride_dos,
+    stride_dod,
+    stride_ob,
+    stride_oh,
+    stride_os,
+    stride_od,
+    n_heads,
+    seq_q,
+    d_head,
+    BLOCK_D: tl.constexpr,
+):
+    """Fused D = rowwise_sum(dO * O) kernel. Avoids two fp32 conversions + allocation."""
+    row_idx = tl.program_id(0)
+    bh_idx = tl.program_id(1)
+    batch_idx = bh_idx // n_heads
+    head_idx = bh_idx % n_heads
+
+    if row_idx >= seq_q:
+        return
+
+    d_offs = tl.arange(0, BLOCK_D)
+    mask = d_offs < d_head
+
+    do_off = batch_idx * stride_dob + head_idx * stride_doh + row_idx * stride_dos
+    o_off = batch_idx * stride_ob + head_idx * stride_oh + row_idx * stride_os
+
+    do_vals = tl.load(DO_ptr + do_off + d_offs * stride_dod, mask=mask, other=0.0).to(tl.float32)
+    o_vals = tl.load(O_ptr + o_off + d_offs * stride_od, mask=mask, other=0.0).to(tl.float32)
+
+    d_val = tl.sum(do_vals * o_vals)
+    tl.store(D_ptr + batch_idx * (n_heads * seq_q) + head_idx * seq_q + row_idx, d_val)
+
+
 def triton_flash_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -379,12 +419,23 @@ def triton_flash_attn_bwd(
     if sm_scale is None:
         sm_scale = 1.0 / (d_head ** 0.5)
 
-    D = (do.float() * o.float()).sum(dim=-1)
+    # Fused D computation via Triton kernel (avoids fp32 temp allocations)
+    D = torch.empty(batch, n_heads, seq_q, dtype=torch.float32, device=q.device)
+    BLOCK_D = triton.next_power_of_2(d_head)
+    grid_d = (seq_q, batch * n_heads)
+    _flash_attn_D_kernel[grid_d](
+        do, o, D,
+        do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+        n_heads, seq_q, d_head,
+        BLOCK_D=BLOCK_D,
+        num_warps=4,
+    )
+
     dq = torch.zeros_like(q)
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
 
-    BLOCK_D = triton.next_power_of_2(d_head)
     BLOCK_Q = 64
     BLOCK_KV = 64
 
