@@ -15,6 +15,7 @@ from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.utils.config import TrainConfig
+from src.kernel.triton.cross_entropy import triton_cross_entropy
 
 
 class Trainer:
@@ -167,7 +168,7 @@ class Trainer:
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                     logits = self.model(x)
-                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                    loss = triton_cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
@@ -246,7 +247,7 @@ class Trainer:
             x, y = x.to(self.device), y.to(self.device)
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                 logits = self.model(x)
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                loss = triton_cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             total_loss += loss.item()
             n_batches += 1
 

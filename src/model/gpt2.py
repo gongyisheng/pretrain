@@ -59,7 +59,7 @@ class GPT2Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def forward(self, idx: torch.Tensor, return_logits: bool = True) -> torch.Tensor:
         B, S = idx.shape
         pos = torch.arange(0, S, device=idx.device).unsqueeze(0)
 
@@ -74,4 +74,6 @@ class GPT2Model(nn.Module):
                 x = block(x)
 
         x = self.ln_f(x)
-        return self.lm_head(x)
+        if return_logits:
+            return self.lm_head(x)
+        return x

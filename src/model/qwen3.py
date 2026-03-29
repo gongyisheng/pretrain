@@ -62,7 +62,7 @@ class Qwen3Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def forward(self, idx: torch.Tensor, return_logits: bool = True) -> torch.Tensor:
         x = self.drop(self.token_emb(idx))
 
         if self.config.attn_res:
@@ -74,4 +74,6 @@ class Qwen3Model(nn.Module):
                 x = block(x, rope=self.rope)
 
         x = self.ln_f(x)
-        return self.lm_head(x)
+        if return_logits:
+            return self.lm_head(x)
+        return x
