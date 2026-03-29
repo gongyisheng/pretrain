@@ -27,6 +27,10 @@ class Trainer:
         # Seed for reproducibility
         self._seed(42)
 
+        # Backend selection: "torch" (torch.compile) or "triton" (custom kernels)
+        from src.model.components import set_backend
+        set_backend(config.training.backend)
+
         # Model
         self.model = build_model(config).to(self.device)
         n_params = sum(p.numel() for p in self.model.parameters())
@@ -67,10 +71,9 @@ class Trainer:
         self.amp_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(enabled=(self.use_amp and self.amp_dtype == torch.float16))
 
-        # torch.compile — fuses kernels via Triton JIT (requires PyTorch 2.0+)
-        if config.training.compile:
+        if config.training.backend == "torch":
             self.model = torch.compile(self.model)
-            print("[trainer] torch.compile enabled")
+        print(f"[trainer] backend={config.training.backend}")
 
         # Activation checkpointing
         if config.training.activation_checkpointing:

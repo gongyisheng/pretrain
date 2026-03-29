@@ -1,8 +1,11 @@
 import pytest
 import torch
+from src.model.components import set_backend
 from src.model.gpt2 import GPT2Model
 from src.model.registry import build_model
 from src.utils.config import ModelConfig
+
+set_backend("torch")
 
 
 def _small_config():
