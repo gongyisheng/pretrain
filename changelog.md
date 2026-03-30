@@ -298,6 +298,30 @@ GPT2: +3.6% (SDPA's cuDNN kernel is faster for standard MHA).
 Qwen3: -7.6% (SDPA doesn't optimize well for GQA's expanded KV heads).
 Reverted due to regression on the GQA architecture.
 
+### nsys profiling analysis (2026-03-29)
+
+Profiled all 4 configs with `nsys profile`. Key findings:
+
+**GPU utilization:** torch 80-85%, triton 48-61%. The triton autograd.Function
+ops cause graph breaks in torch.compile, forcing CPU dispatch gaps between
+kernel groups.
+
+**Attempted fixes:**
+- **Deferred loss `.item()` sync** — moved to next step start. No measurable
+  throughput change (gaps were CPU overhead, not CUDA sync). Kept for cleanliness.
+- **Skip torch.compile for triton** — 22% regression. torch.compile's
+  optimization of linear layers/fused ops is essential even with graph breaks.
+- **`allow_in_graph` for triton ops** — fails because torch.compile tries to
+  trace into the kernels which use `.data_ptr()` on fake tensors.
+- **Fix flash attn backward bf16 casts** — 14% regression. Explicit `.to(tl.bfloat16)`
+  casts on loads disrupt Triton's internal optimization of dot product operands.
+
+**Conclusion:** The triton backend's graph break overhead (48-61% GPU utilization)
+is a fundamental limitation of the `autograd.Function` + raw Triton kernel
+approach. Fixing it would require rewriting kernels as `torch.library.custom_op`
+with fake tensor implementations, which was previously tested and caused 12% regression.
+The current architecture is a local optimum.
+
 ### Exp 19: 2-pass triton RMSNorm backward - REVERTED
 
 Implemented 2-pass approach: kernel 1 computes dx + writes per-row dw to
