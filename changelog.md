@@ -322,10 +322,10 @@ overhead. torch.compile generates a superior fused backward for this operation.
 
 | Model | Backend | Before | After | Change |
 |-------|---------|--------|-------|--------|
-| GPT2 | torch | 41,083 | 46,196 | **+12.4%** |
-| GPT2 | triton | 37,769 | 44,306 | **+17.3%** |
-| Qwen3 | torch | 33,561 | 37,971 | **+13.1%** |
-| Qwen3 | triton | 33,573 | 39,569 | **+17.9%** |
+| GPT2 | torch | 41,083 | 46,174 | **+12.4%** |
+| GPT2 | triton | 37,769 | 44,320 | **+17.3%** |
+| Qwen3 | torch | 33,561 | 38,002 | **+13.2%** |
+| Qwen3 | triton | 33,573 | 39,565 | **+17.9%** |
 
 ### Key Optimizations That Worked
 1. **Vocab padding to multiple of 128** — biggest win (+6-15%, especially for triton)
@@ -342,3 +342,15 @@ overhead. torch.compile generates a superior fused backward for this operation.
 - Fused linear cross-entropy
 - Triton RMSNorm (backward too slow)
 - Flash attention backward dtype casts
+- Compiled forward+CE wrapper
+- GradScaler bypass for bf16
+- CE block size tuning (already optimal)
+- torch SDPA hybrid (helps MHA, hurts GQA)
+- dropout=0 (negligible, changes semantics)
+- GPT2 batch size increase (already saturated at bs=12)
+
+### Remaining Bottleneck
+~87% of training step time is spent in linear matmuls (cuBLAS via
+torch.compile). These are already running at hardware peak throughput.
+The main levers left are: increase model size (better GPU utilization),
+increase batch size (more tokens per kernel launch), or use multi-GPU.
