@@ -19,7 +19,7 @@ class _MinimalTransformerBlock(BaseTransformerBlock):
         self.ln2 = nn.LayerNorm(d_model)
         self.ffn = GeluFFN(d_model, d_ff, dropout)
 
-    def attn_sublayer(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+    def attn_sublayer(self, x: torch.Tensor, **kwargs) -> torch.Tensor:  # noqa: ARG002
         return self.attn(self.ln1(x))
 
     def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
