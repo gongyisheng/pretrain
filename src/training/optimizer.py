@@ -26,6 +26,7 @@ def build_optimizer(model: torch.nn.Module, config: TrainConfig) -> torch.optim.
         lr=config.optimizer.lr,
         betas=tuple(config.optimizer.betas),
         eps=config.optimizer.eps,
+        fused=True,
     )
     return optimizer
 

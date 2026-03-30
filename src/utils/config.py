@@ -17,7 +17,7 @@ class ModelConfig:
     attn_res_norm: str = "rmsnorm"  # norm for attn_res keys: "rmsnorm" or "layernorm"
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
     rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
-    qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
+    qk_norm: bool = False         # apply RMSNorm to Q and K per head before attention
 
     def __post_init__(self):
         if self.d_ff == 0:
