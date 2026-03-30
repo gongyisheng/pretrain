@@ -216,3 +216,24 @@ Measured with 20 steps + 15 warmup for stability.
 Removed hardcoded `.to(tl.bfloat16)` in backward kernel store. The output
 tensor inherits dtype from input logits; Triton handles implicit conversion.
 No throughput impact but fixes correctness for float16/float32 dtypes.
+
+### Exp 9: Flash attn backward dtype cast fix - REVERTED
+
+Added `.to(v.dtype)` to `do` before `tl.dot(do, tl.trans(v))` in both
+backward kernels to fix torch.compile's tensor mutation analysis warnings.
+Caused ~15% regression because the explicit cast forces bf16→bf16 conversion
+in Triton's type system, disrupting the compiler's optimization path.
+
+### Exp 10: GQA expand instead of repeat_interleave - KEPT
+
+**File:** `src/model/components.py`
+
+Replaced `k.repeat_interleave(n_groups, dim=1)` with
+`k[:,:,None,:,:].expand(...).reshape(...)`. The expand+reshape creates views
+(zero-copy) whereas repeat_interleave always allocates a new tensor. torch.compile
+can better optimize view operations.
+
+| Model | Backend | Before | After | Change |
+|-------|---------|--------|-------|--------|
+| Qwen3 | torch | 36,109 | 37,961 | +5.1% |
+| Qwen3 | triton | 39,295 | 39,414 | +0.3% (noise) |

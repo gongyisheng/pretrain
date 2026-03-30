@@ -173,9 +173,9 @@ class GroupedQueryAttention(nn.Module):
         q = rope(q)
         k = rope(k)
 
-        # Expand KV heads for GQA
-        k = k.repeat_interleave(self.n_groups, dim=1)
-        v = v.repeat_interleave(self.n_groups, dim=1)
+        # Expand KV heads for GQA (expand+reshape avoids memory allocation vs repeat_interleave)
+        k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
+        v = v[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
         out = _flash_attn(q, k, v, causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
