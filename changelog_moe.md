@@ -124,3 +124,25 @@ Backward kernels:
 **Decision**: COMMITTED (correctness fix + 24% speedup over baseline)
 
 ---
+
+## Final Results Summary
+
+| Backend | Baseline | Final   | Improvement |
+|---------|----------|---------|-------------|
+| torch   | 72,197   | 89,825  | **+24.4%**  |
+| triton  | 74,916   | 92,197  | **+23.1%**  |
+
+### Key optimizations (cumulative):
+1. **Triton scatter kernels** (5-7x per-op speedup): The dominant win. PyTorch fancy indexing + scatter_add_ was the bottleneck (42% of layer time).
+2. **Autograd Function wrappers**: Correctness fix enabling gradient flow through expert weights.
+3. **Sort-free routing**: Triton atomic counters replace torch.sort. Micro-benchmark 1.72x, end-to-end neutral.
+4. **Vectorized aux_loss**: Replaced Python for-loop with bincount.
+
+### Files added:
+- `src/kernel/torch/moe_ffn.py` — compiled expert FFN for torch backend
+- `src/kernel/torch/moe_scatter.py` — PyTorch scatter (CPU fallback)
+- `src/kernel/torch/moe_routing.py` — PyTorch routing (CPU fallback)
+- `src/kernel/triton/moe_ffn.py` — Triton expert FFN
+- `src/kernel/triton/moe_scatter.py` — Triton scatter kernels with autograd
+- `src/kernel/triton/moe_routing.py` — Triton sort-free routing
+- `tests/kernel/test_moe_kernels.py` — 18 tests for all new kernels
