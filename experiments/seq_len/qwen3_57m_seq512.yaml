@@ -44,5 +44,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-seq-len"
-  wandb_run_name: "qwen3-seq512"
+  wandb_run_name: "qwen3-57m-seq512"
   log_every: 10
