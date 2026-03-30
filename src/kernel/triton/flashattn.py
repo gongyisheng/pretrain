@@ -146,7 +146,7 @@ def triton_flash_attn_fwd(
         sm_scale = 1.0 / (d_head ** 0.5)
 
     o = torch.empty_like(q)
-    # log-sum-exp per query row, needed for backward
+    # log-sum-exp per query row — fp32 accumulation dtype for softmax numerics
     L = torch.empty(batch, n_heads, seq_q, dtype=torch.float32, device=q.device)
 
     BLOCK_D = triton.next_power_of_2(d_head)
@@ -419,7 +419,8 @@ def triton_flash_attn_bwd(
     if sm_scale is None:
         sm_scale = 1.0 / (d_head ** 0.5)
 
-    # Fused D computation via Triton kernel (avoids fp32 temp allocations)
+    # D = rowwise_sum(dO * O) — fp32 accumulation dtype for numerical stability
+    # (internal buffer consumed only by backward kernels, like L from forward)
     D = torch.empty(batch, n_heads, seq_q, dtype=torch.float32, device=q.device)
     BLOCK_D = triton.next_power_of_2(d_head)
     grid_d = (seq_q, batch * n_heads)
