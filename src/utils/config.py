@@ -73,6 +73,7 @@ class SchedulerConfig:
 class LoggingConfig:
     wandb_project: str = "pretrain"
     wandb_run_name: str = ""
+    wandb_group: str = ""  # group name for comparing runs in W&B (e.g. "dtype-sweep")
     log_every: int = 10
 
 

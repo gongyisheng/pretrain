@@ -78,13 +78,16 @@ class Trainer:
 
         # Activation checkpointing
         if config.training.activation_checkpointing:
-            for block in self.model.blocks:
-                block._original_forward = block.forward
-                def make_ckpt_forward(b):
-                    def ckpt_forward(x):
-                        return torch.utils.checkpoint.checkpoint(b._original_forward, x, use_reentrant=False)
-                    return ckpt_forward
-                block.forward = make_ckpt_forward(block)
+            if self.is_moe:
+                print("[trainer] WARNING: activation_checkpointing is not supported for MoE; skipping.")
+            else:
+                for block in self.model.blocks:
+                    block._original_forward = block.forward
+                    def make_ckpt_forward(b):
+                        def ckpt_forward(x):
+                            return torch.utils.checkpoint.checkpoint(b._original_forward, x, use_reentrant=False)
+                        return ckpt_forward
+                    block.forward = make_ckpt_forward(block)
 
         # Tokenizer (may be None when tokenizer_path is empty, e.g. in tests)
         self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
