@@ -11,8 +11,8 @@ model:
   dropout: 0.1
   rope_theta: 10000.0
   qk_norm: true
-  n_experts: 8
-  n_experts_per_token: 1
+  n_experts: 16
+  n_experts_per_token: 4
   moe_aux_loss_coef: 0.01
 
 data:
@@ -30,7 +30,7 @@ training:
   activation_checkpointing: false
   backend: "torch"
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/moe/qwen3_moe_133m_a45m/"
+  checkpoint_dir: "checkpoints/moe/qwen3_moe_233m_a82m/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -48,5 +48,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-moe"
-  wandb_run_name: "qwen3-moe-82m-a38m"
+  wandb_run_name: "qwen3-moe-233m-a82m"
   log_every: 10
