@@ -18,6 +18,9 @@ class ModelConfig:
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
     rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
+    n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
+    n_experts_per_token: int = 2    # top-k experts activated per token
+    moe_aux_loss_coef: float = 0.01 # Switch Transformer load-balancing loss coefficient
 
     def __post_init__(self):
         if self.d_ff == 0:
