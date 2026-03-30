@@ -1,6 +1,29 @@
 import pytest
 import torch
-from src.model.components import MultiHeadAttention, TransformerBlock
+import torch.nn as nn
+from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, set_backend
+
+
+@pytest.fixture(autouse=True)
+def backend():
+    set_backend("torch")
+
+
+class _MinimalTransformerBlock(BaseTransformerBlock):
+    """Minimal concrete subclass of BaseTransformerBlock used in tests."""
+
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float = 0.0):
+        super().__init__(d_model)
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = GeluFFN(d_model, d_ff, dropout)
+
+    def attn_sublayer(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        return self.attn(self.ln1(x))
+
+    def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
+        return self.ffn(self.ln2(x))
 
 
 def test_multihead_attention_output_shape():
@@ -22,14 +45,14 @@ def test_multihead_attention_is_causal():
 
 
 def test_transformer_block_output_shape():
-    block = TransformerBlock(d_model=64, n_heads=4, d_ff=256, dropout=0.0)
+    block = _MinimalTransformerBlock(d_model=64, n_heads=4, d_ff=256, dropout=0.0)
     x = torch.randn(2, 16, 64)
     out = block(x)
     assert out.shape == (2, 16, 64)
 
 
 def test_transformer_block_residual():
-    block = TransformerBlock(d_model=64, n_heads=4, d_ff=256, dropout=0.0)
+    block = _MinimalTransformerBlock(d_model=64, n_heads=4, d_ff=256, dropout=0.0)
     x = torch.randn(2, 16, 64)
     out = block(x)
     assert not torch.allclose(out, x)

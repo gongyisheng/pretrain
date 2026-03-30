@@ -31,3 +31,14 @@ def test_moe_router_weights_normalized():
     _, top_weights, _ = router(x)
     sums = top_weights.sum(dim=-1)
     assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+
+
+def test_moe_router_weights_unnormalized():
+    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2, normalize=False)
+    x = torch.randn(32, 64)
+    _, top_weights, router_probs = router(x)
+    # Weights should be positive (from softmax)
+    assert (top_weights > 0).all()
+    # Weights should NOT generally sum to 1 (they are raw softmax probabilities)
+    sums = top_weights.sum(dim=-1)
+    assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
