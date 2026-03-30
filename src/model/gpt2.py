@@ -25,7 +25,10 @@ class GPT2Model(nn.Module):
         super().__init__()
         self.config = config
 
-        self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
+        # Pad vocab to multiple of 128 for better matmul alignment
+        pad_multiple = 128
+        self.padded_vocab_size = ((config.vocab_size + pad_multiple - 1) // pad_multiple) * pad_multiple
+        self.token_emb = nn.Embedding(self.padded_vocab_size, config.d_model)
         self.pos_emb = nn.Embedding(max_seq_len, config.d_model)
         self.drop = nn.Dropout(config.dropout)
 
@@ -44,7 +47,7 @@ class GPT2Model(nn.Module):
         ])
 
         self.ln_f = nn.LayerNorm(config.d_model)
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=False)
 
         # Weight tying
         self.lm_head.weight = self.token_emb.weight

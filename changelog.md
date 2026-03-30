@@ -183,3 +183,28 @@ launch overhead over more tokens. Peak memory goes from ~10GB to ~12.3GB (fits
 |-------|---------|--------|-------|--------|
 | Qwen3 | torch | 34,054 | 34,763 | +2.1% |
 | Qwen3 | triton | 34,071 | 34,744 | +2.0% |
+
+### Exp 5: torch.compile mode=max-autotune - REVERTED
+
+`max-autotune` crashes with CUDA graph tensor overwrite (weight tying).
+`max-autotune-no-cudagraphs` showed no improvement (within noise).
+
+### Exp 6: Pad vocab to multiple of 128 for matmul alignment - KEPT
+
+**Files:** `src/model/gpt2.py`, `src/model/qwen3.py`
+
+Padded vocab_size from 50257 to 50304 (next multiple of 128) by increasing
+the embedding dimension. The lm_head matmul `(B*S, D) @ (D, V)` benefits
+enormously from V being aligned — cuBLAS and Triton can pick optimal tiling
+instead of falling back to slow remainder-handling paths.
+
+Weight tying preserved (lm_head.weight = token_emb.weight). The 47 extra
+vocab entries participate in softmax but receive near-zero probability.
+Measured with 20 steps + 15 warmup for stability.
+
+| Model | Backend | Before | After | Change |
+|-------|---------|--------|-------|--------|
+| GPT2 | torch | 41,984 | 44,608 | +6.3% |
+| GPT2 | triton | 38,598 | 44,329 | +14.8% |
+| Qwen3 | torch | 35,248 | 36,109 | +2.4% |
+| Qwen3 | triton | 35,137 | 39,295 | +11.8% |
