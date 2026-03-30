@@ -72,8 +72,8 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_shape = x.shape
-        out = _rmsnorm(x.view(-1, orig_shape[-1]), self.weight, self.eps)
-        return out.view(orig_shape)
+        out = _rmsnorm(x.reshape(-1, orig_shape[-1]), self.weight, self.eps)
+        return out.reshape(orig_shape)
 
 
 # --- RoPE ---
@@ -194,10 +194,10 @@ class GroupedQueryAttention(nn.Module):
 # --- FFN ---
 
 class GeluFFN(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, dropout: float = 0.0):
         super().__init__()
-        self.fc1 = nn.Linear(d_model, d_ff)
-        self.fc2 = nn.Linear(d_ff, d_model)
+        self.fc1 = nn.Linear(d_model, intermediate_size)
+        self.fc2 = nn.Linear(intermediate_size, d_model)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -209,11 +209,11 @@ class GeluFFN(nn.Module):
 
 
 class SwiGluFFN(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, dropout: float = 0.0):
         super().__init__()
-        self.gate_proj = nn.Linear(d_model, d_ff, bias=False)
-        self.up_proj = nn.Linear(d_model, d_ff, bias=False)
-        self.down_proj = nn.Linear(d_ff, d_model, bias=False)
+        self.gate_proj = nn.Linear(d_model, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(d_model, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -222,6 +222,97 @@ class SwiGluFFN(nn.Module):
         x = self.down_proj(_swiglu(gate, up))
         x = self.dropout(x)
         return x
+
+
+# --- MoE ---
+
+class MoERouter(nn.Module):
+    def __init__(self, d_model: int, n_experts: int, n_experts_per_token: int, normalize: bool = True):
+        super().__init__()
+        self.n_experts = n_experts
+        self.n_experts_per_token = n_experts_per_token
+        self.normalize = normalize
+        self.gate = nn.Linear(d_model, n_experts, bias=False)
+
+    def forward(self, x: torch.Tensor):
+        # x: (T, d_model)  where T = B*S (flattened)
+        logits = self.gate(x)                                        # (T, n_experts)
+        router_probs = logits.softmax(-1)                            # (T, n_experts)
+        top_weights, top_indices = torch.topk(router_probs, self.n_experts_per_token, dim=-1)
+        if self.normalize:
+            top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
+        return top_indices, top_weights, router_probs
+
+
+class SparseMoEBlock(nn.Module):
+    """Sparse Mixture-of-Experts FFN block.
+
+    Each expert is a SwiGluFFN. For each forward pass:
+      - Tokens are routed to top-k experts via MoERouter.
+      - Each expert processes only its assigned tokens.
+      - Outputs are weighted and summed back into the full sequence.
+      - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
+
+    Note: aux_loss scale grows linearly with n_experts_per_token (k). Under balanced
+    routing the expected value is approximately k. Callers using moe_aux_loss_coef should
+    account for this when comparing runs across different k values.
+
+    Note: forward() is not torch.compile-compatible due to dynamic expert dispatch
+    (boolean index masking produces variable-size tensors that cause graph breaks).
+    The trainer must NOT wrap this model with torch.compile.
+    """
+
+    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout: float = 0.0):
+        super().__init__()
+        self.n_experts = n_experts
+        self.n_experts_per_token = n_experts_per_token
+        self.router = MoERouter(d_model, n_experts, n_experts_per_token)
+        self.experts = nn.ModuleList([
+            SwiGluFFN(d_model, intermediate_size, dropout) for _ in range(n_experts)
+        ])
+
+    def forward(self, x: torch.Tensor):
+        # x: (B, S, D)
+        B, S, D = x.shape
+        T = B * S
+        x_flat = x.view(T, D)                          # (T, D)
+
+        top_indices, top_weights, router_probs = self.router(x_flat)
+        # top_indices: (T, k)   top_weights: (T, k)   router_probs: (T, n_experts)
+
+        output = torch.zeros_like(x_flat)              # (T, D)
+
+        for expert_idx in range(self.n_experts):
+            # mask[t, slot] = True when token t is assigned to this expert at that slot
+            mask = (top_indices == expert_idx)          # (T, k) bool
+            token_mask = mask.any(dim=-1)               # (T,) bool — any slot routes here
+            if not token_mask.any():
+                continue
+            # Per-token weight from this expert: sum over matched slots
+            weight = (top_weights * mask.float()).sum(-1)   # (T,)
+
+            expert_out = self.experts[expert_idx](x_flat[token_mask])   # (n_routed, D)
+            output[token_mask] += expert_out * weight[token_mask].unsqueeze(-1)
+
+        # Switch Transformer load-balancing auxiliary loss:
+        #   L = n_experts * sum_i(f_i * P_i)
+        #   f_i = fraction of tokens routed to expert i (hard, no grad)
+        #   P_i = mean router probability for expert i (soft, carries grad through router)
+        with torch.no_grad():
+            # One-hot encode routing decisions -> (T, n_experts)
+            expert_mask = torch.zeros(T, self.n_experts, device=x.device, dtype=x.dtype)
+            for k in range(self.n_experts_per_token):
+                expert_mask.scatter_add_(
+                    1,
+                    top_indices[:, k].unsqueeze(1),
+                    torch.ones(T, 1, device=x.device, dtype=x.dtype),
+                )
+            f = expert_mask.mean(0)                     # (n_experts,) fraction per expert
+
+        P = router_probs.mean(0)                        # (n_experts,) mean softmax prob per expert
+        aux_loss = self.n_experts * (f * P).sum()
+
+        return output.view(B, S, D), aux_loss
 
 
 # --- Transformer Block ---

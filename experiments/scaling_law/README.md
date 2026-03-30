@@ -10,7 +10,7 @@ For a fixed compute budget, there exists an optimal (model size, tokens) pair. L
 
 ### GPT-2
 
-Learned positional embeddings + LayerNorm + GELU FFN (d_ff=4×d_model) + MHA (full KV heads) + bias in all linear layers.
+Learned positional embeddings + LayerNorm + GELU FFN (intermediate_size=4×d_model) + MHA (full KV heads) + bias in all linear layers.
 
 | Config | d_model | layers | heads | ~Params | LR |
 |---|---|---|---|---|---|
@@ -21,7 +21,7 @@ Learned positional embeddings + LayerNorm + GELU FFN (d_ff=4×d_model) + MHA (fu
 
 ### Qwen3
 
-RoPE + RMSNorm + SwiGLU (d_ff=4×d_model) + GQA (n_kv_heads=n_heads/2) + qk_norm.
+RoPE + RMSNorm + SwiGLU (intermediate_size=4×d_model) + GQA (n_kv_heads=n_heads/2) + qk_norm.
 Larger params than GPT-2 counterparts at same depth/width due to SwiGLU's extra gate matrix.
 
 | Config | d_model | layers | heads | kv_heads | ~Params | LR |

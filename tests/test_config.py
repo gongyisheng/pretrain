@@ -42,15 +42,15 @@ def test_config_d_ff_default():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         config = load_config(path)
-        assert config.model.d_ff == 4 * 64
+        assert config.model.intermediate_size == 4 * 64
 
 
 def test_config_d_ff_explicit():
-    data = {**MINIMAL_CONFIG, "model": {**MINIMAL_CONFIG["model"], "d_ff": 128}}
+    data = {**MINIMAL_CONFIG, "model": {**MINIMAL_CONFIG["model"], "intermediate_size": 128}}
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, data)
         config = load_config(path)
-        assert config.model.d_ff == 128
+        assert config.model.intermediate_size == 128
 
 
 def test_config_cli_overrides():
@@ -68,3 +68,30 @@ def test_config_to_dict_roundtrip():
         d = config.to_dict()
         assert d["max_seq_len"] == 128
         assert d["model"]["arch"] == "gpt2"
+
+
+def test_config_moe_fields():
+    data = {
+        **MINIMAL_CONFIG,
+        "model": {
+            **MINIMAL_CONFIG["model"],
+            "n_experts": 8,
+            "n_experts_per_token": 2,
+            "moe_aux_loss_coef": 0.02,
+        },
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_yaml(tmp, data)
+        config = load_config(path)
+        assert config.model.n_experts == 8
+        assert config.model.n_experts_per_token == 2
+        assert config.model.moe_aux_loss_coef == 0.02
+
+
+def test_config_moe_fields_defaults():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_yaml(tmp, MINIMAL_CONFIG)
+        config = load_config(path)
+        assert config.model.n_experts == 0
+        assert config.model.n_experts_per_token == 2
+        assert config.model.moe_aux_loss_coef == 0.01

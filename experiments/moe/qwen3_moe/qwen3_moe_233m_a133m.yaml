@@ -1,0 +1,52 @@
+max_seq_len: 1024
+
+model:
+  arch: "qwen3_moe"
+  n_layers: 8
+  n_heads: 8
+  n_kv_heads: 4
+  d_model: 512
+  moe_intermediate_size: 1024
+  vocab_size: 50257
+  dropout: 0.1
+  rope_theta: 10000.0
+  qk_norm: true
+  n_experts: 16
+  n_experts_per_token: 8
+  moe_aux_loss_coef: 0.01
+
+data:
+  dataset: "openwebtext"
+  tokenizer_path: "tokenizers/custom_bpe_50k"
+  data_dir: "data/"
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  max_steps: 60000
+  mixed_precision: "bf16"
+  activation_checkpointing: false
+  backend: "torch"
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/moe/qwen3_moe_233m_a133m/"
+  checkpoint_every: 5000
+  eval_every: 1000
+  eval_steps: 200
+
+optimizer:
+  name: "adamw"
+  lr: 6e-4
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 2000
+  min_lr: 6e-5
+
+logging:
+  wandb_project: "pretrain-moe"
+  wandb_run_name: "qwen3-moe-233m-a133m"
+  log_every: 10

@@ -6,12 +6,12 @@ from src.utils.config import ModelConfig
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, d_ff: int, dropout: float, qk_norm: bool = False, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, intermediate_size: int, dropout: float, qk_norm: bool = False, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = RMSNorm(d_model)
         self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout, qk_norm)
         self.ln2 = RMSNorm(d_model)
-        self.ffn = SwiGluFFN(d_model, d_ff, dropout)
+        self.ffn = SwiGluFFN(d_model, intermediate_size, dropout)
 
     def attn_sublayer(self, x: torch.Tensor, rope: RoPE) -> torch.Tensor:
         return self.attn(self.ln1(x), rope)
@@ -38,7 +38,7 @@ class Qwen3Model(nn.Module):
                 d_model=config.d_model,
                 n_heads=config.n_heads,
                 n_kv_heads=config.n_kv_heads,
-                d_ff=config.d_ff,
+                intermediate_size=config.intermediate_size,
                 dropout=config.dropout,
                 qk_norm=config.qk_norm,
                 attn_res=config.attn_res,

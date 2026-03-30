@@ -11,6 +11,7 @@ class WandbLogger:
             wandb.init(
                 project=config.logging.wandb_project,
                 name=config.logging.wandb_run_name or None,
+                group=config.logging.wandb_group or None,
                 config=config.to_dict(),
             )
 
