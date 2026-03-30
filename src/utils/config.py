@@ -23,6 +23,7 @@ class ModelConfig:
     moe_intermediate_size: int = 0               # per-expert FFN hidden dim; 0 = same as intermediate_size
     moe_aux_loss_coef: float = 0.01 # Switch Transformer load-balancing loss coefficient
 
+
     def __post_init__(self):
         if self.intermediate_size == 0:
             self.intermediate_size = 4 * self.d_model

@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
+@torch.compile
 def torch_flash_attn(q, k, v, causal=True, sm_scale=None):
     if sm_scale is None:
         sm_scale = 1.0 / (q.shape[-1] ** 0.5)

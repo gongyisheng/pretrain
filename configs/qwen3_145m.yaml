@@ -16,13 +16,14 @@ data:
   tokenizer_path: "tokenizers/custom_bpe_50k"
   data_dir: "data/"
   val_split: 0.01
-  num_workers: 4
+  num_workers: 0
 
 training:
-  batch_size: 4
-  gradient_accumulation_steps: 8
+  batch_size: 12
+  gradient_accumulation_steps: 3
   max_steps: 120000
   mixed_precision: "bf16"
+  backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/scaling_law/qwen3_145m/"

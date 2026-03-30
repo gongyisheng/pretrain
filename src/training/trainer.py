@@ -15,6 +15,8 @@ from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.utils.config import TrainConfig
+from src.kernel.triton.cross_entropy import triton_cross_entropy
+from src.kernel.torch.cross_entropy import torch_cross_entropy
 
 
 class Trainer:
@@ -24,12 +26,20 @@ class Trainer:
         self.step = 0
         self.loss_history = []
 
+        # Enable TF32 for matmuls on Ampere+ GPUs
+        torch.set_float32_matmul_precision('high')
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
+
         # Seed for reproducibility
         self._seed(42)
 
         # Backend selection: "torch" (torch.compile) or "triton" (custom kernels)
         from src.model.components import set_backend
         set_backend(config.training.backend)
+        self._cross_entropy = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
 
         # Model
         self.model = build_model(config).to(self.device)
@@ -54,13 +64,16 @@ class Trainer:
         self.train_dataset = PretrainDataset(train_path, config.max_seq_len)
         self.val_dataset = PretrainDataset(val_path, config.max_seq_len)
 
+        nw = config.data.num_workers
         self.train_loader = DataLoader(
             self.train_dataset, batch_size=config.training.batch_size,
-            shuffle=True, num_workers=config.data.num_workers, pin_memory=True,
+            shuffle=True, num_workers=nw, pin_memory=True,
+            persistent_workers=nw > 0,
         )
         self.val_loader = DataLoader(
             self.val_dataset, batch_size=config.training.batch_size,
-            shuffle=False, num_workers=config.data.num_workers, pin_memory=True,
+            shuffle=False, num_workers=nw, pin_memory=True,
+            persistent_workers=nw > 0,
         )
 
         # Optimizer & scheduler
@@ -112,6 +125,13 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
 
+    def _next_batch(self, train_iter):
+        try:
+            return next(train_iter), train_iter
+        except StopIteration:
+            train_iter = iter(self.train_loader)
+            return next(train_iter), train_iter
+
     def train(self):
         cfg = self.config.training
         self.model.train()
@@ -121,35 +141,68 @@ class Trainer:
         t_last_log = time.time()
         tokens_since_log = 0
 
+        # Data prefetch stream for overlapping H2D transfer with compute
+        prefetch_stream = torch.cuda.Stream() if self.device == "cuda" else None
+
+        # Deferred loss: keep previous step's loss tensor to read while next step runs
+        prev_loss_tensor = None
+
         stop_at = self.config.debug.max_steps if self.config.debug.max_steps > 0 else cfg.max_steps
         pbar = tqdm(total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True)
         while self.step < stop_at:
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            # Read previous step's loss NOW (GPU has been computing since we launched it)
+            # This overlaps the .item() sync with the current step's data prefetch
+            if prev_loss_tensor is not None:
+                accum_loss = prev_loss_tensor.item()
+
+            # Accumulate loss as tensor to avoid CUDA sync every micro-step
+            accum_loss_tensor = torch.zeros(1, device=self.device)
+
+            # Prefetch first batch
+            (x_cpu, y_cpu), train_iter = self._next_batch(train_iter)
+            if prefetch_stream is not None:
+                with torch.cuda.stream(prefetch_stream):
+                    x = x_cpu.to(self.device, non_blocking=True)
+                    y = y_cpu.to(self.device, non_blocking=True)
+            else:
+                x, y = x_cpu.to(self.device), y_cpu.to(self.device)
 
             for micro_step in range(cfg.gradient_accumulation_steps):
-                try:
-                    x, y = next(train_iter)
-                except StopIteration:
-                    train_iter = iter(self.train_loader)
-                    x, y = next(train_iter)
+                # Wait for current batch transfer to complete
+                if prefetch_stream is not None:
+                    torch.cuda.current_stream().wait_stream(prefetch_stream)
 
-                x, y = x.to(self.device), y.to(self.device)
+                # Start prefetching next batch while computing
+                if micro_step < cfg.gradient_accumulation_steps - 1:
+                    (next_x_cpu, next_y_cpu), train_iter = self._next_batch(train_iter)
+                    if prefetch_stream is not None:
+                        with torch.cuda.stream(prefetch_stream):
+                            next_x = next_x_cpu.to(self.device, non_blocking=True)
+                            next_y = next_y_cpu.to(self.device, non_blocking=True)
+                    else:
+                        next_x, next_y = next_x_cpu.to(self.device), next_y_cpu.to(self.device)
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                     if self.is_moe:
                         logits, aux_loss = self.model(x)
-                        ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                        ce_loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
                         loss = ce_loss + self.config.model.moe_aux_loss_coef * aux_loss
                     else:
                         logits = self.model(x)
-                        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                        loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
-                accum_loss += loss.item()
+                accum_loss_tensor += loss.detach()
                 tokens_since_log += x.numel()
 
-            # Gradient clipping
+                # Swap to prefetched batch
+                if micro_step < cfg.gradient_accumulation_steps - 1:
+                    x, y = next_x, next_y
+
+            # Gradient clipping (no .item() sync here — loss read is deferred)
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
 
@@ -157,12 +210,15 @@ class Trainer:
             self.scaler.update()
             self.scheduler.step()
 
+            # Defer loss sync to next iteration (save tensor, read later)
+            prev_loss_tensor = accum_loss_tensor
+
             self.step += 1
             self.total_tokens += self.tokens_per_step
             self.loss_history.append(accum_loss)
             pbar.update(1)
 
-            # Logging
+            # Logging (uses accum_loss from *previous* step — 1-step delay, no impact on training)
             if self.step % self.config.logging.log_every == 0:
                 elapsed = time.time() - t_last_log
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
@@ -192,8 +248,6 @@ class Trainer:
                     clip_value=cfg.grad_clip,
                 )
 
-            accum_loss = 0.0
-
             # Evaluation
             if self.step % cfg.eval_every == 0:
                 self._evaluate()
@@ -201,6 +255,11 @@ class Trainer:
             # Checkpoint
             if self.step % cfg.checkpoint_every == 0:
                 self._save_checkpoint()
+
+        # Final loss sync for the last step
+        if prev_loss_tensor is not None:
+            accum_loss = prev_loss_tensor.item()
+            self.loss_history[-1] = accum_loss
 
         pbar.close()
         self.logger.finish()
@@ -220,7 +279,8 @@ class Trainer:
                     logits, _ = self.model(x)
                 else:
                     logits = self.model(x)
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                logits = self.model(x)
             total_loss += loss.item()
             n_batches += 1
 
