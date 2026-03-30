@@ -122,6 +122,80 @@ All benchmarks compare custom Triton kernels against `torch.compile` baselines (
 | 2048 | 1.665 | 1.588 | 0.95x |
 | 4096 | 5.910 | 5.646 | 0.96x |
 
+## MoE Scatter (Token ↔ Expert Dispatch)
+
+**Scatter-In Forward** (E=64, k=2, D=512)
+
+| T | Triton (ms) | PyTorch (ms) | Speedup |
+|---|---|---|---|
+| 1024 | 0.016 | 0.038 | 2.30x |
+| 2048 | 0.029 | 0.068 | 2.32x |
+| 4096 | 0.054 | 0.130 | 2.40x |
+| 8192 | 0.103 | 0.257 | 2.49x |
+| 16384 | 0.259 | 0.584 | 2.25x |
+
+**Scatter-In Backward** (E=64, k=2, D=512)
+
+| T | Triton (ms) | PyTorch (ms) | Speedup |
+|---|---|---|---|
+| 1024 | 0.018 | 0.089 | 5.01x |
+| 2048 | 0.033 | 0.152 | 4.68x |
+| 4096 | 0.058 | 0.257 | 4.45x |
+| 8192 | 0.096 | 0.509 | 5.31x |
+| 16384 | 0.205 | 1.131 | 5.53x |
+
+**Scatter-Out Forward** (E=64, k=2, D=512)
+
+| T | Triton (ms) | PyTorch (ms) | Speedup |
+|---|---|---|---|
+| 1024 | 0.020 | 0.056 | 2.82x |
+| 2048 | 0.034 | 0.097 | 2.88x |
+| 4096 | 0.062 | 0.169 | 2.74x |
+| 8192 | 0.099 | 0.339 | 3.41x |
+| 16384 | 0.215 | 0.754 | 3.51x |
+
+**Scatter-Out Backward** (E=64, k=2, D=512)
+
+| T | Triton (ms) | PyTorch (ms) | Speedup |
+|---|---|---|---|
+| 1024 | 0.017 | 0.109 | 6.45x |
+| 2048 | 0.031 | 0.179 | 5.79x |
+| 4096 | 0.058 | 0.292 | 5.04x |
+| 8192 | 0.106 | 0.600 | 5.64x |
+| 16384 | 0.258 | 1.545 | 5.98x |
+
+## MoE Routing (Token → Expert Assignment)
+
+**Sweep T** (E=64, k=2, capacity_factor=1.25)
+
+| T | Triton atomic (ms) | PyTorch sort (ms) | Speedup |
+|---|---|---|---|
+| 1024 | 0.120 | 0.223 | 1.85x |
+| 2048 | 0.115 | 0.217 | 1.88x |
+| 4096 | 0.125 | 0.256 | 2.05x |
+| 8192 | 0.126 | 0.269 | 2.13x |
+| 16384 | 0.127 | 0.277 | 2.19x |
+
+**Sweep E** (T=8192, k=2, capacity_factor=1.25)
+
+| E | Triton atomic (ms) | PyTorch sort (ms) | Speedup |
+|---|---|---|---|
+| 4 | 0.123 | 0.269 | 2.19x |
+| 8 | 0.125 | 0.281 | 2.25x |
+| 16 | 0.123 | 0.263 | 2.14x |
+| 32 | 0.122 | 0.265 | 2.17x |
+| 64 | 0.128 | 0.266 | 2.08x |
+| 128 | 0.124 | 0.274 | 2.20x |
+
+**Sweep k** (T=8192, E=64, capacity_factor=1.25)
+
+| k | Triton atomic (ms) | PyTorch sort (ms) | Speedup |
+|---|---|---|---|
+| 1 | 0.121 | 0.260 | 2.14x |
+| 2 | 0.122 | 0.265 | 2.18x |
+| 4 | 0.136 | 0.326 | 2.40x |
+| 8 | 0.139 | 0.297 | 2.14x |
+
 ## Summary
 
 | Kernel | Forward | Backward | Notes |
@@ -131,3 +205,5 @@ All benchmarks compare custom Triton kernels against `torch.compile` baselines (
 | RMSNorm | up to 1.72x faster | up to 2.26x faster | Regresses at N=16384 backward (11ms vs 2.6ms) |
 | SwiGLU | ~1.00x (parity) | ~1.58x faster | Forward is memory-bound (no win); backward fuses nicely |
 | Flash Attention | ~1.0-1.2x at short seq | ~0.95x (slightly slower) | Competitive with PyTorch's optimized SDPA at longer sequences |
+| MoE Scatter | 2.3-3.5x faster | 4.5-6.5x faster | Biggest wins in backward; scales well with T |
+| MoE Routing | 1.9-2.4x faster | N/A | Atomic counters vs sort; consistent across E and k |
