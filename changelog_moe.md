@@ -70,3 +70,17 @@ Full training benchmark:
 **Decision**: COMMITTED
 
 ---
+
+## Experiment 4: Use Triton scatter for torch backend too
+
+**Changes**: Made the torch backend use Triton scatter kernels on CUDA (with fallback to PyTorch scatter on CPU for tests). Profile showed scatter ops take 42% of layer time — Triton scatter is 5-7x faster even within the torch.compile compiled graph.
+
+| Backend | Before  | After    | Delta   |
+|---------|---------|----------|---------|
+| torch   | 72,197  | 102,396  | +41.8%  |
+| triton  | 74,916  | 105,983  | +41.5%  |
+
+**Result**: Both backends now get the full scatter speedup.
+**Decision**: COMMITTED
+
+---
