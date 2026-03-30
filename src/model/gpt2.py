@@ -6,10 +6,10 @@ from src.utils.config import ModelConfig
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float, qk_norm: bool = False, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_heads, dropout)
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout, qk_norm=qk_norm)
         self.ln2 = nn.LayerNorm(d_model)
         self.ffn = GeluFFN(d_model, d_ff, dropout)
 
@@ -38,6 +38,7 @@ class GPT2Model(nn.Module):
                 n_heads=config.n_heads,
                 d_ff=config.d_ff,
                 dropout=config.dropout,
+                qk_norm=config.qk_norm,
                 attn_res=config.attn_res,
                 attn_res_block_size=config.attn_res_block_size,
                 attn_res_norm=config.attn_res_norm,
