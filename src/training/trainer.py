@@ -33,6 +33,7 @@ class Trainer:
 
         # Model
         self.model = build_model(config).to(self.device)
+        self.is_moe = (config.model.arch == "qwen3_moe")
         n_params = sum(p.numel() for p in self.model.parameters())
         self.n_non_emb_params = n_params - sum(
             p.numel() for name, p in self.model.named_parameters()
@@ -71,7 +72,8 @@ class Trainer:
         self.amp_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(enabled=(self.use_amp and self.amp_dtype == torch.float16))
 
-        self.model = torch.compile(self.model)
+        if not self.is_moe:
+            self.model = torch.compile(self.model)
         print(f"[trainer] backend={config.training.backend}")
 
         # Activation checkpointing
@@ -84,8 +86,8 @@ class Trainer:
                     return ckpt_forward
                 block.forward = make_ckpt_forward(block)
 
-        # Tokenizer
-        self.tokenizer = load_tokenizer(config.data.tokenizer_path)
+        # Tokenizer (may be None when tokenizer_path is empty, e.g. in tests)
+        self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
 
         # Logger
         self.logger = WandbLogger(config, enabled=wandb_enabled)
@@ -131,8 +133,13 @@ class Trainer:
                 x, y = x.to(self.device), y.to(self.device)
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                    logits = self.model(x)
-                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                    if self.is_moe:
+                        logits, aux_loss = self.model(x)
+                        ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                        loss = ce_loss + self.config.model.moe_aux_loss_coef * aux_loss
+                    else:
+                        logits = self.model(x)
+                        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
@@ -158,7 +165,7 @@ class Trainer:
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
                 lr = self.optimizer.param_groups[0]["lr"]
                 flops = 6 * self.n_non_emb_params * self.total_tokens
-                self.logger.log({
+                log_dict = {
                     "train/loss": accum_loss,
                     "train/perplexity": min(float(torch.exp(torch.tensor(accum_loss))), 1e6),
                     "train/flops": flops,
@@ -166,7 +173,10 @@ class Trainer:
                     "lr": lr,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "tokens_per_sec": tokens_per_sec,
-                }, step=self.step)
+                }
+                if self.is_moe:
+                    log_dict["moe/aux_loss"] = aux_loss.item()
+                self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
                 t_last_log = time.time()
                 tokens_since_log = 0
@@ -203,7 +213,10 @@ class Trainer:
                 break
             x, y = x.to(self.device), y.to(self.device)
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                logits = self.model(x)
+                if self.is_moe:
+                    logits, _ = self.model(x)
+                else:
+                    logits = self.model(x)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             total_loss += loss.item()
             n_batches += 1
@@ -219,13 +232,18 @@ class Trainer:
     @torch.no_grad()
     def _generate_sample(self, max_new_tokens: int = 50):
         """Generate a short text sample for qualitative monitoring."""
+        if self.tokenizer is None:
+            return
         self.model.eval()
         # <|endoftext|> (token 0) acts as BOS, prompting the model to start a new document
         idx = torch.zeros((1, 1), dtype=torch.long, device=self.device)
         for _ in range(max_new_tokens):
             # truncate context to max_seq_len if generation grows long
             idx_cond = idx[:, -self.config.max_seq_len:]
-            logits = self.model(idx_cond)
+            if self.is_moe:
+                logits, _ = self.model(idx_cond)
+            else:
+                logits = self.model(idx_cond)
             logits = logits[:, -1, :]  # take last token's logits
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # sample from distribution
