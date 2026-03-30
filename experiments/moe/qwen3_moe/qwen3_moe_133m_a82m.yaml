@@ -6,7 +6,7 @@ model:
   n_heads: 8
   n_kv_heads: 4
   d_model: 512
-  moe_d_ff: 1024
+  moe_intermediate_size: 1024
   vocab_size: 50257
   dropout: 0.1
   rope_theta: 10000.0

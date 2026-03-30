@@ -75,7 +75,7 @@ def _tiny_moe_config(tmp_dir):
             n_heads=2,
             n_kv_heads=2,
             d_model=64,
-            d_ff=32,
+            intermediate_size=32,
             vocab_size=4096,
             dropout=0.0,
             n_experts=4,

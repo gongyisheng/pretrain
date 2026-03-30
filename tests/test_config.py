@@ -42,15 +42,15 @@ def test_config_d_ff_default():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         config = load_config(path)
-        assert config.model.d_ff == 4 * 64
+        assert config.model.intermediate_size == 4 * 64
 
 
 def test_config_d_ff_explicit():
-    data = {**MINIMAL_CONFIG, "model": {**MINIMAL_CONFIG["model"], "d_ff": 128}}
+    data = {**MINIMAL_CONFIG, "model": {**MINIMAL_CONFIG["model"], "intermediate_size": 128}}
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, data)
         config = load_config(path)
-        assert config.model.d_ff == 128
+        assert config.model.intermediate_size == 128
 
 
 def test_config_cli_overrides():

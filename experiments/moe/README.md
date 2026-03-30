@@ -10,7 +10,7 @@ Grid search over `n_experts_per_token` (top-k) for Qwen3 MoE architecture.
 | `n_layers` | 8 |
 | `n_heads` | 6 |
 | `n_kv_heads` | 3 |
-| `d_ff` (per expert) | 512 |
+| `intermediate_size` (per expert) | 512 |
 | `n_experts` | 8 |
 | `vocab_size` | 50257 |
 

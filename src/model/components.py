@@ -185,10 +185,10 @@ class GroupedQueryAttention(nn.Module):
 # --- FFN ---
 
 class GeluFFN(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, dropout: float = 0.0):
         super().__init__()
-        self.fc1 = nn.Linear(d_model, d_ff)
-        self.fc2 = nn.Linear(d_ff, d_model)
+        self.fc1 = nn.Linear(d_model, intermediate_size)
+        self.fc2 = nn.Linear(intermediate_size, d_model)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -200,11 +200,11 @@ class GeluFFN(nn.Module):
 
 
 class SwiGluFFN(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, dropout: float = 0.0):
         super().__init__()
-        self.gate_proj = nn.Linear(d_model, d_ff, bias=False)
-        self.up_proj = nn.Linear(d_model, d_ff, bias=False)
-        self.down_proj = nn.Linear(d_ff, d_model, bias=False)
+        self.gate_proj = nn.Linear(d_model, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(d_model, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -253,13 +253,13 @@ class SparseMoEBlock(nn.Module):
     The trainer must NOT wrap this model with torch.compile.
     """
 
-    def __init__(self, d_model: int, d_ff: int, n_experts: int, n_experts_per_token: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout: float = 0.0):
         super().__init__()
         self.n_experts = n_experts
         self.n_experts_per_token = n_experts_per_token
         self.router = MoERouter(d_model, n_experts, n_experts_per_token)
         self.experts = nn.ModuleList([
-            SwiGluFFN(d_model, d_ff, dropout) for _ in range(n_experts)
+            SwiGluFFN(d_model, intermediate_size, dropout) for _ in range(n_experts)
         ])
 
     def forward(self, x: torch.Tensor):

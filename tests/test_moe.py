@@ -47,14 +47,14 @@ def test_moe_router_weights_unnormalized():
 
 
 def test_sparse_moe_block_output_shape():
-    block = SparseMoEBlock(d_model=64, d_ff=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
     x = torch.randn(2, 8, 64)
     out, aux_loss = block(x)
     assert out.shape == (2, 8, 64)
 
 
 def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
-    block = SparseMoEBlock(d_model=64, d_ff=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
     assert aux_loss.ndim == 0
@@ -62,7 +62,7 @@ def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
 
 
 def test_sparse_moe_block_aux_loss_has_grad():
-    block = SparseMoEBlock(d_model=64, d_ff=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
     aux_loss.backward()
@@ -77,7 +77,7 @@ def _tiny_moe_config():
         n_heads=4,
         n_kv_heads=2,
         d_model=64,
-        d_ff=64,
+        intermediate_size=64,
         vocab_size=256,
         dropout=0.0,
         rope_theta=10000.0,

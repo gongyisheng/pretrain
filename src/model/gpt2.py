@@ -6,12 +6,12 @@ from src.utils.config import ModelConfig
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout: float, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = nn.LayerNorm(d_model)
         self.attn = MultiHeadAttention(d_model, n_heads, dropout)
         self.ln2 = nn.LayerNorm(d_model)
-        self.ffn = GeluFFN(d_model, d_ff, dropout)
+        self.ffn = GeluFFN(d_model, intermediate_size, dropout)
 
     def attn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
         return self.attn(self.ln1(x))
@@ -33,7 +33,7 @@ class GPT2Model(nn.Module):
             GPT2TransformerBlock(
                 d_model=config.d_model,
                 n_heads=config.n_heads,
-                d_ff=config.d_ff,
+                intermediate_size=config.intermediate_size,
                 dropout=config.dropout,
                 attn_res=config.attn_res,
                 attn_res_block_size=config.attn_res_block_size,
