@@ -215,6 +215,26 @@ class SwiGluFFN(nn.Module):
         return x
 
 
+# --- MoE ---
+
+class MoERouter(nn.Module):
+    def __init__(self, d_model: int, n_experts: int, n_experts_per_token: int, normalize: bool = True):
+        super().__init__()
+        self.n_experts = n_experts
+        self.n_experts_per_token = n_experts_per_token
+        self.normalize = normalize
+        self.gate = nn.Linear(d_model, n_experts, bias=False)
+
+    def forward(self, x: torch.Tensor):
+        # x: (T, d_model)  where T = B*S (flattened)
+        logits = self.gate(x)                                        # (T, n_experts)
+        router_probs = logits.softmax(-1)                            # (T, n_experts)
+        top_weights, top_indices = torch.topk(router_probs, self.n_experts_per_token, dim=-1)
+        if self.normalize:
+            top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
+        return top_indices, top_weights, router_probs
+
+
 # --- Transformer Block ---
 
 def _block_attn_res(
