@@ -1,6 +1,6 @@
 import pytest
 import torch
-from src.model.components import set_backend, MoERouter
+from src.model.components import set_backend, MoERouter, SparseMoEBlock
 
 
 @pytest.fixture(autouse=True)
@@ -42,3 +42,27 @@ def test_moe_router_weights_unnormalized():
     # Weights should NOT generally sum to 1 (they are raw softmax probabilities)
     sums = top_weights.sum(dim=-1)
     assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
+
+
+def test_sparse_moe_block_output_shape():
+    block = SparseMoEBlock(d_model=64, d_ff=128, n_experts=4, n_experts_per_token=2)
+    x = torch.randn(2, 8, 64)
+    out, aux_loss = block(x)
+    assert out.shape == (2, 8, 64)
+
+
+def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
+    block = SparseMoEBlock(d_model=64, d_ff=128, n_experts=4, n_experts_per_token=2)
+    x = torch.randn(2, 8, 64)
+    _, aux_loss = block(x)
+    assert aux_loss.ndim == 0
+    assert aux_loss.item() >= 0.0
+
+
+def test_sparse_moe_block_aux_loss_has_grad():
+    block = SparseMoEBlock(d_model=64, d_ff=128, n_experts=4, n_experts_per_token=2)
+    x = torch.randn(2, 8, 64)
+    _, aux_loss = block(x)
+    aux_loss.backward()
+    # router gate should receive gradient
+    assert block.router.gate.weight.grad is not None

@@ -235,6 +235,69 @@ class MoERouter(nn.Module):
         return top_indices, top_weights, router_probs
 
 
+class SparseMoEBlock(nn.Module):
+    """Sparse Mixture-of-Experts FFN block.
+
+    Each expert is a SwiGluFFN. For each forward pass:
+      - Tokens are routed to top-k experts via MoERouter.
+      - Each expert processes only its assigned tokens.
+      - Outputs are weighted and summed back into the full sequence.
+      - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
+    """
+
+    def __init__(self, d_model: int, d_ff: int, n_experts: int, n_experts_per_token: int, dropout: float = 0.0):
+        super().__init__()
+        self.n_experts = n_experts
+        self.n_experts_per_token = n_experts_per_token
+        self.router = MoERouter(d_model, n_experts, n_experts_per_token)
+        self.experts = nn.ModuleList([
+            SwiGluFFN(d_model, d_ff, dropout) for _ in range(n_experts)
+        ])
+
+    def forward(self, x: torch.Tensor):
+        # x: (B, S, D)
+        B, S, D = x.shape
+        T = B * S
+        x_flat = x.view(T, D)                          # (T, D)
+
+        top_indices, top_weights, router_probs = self.router(x_flat)
+        # top_indices: (T, k)   top_weights: (T, k)   router_probs: (T, n_experts)
+
+        output = torch.zeros_like(x_flat)              # (T, D)
+
+        for expert_idx in range(self.n_experts):
+            # mask[t, slot] = True when token t is assigned to this expert at that slot
+            mask = (top_indices == expert_idx)          # (T, k) bool
+            token_mask = mask.any(dim=-1)               # (T,) bool — any slot routes here
+            if not token_mask.any():
+                continue
+            # Per-token weight from this expert: sum over matched slots
+            weight = (top_weights * mask.float()).sum(-1)   # (T,)
+
+            expert_out = self.experts[expert_idx](x_flat[token_mask])   # (n_routed, D)
+            output[token_mask] += expert_out * weight[token_mask].unsqueeze(-1)
+
+        # Switch Transformer load-balancing auxiliary loss:
+        #   L = n_experts * sum_i(f_i * P_i)
+        #   f_i = fraction of tokens routed to expert i (hard, no grad)
+        #   P_i = mean router probability for expert i (soft, carries grad through router)
+        with torch.no_grad():
+            # One-hot encode routing decisions -> (T, n_experts)
+            expert_mask = torch.zeros(T, self.n_experts, device=x.device, dtype=x.dtype)
+            for k in range(self.n_experts_per_token):
+                expert_mask.scatter_add_(
+                    1,
+                    top_indices[:, k].unsqueeze(1),
+                    torch.ones(T, 1, device=x.device, dtype=x.dtype),
+                )
+            f = expert_mask.mean(0)                     # (n_experts,) fraction per expert
+
+        P = router_probs.mean(0)                        # (n_experts,) mean softmax prob per expert
+        aux_loss = self.n_experts * (f * P).sum()
+
+        return output.view(B, S, D), aux_loss
+
+
 # --- Transformer Block ---
 
 def _block_attn_res(
