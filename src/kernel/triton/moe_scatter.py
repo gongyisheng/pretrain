@@ -158,6 +158,7 @@ def _run_scatter_in(x_flat, expert_ids, token_ids, positions, E, capacity):
 
 
 def _run_scatter_in_bwd(grad_padded, expert_ids, token_ids, positions, T):
+    grad_padded = grad_padded.contiguous()
     E, C, D = grad_padded.shape
     N = expert_ids.shape[0]
     grad_x = torch.zeros(T, D, device=grad_padded.device, dtype=grad_padded.dtype)
@@ -198,6 +199,7 @@ def _run_scatter_out(expert_out, expert_ids, token_ids, positions, weights, T):
 
 
 def _run_scatter_out_bwd_expert(grad_output, expert_ids, token_ids, positions, weights, E, C):
+    grad_output = grad_output.contiguous()
     D = grad_output.shape[1]
     N = expert_ids.shape[0]
     grad_expert = torch.zeros(E, C, D, device=grad_output.device, dtype=grad_output.dtype)
