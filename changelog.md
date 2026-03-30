@@ -124,3 +124,34 @@ backward kernels. No measurable difference — kernel is bandwidth-bound.
 | RoPE FWD | 0.049 ms | Negligible |
 | SwiGLU FWD | 0.183 ms | Bandwidth-bound |
 | SwiGLU BWD | 0.324 ms | Bandwidth-bound |
+
+---
+
+## Round 2: Systematic Speed Optimization (2026-03-29)
+
+GPU: NVIDIA GeForce RTX 5060 Ti 16GB
+
+### New Baseline (after prior optimizations)
+
+| Model | Backend | tok/s |
+|-------|---------|-------|
+| GPT2 124M | torch | 41,083 |
+| GPT2 124M | triton | 37,769 |
+| Qwen3 145M | torch | 33,561 |
+| Qwen3 145M | triton | 33,573 |
+
+Benchmark: `bench_train.py --all --steps 10 --warmup 10`
+
+### Exp 1: Fused AdamW (`fused=True`) - KEPT
+
+**File:** `src/training/optimizer.py`
+
+Added `fused=True` to `torch.optim.AdamW`. This uses a single CUDA kernel per
+parameter group for the optimizer step instead of separate kernels per parameter.
+
+| Model | Backend | Before | After | Change |
+|-------|---------|--------|-------|--------|
+| GPT2 | torch | 41,083 | 41,542 | +1.1% |
+| GPT2 | triton | 37,769 | 38,130 | +1.0% |
+| Qwen3 | torch | 33,561 | 34,054 | +1.5% |
+| Qwen3 | triton | 33,573 | 34,071 | +1.5% |
