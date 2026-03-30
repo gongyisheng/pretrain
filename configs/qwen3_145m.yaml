@@ -23,6 +23,7 @@ training:
   gradient_accumulation_steps: 4
   max_steps: 120000
   mixed_precision: "bf16"
+  backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/scaling_law/qwen3_145m/"
