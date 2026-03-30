@@ -138,6 +138,11 @@ Backward kernels:
 3. **Sort-free routing**: Triton atomic counters replace torch.sort. Micro-benchmark 1.72x, end-to-end neutral.
 4. **Vectorized aux_loss**: Replaced Python for-loop with bincount.
 
+### Explored but not beneficial:
+5. **Padding-free dispatch (grouped GEMM)**: `torch._grouped_mm` is 2x slower than padded `torch.bmm`. Per-expert loop is 5.5x slower (64 kernel launches). Padded BMM with cuBLAS is already well-optimized.
+6. **Fused scatter-in + expert FFN**: Scatter-in is only 0.039ms (4% of layer time). Fusion would save negligible time.
+7. **Capacity reduction** (1.25→1.0): Smaller matrices are faster in isolation (0.357 vs 0.455ms) but full training pipeline doesn't benefit due to recompilation and different code paths.
+
 ### Files added:
 - `src/kernel/torch/moe_ffn.py` — compiled expert FFN for torch backend
 - `src/kernel/torch/moe_scatter.py` — PyTorch scatter (CPU fallback)
