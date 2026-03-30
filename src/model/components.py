@@ -26,18 +26,13 @@ def set_backend(backend: str):
         from src.kernel.torch.moe_ffn import torch_moe_expert_ffn
         from src.kernel.torch.moe_scatter import torch_moe_scatter_in, torch_moe_scatter_out
         from src.kernel.torch.moe_routing import torch_moe_routing
-        _rmsnorm, _rope, _swiglu, _flash_attn = torch_rmsnorm, torch_rope, torch_swiglu, torch_flash_attn
+        _rmsnorm = torch_rmsnorm
+        _rope = torch_rope
+        _swiglu = torch_swiglu
+        _flash_attn = torch_flash_attn
         _moe_expert_ffn = torch_moe_expert_ffn
+        _moe_scatter_in, _moe_scatter_out = torch_moe_scatter_in, torch_moe_scatter_out
         _moe_routing = torch_moe_routing
-        # Use Triton scatter/routing on CUDA (much faster), fall back to PyTorch on CPU
-        try:
-            from src.kernel.triton.moe_scatter import triton_moe_scatter_in, triton_moe_scatter_out
-            from src.kernel.triton.moe_routing import triton_moe_routing
-            _moe_scatter_in = lambda *a, **kw: triton_moe_scatter_in(*a, **kw) if a[0].is_cuda else torch_moe_scatter_in(*a, **kw)
-            _moe_scatter_out = lambda *a, **kw: triton_moe_scatter_out(*a, **kw) if a[0].is_cuda else torch_moe_scatter_out(*a, **kw)
-            _moe_routing = lambda *a, **kw: triton_moe_routing(*a, **kw) if a[0].is_cuda else torch_moe_routing(*a, **kw)
-        except ImportError:
-            _moe_scatter_in, _moe_scatter_out = torch_moe_scatter_in, torch_moe_scatter_out
     elif backend == "triton":
         from src.kernel.torch.rmsnorm import torch_rmsnorm
         from src.kernel.triton.rope import triton_rope
@@ -46,7 +41,10 @@ def set_backend(backend: str):
         from src.kernel.triton.moe_ffn import triton_moe_expert_ffn
         from src.kernel.triton.moe_scatter import triton_moe_scatter_in, triton_moe_scatter_out
         from src.kernel.triton.moe_routing import triton_moe_routing
-        _rmsnorm, _rope, _swiglu, _flash_attn = torch_rmsnorm, triton_rope, triton_swiglu, triton_flash_attn
+        _rmsnorm = torch_rmsnorm
+        _rope = triton_rope
+        _swiglu = triton_swiglu
+        _flash_attn = triton_flash_attn
         _moe_expert_ffn = triton_moe_expert_ffn
         _moe_scatter_in, _moe_scatter_out = triton_moe_scatter_in, triton_moe_scatter_out
         _moe_routing = triton_moe_routing
