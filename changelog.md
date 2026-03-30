@@ -164,3 +164,22 @@ Added `persistent_workers=True` when `num_workers > 0` to avoid worker process
 respawn overhead between epochs. No measurable throughput change since both
 configs use `num_workers=0` (data loading is ~0.3% of step time due to
 memory-mapped datasets + prefetch stream). Code change kept for correctness.
+
+### Exp 3: CUDA expandable segments allocator - NO CHANGE
+
+Tested `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. No measurable
+improvement — memory is not fragmented in single-model training.
+
+### Exp 4: Qwen3 batch size increase (8→12) - KEPT
+
+**File:** `configs/qwen3_145m.yaml`
+
+Increased Qwen3 batch_size from 8 to 12, reduced gradient_accumulation_steps
+from 4 to 3. Larger micro-batches improve GPU utilization by amortizing kernel
+launch overhead over more tokens. Peak memory goes from ~10GB to ~12.3GB (fits
+16GB GPU). GPT2 bs=16 was also tested but showed no gain (already saturated at bs=12).
+
+| Model | Backend | Before | After | Change |
+|-------|---------|--------|-------|--------|
+| Qwen3 | torch | 34,054 | 34,763 | +2.1% |
+| Qwen3 | triton | 34,071 | 34,744 | +2.0% |
