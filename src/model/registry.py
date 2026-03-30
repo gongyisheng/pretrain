@@ -1,9 +1,11 @@
 from src.model.gpt2 import GPT2Model
 from src.model.qwen3 import Qwen3Model
+from src.model.qwen3_moe import Qwen3MoEModel
 
 MODEL_REGISTRY = {
     "gpt2": GPT2Model,
     "qwen3": Qwen3Model,
+    "qwen3_moe": Qwen3MoEModel,
 }
 
 
