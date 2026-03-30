@@ -22,6 +22,7 @@ class ModelConfig:
     n_experts_per_token: int = 2    # top-k experts activated per token
     moe_intermediate_size: int = 0               # per-expert FFN hidden dim; 0 = same as intermediate_size
     moe_aux_loss_coef: float = 0.01 # Switch Transformer load-balancing loss coefficient
+    moe_expert_capacity_factor: Optional[float] = None  # None = dynamic (no dropping); float = fixed capacity, enables torch.compile
 
 
     def __post_init__(self):
@@ -124,6 +125,15 @@ def _apply_overrides(config: TrainConfig, overrides: List[str]):
             value = int(value)
         elif isinstance(current, float):
             value = float(value)
+        elif current is None:
+            # Optional field: try float, then int, then leave as string
+            try:
+                value = float(value)
+            except ValueError:
+                try:
+                    value = int(value)
+                except ValueError:
+                    pass
         setattr(obj, field_name, value)
 
 

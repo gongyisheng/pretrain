@@ -245,72 +245,114 @@ class MoERouter(nn.Module):
 
 
 class SparseMoEBlock(nn.Module):
-    """Sparse Mixture-of-Experts FFN block.
+    """Sparse Mixture-of-Experts FFN block with batched expert dispatch.
 
-    Each expert is a SwiGluFFN. For each forward pass:
+    Expert weights are stored as stacked tensors and processed via torch.bmm,
+    replacing the sequential per-expert loop with 3 batched GEMMs.
+
+    For each forward pass:
       - Tokens are routed to top-k experts via MoERouter.
-      - Each expert processes only its assigned tokens.
-      - Outputs are weighted and summed back into the full sequence.
+      - Routed tokens are sorted by expert, padded, and stacked into (E, C, D).
+      - Batched matmuls compute all experts in parallel.
+      - Outputs are gathered back with routing weights.
       - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
 
     Note: aux_loss scale grows linearly with n_experts_per_token (k). Under balanced
     routing the expected value is approximately k. Callers using moe_aux_loss_coef should
     account for this when comparing runs across different k values.
-
-    Note: forward() is not torch.compile-compatible due to dynamic expert dispatch
-    (boolean index masking produces variable-size tensors that cause graph breaks).
-    The trainer must NOT wrap this model with torch.compile.
     """
 
-    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout: float = 0.0, capacity_factor: float = None):
         super().__init__()
         self.n_experts = n_experts
         self.n_experts_per_token = n_experts_per_token
+        self.capacity_factor = capacity_factor
         self.router = MoERouter(d_model, n_experts, n_experts_per_token)
-        self.experts = nn.ModuleList([
-            SwiGluFFN(d_model, intermediate_size, dropout) for _ in range(n_experts)
-        ])
+
+        # Stacked expert weights: (E, out, in) following nn.Linear convention
+        # gate and up are fused into one tensor to save memory (one bmm instead of two)
+        self.expert_gate_up = nn.Parameter(torch.empty(n_experts, 2 * intermediate_size, d_model))
+        self.expert_down = nn.Parameter(torch.empty(n_experts, d_model, intermediate_size))
+        self.expert_dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)
         B, S, D = x.shape
         T = B * S
-        x_flat = x.view(T, D)                          # (T, D)
+        k = self.n_experts_per_token
+        E = self.n_experts
+        x_flat = x.view(T, D)
 
         top_indices, top_weights, router_probs = self.router(x_flat)
-        # top_indices: (T, k)   top_weights: (T, k)   router_probs: (T, n_experts)
+        # top_indices: (T, k)   top_weights: (T, k)   router_probs: (T, E)
 
-        output = torch.zeros_like(x_flat)              # (T, D)
+        # --- Flatten routing decisions into (T*k,) arrays ---
+        flat_expert_ids = top_indices.reshape(-1)                                    # (T*k,)
+        flat_token_ids = torch.arange(T, device=x.device).unsqueeze(1).expand(T, k).reshape(-1)  # (T*k,)
+        flat_weights = top_weights.reshape(-1)                                       # (T*k,)
 
-        for expert_idx in range(self.n_experts):
-            # mask[t, slot] = True when token t is assigned to this expert at that slot
-            mask = (top_indices == expert_idx)          # (T, k) bool
-            token_mask = mask.any(dim=-1)               # (T,) bool — any slot routes here
-            if not token_mask.any():
-                continue
-            # Per-token weight from this expert: sum over matched slots
-            weight = (top_weights * mask.float()).sum(-1)   # (T,)
+        # --- Sort by expert to create contiguous groups ---
+        sorted_order = flat_expert_ids.argsort(stable=True)
+        sorted_expert_ids = flat_expert_ids[sorted_order]
+        sorted_token_ids = flat_token_ids[sorted_order]
+        sorted_weights = flat_weights[sorted_order]
 
-            expert_out = self.experts[expert_idx](x_flat[token_mask])   # (n_routed, D)
-            output[token_mask] += expert_out * weight[token_mask].unsqueeze(-1)
+        # --- Per-expert counts and capacity ---
+        expert_counts = torch.zeros(E, dtype=torch.long, device=x.device)
+        expert_counts.scatter_add_(0, sorted_expert_ids.long(), torch.ones_like(sorted_expert_ids, dtype=torch.long))
 
-        # Switch Transformer load-balancing auxiliary loss:
-        #   L = n_experts * sum_i(f_i * P_i)
-        #   f_i = fraction of tokens routed to expert i (hard, no grad)
-        #   P_i = mean router probability for expert i (soft, carries grad through router)
+        if self.capacity_factor is not None:
+            # Fixed capacity (Megatron-style): capacity = T * k * factor / E
+            # Tokens exceeding capacity are dropped. Enables torch.compile.
+            capacity = int(T * k * self.capacity_factor / E)
+            # Drop entries whose position within their expert group >= capacity
+            offsets = torch.zeros(E, dtype=torch.long, device=x.device)
+            offsets[1:] = expert_counts[:-1].cumsum(0)
+            positions = torch.arange(len(sorted_expert_ids), device=x.device) - offsets[sorted_expert_ids]
+            keep_mask = positions < capacity
+            sorted_expert_ids = sorted_expert_ids[keep_mask]
+            sorted_token_ids = sorted_token_ids[keep_mask]
+            sorted_weights = sorted_weights[keep_mask]
+            positions = positions[keep_mask]
+        else:
+            # Dynamic capacity: no tokens dropped, capacity = max expert count
+            # Round up to multiple of 32 for stable tensor sizes (reduces fragmentation)
+            capacity = (expert_counts.max().item() + 31) // 32 * 32
+            offsets = torch.zeros(E, dtype=torch.long, device=x.device)
+            offsets[1:] = expert_counts[:-1].cumsum(0)
+            positions = torch.arange(len(sorted_expert_ids), device=x.device) - offsets[sorted_expert_ids]
+
+        # --- Build padded input: (E, capacity, D) ---
+        padded_input = x_flat.new_zeros(E, capacity, D)
+        padded_input[sorted_expert_ids, positions] = x_flat[sorted_token_ids]
+
+        # --- Batched expert FFN: fused gate+up bmm, then down bmm ---
+        gate_up = torch.bmm(padded_input, self.expert_gate_up.mT)  # (E, C, 2*I)
+        gate, up = gate_up.chunk(2, dim=-1)                         # each (E, C, I)
+        hidden = _swiglu(gate, up)                                   # (E, C, I)
+        expert_out = torch.bmm(hidden, self.expert_down.mT)        # (E, C, D)
+        expert_out = self.expert_dropout(expert_out)
+
+        # --- Scatter results back with routing weights ---
+        gathered = expert_out[sorted_expert_ids, positions]      # (N_kept, D)
+        weighted = gathered * sorted_weights.unsqueeze(-1)       # (N_kept, D)
+
+        output = torch.zeros_like(x_flat)
+        output.scatter_add_(0, sorted_token_ids.unsqueeze(-1).expand_as(weighted), weighted)
+
+        # --- Switch Transformer load-balancing auxiliary loss ---
         with torch.no_grad():
-            # One-hot encode routing decisions -> (T, n_experts)
-            expert_mask = torch.zeros(T, self.n_experts, device=x.device, dtype=x.dtype)
-            for k in range(self.n_experts_per_token):
+            expert_mask = torch.zeros(T, E, device=x.device, dtype=x.dtype)
+            for slot in range(k):
                 expert_mask.scatter_add_(
                     1,
-                    top_indices[:, k].unsqueeze(1),
+                    top_indices[:, slot].unsqueeze(1),
                     torch.ones(T, 1, device=x.device, dtype=x.dtype),
                 )
-            f = expert_mask.mean(0)                     # (n_experts,) fraction per expert
+            f = expert_mask.mean(0)                              # (E,)
 
-        P = router_probs.mean(0)                        # (n_experts,) mean softmax prob per expert
-        aux_loss = self.n_experts * (f * P).sum()
+        P = router_probs.mean(0)                                 # (E,)
+        aux_loss = E * (f * P).sum()
 
         return output.view(B, S, D), aux_loss
 

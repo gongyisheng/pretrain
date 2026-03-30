@@ -16,12 +16,13 @@ class Qwen3MoETransformerBlock(nn.Module):
         n_experts_per_token: int,
         dropout: float,
         qk_norm: bool = False,
+        capacity_factor: float = None,
     ):
         super().__init__()
         self.ln1 = RMSNorm(d_model)
         self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout, qk_norm)
         self.ln2 = RMSNorm(d_model)
-        self.ffn = SparseMoEBlock(d_model, moe_intermediate_size, n_experts, n_experts_per_token, dropout)
+        self.ffn = SparseMoEBlock(d_model, moe_intermediate_size, n_experts, n_experts_per_token, dropout, capacity_factor)
 
     def forward(self, x: torch.Tensor, rope: RoPE) -> tuple:
         x = x + self.attn(self.ln1(x), rope)
@@ -53,6 +54,7 @@ class Qwen3MoEModel(nn.Module):
                 n_experts_per_token=config.n_experts_per_token,
                 dropout=config.dropout,
                 qk_norm=config.qk_norm,
+                capacity_factor=config.moe_expert_capacity_factor,
             )
             for _ in range(config.n_layers)
         ])
@@ -70,6 +72,9 @@ class Qwen3MoEModel(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, SparseMoEBlock):
+            torch.nn.init.normal_(module.expert_gate_up, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
     def forward(self, idx: torch.Tensor) -> tuple:
         """Returns (logits, aux_loss).

@@ -86,7 +86,11 @@ class Trainer:
         self.amp_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(enabled=(self.use_amp and self.amp_dtype == torch.float16))
 
-        if not self.is_moe:
+        if self.is_moe and config.model.moe_expert_capacity_factor is None:
+            # Dynamic capacity uses .item() — can't compile the full model
+            for block in self.model.blocks:
+                block.attn = torch.compile(block.attn)
+        else:
             self.model = torch.compile(self.model)
         print(f"[trainer] backend={config.training.backend}")
 
