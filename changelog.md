@@ -285,6 +285,26 @@ Mixed results: torch +0.5%, triton -5.3%. The larger matmul has worse GPU
 occupancy and the tensor split interacts poorly with triton kernel
 contiguity requirements.
 
+### Exp 20: Triton CE block size tuning - NO CHANGE
+
+Swept BLOCK_V in {1024, 2048, 4096, 8192} x num_warps in {4, 8, 16}.
+Current config (BLOCK_V=4096, warps=8) is already near-optimal for
+V=50304.
+
+### Exp 21: torch SDPA for triton backend flash attention - REVERTED
+
+Replaced triton flash attention with torch's SDPA in triton backend.
+GPT2: +3.6% (SDPA's cuDNN kernel is faster for standard MHA).
+Qwen3: -7.6% (SDPA doesn't optimize well for GQA's expanded KV heads).
+Reverted due to regression on the GQA architecture.
+
+### Exp 19: 2-pass triton RMSNorm backward - REVERTED
+
+Implemented 2-pass approach: kernel 1 computes dx + writes per-row dw to
+(M, N) buffer without atomics, kernel 2 reduces across M rows. Still 10x
+slower than torch.compile (2.97ms vs 0.29ms) due to large buffer allocation
+overhead. torch.compile generates a superior fused backward for this operation.
+
 ---
 
 ## Round 2 Final Results
