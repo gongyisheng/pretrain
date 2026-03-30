@@ -139,10 +139,18 @@ class Trainer:
         # Data prefetch stream for overlapping H2D transfer with compute
         prefetch_stream = torch.cuda.Stream() if self.device == "cuda" else None
 
+        # Deferred loss: keep previous step's loss tensor to read while next step runs
+        prev_loss_tensor = None
+
         stop_at = self.config.debug.max_steps if self.config.debug.max_steps > 0 else cfg.max_steps
         pbar = tqdm(total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True)
         while self.step < stop_at:
             self.optimizer.zero_grad(set_to_none=True)
+
+            # Read previous step's loss NOW (GPU has been computing since we launched it)
+            # This overlaps the .item() sync with the current step's data prefetch
+            if prev_loss_tensor is not None:
+                accum_loss = prev_loss_tensor.item()
 
             # Accumulate loss as tensor to avoid CUDA sync every micro-step
             accum_loss_tensor = torch.zeros(1, device=self.device)
@@ -184,10 +192,7 @@ class Trainer:
                 if micro_step < cfg.gradient_accumulation_steps - 1:
                     x, y = next_x, next_y
 
-            # Single sync to get accumulated loss
-            accum_loss = accum_loss_tensor.item()
-
-            # Gradient clipping
+            # Gradient clipping (no .item() sync here — loss read is deferred)
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
 
@@ -195,12 +200,15 @@ class Trainer:
             self.scaler.update()
             self.scheduler.step()
 
+            # Defer loss sync to next iteration (save tensor, read later)
+            prev_loss_tensor = accum_loss_tensor
+
             self.step += 1
             self.total_tokens += self.tokens_per_step
             self.loss_history.append(accum_loss)
             pbar.update(1)
 
-            # Logging
+            # Logging (uses accum_loss from *previous* step — 1-step delay, no impact on training)
             if self.step % self.config.logging.log_every == 0:
                 elapsed = time.time() - t_last_log
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
@@ -227,8 +235,6 @@ class Trainer:
                     clip_value=cfg.grad_clip,
                 )
 
-            accum_loss = 0.0
-
             # Evaluation
             if self.step % cfg.eval_every == 0:
                 self._evaluate()
@@ -236,6 +242,11 @@ class Trainer:
             # Checkpoint
             if self.step % cfg.checkpoint_every == 0:
                 self._save_checkpoint()
+
+        # Final loss sync for the last step
+        if prev_loss_tensor is not None:
+            accum_loss = prev_loss_tensor.item()
+            self.loss_history[-1] = accum_loss
 
         pbar.close()
         self.logger.finish()
