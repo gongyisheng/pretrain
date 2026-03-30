@@ -1,5 +1,5 @@
 """
-Training throughput benchmark for GPT-2 and Qwen3.
+Training throughput benchmark for GPT-2, Qwen3, and Qwen3 MoE.
 
 Runs the Trainer for a short number of steps with W&B disabled.
 Uses per-step debug_metrics to compute steady-state throughput,
@@ -12,6 +12,9 @@ Usage:
     # Benchmark Qwen3 145M (triton backend)
     python benchmarks/trainer/bench_train.py --config configs/qwen3_145m.yaml --backend triton
 
+    # Benchmark Qwen3 MoE 57M (torch backend)
+    python benchmarks/trainer/bench_train.py --config configs/qwen3_moe_133m.yaml
+
     # Run all model/backend combinations
     python benchmarks/trainer/bench_train.py --all
 """
@@ -19,10 +22,8 @@ import argparse
 import json
 import os
 import sys
-import time
 
 import torch
-import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
@@ -94,6 +95,8 @@ def run_all_benchmarks(steps=10, warmup=5):
         ("configs/gpt2_124m.yaml", "triton"),
         ("configs/qwen3_145m.yaml", "torch"),
         ("configs/qwen3_145m.yaml", "triton"),
+        ("configs/qwen3_moe_133m.yaml", "torch"),
+        ("configs/qwen3_moe_133m.yaml", "triton"),
     ]
 
     all_results = []
