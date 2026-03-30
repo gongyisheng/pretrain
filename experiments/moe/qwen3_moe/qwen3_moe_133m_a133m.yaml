@@ -6,13 +6,13 @@ model:
   n_heads: 8
   n_kv_heads: 4
   d_model: 512
-  d_ff: 512
+  moe_d_ff: 1024
   vocab_size: 50257
   dropout: 0.1
   rope_theta: 10000.0
   qk_norm: true
   n_experts: 8
-  n_experts_per_token: 1
+  n_experts_per_token: 8
   moe_aux_loss_coef: 0.01
 
 data:
@@ -30,7 +30,7 @@ training:
   activation_checkpointing: false
   backend: "torch"
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/moe/qwen3_moe_82m_a38m/"
+  checkpoint_dir: "checkpoints/moe/qwen3_moe_133m_a133m/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -48,5 +48,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-moe"
-  wandb_run_name: "qwen3-moe-82m-a38m"
+  wandb_run_name: "qwen3-moe-82m-a82m"
   log_every: 10

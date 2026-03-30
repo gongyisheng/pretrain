@@ -6,7 +6,7 @@ model:
   n_heads: 8
   n_kv_heads: 4
   d_model: 512
-  d_ff: 512
+  moe_d_ff: 1024
   vocab_size: 50257
   dropout: 0.1
   rope_theta: 10000.0
@@ -30,7 +30,7 @@ training:
   activation_checkpointing: false
   backend: "torch"
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/moe/qwen3_moe_82m_a57m/"
+  checkpoint_dir: "checkpoints/moe/qwen3_moe_133m_a82m/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200

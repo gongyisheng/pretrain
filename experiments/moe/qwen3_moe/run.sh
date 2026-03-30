@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")/../../.."
 
-for config in qwen3_moe_82m_a38m qwen3_moe_82m_a45m qwen3_moe_82m_a57m qwen3_moe_82m_a82m; do
+for config in qwen3_moe_133m_a45m qwen3_moe_133m_a57m qwen3_moe_133m_a82m qwen3_moe_133m_a133m; do
     echo "=== ${config} ==="
     echo "Started at: $(date)"
     python scripts/train.py --config "experiments/moe/qwen3_moe/${config}.yaml"

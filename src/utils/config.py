@@ -20,6 +20,7 @@ class ModelConfig:
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
     n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
     n_experts_per_token: int = 2    # top-k experts activated per token
+    moe_d_ff: int = 0               # per-expert FFN hidden dim; 0 = same as d_ff
     moe_aux_loss_coef: float = 0.01 # Switch Transformer load-balancing loss coefficient
 
     def __post_init__(self):
@@ -27,6 +28,8 @@ class ModelConfig:
             self.d_ff = 4 * self.d_model
         if self.n_kv_heads == 0:
             self.n_kv_heads = self.n_heads
+        if self.moe_d_ff == 0:
+            self.moe_d_ff = self.d_ff
 
 
 @dataclass

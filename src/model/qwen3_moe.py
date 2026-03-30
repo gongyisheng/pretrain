@@ -48,7 +48,7 @@ class Qwen3MoEModel(nn.Module):
                 d_model=config.d_model,
                 n_heads=config.n_heads,
                 n_kv_heads=config.n_kv_heads,
-                d_ff=config.d_ff,
+                d_ff=config.moe_d_ff,
                 n_experts=config.n_experts,
                 n_experts_per_token=config.n_experts_per_token,
                 dropout=config.dropout,
