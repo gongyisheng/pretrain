@@ -8,7 +8,7 @@ model:
   d_model: 512
   moe_intermediate_size: 128
   vocab_size: 50257
-  dropout: 0.1
+  dropout: 0.0
   rope_theta: 10000.0
   qk_norm: true
   n_experts: 16
@@ -29,7 +29,7 @@ training:
   max_steps: 60000
   mixed_precision: "bf16"
   activation_checkpointing: false
-  backend: "triton"
+  backend: "torch"
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/moe/qwen3_moe_57m_a45m/"
   checkpoint_every: 5000

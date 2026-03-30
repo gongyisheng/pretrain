@@ -1,4 +1,4 @@
-max_seq_len: 4096
+max_seq_len: 1024
 
 model:
   arch: "qwen3"
@@ -7,7 +7,7 @@ model:
   n_kv_heads: 4
   d_model: 512
   vocab_size: 50257
-  dropout: 0.1
+  dropout: 0.0
   rope_theta: 10000.0
   qk_norm: true
 
@@ -19,14 +19,14 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 1
+  batch_size: 4
   gradient_accumulation_steps: 8
   max_steps: 50000
   mixed_precision: "bf16"
   backend: "torch"
-  activation_checkpointing: true
+  activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/seq_len/qwen3_seq4096/"
+  checkpoint_dir: "checkpoints/seq_len/qwen3_seq1024/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -44,5 +44,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-seq-len"
-  wandb_run_name: "qwen3-seq4096"
+  wandb_run_name: "qwen3-seq1024"
   log_every: 10
