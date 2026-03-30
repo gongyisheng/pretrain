@@ -237,3 +237,88 @@ can better optimize view operations.
 |-------|---------|--------|-------|--------|
 | Qwen3 | torch | 36,109 | 37,961 | +5.1% |
 | Qwen3 | triton | 39,295 | 39,414 | +0.3% (noise) |
+
+### Exp 11: torch.compile fullgraph=True - REVERTED
+
+No improvement for either backend. torch.compile already handles graph breaks
+efficiently with the default mode.
+
+### Exp 12: Fused linear cross-entropy - REVERTED
+
+Implemented chunked lm_head + CE autograd function to avoid materializing full
+logits tensor. Produced NaN losses due to autograd graph issues with the custom
+Function, and was ~30% slower due to Python loop overhead and loss of
+torch.compile optimization of the lm_head matmul.
+
+### Exp 13: Inductor epilogue_fusion + aggressive_fusion - REVERTED
+
+`torch._inductor.config.epilogue_fusion = True` and
+`aggressive_fusion = True` showed no improvement (within noise).
+
+### Exp 14: dropout=0 - NOT APPLIED
+
+Tested dropout=0 vs 0.1. No measurable throughput difference (within noise).
+Dropout overhead is negligible with torch.compile. Not applied since it changes
+training semantics.
+
+### Exp 15: Triton RMSNorm for triton backend - REVERTED
+
+Switched triton backend to use triton_rmsnorm instead of torch_rmsnorm.
+~13% regression confirmed — triton RMSNorm backward with atomic_add for dw
+is much slower than torch.compile's fused backward.
+
+### Exp 16: GPT2 batch size increase - NO CHANGE
+
+GPT2 at bs=16 ga=3 showed no improvement over bs=12 ga=4. GPU already
+well-saturated at the current batch size.
+
+### Exp 17: Fused QKV projection for MHA - REVERTED
+
+Replaced 3 separate Q/K/V Linear layers with a single fused QKV Linear
+(768→2304). No improvement (-0.5 to -0.9%) because torch.compile already
+fuses the separate matmuls effectively.
+
+### Exp 18: Fused gate+up projection for SwiGLU - REVERTED
+
+Combined gate_proj and up_proj into a single gate_up_proj Linear (768→6144).
+Mixed results: torch +0.5%, triton -5.3%. The larger matmul has worse GPU
+occupancy and the tensor split interacts poorly with triton kernel
+contiguity requirements.
+
+---
+
+## Round 2 Final Results
+
+### After All Optimizations (20 steps, 15 warmup)
+
+| Model | Backend | tok/s |
+|-------|---------|-------|
+| GPT2 124M | torch | 46,196 |
+| GPT2 124M | triton | 44,306 |
+| Qwen3 145M | torch | 37,971 |
+| Qwen3 145M | triton | 39,569 |
+
+### Improvement from Round 2 Baseline
+
+| Model | Backend | Before | After | Change |
+|-------|---------|--------|-------|--------|
+| GPT2 | torch | 41,083 | 46,196 | **+12.4%** |
+| GPT2 | triton | 37,769 | 44,306 | **+17.3%** |
+| Qwen3 | torch | 33,561 | 37,971 | **+13.1%** |
+| Qwen3 | triton | 33,573 | 39,569 | **+17.9%** |
+
+### Key Optimizations That Worked
+1. **Vocab padding to multiple of 128** — biggest win (+6-15%, especially for triton)
+2. **GQA expand+reshape instead of repeat_interleave** — +5% for Qwen3 torch
+3. **Qwen3 batch size 8→12** — +2% from better GPU utilization
+4. **Fused AdamW optimizer** — +1-1.5% across all configs
+
+### Optimizations That Didn't Work
+- torch.compile max-autotune/fullgraph modes
+- CUDA expandable segments allocator
+- Inductor epilogue_fusion / aggressive_fusion
+- Fused QKV projection (torch.compile already optimizes this)
+- Fused gate+up projection for SwiGLU
+- Fused linear cross-entropy
+- Triton RMSNorm (backward too slow)
+- Flash attention backward dtype casts
