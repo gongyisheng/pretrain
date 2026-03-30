@@ -84,3 +84,25 @@ Full training benchmark:
 **Decision**: COMMITTED
 
 ---
+
+## Experiment 5: Sort-free routing with Triton atomic position assignment
+
+**Changes**: Replaced `torch.sort` (O(N log N)) with a Triton kernel that assigns within-expert positions via atomic counters (O(N)). Expert IDs in the output are not sorted — the scatter kernels handle random access.
+
+Micro-benchmark (routing only):
+| Approach      | Time   |
+|---------------|--------|
+| torch.sort    | 0.268ms|
+| Atomic assign | 0.155ms|
+| Speedup       | 1.72x  |
+
+Full training benchmark (combined with all prior optimizations):
+| Backend | Before   | After    | Delta  |
+|---------|----------|----------|--------|
+| torch   | 102,396  | ~102k    | ~0%    |
+| triton  | 105,983  | ~105k    | ~0%    |
+
+**Result**: Micro-benchmark 1.72x on routing, but end-to-end neutral because unsorted expert IDs produce less cache-friendly scatter patterns. Overall a wash.
+**Decision**: KEPT (cleaner code, eliminates sort for fixed-capacity path)
+
+---

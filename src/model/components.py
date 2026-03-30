@@ -13,10 +13,11 @@ _flash_attn      = None
 _moe_expert_ffn  = None
 _moe_scatter_in  = None
 _moe_scatter_out = None
+_moe_routing     = None
 
 
 def set_backend(backend: str):
-    global _rmsnorm, _rope, _swiglu, _flash_attn, _moe_expert_ffn, _moe_scatter_in, _moe_scatter_out
+    global _rmsnorm, _rope, _swiglu, _flash_attn, _moe_expert_ffn, _moe_scatter_in, _moe_scatter_out, _moe_routing
     if backend == "torch":
         from src.kernel.torch.rmsnorm import torch_rmsnorm
         from src.kernel.torch.rope import torch_rope
@@ -24,13 +25,17 @@ def set_backend(backend: str):
         from src.kernel.torch.flashattn import torch_flash_attn
         from src.kernel.torch.moe_ffn import torch_moe_expert_ffn
         from src.kernel.torch.moe_scatter import torch_moe_scatter_in, torch_moe_scatter_out
+        from src.kernel.torch.moe_routing import torch_moe_routing
         _rmsnorm, _rope, _swiglu, _flash_attn = torch_rmsnorm, torch_rope, torch_swiglu, torch_flash_attn
         _moe_expert_ffn = torch_moe_expert_ffn
-        # Use Triton scatter on CUDA (5-7x faster), fall back to PyTorch on CPU
+        _moe_routing = torch_moe_routing
+        # Use Triton scatter/routing on CUDA (much faster), fall back to PyTorch on CPU
         try:
             from src.kernel.triton.moe_scatter import triton_moe_scatter_in, triton_moe_scatter_out
+            from src.kernel.triton.moe_routing import triton_moe_routing
             _moe_scatter_in = lambda *a, **kw: triton_moe_scatter_in(*a, **kw) if a[0].is_cuda else torch_moe_scatter_in(*a, **kw)
             _moe_scatter_out = lambda *a, **kw: triton_moe_scatter_out(*a, **kw) if a[0].is_cuda else torch_moe_scatter_out(*a, **kw)
+            _moe_routing = lambda *a, **kw: triton_moe_routing(*a, **kw) if a[0].is_cuda else torch_moe_routing(*a, **kw)
         except ImportError:
             _moe_scatter_in, _moe_scatter_out = torch_moe_scatter_in, torch_moe_scatter_out
     elif backend == "triton":
@@ -40,9 +45,11 @@ def set_backend(backend: str):
         from src.kernel.triton.flashattn import triton_flash_attn
         from src.kernel.triton.moe_ffn import triton_moe_expert_ffn
         from src.kernel.triton.moe_scatter import triton_moe_scatter_in, triton_moe_scatter_out
+        from src.kernel.triton.moe_routing import triton_moe_routing
         _rmsnorm, _rope, _swiglu, _flash_attn = torch_rmsnorm, triton_rope, triton_swiglu, triton_flash_attn
         _moe_expert_ffn = triton_moe_expert_ffn
         _moe_scatter_in, _moe_scatter_out = triton_moe_scatter_in, triton_moe_scatter_out
+        _moe_routing = triton_moe_routing
     else:
         raise ValueError(f"Unknown backend: {backend}. Use 'torch' or 'triton'.")
 
@@ -303,35 +310,20 @@ class SparseMoEBlock(nn.Module):
         top_indices, top_weights, router_probs = self.router(x_flat)
         # top_indices: (T, k)   top_weights: (T, k)   router_probs: (T, E)
 
-        # --- Flatten routing decisions into (T*k,) arrays ---
-        flat_expert_ids = top_indices.reshape(-1)                                    # (T*k,)
-        flat_token_ids = torch.arange(T, device=x.device).unsqueeze(1).expand(T, k).reshape(-1)  # (T*k,)
-        flat_weights = top_weights.reshape(-1)                                       # (T*k,)
-
-        # --- Sort by expert to create contiguous groups ---
-        sorted_expert_ids, sorted_order = flat_expert_ids.sort(stable=True)
-        sorted_token_ids = flat_token_ids[sorted_order]
-        sorted_weights = flat_weights[sorted_order]
-
-        # --- Per-expert counts and capacity ---
-        expert_counts = torch.bincount(sorted_expert_ids.long(), minlength=E)
-
         if self.capacity_factor is not None:
-            # Fixed capacity (Megatron-style): capacity = T * k * factor / E
-            # Tokens exceeding capacity are dropped. Enables torch.compile.
-            capacity = int(T * k * self.capacity_factor / E)
-            # Drop entries whose position within their expert group >= capacity
-            offsets = torch.zeros(E, dtype=torch.long, device=x.device)
-            offsets[1:] = expert_counts[:-1].cumsum(0)
-            positions = torch.arange(len(sorted_expert_ids), device=x.device) - offsets[sorted_expert_ids]
-            keep_mask = positions < capacity
-            sorted_expert_ids = sorted_expert_ids[keep_mask]
-            sorted_token_ids = sorted_token_ids[keep_mask]
-            sorted_weights = sorted_weights[keep_mask]
-            positions = positions[keep_mask]
+            # --- Optimized routing with capacity filtering ---
+            sorted_expert_ids, sorted_token_ids, sorted_weights, positions, capacity, expert_counts = (
+                _moe_routing(top_indices, top_weights, E, self.capacity_factor)
+            )
         else:
-            # Dynamic capacity: no tokens dropped, capacity = max expert count
-            # Round up to multiple of 32 for stable tensor sizes (reduces fragmentation)
+            # --- Dynamic capacity: no tokens dropped ---
+            flat_expert_ids = top_indices.reshape(-1)
+            flat_token_ids = torch.arange(T, device=x.device).unsqueeze(1).expand(T, k).reshape(-1)
+            flat_weights = top_weights.reshape(-1)
+            sorted_expert_ids, sorted_order = flat_expert_ids.sort(stable=True)
+            sorted_token_ids = flat_token_ids[sorted_order]
+            sorted_weights = flat_weights[sorted_order]
+            expert_counts = torch.bincount(sorted_expert_ids.long(), minlength=E)
             capacity = (expert_counts.max().item() + 31) // 32 * 32
             offsets = torch.zeros(E, dtype=torch.long, device=x.device)
             offsets[1:] = expert_counts[:-1].cumsum(0)
