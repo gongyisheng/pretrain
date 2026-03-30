@@ -235,7 +235,8 @@ class Trainer:
                     "tokens_per_sec": tokens_per_sec,
                 }
                 if self.is_moe:
-                    log_dict["moe/aux_loss"] = aux_loss.item()
+                    aux_floor = self.config.model.n_layers * self.config.model.n_experts_per_token
+                    log_dict["train/aux_loss"] = aux_loss.item() - aux_floor
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
                 self.debug_metrics.append({
