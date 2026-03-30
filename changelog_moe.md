@@ -106,3 +106,21 @@ Full training benchmark (combined with all prior optimizations):
 **Decision**: KEPT (cleaner code, eliminates sort for fixed-capacity path)
 
 ---
+
+## Experiment 6: Triton scatter autograd support (correctness fix)
+
+**Changes**: Added `torch.autograd.Function` wrappers for Triton scatter-in and scatter-out kernels with Triton backward kernels. This is necessary for correct gradient flow through expert weights — without autograd, expert_gate_up and expert_down parameters don't receive gradients from the cross-entropy loss, only the router gets gradients from the aux_loss.
+
+Backward kernels:
+- Scatter-in backward: gather from grad_padded, atomic_add into grad_x
+- Scatter-out backward: gather from grad_output, multiply by weight, store into grad_expert
+
+| Backend | Before (no autograd) | After (with autograd) | vs Baseline |
+|---------|---------------------|-----------------------|-------------|
+| torch   | ~105k (incorrect)   | 89,691                | +24.2%      |
+| triton  | ~106k (incorrect)   | 91,955                | +22.7%      |
+
+**Result**: ~90k tok/s (vs 72k baseline). The 105k numbers were incorrect (no expert gradient flow). Real improvement is ~24%.
+**Decision**: COMMITTED (correctness fix + 24% speedup over baseline)
+
+---

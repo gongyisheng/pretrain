@@ -160,6 +160,46 @@ def test_expert_ffn_dtype_support(dtype):
     assert not torch.isnan(out).any()
 
 
+def test_scatter_in_autograd():
+    """Scatter-in should propagate gradients to x_flat."""
+    torch.manual_seed(42)
+    T, D, E, C = 32, 16, 4, 16
+    x_flat = torch.randn(T, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    expert_ids = torch.tensor([0, 0, 1, 1, 2, 3], device="cuda")
+    token_ids = torch.tensor([0, 5, 10, 15, 20, 25], device="cuda")
+    positions = torch.tensor([0, 1, 0, 1, 0, 0], device="cuda")
+
+    padded = triton_moe_scatter_in(x_flat, expert_ids, token_ids, positions, E, C)
+    padded.backward(torch.ones_like(padded))
+
+    assert x_flat.grad is not None
+    assert torch.isfinite(x_flat.grad).all()
+    # Only tokens that were scattered should have nonzero grad
+    scattered_tokens = set(token_ids.tolist())
+    for t in range(T):
+        if t in scattered_tokens:
+            assert x_flat.grad[t].abs().sum() > 0
+        else:
+            assert x_flat.grad[t].abs().sum() == 0
+
+
+def test_scatter_out_autograd():
+    """Scatter-out should propagate gradients to expert_out."""
+    torch.manual_seed(42)
+    T, D, E, C = 32, 16, 4, 16
+    expert_out = torch.randn(E, C, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    expert_ids = torch.tensor([0, 0, 1, 1, 2, 3], device="cuda")
+    token_ids = torch.tensor([0, 5, 10, 15, 20, 25], device="cuda")
+    positions = torch.tensor([0, 1, 0, 1, 0, 0], device="cuda")
+    weights = torch.rand(6, device="cuda", dtype=torch.bfloat16)
+
+    output = triton_moe_scatter_out(expert_out, expert_ids, token_ids, positions, weights, T)
+    output.sum().backward()
+
+    assert expert_out.grad is not None
+    assert torch.isfinite(expert_out.grad).all()
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_scatter_dtype_support(dtype):
     """Scatter kernels should work with float32, float16, and bfloat16."""
