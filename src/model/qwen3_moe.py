@@ -35,6 +35,8 @@ class Qwen3MoEModel(nn.Module):
 
     def __init__(self, config: ModelConfig, max_seq_len: int = 2048):
         super().__init__()
+        if config.attn_res:
+            raise ValueError("Qwen3MoEModel does not support attn_res. Set attn_res=False.")
         self.config = config
 
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
@@ -70,6 +72,12 @@ class Qwen3MoEModel(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx: torch.Tensor) -> tuple:
+        """Returns (logits, aux_loss).
+
+        aux_loss is the raw accumulated load-balancing loss across all MoE blocks.
+        The caller (trainer) scales it by config.moe_aux_loss_coef before adding
+        to the cross-entropy loss.
+        """
         x = self.drop(self.token_emb(idx))
         aux_loss = torch.tensor(0.0, device=idx.device)
         for block in self.blocks:
