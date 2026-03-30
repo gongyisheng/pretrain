@@ -83,7 +83,7 @@ def _cross_entropy_bwd_kernel(
         p = tl.exp(z - max_val) / sum_exp
         dz = tl.where(cols == target, p - 1.0, p) * dloss
 
-        tl.store(DLOGITS_ptr + base + cols, dz.to(tl.bfloat16), mask=mask)
+        tl.store(DLOGITS_ptr + base + cols, dz, mask=mask)
 
 
 def triton_cross_entropy_fwd(logits, targets):

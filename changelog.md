@@ -208,3 +208,11 @@ Measured with 20 steps + 15 warmup for stability.
 | GPT2 | triton | 38,598 | 44,329 | +14.8% |
 | Qwen3 | torch | 35,248 | 36,109 | +2.4% |
 | Qwen3 | triton | 35,137 | 39,295 | +11.8% |
+
+### Exp 7: Fix triton CE backward hardcoded dtype - KEPT (correctness)
+
+**File:** `src/kernel/triton/cross_entropy.py`
+
+Removed hardcoded `.to(tl.bfloat16)` in backward kernel store. The output
+tensor inherits dtype from input logits; Triton handles implicit conversion.
+No throughput impact but fixes correctness for float16/float32 dtypes.
