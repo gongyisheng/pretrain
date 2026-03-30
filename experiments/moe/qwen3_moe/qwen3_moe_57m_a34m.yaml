@@ -29,7 +29,7 @@ training:
   max_steps: 60000
   mixed_precision: "bf16"
   activation_checkpointing: false
-  backend: "torch"
+  backend: "triton"
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/moe/qwen3_moe_57m_a34m/"
   checkpoint_every: 5000
