@@ -322,6 +322,22 @@ approach. Fixing it would require rewriting kernels as `torch.library.custom_op`
 with fake tensor implementations, which was previously tested and caused 12% regression.
 The current architecture is a local optimum.
 
+**Update: `torch.library.custom_op` deep-dive (2026-03-29)**
+
+Implemented `custom_op` + `register_fake` + `register_autograd` for all 4 triton
+kernels (flash_attn, swiglu, rope, cross_entropy). Forward compilation worked
+perfectly (no graph breaks). However, the backward fails because **Inductor promotes
+saved tensors to fp32**: the backward receives `q=fp32, k=fp32, v=bf16` (mixed
+dtypes). With `autograd.Function`, the graph break means backward runs eagerly,
+preserving the original bf16 dtypes from AMP autocast.
+
+Root cause: torch.compile's Inductor optimizer promotes intermediate tensors to
+fp32 for numerical stability, but `save_for_backward` captures these promoted
+tensors. The triton backward kernel then gets mixed-dtype inputs.
+
+This is a PyTorch limitation — fixing it requires changes to Inductor's
+`save_for_backward` dtype handling or explicit dtype pinning hooks.
+
 ### Exp 19: 2-pass triton RMSNorm backward - REVERTED
 
 Implemented 2-pass approach: kernel 1 computes dx + writes per-row dw to
