@@ -155,3 +155,12 @@ parameter group for the optimizer step instead of separate kernels per parameter
 | GPT2 | triton | 37,769 | 38,130 | +1.0% |
 | Qwen3 | torch | 33,561 | 34,054 | +1.5% |
 | Qwen3 | triton | 33,573 | 34,071 | +1.5% |
+
+### Exp 2: DataLoader persistent_workers - KEPT (code quality)
+
+**File:** `src/training/trainer.py`
+
+Added `persistent_workers=True` when `num_workers > 0` to avoid worker process
+respawn overhead between epochs. No measurable throughput change since both
+configs use `num_workers=0` (data loading is ~0.3% of step time due to
+memory-mapped datasets + prefetch stream). Code change kept for correctness.

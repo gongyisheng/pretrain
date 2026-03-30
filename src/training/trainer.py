@@ -63,13 +63,16 @@ class Trainer:
         self.train_dataset = PretrainDataset(train_path, config.max_seq_len)
         self.val_dataset = PretrainDataset(val_path, config.max_seq_len)
 
+        nw = config.data.num_workers
         self.train_loader = DataLoader(
             self.train_dataset, batch_size=config.training.batch_size,
-            shuffle=True, num_workers=config.data.num_workers, pin_memory=True,
+            shuffle=True, num_workers=nw, pin_memory=True,
+            persistent_workers=nw > 0,
         )
         self.val_loader = DataLoader(
             self.val_dataset, batch_size=config.training.batch_size,
-            shuffle=False, num_workers=config.data.num_workers, pin_memory=True,
+            shuffle=False, num_workers=nw, pin_memory=True,
+            persistent_workers=nw > 0,
         )
 
         # Optimizer & scheduler
