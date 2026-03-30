@@ -243,6 +243,14 @@ class SparseMoEBlock(nn.Module):
       - Each expert processes only its assigned tokens.
       - Outputs are weighted and summed back into the full sequence.
       - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
+
+    Note: aux_loss scale grows linearly with n_experts_per_token (k). Under balanced
+    routing the expected value is approximately k. Callers using moe_aux_loss_coef should
+    account for this when comparing runs across different k values.
+
+    Note: forward() is not torch.compile-compatible due to dynamic expert dispatch
+    (boolean index masking produces variable-size tensors that cause graph breaks).
+    The trainer must NOT wrap this model with torch.compile.
     """
 
     def __init__(self, d_model: int, d_ff: int, n_experts: int, n_experts_per_token: int, dropout: float = 0.0):
