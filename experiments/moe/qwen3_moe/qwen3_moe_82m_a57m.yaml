@@ -3,9 +3,9 @@ max_seq_len: 1024
 model:
   arch: "qwen3_moe"
   n_layers: 8
-  n_heads: 6
-  n_kv_heads: 3
-  d_model: 384
+  n_heads: 8
+  n_kv_heads: 4
+  d_model: 512
   d_ff: 512
   vocab_size: 50257
   dropout: 0.1
@@ -30,7 +30,7 @@ training:
   activation_checkpointing: false
   backend: "torch"
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/moe/qwen3_moe_61m_a42m/"
+  checkpoint_dir: "checkpoints/moe/qwen3_moe_82m_a57m/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -48,5 +48,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-moe"
-  wandb_run_name: "qwen3-moe-61m-a42m"
+  wandb_run_name: "qwen3-moe-82m-a57m"
   log_every: 10
