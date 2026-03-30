@@ -407,11 +407,13 @@ def triton_flash_attn_bwd(
     causal=True,
     sm_scale=None,
 ):
+    # Ensure all inputs share the same dtype — torch.compile/Inductor may promote
+    # some saved tensors (q, k, o, do) to fp32 while v stays in the original dtype.
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
-    o = o.contiguous()
-    do = do.contiguous()
+    o = o.to(q.dtype).contiguous()
+    do = do.to(q.dtype).contiguous()
 
     batch, n_heads, seq_q, d_head = q.shape
     seq_kv = k.shape[2]
