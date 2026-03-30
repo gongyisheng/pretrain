@@ -1,8 +1,9 @@
 """
 Training throughput benchmark for GPT-2 and Qwen3.
 
-Runs the Trainer for a short number of steps (default 5) with W&B disabled,
-and reports tokens/sec throughput.
+Runs the Trainer for a short number of steps with W&B disabled.
+Uses per-step debug_metrics to compute steady-state throughput,
+excluding warmup steps (torch.compile tracing, CUDA caching, etc.).
 
 Usage:
     # Benchmark GPT-2 124M (torch backend)
@@ -29,15 +30,15 @@ from src.utils.config import load_config
 from src.training.trainer import Trainer
 
 
-def run_benchmark(config_path, backend=None, steps=5, warmup=5):
+def run_benchmark(config_path, backend=None, steps=10, warmup=5):
     """Run a training throughput benchmark using the Trainer.
 
-    Runs warmup steps first (excluded from measurement), then measures
-    steady-state throughput over the remaining steps.
+    Runs all steps in a single train() call. Uses per-step debug_metrics
+    from the Trainer to compute throughput excluding warmup steps.
     """
     total_steps = warmup + steps
     overrides = [
-        f"debug.max_steps={warmup}",
+        f"debug.max_steps={total_steps}",
         # disable eval/checkpoint during benchmark
         f"training.eval_every={total_steps + 1}",
         f"training.checkpoint_every={total_steps + 1}",
@@ -49,23 +50,13 @@ def run_benchmark(config_path, backend=None, steps=5, warmup=5):
     config = load_config(config_path, overrides=overrides)
     trainer = Trainer(config, wandb_enabled=False)
 
-    # Phase 1: warmup (compilation, caching, etc.)
-    print(f"\n--- warmup ({warmup} steps) ---")
     trainer.train()
 
-    # Phase 2: measured steps
-    print(f"\n--- benchmark ({steps} steps) ---")
-    trainer.config.debug.max_steps = total_steps
-    tokens_before = trainer.total_tokens
-
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    trainer.train()
-    torch.cuda.synchronize()
-    elapsed = time.perf_counter() - t0
-
-    measured_tokens = trainer.total_tokens - tokens_before
-    tok_per_sec = measured_tokens / elapsed if elapsed > 0 else 0
+    # Average tokens_per_sec from measured steps (warmup excluded)
+    measured = [m for m in trainer.debug_metrics if m["step"] > warmup]
+    tok_per_sec = sum(m["tokens_per_sec"] for m in measured) / len(measured)
+    measured_tokens = steps * trainer.tokens_per_step
+    elapsed = measured_tokens / tok_per_sec if tok_per_sec > 0 else 0
 
     results = {
         "config": config_path,
@@ -96,7 +87,7 @@ def run_benchmark(config_path, backend=None, steps=5, warmup=5):
     return results
 
 
-def run_all_benchmarks(steps=5, warmup=5):
+def run_all_benchmarks(steps=10, warmup=5):
     """Run benchmarks for all model/backend combinations."""
     configs = [
         ("configs/gpt2_124m.yaml", "torch"),
@@ -139,7 +130,7 @@ def main():
     parser.add_argument("--config", type=str, help="Path to config YAML")
     parser.add_argument("--backend", type=str, choices=["torch", "triton"], default=None,
                         help="Override backend (default: use config value)")
-    parser.add_argument("--steps", type=int, default=5, help="Measured steps to run (default: 5)")
+    parser.add_argument("--steps", type=int, default=10, help="Measured steps to run (default: 10)")
     parser.add_argument("--warmup", type=int, default=5, help="Warmup steps excluded from measurement (default: 5)")
     parser.add_argument("--all", action="store_true",
                         help="Run all model/backend combinations")

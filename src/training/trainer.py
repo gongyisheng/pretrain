@@ -25,6 +25,7 @@ class Trainer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.step = 0
         self.loss_history = []
+        self.debug_metrics = []  # per-step: {"step", "tokens_per_sec", "total_tokens"}
 
         # Enable TF32 for matmuls on Ampere+ GPUs
         torch.set_float32_matmul_precision('high')
@@ -237,6 +238,11 @@ class Trainer:
                     log_dict["moe/aux_loss"] = aux_loss.item()
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
+                self.debug_metrics.append({
+                    "step": self.step,
+                    "tokens_per_sec": tokens_per_sec,
+                    "total_tokens": self.total_tokens,
+                })
                 t_last_log = time.time()
                 tokens_since_log = 0
 
