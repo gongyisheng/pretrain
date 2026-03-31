@@ -242,3 +242,36 @@ def test_torch_flash_attn_with_attn_mask():
     mask.masked_fill_(~torch.ones(S, S).tril().bool(), float('-inf'))
     out = torch_flash_attn(q, k, v, causal=False, attn_mask=mask)
     assert out.shape == (B, H, S, D)
+
+
+def test_mha_doc_ids_output_shape():
+    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout=0.0)
+    x = torch.randn(2, 8, 64)
+    doc_ids = build_doc_ids(torch.randint(1, 100, (2, 8)), EOT)
+    out = mha(x, doc_ids=doc_ids)
+    assert out.shape == (2, 8, 64)
+
+
+def test_mha_doc_ids_blocks_cross_doc_attention():
+    """Token in doc1 must not be influenced by tokens in doc0."""
+    torch.manual_seed(0)
+    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout=0.0)
+    mha.eval()
+
+    # Sequence: [tok0(doc0), EOT(doc0), tok2(doc1), tok3(doc1)]
+    x = torch.randn(1, 4, 64)
+    eot_id = 0
+    tokens = torch.tensor([[1, eot_id, 2, 3]])
+    doc_ids = build_doc_ids(tokens, eot_id)
+
+    out_base = mha(x, doc_ids=doc_ids)
+
+    # Modify only doc0 tokens (positions 0 and 1)
+    x2 = x.clone()
+    x2[0, 0, :] = torch.randn(64)
+    x2[0, 1, :] = torch.randn(64)
+    out_modified = mha(x2, doc_ids=doc_ids)
+
+    # doc1 tokens (positions 2, 3) must be unaffected
+    assert torch.allclose(out_base[0, 2:], out_modified[0, 2:], atol=1e-5), \
+        "doc1 tokens were affected by changes to doc0 tokens"
