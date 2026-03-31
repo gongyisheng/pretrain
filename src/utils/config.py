@@ -41,6 +41,7 @@ class DataConfig:
     data_dir: str = "data/"
     val_split: float = 0.01
     num_workers: int = 4
+    eot_token_id: int = 0
 
 
 @dataclass
@@ -56,6 +57,7 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 1000
     eval_steps: int = 200
+    doc_mask: bool = False
 
 
 @dataclass
