@@ -36,3 +36,4 @@ wandb/
 logs/
 nohup.out
 *.log
+tmp/
