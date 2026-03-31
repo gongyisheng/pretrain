@@ -102,8 +102,8 @@ class Trainer:
                 for block in self.model.blocks:
                     block._original_forward = block.forward
                     def make_ckpt_forward(b):
-                        def ckpt_forward(x):
-                            return torch.utils.checkpoint.checkpoint(b._original_forward, x, use_reentrant=False)
+                        def ckpt_forward(x, **kwargs):
+                            return torch.utils.checkpoint.checkpoint(b._original_forward, x, use_reentrant=False, **kwargs)
                         return ckpt_forward
                     block.forward = make_ckpt_forward(block)
 

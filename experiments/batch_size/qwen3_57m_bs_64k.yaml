@@ -1,4 +1,4 @@
-max_seq_len: 512
+max_seq_len: 1024
 
 model:
   arch: "qwen3"
@@ -26,7 +26,7 @@ training:
   backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/batch_size/qwen3_bs_32k/"
+  checkpoint_dir: "checkpoints/batch_size/qwen3_bs_64k/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -44,5 +44,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-batch-size"
-  wandb_run_name: "qwen3-57m-bs-32k"
+  wandb_run_name: "qwen3-57m-bs-64k"
   log_every: 10

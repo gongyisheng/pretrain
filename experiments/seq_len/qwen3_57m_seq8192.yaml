@@ -24,7 +24,7 @@ training:
   max_steps: 50000
   mixed_precision: "bf16"
   backend: "torch"
-  activation_checkpointing: true
+  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/seq_len/qwen3_seq8192/"
   checkpoint_every: 5000
