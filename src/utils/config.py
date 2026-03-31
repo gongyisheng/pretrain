@@ -80,6 +80,7 @@ class LoggingConfig:
     wandb_run_name: str = ""
     wandb_group: str = ""  # group name for comparing runs in W&B (e.g. "dtype-sweep")
     log_every: int = 10
+    log_layer_grad_norms: bool = False  # log per-layer gradient norms to W&B
 
 
 @dataclass

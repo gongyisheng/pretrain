@@ -14,6 +14,7 @@ from src.data.tokenizer import load_tokenizer
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
+from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
 from src.kernel.triton.cross_entropy import triton_cross_entropy
 from src.kernel.torch.cross_entropy import torch_cross_entropy
@@ -110,14 +111,17 @@ class Trainer:
         # Tokenizer (may be None when tokenizer_path is empty, e.g. in tests)
         self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
 
+        # Metrics
+        self.metrics = MetricsTracker(config, self.n_non_emb_params, self.device)
+
         # Logger
         self.logger = WandbLogger(config, enabled=wandb_enabled)
 
-        # Checkpoint dir
-        os.makedirs(config.training.checkpoint_dir, exist_ok=True)
-
         # Debug
         self.spike_debugger = SpikeDebugger(config.debug.spike, config.training.checkpoint_dir)
+
+        # Checkpoint dir
+        os.makedirs(config.training.checkpoint_dir, exist_ok=True)
 
         # Resume
         if resume_from:
@@ -207,12 +211,22 @@ class Trainer:
                 if micro_step < cfg.gradient_accumulation_steps - 1:
                     x, y = next_x, next_y
 
-            # Gradient clipping (no .item() sync here — loss read is deferred)
+            # Gradient clipping
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
+            grad_norm_val = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
 
+            # Optimizer step
+            scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            self.metrics.on_step(
+                grad_norm_val, 
+                cfg.grad_clip,
+                self.scaler.is_enabled(), 
+                scale_before, 
+                self.scaler.get_scale()
+            )
             self.scheduler.step()
 
             # Defer loss sync to next iteration (save tensor, read later)
@@ -228,19 +242,12 @@ class Trainer:
                 elapsed = time.time() - t_last_log
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
                 lr = self.optimizer.param_groups[0]["lr"]
-                flops = 6 * self.n_non_emb_params * self.total_tokens
-                log_dict = {
-                    "train/loss": accum_loss,
-                    "train/perplexity": min(float(torch.exp(torch.tensor(accum_loss))), 1e6),
-                    "train/flops": flops,
-                    "train/total_tokens": self.total_tokens,
-                    "lr": lr,
-                    "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    "tokens_per_sec": tokens_per_sec,
-                }
-                if self.is_moe:
-                    aux_floor = self.config.model.n_layers * self.config.model.n_experts_per_token
-                    log_dict["train/aux_loss"] = aux_loss.item() - aux_floor
+                log_dict = self.metrics.build_log_dict(
+                    loss=accum_loss, total_tokens=self.total_tokens, lr=lr,
+                    grad_norm=grad_norm_val, tokens_per_sec=tokens_per_sec,
+                    elapsed=elapsed, model=self.model, scaler=self.scaler,
+                    aux_loss=aux_loss.item() if self.is_moe else None,
+                )
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
                 self.debug_metrics.append({
