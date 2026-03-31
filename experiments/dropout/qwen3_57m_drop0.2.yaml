@@ -33,14 +33,14 @@ training:
 
 optimizer:
   name: "adamw"
-  lr: 1e-4
+  lr: 6e-4
   weight_decay: 0.1
   betas: [0.9, 0.95]
 
 scheduler:
   name: "cosine"
   warmup_steps: 1000
-  min_lr: 1e-5
+  min_lr: 6e-5
 
 logging:
   wandb_project: "pretrain-dropout"
