@@ -16,6 +16,55 @@ _moe_scatter_out = None
 _moe_routing     = None
 
 
+def build_doc_ids(x: torch.Tensor, eot_token_id: int) -> torch.Tensor:
+    """Assign each token an integer doc ID based on EOT boundaries.
+
+    The EOT token itself belongs to the document it ends (doc N), and the
+    token immediately after EOT starts the next document (doc N+1).
+
+    Args:
+        x: token IDs, shape (B, S)
+        eot_token_id: token ID of the <|endoftext|> token
+
+    Returns:
+        doc_ids: shape (B, S), dtype long, values 0..K where K is the number
+                 of EOT tokens seen before each position.
+    """
+    is_eot = (x == eot_token_id)          # (B, S) bool
+    doc_ids = torch.zeros_like(x)
+    if x.shape[1] > 1:
+        doc_ids[:, 1:] = is_eot[:, :-1].long().cumsum(dim=1)
+    return doc_ids
+
+
+def build_doc_causal_mask(
+    doc_ids: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build a block-causal additive attention mask from doc_ids.
+
+    Returns a mask of shape (B, 1, S, S) where:
+      - 0.0  at positions (i, j) where j <= i AND doc_ids[b,i] == doc_ids[b,j]
+      - -inf at positions (i, j) where j > i  OR  doc_ids[b,i] != doc_ids[b,j]
+
+    Args:
+        doc_ids: shape (B, S), long tensor of document indices per token
+        device: target device
+        dtype: dtype matching query tensors (required by SDPA)
+
+    Returns:
+        additive mask of shape (B, 1, S, S)
+    """
+    B, S = doc_ids.shape
+    same_doc = doc_ids.unsqueeze(2) == doc_ids.unsqueeze(1)   # (B, S, S)
+    causal = torch.ones(S, S, dtype=torch.bool, device=device).tril()  # (S, S)
+    attend = same_doc & causal                                 # (B, S, S)
+    additive = torch.zeros(B, 1, S, S, dtype=dtype, device=device)
+    additive.masked_fill_(~attend.unsqueeze(1), float('-inf'))
+    return additive
+
+
 def set_backend(backend: str):
     global _rmsnorm, _rope, _swiglu, _flash_attn, _moe_expert_ffn, _moe_scatter_in, _moe_scatter_out, _moe_routing
     if backend == "torch":

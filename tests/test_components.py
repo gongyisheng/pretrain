@@ -2,6 +2,7 @@ import pytest
 import torch
 import torch.nn as nn
 from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, set_backend, MoERouter, SparseMoEBlock
+from src.model.components import build_doc_ids, build_doc_causal_mask
 from src.model.qwen3_moe import Qwen3MoEModel
 from src.utils.config import ModelConfig
 
@@ -160,3 +161,72 @@ def test_qwen3_moe_aux_loss_is_scalar_and_nonneg():
     _, aux_loss = model(x)
     assert aux_loss.ndim == 0
     assert aux_loss.item() >= 0.0
+
+
+EOT = 0  # <|endoftext|> token ID used in tests
+
+
+def test_build_doc_ids_single_doc():
+    x = torch.tensor([[1, 2, 3, 4, 5]])  # (1, 5)
+    ids = build_doc_ids(x, EOT)
+    assert ids.shape == (1, 5)
+    assert ids.tolist() == [[0, 0, 0, 0, 0]]
+
+
+def test_build_doc_ids_eot_belongs_to_its_doc():
+    # EOT at position 3 → positions 0-3 are doc 0, positions 4+ are doc 1
+    x = torch.tensor([[1, 2, 3, EOT, 5, 6]])  # (1, 6)
+    ids = build_doc_ids(x, EOT)
+    assert ids.tolist() == [[0, 0, 0, 0, 1, 1]]
+
+
+def test_build_doc_ids_multiple_docs():
+    x = torch.tensor([[1, EOT, 2, EOT, 3]])  # (1, 5)
+    ids = build_doc_ids(x, EOT)
+    assert ids.tolist() == [[0, 0, 1, 1, 2]]
+
+
+def test_build_doc_ids_batch():
+    x = torch.tensor([
+        [1, EOT, 2],
+        [3, 4, 5],
+    ])  # (2, 3)
+    ids = build_doc_ids(x, EOT)
+    assert ids.tolist() == [[0, 0, 1], [0, 0, 0]]
+
+
+def test_build_doc_causal_mask_shape():
+    x = torch.tensor([[1, EOT, 2, 3]])  # (1, 4)
+    ids = build_doc_ids(x, EOT)
+    mask = build_doc_causal_mask(ids, device=ids.device, dtype=torch.float32)
+    assert mask.shape == (1, 1, 4, 4)
+
+
+def test_build_doc_causal_mask_blocks_future():
+    x = torch.tensor([[1, 2, 3, 4]])
+    ids = build_doc_ids(x, EOT)
+    mask = build_doc_causal_mask(ids, device=ids.device, dtype=torch.float32)
+    m = mask[0, 0]  # (4, 4)
+    for i in range(4):
+        for j in range(i + 1, 4):
+            assert m[i, j].item() == float('-inf'), f"Expected -inf at ({i},{j})"
+
+
+def test_build_doc_causal_mask_blocks_cross_doc():
+    x = torch.tensor([[1, EOT, 2, 3]])  # doc0=[0,1], doc1=[2,3]
+    ids = build_doc_ids(x, EOT)
+    mask = build_doc_causal_mask(ids, device=ids.device, dtype=torch.float32)
+    m = mask[0, 0]  # (4, 4)
+    assert m[2, 0].item() == float('-inf')
+    assert m[2, 1].item() == float('-inf')
+    assert m[2, 2].item() == 0.0
+
+
+def test_build_doc_causal_mask_allows_same_doc_causal():
+    x = torch.tensor([[1, 2, 3, 4]])  # single doc
+    ids = build_doc_ids(x, EOT)
+    mask = build_doc_causal_mask(ids, device=ids.device, dtype=torch.float32)
+    m = mask[0, 0]  # (4, 4)
+    for i in range(4):
+        for j in range(i + 1):
+            assert m[i, j].item() == 0.0, f"Expected 0.0 at ({i},{j})"
