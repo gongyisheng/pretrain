@@ -230,3 +230,17 @@ def test_build_doc_causal_mask_allows_same_doc_causal():
     for i in range(4):
         for j in range(i + 1):
             assert m[i, j].item() == 0.0, f"Expected 0.0 at ({i},{j})"
+
+
+from src.kernel.torch.flashattn import torch_flash_attn
+
+
+def test_torch_flash_attn_with_attn_mask():
+    B, H, S, D = 2, 4, 8, 16
+    q = torch.randn(B, H, S, D)
+    k = torch.randn(B, H, S, D)
+    v = torch.randn(B, H, S, D)
+    mask = torch.zeros(B, 1, S, S)
+    mask.masked_fill_(~torch.ones(S, S).tril().bool(), float('-inf'))
+    out = torch_flash_attn(q, k, v, causal=False, attn_mask=mask)
+    assert out.shape == (B, H, S, D)
