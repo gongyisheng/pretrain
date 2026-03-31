@@ -194,7 +194,7 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, doc_ids: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_heads, S, d_head)
         k = self.k_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
@@ -204,8 +204,7 @@ class MultiHeadAttention(nn.Module):
             q = self.q_norm(q.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
 
-        if doc_ids is not None:
-            attn_mask = build_doc_causal_mask(doc_ids, q.device, q.dtype)
+        if attn_mask is not None:
             out = _flash_attn(q, k, v, causal=False, attn_mask=attn_mask)
         else:
             out = _flash_attn(q, k, v, causal=True)
@@ -243,7 +242,7 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, rope: RoPE, doc_ids: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: RoPE, attn_mask: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
 
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)    # (B, n_heads, S, d_head)
@@ -261,8 +260,7 @@ class GroupedQueryAttention(nn.Module):
         k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
         v = v[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
 
-        if doc_ids is not None:
-            attn_mask = build_doc_causal_mask(doc_ids, q.device, q.dtype)
+        if attn_mask is not None:
             out = _flash_attn(q, k, v, causal=False, attn_mask=attn_mask)
         else:
             out = _flash_attn(q, k, v, causal=True)

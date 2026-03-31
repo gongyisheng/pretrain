@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention
+from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, build_doc_causal_mask
 from src.utils.config import ModelConfig
 
 
@@ -13,8 +13,8 @@ class GPT2TransformerBlock(BaseTransformerBlock):
         self.ln2 = nn.LayerNorm(d_model)
         self.ffn = GeluFFN(d_model, intermediate_size, dropout)
 
-    def attn_sublayer(self, x: torch.Tensor, doc_ids: torch.Tensor = None) -> torch.Tensor:
-        return self.attn(self.ln1(x), doc_ids=doc_ids)
+    def attn_sublayer(self, x: torch.Tensor, attn_mask: torch.Tensor = None) -> torch.Tensor:
+        return self.attn(self.ln1(x), attn_mask=attn_mask)
 
     def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
         return self.ffn(self.ln2(x))
@@ -66,16 +66,17 @@ class GPT2Model(nn.Module):
     def forward(self, idx: torch.Tensor, doc_ids: torch.Tensor = None, return_logits: bool = True) -> torch.Tensor:
         B, S = idx.shape
         pos = torch.arange(0, S, device=idx.device).unsqueeze(0)
-
         x = self.drop(self.token_emb(idx) + self.pos_emb(pos))
+
+        attn_mask = build_doc_causal_mask(doc_ids, idx.device, x.dtype) if doc_ids is not None else None
 
         if self.config.attn_res:
             attn_res_ctx = []
             for block in self.blocks:
-                x, attn_res_ctx = block(x, attn_res_ctx, doc_ids=doc_ids)
+                x, attn_res_ctx = block(x, attn_res_ctx, attn_mask=attn_mask)
         else:
             for block in self.blocks:
-                x = block(x, doc_ids=doc_ids)
+                x = block(x, attn_mask=attn_mask)
 
         x = self.ln_f(x)
         if return_logits:

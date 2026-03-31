@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.model.components import BaseTransformerBlock, GroupedQueryAttention, RMSNorm, RoPE, SwiGluFFN
+from src.model.components import BaseTransformerBlock, build_doc_causal_mask, GroupedQueryAttention, RMSNorm, RoPE, SwiGluFFN
 from src.utils.config import ModelConfig
 
 
@@ -13,8 +13,8 @@ class Qwen3TransformerBlock(BaseTransformerBlock):
         self.ln2 = RMSNorm(d_model)
         self.ffn = SwiGluFFN(d_model, intermediate_size, dropout)
 
-    def attn_sublayer(self, x: torch.Tensor, rope: RoPE) -> torch.Tensor:
-        return self.attn(self.ln1(x), rope)
+    def attn_sublayer(self, x: torch.Tensor, rope: RoPE, attn_mask: torch.Tensor = None) -> torch.Tensor:
+        return self.attn(self.ln1(x), rope, attn_mask=attn_mask)
 
     def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
         return self.ffn(self.ln2(x))
@@ -65,16 +65,18 @@ class Qwen3Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, return_logits: bool = True) -> torch.Tensor:
+    def forward(self, idx: torch.Tensor, doc_ids: torch.Tensor = None, return_logits: bool = True) -> torch.Tensor:
         x = self.drop(self.token_emb(idx))
+
+        attn_mask = build_doc_causal_mask(doc_ids, idx.device, x.dtype) if doc_ids is not None else None
 
         if self.config.attn_res:
             attn_res_ctx = []
             for block in self.blocks:
-                x, attn_res_ctx = block(x, attn_res_ctx, self.rope)
+                x, attn_res_ctx = block(x, attn_res_ctx, rope=self.rope, attn_mask=attn_mask)
         else:
             for block in self.blocks:
-                x = block(x, rope=self.rope)
+                x = block(x, rope=self.rope, attn_mask=attn_mask)
 
         x = self.ln_f(x)
         if return_logits:
