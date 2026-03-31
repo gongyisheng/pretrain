@@ -1,6 +1,7 @@
 import pytest
 import torch
 import torch.nn as nn
+from src.kernel.torch.flashattn import torch_flash_attn
 from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, set_backend, MoERouter, SparseMoEBlock
 from src.model.components import build_doc_ids, build_doc_causal_mask
 from src.model.qwen3_moe import Qwen3MoEModel
@@ -230,9 +231,6 @@ def test_build_doc_causal_mask_allows_same_doc_causal():
     for i in range(4):
         for j in range(i + 1):
             assert m[i, j].item() == 0.0, f"Expected 0.0 at ({i},{j})"
-
-
-from src.kernel.torch.flashattn import torch_flash_attn
 
 
 def test_torch_flash_attn_with_attn_mask():
