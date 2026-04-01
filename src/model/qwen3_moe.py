@@ -20,9 +20,18 @@ class Qwen3MoETransformerBlock(nn.Module):
     ):
         super().__init__()
         self.ln1 = RMSNorm(d_model)
-        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout, qk_norm)
+        self.attn = GroupedQueryAttention(
+            d_model, n_heads, n_kv_heads, dropout, qk_norm
+        )
         self.ln2 = RMSNorm(d_model)
-        self.ffn = SparseMoEBlock(d_model, moe_intermediate_size, n_experts, n_experts_per_token, dropout, capacity_factor)
+        self.ffn = SparseMoEBlock(
+            d_model,
+            moe_intermediate_size,
+            n_experts,
+            n_experts_per_token,
+            dropout,
+            capacity_factor,
+        )
 
     def forward(self, x: torch.Tensor, rope: RoPE) -> tuple:
         x = x + self.attn(self.ln1(x), rope)
@@ -37,27 +46,33 @@ class Qwen3MoEModel(nn.Module):
     def __init__(self, config: ModelConfig, max_seq_len: int = 2048):
         super().__init__()
         if config.attn_res:
-            raise ValueError("Qwen3MoEModel does not support attn_res. Set attn_res=False.")
+            raise ValueError(
+                "Qwen3MoEModel does not support attn_res. Set attn_res=False."
+            )
         self.config = config
 
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
         self.drop = nn.Dropout(config.dropout)
-        self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
+        self.rope = RoPE(
+            config.d_model // config.n_heads, max_seq_len, config.rope_theta
+        )
 
-        self.blocks = nn.ModuleList([
-            Qwen3MoETransformerBlock(
-                d_model=config.d_model,
-                n_heads=config.n_heads,
-                n_kv_heads=config.n_kv_heads,
-                moe_intermediate_size=config.moe_intermediate_size,
-                n_experts=config.n_experts,
-                n_experts_per_token=config.n_experts_per_token,
-                dropout=config.dropout,
-                qk_norm=config.qk_norm,
-                capacity_factor=config.moe_expert_capacity_factor,
-            )
-            for _ in range(config.n_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                Qwen3MoETransformerBlock(
+                    d_model=config.d_model,
+                    n_heads=config.n_heads,
+                    n_kv_heads=config.n_kv_heads,
+                    moe_intermediate_size=config.moe_intermediate_size,
+                    n_experts=config.n_experts,
+                    n_experts_per_token=config.n_experts_per_token,
+                    dropout=config.dropout,
+                    qk_norm=config.qk_norm,
+                    capacity_factor=config.moe_expert_capacity_factor,
+                )
+                for _ in range(config.n_layers)
+            ]
+        )
 
         self.ln_f = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
