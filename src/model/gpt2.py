@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, build_doc_causal_mask
+from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, build_doc_causal_mask_from_position_ids
 from src.utils.config import ModelConfig
 
 
@@ -63,12 +63,13 @@ class GPT2Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, doc_ids: torch.Tensor = None, return_logits: bool = True) -> torch.Tensor:
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor = None, return_logits: bool = True) -> torch.Tensor:
         B, S = idx.shape
-        pos = torch.arange(0, S, device=idx.device).unsqueeze(0)
+        pos = position_ids if position_ids is not None else torch.arange(0, S, device=idx.device).unsqueeze(0)
         x = self.drop(self.token_emb(idx) + self.pos_emb(pos))
 
-        attn_mask = build_doc_causal_mask(doc_ids, idx.device, x.dtype) if doc_ids is not None else None
+        attn_mask = build_doc_causal_mask_from_position_ids(position_ids, idx.device, x.dtype) \
+            if position_ids is not None else None
 
         if self.config.attn_res:
             attn_res_ctx = []
