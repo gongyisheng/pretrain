@@ -4,6 +4,11 @@ import torch.nn as nn
 from src.kernel.torch.flashattn import torch_flash_attn
 from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, set_backend, MoERouter, SparseMoEBlock
 from src.model.components import build_doc_ids, build_doc_causal_mask
+from src.model.components import (
+    build_doc_causal_mask_from_position_ids,
+    RoPE,
+    GroupedQueryAttention,
+)
 from src.model.qwen3_moe import Qwen3MoEModel
 from src.utils.config import ModelConfig
 
@@ -275,3 +280,70 @@ def test_mha_attn_mask_blocks_cross_doc_attention():
 
     assert torch.allclose(out_base[0, 2:], out_modified[0, 2:], atol=1e-5), \
         "doc1 tokens were affected by changes to doc0 tokens"
+
+
+def test_build_doc_causal_mask_from_position_ids_shape():
+    pos = torch.tensor([[0, 1, 2, 0, 1]])  # (1, 5)
+    mask = build_doc_causal_mask_from_position_ids(pos, device=pos.device, dtype=torch.float32)
+    assert mask.shape == (1, 1, 5, 5)
+
+
+def test_build_doc_causal_mask_from_position_ids_blocks_cross_doc():
+    # position_ids = [0, 1, 2, 0, 1] → doc0=[0,1,2], doc1=[3,4]
+    pos = torch.tensor([[0, 1, 2, 0, 1]])
+    mask = build_doc_causal_mask_from_position_ids(pos, device=pos.device, dtype=torch.float32)
+    m = mask[0, 0]
+    # doc1 tokens (rows 3,4) must not attend to doc0 tokens (cols 0,1,2)
+    assert m[3, 0].item() == float('-inf')
+    assert m[3, 1].item() == float('-inf')
+    assert m[3, 2].item() == float('-inf')
+    assert m[3, 3].item() == 0.0   # same doc, causal
+    assert m[4, 3].item() == 0.0   # same doc, causal
+
+
+def test_build_doc_causal_mask_from_position_ids_matches_doc_ids_mask():
+    """Must produce the same mask as build_doc_causal_mask for equivalent inputs."""
+    x = torch.tensor([[1, 2, 0, 3, 4, 5, 0, 6, 7]])  # EOT=0 at positions 2 and 6
+    doc_ids = build_doc_ids(x, eot_token_id=0)
+    pos = torch.tensor([[0, 1, 2, 0, 1, 2, 3, 0, 1]])
+    mask_from_doc = build_doc_causal_mask(doc_ids, device=x.device, dtype=torch.float32)
+    mask_from_pos = build_doc_causal_mask_from_position_ids(pos, device=x.device, dtype=torch.float32)
+    assert torch.allclose(mask_from_doc, mask_from_pos)
+
+
+def test_rope_forward_with_position_ids_shape():
+    rope = RoPE(d_head=16, max_seq_len=32)
+    x = torch.randn(2, 4, 8, 16)   # (B, n_heads, S, d_head)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)  # (B, S)
+    out = rope(x, position_ids=pos)
+    assert out.shape == (2, 4, 8, 16)
+
+
+def test_rope_forward_with_position_ids_sequential_matches_no_ids():
+    """Sequential position_ids must produce the same result as no position_ids."""
+    rope = RoPE(d_head=16, max_seq_len=32)
+    x = torch.randn(2, 4, 8, 16)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    assert torch.allclose(rope(x, position_ids=pos), rope(x), atol=1e-6)
+
+
+def test_rope_forward_reset_position_ids_differ():
+    """position_ids with resets must differ from sequential at reset positions."""
+    rope = RoPE(d_head=16, max_seq_len=32)
+    x = torch.randn(1, 1, 6, 16)
+    pos_seq = torch.arange(6).unsqueeze(0)
+    pos_reset = torch.tensor([[0, 1, 2, 0, 1, 2]])
+    out_seq = rope(x, position_ids=pos_seq)
+    out_reset = rope(x, position_ids=pos_reset)
+    assert torch.allclose(out_seq[:, :, :3, :], out_reset[:, :, :3, :], atol=1e-6)
+    assert not torch.allclose(out_seq[:, :, 3:, :], out_reset[:, :, 3:, :], atol=1e-6)
+
+
+def test_gqa_forward_with_position_ids_shape():
+    """GroupedQueryAttention accepts position_ids and returns correct shape."""
+    rope = RoPE(d_head=16, max_seq_len=32)
+    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout=0.0)
+    x = torch.randn(2, 8, 64)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    out = gqa(x, rope, position_ids=pos)
+    assert out.shape == (2, 8, 64)

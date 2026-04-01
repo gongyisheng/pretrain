@@ -65,6 +65,35 @@ def build_doc_causal_mask(
     return additive
 
 
+def build_doc_causal_mask_from_position_ids(
+    position_ids: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build a block-causal additive attention mask directly from position_ids.
+
+    position_ids[i] - i is constant within each document (equals minus the
+    sequence-level start index of that document). Two tokens attend iff they
+    share that constant AND j <= i (causal).
+
+    Args:
+        position_ids: shape (B, S), dtype long — per-token intra-doc position
+        device: target device
+        dtype: dtype matching query tensors (required by SDPA)
+
+    Returns:
+        additive mask of shape (B, 1, S, S) — 0.0 or -inf
+    """
+    B, S = position_ids.shape
+    adj = position_ids - torch.arange(S, device=device)       # (B, S), constant per doc
+    same_doc = (adj.unsqueeze(2) == adj.unsqueeze(1))         # (B, S, S)
+    causal = torch.ones(S, S, dtype=torch.bool, device=device).tril()
+    attend = same_doc & causal
+    additive = torch.zeros(B, 1, S, S, dtype=dtype, device=device)
+    additive.masked_fill_(~attend.unsqueeze(1), float('-inf'))
+    return additive
+
+
 def set_backend(backend: str):
     global _rmsnorm, _rope, _swiglu, _flash_attn, _moe_expert_ffn, _moe_scatter_in, _moe_scatter_out, _moe_routing
     if backend == "torch":
@@ -165,11 +194,16 @@ class RoPE(nn.Module):
         self.register_buffer("cos", torch.cos(angles))
         self.register_buffer("sin", torch.sin(angles))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor = None) -> torch.Tensor:
         # x: (B, n_heads, S, d_head)
-        S = x.shape[2]
-        cos = self.cos[:S][None, None, :, :].to(x.dtype)      # (1, 1, S, d_head)
-        sin = self.sin[:S][None, None, :, :].to(x.dtype)      # (1, 1, S, d_head)
+        if position_ids is not None:
+            # position_ids: (B, S) — gather cos/sin for each per-doc position
+            cos = self.cos[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
+            sin = self.sin[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
+        else:
+            S = x.shape[2]
+            cos = self.cos[:S][None, None, :, :].to(x.dtype)          # (1, 1, S, d_head)
+            sin = self.sin[:S][None, None, :, :].to(x.dtype)          # (1, 1, S, d_head)
         return _rope(x, cos, sin)
 
 
@@ -242,7 +276,7 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, rope: RoPE, attn_mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: RoPE, attn_mask: torch.Tensor = None, position_ids: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
 
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)    # (B, n_heads, S, d_head)
@@ -253,8 +287,8 @@ class GroupedQueryAttention(nn.Module):
             q = self.q_norm(q.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_kv_heads, S, self.d_head)
 
-        q = rope(q)
-        k = rope(k)
+        q = rope(q, position_ids=position_ids)
+        k = rope(k, position_ids=position_ids)
 
         # Expand KV heads for GQA (expand+reshape avoids memory allocation vs repeat_interleave)
         k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
