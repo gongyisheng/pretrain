@@ -21,7 +21,7 @@ data:
 
 training:
   batch_size: 4
-  gradient_accumulation_steps: 12
+  gradient_accumulation_steps: 8
   max_steps: 20000
   mixed_precision: "bf16"
   backend: "torch"
