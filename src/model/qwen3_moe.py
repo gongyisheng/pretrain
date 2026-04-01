@@ -76,7 +76,7 @@ class Qwen3MoEModel(nn.Module):
             torch.nn.init.normal_(module.expert_gate_up, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor) -> tuple:
+    def forward(self, idx: torch.Tensor, doc_ids: torch.Tensor = None) -> tuple:
         """Returns (logits, aux_loss).
 
         aux_loss is the raw accumulated load-balancing loss across all MoE blocks.
