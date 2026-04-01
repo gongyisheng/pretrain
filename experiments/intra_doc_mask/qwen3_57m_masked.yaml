@@ -31,7 +31,7 @@ training:
   checkpoint_every: 5000
   eval_every: 500
   eval_steps: 100
-  doc_mask: true
+  intra_doc_mask: true
 
 optimizer:
   name: "adamw"
@@ -45,7 +45,6 @@ scheduler:
   min_lr: 6e-5
 
 logging:
-  wandb_project: "pretrain"
-  wandb_run_name: "qwen3-57m-intra-doc-mask"
-  wandb_group: "cross-doc-sweep"
+  wandb_project: "pretrain-intra-doc-mask"
+  wandb_run_name: "qwen3-57m-masked"
   log_every: 10
