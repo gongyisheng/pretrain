@@ -265,7 +265,7 @@ class Trainer:
                 elapsed = time.time() - t_last_log
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
                 lr = self.optimizer.param_groups[0]["lr"]
-                log_dict = self.metrics.build_log_dict(
+                log_dict = self.metrics.build_train_log_dict(
                     loss=accum_loss, total_tokens=self.total_tokens, lr=lr,
                     grad_norm=grad_norm_val, tokens_per_sec=tokens_per_sec,
                     elapsed=elapsed, model=self.model, scaler=self.scaler,

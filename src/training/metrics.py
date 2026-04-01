@@ -49,7 +49,7 @@ class MetricsTracker:
     # Log dict assembly
     # ------------------------------------------------------------------
 
-    def build_log_dict(
+    def build_train_log_dict(
         self,
         *,
         loss: float,
