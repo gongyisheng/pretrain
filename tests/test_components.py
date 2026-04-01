@@ -9,6 +9,7 @@ from src.model.components import (
     RoPE,
     GroupedQueryAttention,
 )
+from src.model.qwen3 import Qwen3Model
 from src.model.qwen3_moe import Qwen3MoEModel
 from src.utils.config import ModelConfig
 
@@ -347,3 +348,46 @@ def test_gqa_forward_with_position_ids_shape():
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
     out = gqa(x, rope, position_ids=pos)
     assert out.shape == (2, 8, 64)
+
+
+def _tiny_qwen3_config():
+    return ModelConfig(
+        arch="qwen3",
+        n_layers=2,
+        n_heads=4,
+        n_kv_heads=2,
+        d_model=64,
+        vocab_size=256,
+        dropout=0.0,
+        rope_theta=10000.0,
+        qk_norm=True,
+    )
+
+
+def test_qwen3_forward_with_position_ids_shape():
+    model = Qwen3Model(_tiny_qwen3_config(), max_seq_len=32)
+    x = torch.randint(0, 256, (2, 8))
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    logits = model(x, position_ids=pos)
+    assert logits.shape == (2, 8, 256)
+
+
+def test_qwen3_position_ids_blocks_cross_doc():
+    """Modifying doc0 tokens must not change doc1 token outputs."""
+    torch.manual_seed(0)
+    model = Qwen3Model(_tiny_qwen3_config(), max_seq_len=32)
+    model.eval()
+
+    eot_id = 0
+    x = torch.randint(1, 256, (1, 8))
+    x[0, 3] = eot_id  # doc0=[0..3], doc1=[4..7]
+    position_ids = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])
+
+    logits_base = model(x, position_ids=position_ids)
+
+    x2 = x.clone()
+    x2[0, :3] = torch.randint(1, 256, (3,))
+    logits_modified = model(x2, position_ids=position_ids)
+
+    assert torch.allclose(logits_base[0, 4:], logits_modified[0, 4:], atol=1e-4), \
+        "doc1 logits changed when doc0 tokens were modified"

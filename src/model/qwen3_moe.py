@@ -76,12 +76,11 @@ class Qwen3MoEModel(nn.Module):
             torch.nn.init.normal_(module.expert_gate_up, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, doc_ids: torch.Tensor = None) -> tuple:
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor = None) -> tuple:
         """Returns (logits, aux_loss).
 
-        aux_loss is the raw accumulated load-balancing loss across all MoE blocks.
-        The caller (trainer) scales it by config.moe_aux_loss_coef before adding
-        to the cross-entropy loss.
+        position_ids is accepted for API compatibility but not used — MoE does not
+        support intra_doc_mask (triton guard in Trainer prevents this combination).
         """
         x = self.drop(self.token_emb(idx))
         aux_loss = torch.tensor(0.0, device=idx.device)
