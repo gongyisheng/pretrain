@@ -105,11 +105,10 @@ class Qwen3Model(nn.Module):
     ) -> torch.Tensor:
         x = self.drop(self.token_emb(idx))
 
-        attn_mask = (
-            build_causal_mask(position_ids, idx.device, x.dtype)
-            if position_ids is not None
-            else None
-        )
+        B, S = idx.shape
+        if position_ids is None:
+            position_ids = torch.arange(S, device=idx.device).unsqueeze(0).expand(B, S)
+        attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
 
         if self.config.attn_res:
             attn_res_ctx = []

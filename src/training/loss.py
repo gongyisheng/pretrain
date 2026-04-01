@@ -34,12 +34,12 @@ def compute_loss(logits, y, loss_mask=None, cross_entropy_fn=None):
     if cross_entropy_fn is None:
         cross_entropy_fn = F.cross_entropy
 
-    flat_logits = logits.view(-1, logits.size(-1))
-    flat_y = y.view(-1)
+    flat_logits = logits.reshape(-1, logits.size(-1))
+    flat_y = y.reshape(-1)
 
     if loss_mask is None:
         return cross_entropy_fn(flat_logits, flat_y)
 
     per_token_loss = F.cross_entropy(flat_logits, flat_y, reduction='none')
-    mask = loss_mask.view(-1).float()
+    mask = loss_mask.reshape(-1).float()
     return (per_token_loss * mask).sum() / mask.sum().clamp(min=1)

@@ -44,12 +44,11 @@ class Trainer:
         set_backend(config.training.backend)
         self._cross_entropy = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
 
-        if config.training.cross_doc_mask and config.training.backend == "triton":
+        if config.training.backend == "triton":
             raise ValueError(
-                "cross_doc_mask is not supported with the triton backend. "
+                "The triton backend does not support explicit attention masks. "
                 "Use training.backend=torch instead."
             )
-        self.cross_doc_mask = config.training.cross_doc_mask
 
         # Tokenizer — loaded early to provide special token IDs to the dataset
         self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
@@ -221,14 +220,12 @@ class Trainer:
                     x, y = next_token_targets(tokens)
                     # packing=False: position_ids < 0 marks padding — derive loss mask
                     loss_mask = None if self.config.data.packing else (position_ids >= 0)
-                    # cross-doc mask uses position_ids only in packing=True mode
-                    model_position_ids = position_ids if self.cross_doc_mask else None
                     if self.is_moe:
-                        logits, aux_loss = self.model(x, position_ids=model_position_ids)
+                        logits, aux_loss = self.model(x, position_ids=position_ids)
                         ce_loss = compute_loss(logits, y, loss_mask, self._cross_entropy)
                         loss = ce_loss + self.config.model.moe_aux_loss_coef * aux_loss
                     else:
-                        logits = self.model(x, position_ids=model_position_ids)
+                        logits = self.model(x, position_ids=position_ids)
                         loss = compute_loss(logits, y, loss_mask, self._cross_entropy)
                     loss = loss / cfg.gradient_accumulation_steps
 
@@ -325,11 +322,10 @@ class Trainer:
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                 x, y = next_token_targets(tokens)
                 loss_mask = None if self.config.data.packing else (position_ids >= 0)
-                model_position_ids = position_ids if self.cross_doc_mask else None
                 if self.is_moe:
-                    logits, _ = self.model(x, position_ids=model_position_ids)
+                    logits, _ = self.model(x, position_ids=position_ids)
                 else:
-                    logits = self.model(x, position_ids=model_position_ids)
+                    logits = self.model(x, position_ids=position_ids)
                 loss = compute_loss(logits, y, loss_mask, self._cross_entropy)
             total_loss += loss.item()
             n_batches += 1
