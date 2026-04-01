@@ -41,7 +41,7 @@ class DataConfig:
     data_dir: str = "data/"
     val_split: float = 0.01
     num_workers: int = 4
-    eot_token_id: int = 0
+    packing: bool = True
 
 
 @dataclass
@@ -150,6 +150,8 @@ def _coerce_types(dc_class, raw_dict: dict) -> dict:
     field_types = {f.name: f.type for f in dataclasses.fields(dc_class)}
     coerced = {}
     for k, v in raw_dict.items():
+        if k not in field_types:
+            continue  # silently ignore unknown/deprecated YAML fields
         expected = field_types.get(k)
         if expected == float and isinstance(v, str):
             v = float(v)

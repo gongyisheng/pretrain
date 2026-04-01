@@ -49,7 +49,16 @@ class Trainer:
                 "Use training.backend=torch instead."
             )
         self.cross_doc_mask = config.training.cross_doc_mask
-        self.eot_token_id = config.data.eot_token_id
+
+        # Tokenizer — loaded early to provide special token IDs to the dataset
+        self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
+        if self.tokenizer is not None:
+            eot_id = self.tokenizer.token_to_id("<|endoftext|>")
+            self.eot_token_id = eot_id if eot_id is not None else 0
+        else:
+            self.eot_token_id = 0  # fallback for tests without a real tokenizer
+        # EOT doubles as the padding token (no dedicated pad token in the current tokenizer)
+        self.pad_token_id = self.eot_token_id
 
         # Model
         self.model = build_model(config).to(self.device)
@@ -71,8 +80,13 @@ class Trainer:
         # Data
         train_path = os.path.join(config.data.data_dir, "train.bin")
         val_path = os.path.join(config.data.data_dir, "val.bin")
-        self.train_dataset = PretrainDataset(train_path, config.max_seq_len)
-        self.val_dataset = PretrainDataset(val_path, config.max_seq_len)
+        dataset_kwargs = dict(
+            packing=config.data.packing,
+            eot_token_id=self.eot_token_id,
+            pad_token_id=self.pad_token_id,
+        )
+        self.train_dataset = PretrainDataset(train_path, config.max_seq_len, **dataset_kwargs)
+        self.val_dataset = PretrainDataset(val_path, config.max_seq_len, **dataset_kwargs)
 
         nw = config.data.num_workers
         self.train_loader = DataLoader(
@@ -116,9 +130,6 @@ class Trainer:
                         return ckpt_forward
                     block.forward = make_ckpt_forward(block)
 
-        # Tokenizer (may be None when tokenizer_path is empty, e.g. in tests)
-        self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
-
         # Metrics
         self.metrics = MetricsTracker(config, self.n_non_emb_params, self.device)
 
@@ -141,6 +152,15 @@ class Trainer:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
+
+    def _compute_loss(self, logits, y, loss_mask=None):
+        flat_logits = logits.view(-1, logits.size(-1))
+        flat_y = y.view(-1)
+        if loss_mask is None:
+            return self._cross_entropy(flat_logits, flat_y)
+        per_token_loss = F.cross_entropy(flat_logits, flat_y, reduction='none')
+        mask = loss_mask.view(-1).float()
+        return (per_token_loss * mask).sum() / mask.sum().clamp(min=1)
 
     def _next_batch(self, train_iter):
         try:
@@ -196,13 +216,18 @@ class Trainer:
             accum_loss_tensor = torch.zeros(1, device=self.device)
 
             # Prefetch first batch
-            (x_cpu, y_cpu), train_iter = self._next_batch(train_iter)
+            batch_cpu, train_iter = self._next_batch(train_iter)
+            x_cpu, y_cpu = batch_cpu[0], batch_cpu[1]
+            loss_mask_cpu = batch_cpu[2] if not self.config.data.packing else None
             if prefetch_stream is not None:
                 with torch.cuda.stream(prefetch_stream):
                     x = x_cpu.to(self.device, non_blocking=True)
                     y = y_cpu.to(self.device, non_blocking=True)
+                    loss_mask = loss_mask_cpu.to(self.device, non_blocking=True) if loss_mask_cpu is not None else None
             else:
-                x, y = x_cpu.to(self.device), y_cpu.to(self.device)
+                x = x_cpu.to(self.device)
+                y = y_cpu.to(self.device)
+                loss_mask = loss_mask_cpu.to(self.device) if loss_mask_cpu is not None else None
 
             for micro_step in range(cfg.gradient_accumulation_steps):
                 # Wait for current batch transfer to complete
@@ -211,23 +236,28 @@ class Trainer:
 
                 # Start prefetching next batch while computing
                 if micro_step < cfg.gradient_accumulation_steps - 1:
-                    (next_x_cpu, next_y_cpu), train_iter = self._next_batch(train_iter)
+                    next_batch_cpu, train_iter = self._next_batch(train_iter)
+                    next_x_cpu, next_y_cpu = next_batch_cpu[0], next_batch_cpu[1]
+                    next_loss_mask_cpu = next_batch_cpu[2] if not self.config.data.packing else None
                     if prefetch_stream is not None:
                         with torch.cuda.stream(prefetch_stream):
                             next_x = next_x_cpu.to(self.device, non_blocking=True)
                             next_y = next_y_cpu.to(self.device, non_blocking=True)
+                            next_loss_mask = next_loss_mask_cpu.to(self.device, non_blocking=True) if next_loss_mask_cpu is not None else None
                     else:
-                        next_x, next_y = next_x_cpu.to(self.device), next_y_cpu.to(self.device)
+                        next_x = next_x_cpu.to(self.device)
+                        next_y = next_y_cpu.to(self.device)
+                        next_loss_mask = next_loss_mask_cpu.to(self.device) if next_loss_mask_cpu is not None else None
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                     position_ids = self._build_position_ids(x) if self.cross_doc_mask else None
                     if self.is_moe:
                         logits, aux_loss = self.model(x, position_ids=position_ids)
-                        ce_loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                        ce_loss = self._compute_loss(logits, y, loss_mask)
                         loss = ce_loss + self.config.model.moe_aux_loss_coef * aux_loss
                     else:
                         logits = self.model(x, position_ids=position_ids)
-                        loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                        loss = self._compute_loss(logits, y, loss_mask)
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
@@ -236,7 +266,7 @@ class Trainer:
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
-                    x, y = next_x, next_y
+                    x, y, loss_mask = next_x, next_y, next_loss_mask
 
             # Gradient clipping
             self.scaler.unscale_(self.optimizer)
@@ -315,17 +345,19 @@ class Trainer:
         total_loss = 0.0
         n_batches = 0
 
-        for i, (x, y) in enumerate(self.val_loader):
+        for i, batch in enumerate(self.val_loader):
             if i >= self.config.training.eval_steps:
                 break
-            x, y = x.to(self.device), y.to(self.device)
+            x = batch[0].to(self.device)
+            y = batch[1].to(self.device)
+            loss_mask = batch[2].to(self.device) if not self.config.data.packing else None
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                 position_ids = self._build_position_ids(x) if self.cross_doc_mask else None
                 if self.is_moe:
                     logits, _ = self.model(x, position_ids=position_ids)
                 else:
                     logits = self.model(x, position_ids=position_ids)
-                loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                loss = self._compute_loss(logits, y, loss_mask)
             total_loss += loss.item()
             n_batches += 1
 

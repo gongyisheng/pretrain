@@ -102,9 +102,9 @@ def test_training_config_cross_doc_mask_default():
     assert cfg.cross_doc_mask is False
 
 
-def test_data_config_eot_token_id_default():
+def test_data_config_packing_default():
     cfg = DataConfig()
-    assert cfg.eot_token_id == 0
+    assert cfg.packing is True
 
 
 def test_cross_doc_mask_yaml_override(tmp_path):
@@ -113,10 +113,23 @@ max_seq_len: 128
 training:
   cross_doc_mask: true
 data:
-  eot_token_id: 0
+  packing: true
 """
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml_content)
     cfg = load_config(str(p))
     assert cfg.training.cross_doc_mask is True
-    assert cfg.data.eot_token_id == 0
+    assert cfg.data.packing is True
+
+
+def test_unknown_yaml_fields_ignored(tmp_path):
+    """Deprecated or unknown YAML fields should be silently ignored."""
+    yaml_content = """
+max_seq_len: 128
+data:
+  eot_token_id: 0
+"""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(yaml_content)
+    cfg = load_config(str(p))
+    assert cfg.max_seq_len == 128
