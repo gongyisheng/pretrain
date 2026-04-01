@@ -159,7 +159,7 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: "RoPE" = None, attn_mask: torch.Tensor = None, position_ids: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_heads, S, d_head)
         k = self.k_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
@@ -168,6 +168,10 @@ class MultiHeadAttention(nn.Module):
         if self.qk_norm:
             q = self.q_norm(q.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
+
+        if rope is not None:
+            q = rope(q, position_ids=position_ids)
+            k = rope(k, position_ids=position_ids)
 
         if attn_mask is not None:
             out = _flash_attn(q, k, v, attn_mask=attn_mask)
@@ -207,7 +211,7 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, rope: RoPE, attn_mask: torch.Tensor = None, position_ids: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: "RoPE" = None, attn_mask: torch.Tensor = None, position_ids: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
 
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)    # (B, n_heads, S, d_head)
@@ -218,8 +222,9 @@ class GroupedQueryAttention(nn.Module):
             q = self.q_norm(q.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_kv_heads, S, self.d_head)
 
-        q = rope(q, position_ids=position_ids)
-        k = rope(k, position_ids=position_ids)
+        if rope is not None:
+            q = rope(q, position_ids=position_ids)
+            k = rope(k, position_ids=position_ids)
 
         # Expand KV heads for GQA (expand+reshape avoids memory allocation vs repeat_interleave)
         k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
