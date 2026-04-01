@@ -30,6 +30,7 @@ training:
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
+  cross_doc_mask: true
 
 optimizer:
   name: "adamw"

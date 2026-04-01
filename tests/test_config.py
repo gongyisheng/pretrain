@@ -99,7 +99,7 @@ def test_config_moe_fields_defaults():
 
 def test_training_config_cross_doc_mask_default():
     cfg = TrainingConfig()
-    assert cfg.cross_doc_mask is False
+    assert cfg.cross_doc_mask is True
 
 
 def test_data_config_packing_default():
