@@ -22,26 +22,18 @@ def test_dataset_length(tmp_bin_file):
 
 def test_dataset_getitem_shape(tmp_bin_file):
     ds = PretrainDataset(tmp_bin_file, seq_len=128)
-    x, y, position_ids = ds[0]
-    assert x.shape == (128,)
-    assert y.shape == (128,)
-    assert x.dtype == torch.long
-    assert y.dtype == torch.long
+    tokens, position_ids = ds[0]
+    assert tokens.shape == (129,)   # seq_len + 1
+    assert tokens.dtype == torch.long
     assert position_ids.shape == (128,)
     assert position_ids.dtype == torch.long
 
 
-def test_dataset_getitem_shift(tmp_bin_file):
-    ds = PretrainDataset(tmp_bin_file, seq_len=128)
-    x, y, _ = ds[0]
-    assert torch.equal(y[:-1], x[1:])
-
-
 def test_dataset_getitem_position_ids(tmp_bin_file):
-    # No EOT tokens in arange(1024) data (token 0 is EOT by default, not present here
-    # since arange starts at 0 — position_ids should be monotonically increasing)
+    # No EOT tokens in the data (use an out-of-range eot_token_id)
+    # → position_ids should be monotonically increasing
     ds = PretrainDataset(tmp_bin_file, seq_len=128, eot_token_id=9999)
-    _, _, position_ids = ds[0]
+    _, position_ids = ds[0]
     assert position_ids.tolist() == list(range(128))
 
 
@@ -66,31 +58,28 @@ def test_single_doc_length(packed_bin_file):
     assert len(ds) == 3
 
 
-def test_single_doc_getitem_returns_three_tuple(packed_bin_file):
+def test_single_doc_getitem_returns_two_tuple(packed_bin_file):
     ds = PretrainDataset(packed_bin_file, seq_len=8, packing=False, eot_token_id=EOT, pad_token_id=PAD)
     result = ds[0]
-    assert len(result) == 3
+    assert len(result) == 2
 
 
 def test_single_doc_shapes(packed_bin_file):
     ds = PretrainDataset(packed_bin_file, seq_len=8, packing=False, eot_token_id=EOT, pad_token_id=PAD)
-    x, y, loss_mask = ds[0]
-    assert x.shape == (8,)
-    assert y.shape == (8,)
-    assert loss_mask.shape == (8,)
+    tokens, loss_mask = ds[0]
+    assert tokens.shape == (9,)      # seq_len + 1
+    assert loss_mask.shape == (8,)   # seq_len
     assert loss_mask.dtype == torch.bool
 
 
 def test_single_doc_content(packed_bin_file):
     ds = PretrainDataset(packed_bin_file, seq_len=8, packing=False, eot_token_id=EOT, pad_token_id=PAD)
-    # doc0 = [2, 3, EOT] → x=[2,3,PAD,...], y=[3,EOT,PAD,...], loss_mask=[T,T,F,F,F,F,F,F]
-    x, y, loss_mask = ds[0]
-    assert x[0].item() == 2
-    assert x[1].item() == 3
-    assert x[2].item() == PAD
-    assert y[0].item() == 3
-    assert y[1].item() == EOT   # EOT prediction included in loss
-    assert y[2].item() == PAD
+    # doc0 = [2, 3, EOT] → tokens=[2,3,EOT,PAD,...], loss_mask=[T,T,F,F,F,F,F,F]
+    tokens, loss_mask = ds[0]
+    assert tokens[0].item() == 2
+    assert tokens[1].item() == 3
+    assert tokens[2].item() == EOT
+    assert tokens[3].item() == PAD
     assert loss_mask[:2].all()
     assert not loss_mask[2:].any()
 
@@ -98,9 +87,9 @@ def test_single_doc_content(packed_bin_file):
 def test_single_doc_eot_in_loss(packed_bin_file):
     """EOT prediction must be included in the loss (loss_mask covers it)."""
     ds = PretrainDataset(packed_bin_file, seq_len=8, packing=False, eot_token_id=EOT, pad_token_id=PAD)
-    # doc1 = [4, 5, 6, EOT] → y=[5,6,EOT,PAD,...], loss_mask=[T,T,T,F,...]
-    _, y, loss_mask = ds[1]
-    assert y[2].item() == EOT
+    # doc1 = [4, 5, 6, EOT] → tokens=[4,5,6,EOT,PAD,...], y[2]=tokens[3]=EOT, loss_mask=[T,T,T,F,...]
+    tokens, loss_mask = ds[1]
+    assert tokens[3].item() == EOT   # y[2] = tokens[3]
     assert loss_mask[2].item() is True
     assert not loss_mask[3].item()
 
@@ -113,7 +102,6 @@ def test_single_doc_truncation():
         tokens = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, EOT], dtype=np.uint16)
         tokens.tofile(path)
         ds = PretrainDataset(path, seq_len=4, packing=False, eot_token_id=EOT, pad_token_id=PAD)
-        x, y, loss_mask = ds[0]
-        assert x.shape == (4,)
-        assert loss_mask.all()   # no padding when truncated
-        assert torch.equal(y[:-1], x[1:])  # still a valid shift
+        tokens_out, loss_mask = ds[0]
+        assert tokens_out.shape == (5,)   # seq_len + 1
+        assert loss_mask.all()            # no padding when truncated
