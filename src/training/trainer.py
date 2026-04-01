@@ -17,6 +17,7 @@ from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
 from src.training.loss import next_token_targets, compute_loss
+from src.utils.masking_utils import build_causal_mask
 from src.kernel.triton.cross_entropy import triton_cross_entropy
 from src.kernel.torch.cross_entropy import torch_cross_entropy
 
@@ -108,6 +109,13 @@ class Trainer:
         self.use_amp = config.training.mixed_precision != "no" and self.device == "cuda"
         self.amp_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(enabled=(self.use_amp and self.amp_dtype == torch.float16))
+
+        # Disable assert_indirect_indexing to avoid spurious CUDA assertions during
+        # torchinductor autotuning, which may dispatch kernel test runs on a stream
+        # that doesn't respect wait_stream(prefetch_stream), causing RoPE's
+        # position_ids[i] lookup to read uninitialized GPU memory.
+        import torch._inductor.config as inductor_config
+        inductor_config.assert_indirect_indexing = False
 
         if self.is_moe and config.model.moe_expert_capacity_factor is None:
             # Dynamic capacity uses .item() — can't compile the full model
@@ -220,7 +228,9 @@ class Trainer:
                     x, y = next_token_targets(input_ids)
                     # packing=False: position_ids < 0 marks padding — derive loss mask
                     loss_mask = None if self.config.data.packing else (position_ids >= 0)
-                    logits, aux_loss = self.model(x, position_ids=position_ids)
+                    mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                    attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
+                    logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
                     loss = compute_loss(logits, y, loss_mask, self._loss_fn)
                     if aux_loss is not None:
                         loss = loss + self.config.model.moe_aux_loss_coef * aux_loss
@@ -320,7 +330,9 @@ class Trainer:
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                 x, y = next_token_targets(input_ids)
                 loss_mask = None if self.config.data.packing else (position_ids >= 0)
-                logits, aux_loss = self.model(x, position_ids=position_ids)
+                mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
+                logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
                 loss = compute_loss(logits, y, loss_mask, self._loss_fn)
             total_loss += loss.item()
             if aux_loss is not None:

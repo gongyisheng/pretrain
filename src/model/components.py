@@ -162,6 +162,7 @@ class MultiHeadAttention(nn.Module):
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
 
         if rope is not None:
+            assert position_ids is not None, "position_ids cannot be None when using RoPE"
             q = rope(q, position_ids=position_ids)
             k = rope(k, position_ids=position_ids)
 
@@ -213,6 +214,7 @@ class GroupedQueryAttention(nn.Module):
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_kv_heads, S, self.d_head)
 
         if rope is not None:
+            assert position_ids is not None, "position_ids cannot be None when using RoPE"
             q = rope(q, position_ids)
             k = rope(k, position_ids)
 

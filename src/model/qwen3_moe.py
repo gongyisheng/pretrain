@@ -92,10 +92,11 @@ class Qwen3MoEModel(nn.Module):
             torch.nn.init.normal_(module.expert_gate_up, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor) -> tuple:
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask: torch.Tensor = None) -> tuple:
         """Returns (logits, aux_loss)."""
         x = self.drop(self.token_emb(idx))
-        attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
+        if attn_mask is None:
+            attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
         aux_loss = torch.tensor(0.0, device=idx.device)
         for block in self.blocks:
             x, block_aux = block(x, self.rope, position_ids, attn_mask)
