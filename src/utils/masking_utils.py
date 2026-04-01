@@ -1,6 +1,31 @@
 import torch
 
 
+def build_position_ids(x: torch.Tensor, eot_token_id: int) -> torch.Tensor:
+    """Compute per-token intra-document position IDs from a packed token sequence.
+
+    position_ids[b, i] = position of token i within its document (resets to 0
+    at the token immediately following each EOT token).
+
+    Args:
+        x: token IDs, shape (B, S)
+        eot_token_id: token ID of the end-of-text token
+
+    Returns:
+        position_ids: shape (B, S), dtype long
+    """
+    is_eot = (x == eot_token_id)
+    is_doc_start = torch.zeros_like(x, dtype=torch.bool)
+    is_doc_start[:, 1:] = is_eot[:, :-1]
+    doc_start_pos = torch.where(
+        is_doc_start,
+        torch.arange(x.shape[1], device=x.device).unsqueeze(0).expand_as(x),
+        torch.zeros_like(x),
+    )
+    doc_start_cummax, _ = torch.cummax(doc_start_pos, dim=1)
+    return torch.arange(x.shape[1], device=x.device).unsqueeze(0) - doc_start_cummax
+
+
 def build_causal_mask(
     position_ids: torch.Tensor,
     device: torch.device,
@@ -14,7 +39,7 @@ def build_causal_mask(
 
     **Precondition:** ``position_ids`` must contain intra-document positions
     starting from 0 at each document boundary — i.e. the values produced by
-    ``Trainer._build_position_ids``. Passing absolute sequence positions or
+    ``build_position_ids``. Passing absolute sequence positions or
     any other encoding will silently produce an incorrect mask.
 
     Args:

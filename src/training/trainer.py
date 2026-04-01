@@ -16,6 +16,7 @@ from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
+from src.utils.masking_utils import build_position_ids
 from src.kernel.triton.cross_entropy import triton_cross_entropy
 from src.kernel.torch.cross_entropy import torch_cross_entropy
 
@@ -169,24 +170,6 @@ class Trainer:
             train_iter = iter(self.train_loader)
             return next(train_iter), train_iter
 
-    def _build_position_ids(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute per-token cross-document position IDs from EOT token positions.
-
-        position_ids[b, i] = position of token i within its document.
-        Resets to 0 for the token immediately after each EOT token.
-        Only supported with the torch backend (not triton).
-        """
-        is_eot = (x == self.eot_token_id)
-        is_doc_start = torch.zeros_like(x, dtype=torch.bool)
-        is_doc_start[:, 1:] = is_eot[:, :-1]
-        doc_start_pos = torch.where(
-            is_doc_start,
-            torch.arange(x.shape[1], device=x.device).unsqueeze(0).expand_as(x),
-            torch.zeros_like(x),
-        )
-        doc_start_cummax, _ = torch.cummax(doc_start_pos, dim=1)
-        return torch.arange(x.shape[1], device=x.device).unsqueeze(0) - doc_start_cummax
-
     def train(self):
         cfg = self.config.training
         self.model.train()
@@ -250,7 +233,7 @@ class Trainer:
                         next_loss_mask = next_loss_mask_cpu.to(self.device) if next_loss_mask_cpu is not None else None
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                    position_ids = self._build_position_ids(x) if self.cross_doc_mask else None
+                    position_ids = build_position_ids(x, self.eot_token_id) if self.cross_doc_mask else None
                     if self.is_moe:
                         logits, aux_loss = self.model(x, position_ids=position_ids)
                         ce_loss = self._compute_loss(logits, y, loss_mask)
@@ -352,7 +335,7 @@ class Trainer:
             y = batch[1].to(self.device)
             loss_mask = batch[2].to(self.device) if not self.config.data.packing else None
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                position_ids = self._build_position_ids(x) if self.cross_doc_mask else None
+                position_ids = build_position_ids(x, self.eot_token_id) if self.cross_doc_mask else None
                 if self.is_moe:
                     logits, _ = self.model(x, position_ids=position_ids)
                 else:

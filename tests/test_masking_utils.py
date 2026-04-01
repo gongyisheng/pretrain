@@ -1,5 +1,52 @@
 import torch
-from src.utils.masking_utils import build_causal_mask
+from src.utils.masking_utils import build_causal_mask, build_position_ids
+
+
+EOT = 0  # token ID used as end-of-text in these tests
+
+
+def test_build_position_ids_single_doc():
+    x = torch.tensor([[1, 2, 3, 4]])
+    pos = build_position_ids(x, EOT)
+    assert pos.tolist() == [[0, 1, 2, 3]]
+
+
+def test_build_position_ids_resets_after_eot():
+    # EOT at index 2 → next token starts at 0
+    x = torch.tensor([[1, 2, EOT, 3, 4]])
+    pos = build_position_ids(x, EOT)
+    assert pos.tolist() == [[0, 1, 2, 0, 1]]
+
+
+def test_build_position_ids_eot_belongs_to_its_doc():
+    # EOT itself is position 2 of doc 0, not position 0 of doc 1
+    x = torch.tensor([[1, 2, EOT, 3]])
+    pos = build_position_ids(x, EOT)
+    assert pos[0, 2].item() == 2   # EOT is the 3rd token of doc 0
+    assert pos[0, 3].item() == 0   # next token starts doc 1 at position 0
+
+
+def test_build_position_ids_multiple_docs():
+    x = torch.tensor([[1, EOT, 2, EOT, 3]])
+    pos = build_position_ids(x, EOT)
+    assert pos.tolist() == [[0, 1, 0, 1, 0]]
+
+
+def test_build_position_ids_batch():
+    x = torch.tensor([
+        [1, EOT, 2, 3],
+        [4, 5, 6, EOT],
+    ])
+    pos = build_position_ids(x, EOT)
+    assert pos[0].tolist() == [0, 1, 0, 1]
+    assert pos[1].tolist() == [0, 1, 2, 3]
+
+
+def test_build_position_ids_shape_and_dtype():
+    x = torch.tensor([[1, 2, 3]])
+    pos = build_position_ids(x, EOT)
+    assert pos.shape == x.shape
+    assert pos.dtype == torch.long
 
 
 def test_build_causal_mask_shape():
