@@ -72,17 +72,24 @@ def build_doc_causal_mask_from_position_ids(
 ) -> torch.Tensor:
     """Build a block-causal additive attention mask directly from position_ids.
 
-    position_ids[i] - i is constant within each document (equals minus the
-    sequence-level start index of that document). Two tokens attend iff they
-    share that constant AND j <= i (causal).
+    Exploits the invariant that ``position_ids[b, i] - i`` is constant within
+    each document (equals the negative sequence-level start index of that doc).
+    Two tokens attend iff they share that constant AND j <= i (causal).
+
+    **Precondition:** ``position_ids`` must contain intra-document positions
+    starting from 0 at each document boundary — i.e. the values produced by
+    ``PretrainDataset._build_position_ids`` or ``Trainer._build_position_ids``.
+    Passing absolute sequence positions or any other encoding will silently
+    produce an incorrect mask.
 
     Args:
         position_ids: shape (B, S), dtype long — per-token intra-doc position
+            (resets to 0 at the token immediately following each EOT token)
         device: target device
         dtype: dtype matching query tensors (required by SDPA)
 
     Returns:
-        additive mask of shape (B, 1, S, S) — 0.0 or -inf
+        additive mask of shape (B, 1, S, S) — 0.0 for attended positions, -inf otherwise
     """
     B, S = position_ids.shape
     adj = position_ids - torch.arange(S, device=device)       # (B, S), constant per doc
@@ -195,6 +202,15 @@ class RoPE(nn.Module):
         self.register_buffer("sin", torch.sin(angles))
 
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor = None) -> torch.Tensor:
+        """Apply rotary position embeddings.
+
+        Args:
+            x: shape (B, n_heads, S, d_head)
+            position_ids: optional shape (B, S) — per-token intra-doc position.
+                When provided, cos/sin are gathered by index rather than sliced
+                sequentially, enabling per-document position resets.
+                Only supported with the torch backend (not triton).
+        """
         # x: (B, n_heads, S, d_head)
         if position_ids is not None:
             # position_ids: (B, S) — gather cos/sin for each per-doc position
