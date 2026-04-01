@@ -9,7 +9,7 @@ from src.model.components import (
     SwiGluFFN,
 )
 from src.utils.config import ModelConfig
-from src.utils.masking import build_causal_mask
+from src.utils.masking_utils import build_causal_mask
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):

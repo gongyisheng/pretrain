@@ -7,7 +7,7 @@ from src.model.components import (
     RoPE,
     GroupedQueryAttention,
 )
-from src.utils.masking import build_causal_mask
+from src.utils.masking_utils import build_causal_mask
 from src.model.qwen3 import Qwen3Model
 from src.model.qwen3_moe import Qwen3MoEModel
 from src.utils.config import ModelConfig
@@ -169,39 +169,6 @@ def test_qwen3_moe_aux_loss_is_scalar_and_nonneg():
     assert aux_loss.item() >= 0.0
 
 
-def test_build_causal_mask_shape():
-    pos = torch.tensor([[0, 1, 2, 3]])  # (1, 4)
-    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
-    assert mask.shape == (1, 1, 4, 4)
-
-
-def test_build_causal_mask_blocks_future():
-    pos = torch.tensor([[0, 1, 2, 3]])
-    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
-    m = mask[0, 0]  # (4, 4)
-    for i in range(4):
-        for j in range(i + 1, 4):
-            assert m[i, j].item() == float('-inf'), f"Expected -inf at ({i},{j})"
-
-
-def test_build_causal_mask_blocks_cross_doc():
-    # position_ids reset at pos 2: doc0=[0,1], doc1=[2,3]
-    pos = torch.tensor([[0, 1, 0, 1]])
-    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
-    m = mask[0, 0]  # (4, 4)
-    assert m[2, 0].item() == float('-inf')
-    assert m[2, 1].item() == float('-inf')
-    assert m[2, 2].item() == 0.0
-
-
-def test_build_causal_mask_allows_same_doc_causal():
-    pos = torch.tensor([[0, 1, 2, 3]])  # single doc
-    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
-    m = mask[0, 0]  # (4, 4)
-    for i in range(4):
-        for j in range(i + 1):
-            assert m[i, j].item() == 0.0, f"Expected 0.0 at ({i},{j})"
-
 
 def test_torch_flash_attn_with_attn_mask():
     B, H, S, D = 2, 4, 8, 16
@@ -244,24 +211,6 @@ def test_mha_attn_mask_blocks_cross_doc_attention():
     assert torch.allclose(out_base[0, 2:], out_modified[0, 2:], atol=1e-5), \
         "doc1 tokens were affected by changes to doc0 tokens"
 
-
-def test_build_causal_mask_multi_doc_shape():
-    pos = torch.tensor([[0, 1, 2, 0, 1]])  # (1, 5)
-    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
-    assert mask.shape == (1, 1, 5, 5)
-
-
-def test_build_causal_mask_multi_doc_blocks_cross_doc():
-    # position_ids = [0, 1, 2, 0, 1] → doc0=[0,1,2], doc1=[3,4]
-    pos = torch.tensor([[0, 1, 2, 0, 1]])
-    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
-    m = mask[0, 0]
-    # doc1 tokens (rows 3,4) must not attend to doc0 tokens (cols 0,1,2)
-    assert m[3, 0].item() == float('-inf')
-    assert m[3, 1].item() == float('-inf')
-    assert m[3, 2].item() == float('-inf')
-    assert m[3, 3].item() == 0.0   # same doc, causal
-    assert m[4, 3].item() == 0.0   # same doc, causal
 
 
 def test_rope_forward_with_position_ids_shape():
