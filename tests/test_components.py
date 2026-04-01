@@ -265,7 +265,7 @@ def test_qwen3_forward_with_position_ids_shape():
     model = Qwen3Model(_tiny_qwen3_config(), max_seq_len=32)
     x = torch.randint(0, 256, (2, 8))
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    logits = model(x, position_ids=pos)
+    logits, _ = model(x, position_ids=pos)
     assert logits.shape == (2, 8, 256)
 
 
@@ -280,11 +280,11 @@ def test_qwen3_position_ids_blocks_cross_doc():
     x[0, 3] = eot_id  # doc0=[0..3], doc1=[4..7]
     position_ids = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])
 
-    logits_base = model(x, position_ids=position_ids)
+    logits_base, _ = model(x, position_ids=position_ids)
 
     x2 = x.clone()
     x2[0, :3] = torch.randint(1, 256, (3,))
-    logits_modified = model(x2, position_ids=position_ids)
+    logits_modified, _ = model(x2, position_ids=position_ids)
 
     assert torch.allclose(logits_base[0, 4:], logits_modified[0, 4:], atol=1e-4), \
         "doc1 logits changed when doc0 tokens were modified"

@@ -39,7 +39,7 @@ class Qwen3TransformerBlock(BaseTransformerBlock):
         position_ids: torch.Tensor = None,
     ) -> torch.Tensor:
         return self.attn(
-            self.ln1(x), rope, attn_mask=attn_mask, position_ids=position_ids
+            self.ln1(x), rope, position_ids=position_ids, attn_mask=attn_mask
         )
 
     def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
@@ -113,16 +113,16 @@ class Qwen3Model(nn.Module):
                     x,
                     attn_res_ctx,
                     rope=self.rope,
-                    attn_mask=attn_mask,
                     position_ids=position_ids,
+                    attn_mask=attn_mask,
                 )
         else:
             for block in self.blocks:
                 x = block(
-                    x, rope=self.rope, attn_mask=attn_mask, position_ids=position_ids
+                    x, rope=self.rope, position_ids=position_ids, attn_mask=attn_mask
                 )
 
         x = self.ln_f(x)
         if return_logits:
-            return self.lm_head(x)
+            return self.lm_head(x), None
         return x

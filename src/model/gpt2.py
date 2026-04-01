@@ -81,5 +81,5 @@ class GPT2Model(nn.Module):
 
         x = self.ln_f(x)
         if return_logits:
-            return self.lm_head(x)
+            return self.lm_head(x), None
         return x

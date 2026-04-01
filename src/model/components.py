@@ -151,7 +151,7 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, rope: "RoPE" = None, attn_mask: torch.Tensor = None, position_ids: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_heads, S, d_head)
         k = self.k_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
@@ -201,7 +201,7 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, rope: "RoPE" = None, attn_mask: torch.Tensor = None, position_ids: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
 
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)    # (B, n_heads, S, d_head)

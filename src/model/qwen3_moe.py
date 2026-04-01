@@ -34,8 +34,8 @@ class Qwen3MoETransformerBlock(nn.Module):
             capacity_factor,
         )
 
-    def forward(self, x: torch.Tensor, rope: RoPE, attn_mask: torch.Tensor, position_ids: torch.Tensor) -> tuple:
-        x = x + self.attn(self.ln1(x), rope, attn_mask=attn_mask, position_ids=position_ids)
+    def forward(self, x: torch.Tensor, rope: RoPE, position_ids: torch.Tensor, attn_mask: torch.Tensor) -> tuple:
+        x = x + self.attn(self.ln1(x), rope, position_ids=position_ids, attn_mask=attn_mask)
         ffn_out, aux_loss = self.ffn(self.ln2(x))
         x = x + ffn_out
         return x, aux_loss
@@ -98,7 +98,7 @@ class Qwen3MoEModel(nn.Module):
         attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
         aux_loss = torch.tensor(0.0, device=idx.device)
         for block in self.blocks:
-            x, block_aux = block(x, self.rope, attn_mask, position_ids)
+            x, block_aux = block(x, self.rope, position_ids, attn_mask)
             aux_loss = aux_loss + block_aux
         x = self.ln_f(x)
         logits = self.lm_head(x)
