@@ -173,10 +173,8 @@ class MultiHeadAttention(nn.Module):
             q = rope(q, position_ids=position_ids)
             k = rope(k, position_ids=position_ids)
 
-        if attn_mask is not None:
-            out = _flash_attn(q, k, v, attn_mask=attn_mask)
-        else:
-            out = _flash_attn(q, k, v, is_causal=True)
+        is_causal = attn_mask is None
+        out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
 
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.resid_dropout(self.out_proj(out))
@@ -230,10 +228,8 @@ class GroupedQueryAttention(nn.Module):
         k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
         v = v[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
 
-        if attn_mask is not None:
-            out = _flash_attn(q, k, v, attn_mask=attn_mask)
-        else:
-            out = _flash_attn(q, k, v, is_causal=True)
+        is_causal = attn_mask is None
+        out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
 
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.resid_dropout(self.out_proj(out))
