@@ -191,15 +191,14 @@ class Trainer:
 
             # Prefetch first batch
             batch_cpu, train_iter = self._next_batch(train_iter)
-            tokens_cpu, extra_cpu = batch_cpu[0], batch_cpu[1]
-            # packing=True: extra is position_ids; packing=False: extra is loss_mask
+            tokens_cpu, position_ids_cpu = batch_cpu[0], batch_cpu[1]
             if prefetch_stream is not None:
                 with torch.cuda.stream(prefetch_stream):
                     tokens = tokens_cpu.to(self.device, non_blocking=True)
-                    extra = extra_cpu.to(self.device, non_blocking=True)
+                    position_ids = position_ids_cpu.to(self.device, non_blocking=True)
             else:
                 tokens = tokens_cpu.to(self.device)
-                extra = extra_cpu.to(self.device)
+                position_ids = position_ids_cpu.to(self.device)
 
             for micro_step in range(cfg.gradient_accumulation_steps):
                 # Wait for current batch transfer to complete
@@ -209,29 +208,27 @@ class Trainer:
                 # Start prefetching next batch while computing
                 if micro_step < cfg.gradient_accumulation_steps - 1:
                     next_batch_cpu, train_iter = self._next_batch(train_iter)
-                    next_tokens_cpu, next_extra_cpu = next_batch_cpu[0], next_batch_cpu[1]
+                    next_tokens_cpu, next_position_ids_cpu = next_batch_cpu[0], next_batch_cpu[1]
                     if prefetch_stream is not None:
                         with torch.cuda.stream(prefetch_stream):
                             next_tokens = next_tokens_cpu.to(self.device, non_blocking=True)
-                            next_extra = next_extra_cpu.to(self.device, non_blocking=True)
+                            next_position_ids = next_position_ids_cpu.to(self.device, non_blocking=True)
                     else:
                         next_tokens = next_tokens_cpu.to(self.device)
-                        next_extra = next_extra_cpu.to(self.device)
+                        next_position_ids = next_position_ids_cpu.to(self.device)
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                     x, y = next_token_targets(tokens)
-                    if self.config.data.packing:
-                        position_ids = extra if self.cross_doc_mask else None
-                        loss_mask = None
-                    else:
-                        position_ids = None
-                        loss_mask = extra
+                    # packing=False: position_ids < 0 marks padding — derive loss mask
+                    loss_mask = None if self.config.data.packing else (position_ids >= 0)
+                    # cross-doc mask uses position_ids only in packing=True mode
+                    model_position_ids = position_ids if self.cross_doc_mask else None
                     if self.is_moe:
-                        logits, aux_loss = self.model(x, position_ids=position_ids)
+                        logits, aux_loss = self.model(x, position_ids=model_position_ids)
                         ce_loss = compute_loss(logits, y, loss_mask, self._cross_entropy)
                         loss = ce_loss + self.config.model.moe_aux_loss_coef * aux_loss
                     else:
-                        logits = self.model(x, position_ids=position_ids)
+                        logits = self.model(x, position_ids=model_position_ids)
                         loss = compute_loss(logits, y, loss_mask, self._cross_entropy)
                     loss = loss / cfg.gradient_accumulation_steps
 
@@ -241,7 +238,7 @@ class Trainer:
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
-                    tokens, extra = next_tokens, next_extra
+                    tokens, position_ids = next_tokens, next_position_ids
 
             # Gradient clipping
             self.scaler.unscale_(self.optimizer)
@@ -323,16 +320,17 @@ class Trainer:
         for i, batch in enumerate(self.val_loader):
             if i >= self.config.training.eval_steps:
                 break
-            x = batch[0].to(self.device)
-            y = batch[1].to(self.device)
-            loss_mask = batch[2].to(self.device) if not self.config.data.packing else None
+            tokens = batch[0].to(self.device)
+            position_ids = batch[1].to(self.device)
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                position_ids = build_position_ids(x, self.eot_token_id) if self.cross_doc_mask else None
+                x, y = next_token_targets(tokens)
+                loss_mask = None if self.config.data.packing else (position_ids >= 0)
+                model_position_ids = position_ids if self.cross_doc_mask else None
                 if self.is_moe:
-                    logits, _ = self.model(x, position_ids=position_ids)
+                    logits, _ = self.model(x, position_ids=model_position_ids)
                 else:
-                    logits = self.model(x, position_ids=position_ids)
-                loss = self._compute_loss(logits, y, loss_mask)
+                    logits = self.model(x, position_ids=model_position_ids)
+                loss = compute_loss(logits, y, loss_mask, self._cross_entropy)
             total_loss += loss.item()
             n_batches += 1
 

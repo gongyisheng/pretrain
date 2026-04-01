@@ -8,22 +8,20 @@ from src.utils.masking_utils import build_position_ids
 class PretrainDataset(Dataset):
     """Memory-mapped dataset for pretraining.
 
-    packing=True (default): returns fixed-length chunks from a flat token stream
-    (multiple documents packed per sequence). Returns (tokens, position_ids) where
-    tokens has length seq_len+1 and position_ids[i] is the intra-document position
-    of token i (resets to 0 after each EOT), used to build block-causal masks.
+    Both modes return (input_ids, position_ids):
 
-    packing=False: single-document mode — one document per sample, padded to
-    seq_len+1 tokens. Returns (tokens, loss_mask) where loss_mask (length seq_len)
-    is True for valid (non-pad) positions. The EOT token at the end of each
-    document IS included in the loss.
+    packing=True (default): input_ids has seq_len+1 tokens from a flat packed
+    stream. position_ids[i] is the intra-document position of input token i
+    (resets to 0 after each EOT), used to build block-causal masks. All
+    position_ids are >= 0.
 
-    In both modes the caller is responsible for splitting tokens into model input
-    and next-token targets via next_token_targets() in training/loss.py.
+    packing=False: single-document mode. input_ids is one document padded to
+    seq_len+1 tokens. position_ids are sequential (0, 1, 2, ...) for real
+    content tokens and -1 for padding tokens (those after the document-ending
+    EOT). Callers derive the loss mask via ``position_ids >= 0``.
 
-    Note: pad_token_id fills token positions beyond the document boundary.
-    Because EOT doubles as pad (no dedicated pad token), loss_mask is tracked
-    explicitly so EOT predictions inside content are always included in the loss.
+    In both modes the caller splits input_ids into model input and next-token
+    targets via next_token_targets() in training/loss.py.
     """
 
     def __init__(
@@ -66,10 +64,12 @@ class PretrainDataset(Dataset):
         if self.packing:
             start = idx * self.seq_len
             chunk = self.data[start : start + self.seq_len + 1].astype(np.int64)
-            tokens = torch.from_numpy(chunk)
-            # position_ids correspond to the input (all but last token)
-            position_ids = build_position_ids(tokens[:-1].unsqueeze(0), self.eot_token_id).squeeze(0)
-            return tokens, position_ids
+            input_ids = torch.from_numpy(chunk)
+            # position_ids correspond to the input tokens (all but last)
+            position_ids = build_position_ids(
+                input_ids[:-1].unsqueeze(0), self.eot_token_id, packing=True
+            ).squeeze(0)
+            return input_ids, position_ids
 
         # Single-document mode
         doc_start = int(self._doc_starts[idx])
@@ -80,12 +80,13 @@ class PretrainDataset(Dataset):
         n_content = min(doc_len, self.seq_len + 1)
         doc = self.data[doc_start : doc_start + n_content].astype(np.int64)
 
-        tokens_arr = np.full(self.seq_len + 1, self.pad_token_id, dtype=np.int64)
-        tokens_arr[:n_content] = doc[:n_content]
+        input_ids_arr = np.full(self.seq_len + 1, self.pad_token_id, dtype=np.int64)
+        input_ids_arr[:n_content] = doc[:n_content]
+        input_ids = torch.from_numpy(input_ids_arr)
 
-        # loss_mask covers positions where y = tokens[1:] is a real target token
-        n_valid = n_content - 1
-        loss_mask = torch.zeros(self.seq_len, dtype=torch.bool)
-        loss_mask[:n_valid] = True
+        # position_ids for the input tokens: -1 marks padding positions
+        position_ids = build_position_ids(
+            input_ids[:-1].unsqueeze(0), self.eot_token_id, packing=False
+        ).squeeze(0)
 
-        return torch.from_numpy(tokens_arr), loss_mask
+        return input_ids, position_ids

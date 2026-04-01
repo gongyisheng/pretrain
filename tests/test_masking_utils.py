@@ -49,6 +49,55 @@ def test_build_position_ids_shape_and_dtype():
     assert pos.dtype == torch.long
 
 
+# ---- packing=False tests ----
+
+def test_build_position_ids_unpacked_single_doc():
+    # doc=[1,2,EOT] padded to len 6: real=0,1,2; padding=-1
+    x = torch.tensor([[1, 2, EOT, EOT, EOT, EOT]])
+    pos = build_position_ids(x, EOT, packing=False)
+    assert pos.tolist() == [[0, 1, 2, -1, -1, -1]]
+
+
+def test_build_position_ids_unpacked_no_eot():
+    # truncated doc, no EOT — all positions are real
+    x = torch.tensor([[1, 2, 3, 4]])
+    pos = build_position_ids(x, EOT, packing=False)
+    assert pos.tolist() == [[0, 1, 2, 3]]
+
+
+def test_build_position_ids_unpacked_eot_belongs_to_doc():
+    # EOT at position 2 is real (part of the document), not padding
+    x = torch.tensor([[1, 2, EOT, EOT]])
+    pos = build_position_ids(x, EOT, packing=False)
+    assert pos[0, 2].item() == 2    # EOT itself is the last real position
+    assert pos[0, 3].item() == -1   # token after EOT is padding
+
+
+def test_build_position_ids_unpacked_batch():
+    # Two sequences with different padding lengths
+    x = torch.tensor([
+        [1, 2, EOT, EOT, EOT],   # doc ends at pos 2
+        [3, 4, 5, EOT, EOT],     # doc ends at pos 3
+    ])
+    pos = build_position_ids(x, EOT, packing=False)
+    assert pos[0].tolist() == [0, 1, 2, -1, -1]
+    assert pos[1].tolist() == [0, 1, 2, 3, -1]
+
+
+def test_build_position_ids_unpacked_shape_and_dtype():
+    x = torch.tensor([[1, 2, EOT, EOT]])
+    pos = build_position_ids(x, EOT, packing=False)
+    assert pos.shape == x.shape
+    assert pos.dtype == torch.long
+
+
+def test_build_position_ids_unpacked_all_real():
+    # No EOT at all — entire sequence is real content
+    x = torch.tensor([[5, 6, 7, 8, 9]])
+    pos = build_position_ids(x, EOT, packing=False)
+    assert pos.tolist() == [[0, 1, 2, 3, 4]]
+
+
 def test_build_causal_mask_shape():
     pos = torch.tensor([[0, 1, 2, 3]])  # (1, 4)
     mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
