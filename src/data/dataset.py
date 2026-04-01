@@ -2,12 +2,16 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from src.utils.masking_utils import build_position_ids
+
 
 class PretrainDataset(Dataset):
     """Memory-mapped dataset for pretraining.
 
     packing=True (default): returns fixed-length chunks from a flat token stream
-    (multiple documents packed per sequence). Returns (x, y).
+    (multiple documents packed per sequence). Returns (x, y, position_ids) where
+    position_ids[i] is the intra-document position of token i (resets to 0 after
+    each EOT), used to build block-causal attention masks.
 
     packing=False: single-document mode — one document per sample, padded to
     seq_len. Returns (x, y, loss_mask) where loss_mask is True for valid (non-pad)
@@ -31,6 +35,7 @@ class PretrainDataset(Dataset):
         self.seq_len = seq_len
         self.packing = packing
         self.pad_token_id = pad_token_id
+        self.eot_token_id = eot_token_id
         self.data = np.memmap(bin_path, dtype=np.uint16, mode="r")
 
         if packing:
@@ -61,7 +66,8 @@ class PretrainDataset(Dataset):
             chunk = self.data[start : start + self.seq_len + 1].astype(np.int64)
             x = torch.from_numpy(chunk[:-1])
             y = torch.from_numpy(chunk[1:])
-            return x, y
+            position_ids = build_position_ids(x.unsqueeze(0), self.eot_token_id).squeeze(0)
+            return x, y, position_ids
 
         # Single-document mode
         doc_start = int(self._doc_starts[idx])

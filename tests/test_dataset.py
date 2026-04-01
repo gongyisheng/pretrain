@@ -22,17 +22,27 @@ def test_dataset_length(tmp_bin_file):
 
 def test_dataset_getitem_shape(tmp_bin_file):
     ds = PretrainDataset(tmp_bin_file, seq_len=128)
-    x, y = ds[0]
+    x, y, position_ids = ds[0]
     assert x.shape == (128,)
     assert y.shape == (128,)
     assert x.dtype == torch.long
     assert y.dtype == torch.long
+    assert position_ids.shape == (128,)
+    assert position_ids.dtype == torch.long
 
 
 def test_dataset_getitem_shift(tmp_bin_file):
     ds = PretrainDataset(tmp_bin_file, seq_len=128)
-    x, y = ds[0]
+    x, y, _ = ds[0]
     assert torch.equal(y[:-1], x[1:])
+
+
+def test_dataset_getitem_position_ids(tmp_bin_file):
+    # No EOT tokens in arange(1024) data (token 0 is EOT by default, not present here
+    # since arange starts at 0 — position_ids should be monotonically increasing)
+    ds = PretrainDataset(tmp_bin_file, seq_len=128, eot_token_id=9999)
+    _, _, position_ids = ds[0]
+    assert position_ids.tolist() == list(range(128))
 
 
 # ---- packing=False tests ----
