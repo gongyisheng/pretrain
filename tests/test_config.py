@@ -97,9 +97,9 @@ def test_config_moe_fields_defaults():
         assert config.model.moe_aux_loss_coef == 0.01
 
 
-def test_training_config_doc_mask_default():
+def test_training_config_intra_doc_mask_default():
     cfg = TrainingConfig()
-    assert cfg.doc_mask is False
+    assert cfg.intra_doc_mask is False
 
 
 def test_data_config_eot_token_id_default():
@@ -107,16 +107,16 @@ def test_data_config_eot_token_id_default():
     assert cfg.eot_token_id == 0
 
 
-def test_doc_mask_yaml_override(tmp_path):
+def test_intra_doc_mask_yaml_override(tmp_path):
     yaml_content = """
 max_seq_len: 128
 training:
-  doc_mask: true
+  intra_doc_mask: true
 data:
   eot_token_id: 0
 """
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml_content)
     cfg = load_config(str(p))
-    assert cfg.training.doc_mask is True
+    assert cfg.training.intra_doc_mask is True
     assert cfg.data.eot_token_id == 0

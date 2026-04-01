@@ -43,12 +43,12 @@ class Trainer:
         set_backend(config.training.backend)
         self._cross_entropy = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
 
-        if config.training.doc_mask and config.training.backend == "triton":
+        if config.training.intra_doc_mask and config.training.backend == "triton":
             raise ValueError(
-                "doc_mask is not supported with the triton backend. "
+                "intra_doc_mask is not supported with the triton backend. "
                 "Use training.backend=torch instead."
             )
-        self.doc_mask = config.training.doc_mask
+        self.intra_doc_mask = config.training.intra_doc_mask
         self.eot_token_id = config.data.eot_token_id
 
         # Model
@@ -214,7 +214,7 @@ class Trainer:
                         next_x, next_y = next_x_cpu.to(self.device), next_y_cpu.to(self.device)
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                    doc_ids = self._build_doc_ids(x) if self.doc_mask else None
+                    doc_ids = self._build_doc_ids(x) if self.intra_doc_mask else None
                     if self.is_moe:
                         logits, aux_loss = self.model(x, doc_ids=doc_ids)
                         ce_loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
@@ -314,7 +314,7 @@ class Trainer:
                 break
             x, y = x.to(self.device), y.to(self.device)
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                doc_ids = self._build_doc_ids(x) if self.doc_mask else None
+                doc_ids = self._build_doc_ids(x) if self.intra_doc_mask else None
                 if self.is_moe:
                     logits, _ = self.model(x, doc_ids=doc_ids)
                 else:
