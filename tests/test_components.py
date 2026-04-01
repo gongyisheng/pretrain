@@ -3,12 +3,11 @@ import torch
 import torch.nn as nn
 from src.kernel.torch.flashattn import torch_flash_attn
 from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, set_backend, MoERouter, SparseMoEBlock
-from src.model.components import build_doc_ids, build_doc_causal_mask
 from src.model.components import (
-    build_doc_causal_mask_from_position_ids,
     RoPE,
     GroupedQueryAttention,
 )
+from src.utils.masking import build_causal_mask
 from src.model.qwen3 import Qwen3Model
 from src.model.qwen3_moe import Qwen3MoEModel
 from src.utils.config import ModelConfig
@@ -170,69 +169,34 @@ def test_qwen3_moe_aux_loss_is_scalar_and_nonneg():
     assert aux_loss.item() >= 0.0
 
 
-EOT = 0  # <|endoftext|> token ID used in tests
-
-
-def test_build_doc_ids_single_doc():
-    x = torch.tensor([[1, 2, 3, 4, 5]])  # (1, 5)
-    ids = build_doc_ids(x, EOT)
-    assert ids.shape == (1, 5)
-    assert ids.tolist() == [[0, 0, 0, 0, 0]]
-
-
-def test_build_doc_ids_eot_belongs_to_its_doc():
-    # EOT at position 3 → positions 0-3 are doc 0, positions 4+ are doc 1
-    x = torch.tensor([[1, 2, 3, EOT, 5, 6]])  # (1, 6)
-    ids = build_doc_ids(x, EOT)
-    assert ids.tolist() == [[0, 0, 0, 0, 1, 1]]
-
-
-def test_build_doc_ids_multiple_docs():
-    x = torch.tensor([[1, EOT, 2, EOT, 3]])  # (1, 5)
-    ids = build_doc_ids(x, EOT)
-    assert ids.tolist() == [[0, 0, 1, 1, 2]]
-
-
-def test_build_doc_ids_batch():
-    x = torch.tensor([
-        [1, EOT, 2],
-        [3, 4, 5],
-    ])  # (2, 3)
-    ids = build_doc_ids(x, EOT)
-    assert ids.tolist() == [[0, 0, 1], [0, 0, 0]]
-
-
-def test_build_doc_causal_mask_shape():
-    x = torch.tensor([[1, EOT, 2, 3]])  # (1, 4)
-    ids = build_doc_ids(x, EOT)
-    mask = build_doc_causal_mask(ids, device=ids.device, dtype=torch.float32)
+def test_build_causal_mask_shape():
+    pos = torch.tensor([[0, 1, 2, 3]])  # (1, 4)
+    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
     assert mask.shape == (1, 1, 4, 4)
 
 
-def test_build_doc_causal_mask_blocks_future():
-    x = torch.tensor([[1, 2, 3, 4]])
-    ids = build_doc_ids(x, EOT)
-    mask = build_doc_causal_mask(ids, device=ids.device, dtype=torch.float32)
+def test_build_causal_mask_blocks_future():
+    pos = torch.tensor([[0, 1, 2, 3]])
+    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
     m = mask[0, 0]  # (4, 4)
     for i in range(4):
         for j in range(i + 1, 4):
             assert m[i, j].item() == float('-inf'), f"Expected -inf at ({i},{j})"
 
 
-def test_build_doc_causal_mask_blocks_cross_doc():
-    x = torch.tensor([[1, EOT, 2, 3]])  # doc0=[0,1], doc1=[2,3]
-    ids = build_doc_ids(x, EOT)
-    mask = build_doc_causal_mask(ids, device=ids.device, dtype=torch.float32)
+def test_build_causal_mask_blocks_cross_doc():
+    # position_ids reset at pos 2: doc0=[0,1], doc1=[2,3]
+    pos = torch.tensor([[0, 1, 0, 1]])
+    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
     m = mask[0, 0]  # (4, 4)
     assert m[2, 0].item() == float('-inf')
     assert m[2, 1].item() == float('-inf')
     assert m[2, 2].item() == 0.0
 
 
-def test_build_doc_causal_mask_allows_same_doc_causal():
-    x = torch.tensor([[1, 2, 3, 4]])  # single doc
-    ids = build_doc_ids(x, EOT)
-    mask = build_doc_causal_mask(ids, device=ids.device, dtype=torch.float32)
+def test_build_causal_mask_allows_same_doc_causal():
+    pos = torch.tensor([[0, 1, 2, 3]])  # single doc
+    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
     m = mask[0, 0]  # (4, 4)
     for i in range(4):
         for j in range(i + 1):
@@ -253,9 +217,8 @@ def test_torch_flash_attn_with_attn_mask():
 def test_mha_attn_mask_output_shape():
     mha = MultiHeadAttention(d_model=64, n_heads=4, dropout=0.0)
     x = torch.randn(2, 8, 64)
-    # build a simple causal mask (no cross-doc, just verify the plumbing works)
-    doc_ids = build_doc_ids(torch.randint(1, 100, (2, 8)), EOT)
-    attn_mask = build_doc_causal_mask(doc_ids, device=x.device, dtype=x.dtype)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    attn_mask = build_causal_mask(pos, device=x.device, dtype=x.dtype)
     out = mha(x, attn_mask=attn_mask)
     assert out.shape == (2, 8, 64)
 
@@ -267,10 +230,9 @@ def test_mha_attn_mask_blocks_cross_doc_attention():
     mha.eval()
 
     x = torch.randn(1, 4, 64)
-    eot_id = 0
-    tokens = torch.tensor([[1, eot_id, 2, 3]])
-    doc_ids = build_doc_ids(tokens, eot_id)
-    attn_mask = build_doc_causal_mask(doc_ids, device=x.device, dtype=x.dtype)
+    # position_ids [0,1,0,1]: doc0=[pos0,pos1], doc1=[pos2,pos3]
+    pos = torch.tensor([[0, 1, 0, 1]])
+    attn_mask = build_causal_mask(pos, device=x.device, dtype=x.dtype)
 
     out_base = mha(x, attn_mask=attn_mask)
 
@@ -283,16 +245,16 @@ def test_mha_attn_mask_blocks_cross_doc_attention():
         "doc1 tokens were affected by changes to doc0 tokens"
 
 
-def test_build_doc_causal_mask_from_position_ids_shape():
+def test_build_causal_mask_multi_doc_shape():
     pos = torch.tensor([[0, 1, 2, 0, 1]])  # (1, 5)
-    mask = build_doc_causal_mask_from_position_ids(pos, device=pos.device, dtype=torch.float32)
+    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
     assert mask.shape == (1, 1, 5, 5)
 
 
-def test_build_doc_causal_mask_from_position_ids_blocks_cross_doc():
+def test_build_causal_mask_multi_doc_blocks_cross_doc():
     # position_ids = [0, 1, 2, 0, 1] → doc0=[0,1,2], doc1=[3,4]
     pos = torch.tensor([[0, 1, 2, 0, 1]])
-    mask = build_doc_causal_mask_from_position_ids(pos, device=pos.device, dtype=torch.float32)
+    mask = build_causal_mask(pos, device=pos.device, dtype=torch.float32)
     m = mask[0, 0]
     # doc1 tokens (rows 3,4) must not attend to doc0 tokens (cols 0,1,2)
     assert m[3, 0].item() == float('-inf')
@@ -300,16 +262,6 @@ def test_build_doc_causal_mask_from_position_ids_blocks_cross_doc():
     assert m[3, 2].item() == float('-inf')
     assert m[3, 3].item() == 0.0   # same doc, causal
     assert m[4, 3].item() == 0.0   # same doc, causal
-
-
-def test_build_doc_causal_mask_from_position_ids_matches_doc_ids_mask():
-    """Must produce the same mask as build_doc_causal_mask for equivalent inputs."""
-    x = torch.tensor([[1, 2, 0, 3, 4, 5, 0, 6, 7]])  # EOT=0 at positions 2 and 6
-    doc_ids = build_doc_ids(x, eot_token_id=0)
-    pos = torch.tensor([[0, 1, 2, 0, 1, 2, 3, 0, 1]])
-    mask_from_doc = build_doc_causal_mask(doc_ids, device=x.device, dtype=torch.float32)
-    mask_from_pos = build_doc_causal_mask_from_position_ids(pos, device=x.device, dtype=torch.float32)
-    assert torch.allclose(mask_from_doc, mask_from_pos)
 
 
 def test_rope_forward_with_position_ids_shape():

@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 
-from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention, build_doc_causal_mask_from_position_ids
+from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention
 from src.utils.config import ModelConfig
+from src.utils.masking import build_causal_mask
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
@@ -68,7 +69,7 @@ class GPT2Model(nn.Module):
         pos = position_ids if position_ids is not None else torch.arange(0, S, device=idx.device).unsqueeze(0)
         x = self.drop(self.token_emb(idx) + self.pos_emb(pos))
 
-        attn_mask = build_doc_causal_mask_from_position_ids(position_ids, idx.device, x.dtype) \
+        attn_mask = build_causal_mask(position_ids, idx.device, x.dtype) \
             if position_ids is not None else None
 
         if self.config.attn_res:

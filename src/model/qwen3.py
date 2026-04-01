@@ -3,13 +3,13 @@ import torch.nn as nn
 
 from src.model.components import (
     BaseTransformerBlock,
-    build_doc_causal_mask_from_position_ids,
     GroupedQueryAttention,
     RMSNorm,
     RoPE,
     SwiGluFFN,
 )
 from src.utils.config import ModelConfig
+from src.utils.masking import build_causal_mask
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):
@@ -106,7 +106,7 @@ class Qwen3Model(nn.Module):
         x = self.drop(self.token_emb(idx))
 
         attn_mask = (
-            build_doc_causal_mask_from_position_ids(position_ids, idx.device, x.dtype)
+            build_causal_mask(position_ids, idx.device, x.dtype)
             if position_ids is not None
             else None
         )
