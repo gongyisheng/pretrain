@@ -1,12 +1,15 @@
-max_seq_len: 1024
+max_seq_len: 4096
 
 model:
-  arch: "gpt2"
-  n_layers: 12
-  n_heads: 12
-  d_model: 768
+  arch: "qwen3"
+  n_layers: 8
+  n_heads: 8
+  n_kv_heads: 4
+  d_model: 512
   vocab_size: 50257
   dropout: 0.0
+  rope_theta: 500000.0
+  qk_norm: true
 
 data:
   dataset: "openwebtext"
@@ -17,8 +20,8 @@ data:
   eot_token_id: 0
 
 training:
-  batch_size: 12
-  gradient_accumulation_steps: 4
+  batch_size: 4
+  gradient_accumulation_steps: 12
   max_steps: 20000
   mixed_precision: "bf16"
   backend: "torch"
