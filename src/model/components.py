@@ -255,9 +255,9 @@ class MultiHeadAttention(nn.Module):
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
 
         if attn_mask is not None:
-            out = _flash_attn(q, k, v, causal=False, attn_mask=attn_mask)
+            out = _flash_attn(q, k, v, attn_mask=attn_mask)
         else:
-            out = _flash_attn(q, k, v, causal=True)
+            out = _flash_attn(q, k, v, is_causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.resid_dropout(self.out_proj(out))
@@ -311,9 +311,9 @@ class GroupedQueryAttention(nn.Module):
         v = v[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
 
         if attn_mask is not None:
-            out = _flash_attn(q, k, v, causal=False, attn_mask=attn_mask)
+            out = _flash_attn(q, k, v, attn_mask=attn_mask)
         else:
-            out = _flash_attn(q, k, v, causal=True)
+            out = _flash_attn(q, k, v, is_causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.resid_dropout(self.out_proj(out))

@@ -246,7 +246,7 @@ def test_torch_flash_attn_with_attn_mask():
     v = torch.randn(B, H, S, D)
     mask = torch.zeros(B, 1, S, S)
     mask.masked_fill_(~torch.ones(S, S).tril().bool(), float('-inf'))
-    out = torch_flash_attn(q, k, v, causal=False, attn_mask=mask)
+    out = torch_flash_attn(q, k, v, attn_mask=mask)
     assert out.shape == (B, H, S, D)
 
 

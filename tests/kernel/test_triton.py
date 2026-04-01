@@ -296,8 +296,8 @@ def _make_flashattn_inputs(B=2, n_heads=4, seq=64, d_head=64, dtype=torch.bfloat
 def test_flashattn_fwd():
     q, k, v = _make_flashattn_inputs()
 
-    o_triton, L = triton_flash_attn_fwd(q, k, v, causal=True)
-    o_ref = torch_flash_attn(q, k, v, causal=True)
+    o_triton, L = triton_flash_attn_fwd(q, k, v, is_causal=True)
+    o_ref = torch_flash_attn(q, k, v, is_causal=True)
 
     assert o_triton.dtype == o_ref.dtype == q.dtype
     assert o_triton.shape == o_ref.shape
@@ -307,8 +307,8 @@ def test_flashattn_fwd():
 def test_flashattn_fwd_noncausal():
     q, k, v = _make_flashattn_inputs()
 
-    o_triton, L = triton_flash_attn_fwd(q, k, v, causal=False)
-    o_ref = torch_flash_attn(q, k, v, causal=False)
+    o_triton, L = triton_flash_attn_fwd(q, k, v, is_causal=False)
+    o_ref = torch_flash_attn(q, k, v)
 
     assert torch.allclose(o_triton, o_ref, atol=1e-2, rtol=1e-2)
 
@@ -319,16 +319,16 @@ def test_flashattn_bwd():
     k.requires_grad_(True)
     v.requires_grad_(True)
 
-    o_ref = torch_flash_attn(q, k, v, causal=True)
+    o_ref = torch_flash_attn(q, k, v, is_causal=True)
     do = torch.randn_like(o_ref)
     o_ref.backward(do)
     dq_ref = q.grad.clone()
     dk_ref = k.grad.clone()
     dv_ref = v.grad.clone()
 
-    o_triton, L = triton_flash_attn_fwd(q.detach(), k.detach(), v.detach(), causal=True)
+    o_triton, L = triton_flash_attn_fwd(q.detach(), k.detach(), v.detach(), is_causal=True)
     dq_tri, dk_tri, dv_tri = triton_flash_attn_bwd(
-        q.detach(), k.detach(), v.detach(), o_triton, L, do, causal=True
+        q.detach(), k.detach(), v.detach(), o_triton, L, do, is_causal=True
     )
 
     assert torch.allclose(dq_tri, dq_ref, atol=1e-2, rtol=1e-2)
@@ -342,7 +342,7 @@ def test_flashattn_autograd():
     k.requires_grad_(True)
     v.requires_grad_(True)
 
-    o = triton_flash_attn(q, k, v, causal=True)
+    o = triton_flash_attn(q, k, v, is_causal=True)
     o.sum().backward()
 
     assert q.grad is not None
