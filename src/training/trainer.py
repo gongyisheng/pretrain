@@ -149,17 +149,23 @@ class Trainer:
             train_iter = iter(self.train_loader)
             return next(train_iter), train_iter
 
-    def _build_doc_ids(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute per-token document IDs from EOT token positions.
+    def _build_position_ids(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute per-token intra-document position IDs from EOT token positions.
 
-        doc_ids[b, i] = number of EOT tokens seen in x[b, 0..i-1].
-        The EOT token itself belongs to the document it ends.
+        position_ids[b, i] = position of token i within its document.
+        Resets to 0 for the token immediately after each EOT token.
+        Only supported with the torch backend (not triton).
         """
         is_eot = (x == self.eot_token_id)
-        doc_ids = torch.zeros_like(x)
-        if x.shape[1] > 1:
-            doc_ids[:, 1:] = is_eot[:, :-1].long().cumsum(dim=1)
-        return doc_ids
+        is_doc_start = torch.zeros_like(x, dtype=torch.bool)
+        is_doc_start[:, 1:] = is_eot[:, :-1]
+        doc_start_pos = torch.where(
+            is_doc_start,
+            torch.arange(x.shape[1], device=x.device).unsqueeze(0).expand_as(x),
+            torch.zeros_like(x),
+        )
+        doc_start_cummax, _ = torch.cummax(doc_start_pos, dim=1)
+        return torch.arange(x.shape[1], device=x.device).unsqueeze(0) - doc_start_cummax
 
     def train(self):
         cfg = self.config.training
@@ -214,13 +220,13 @@ class Trainer:
                         next_x, next_y = next_x_cpu.to(self.device), next_y_cpu.to(self.device)
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                    doc_ids = self._build_doc_ids(x) if self.intra_doc_mask else None
+                    position_ids = self._build_position_ids(x) if self.intra_doc_mask else None
                     if self.is_moe:
-                        logits, aux_loss = self.model(x, doc_ids=doc_ids)
+                        logits, aux_loss = self.model(x, position_ids=position_ids)
                         ce_loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
                         loss = ce_loss + self.config.model.moe_aux_loss_coef * aux_loss
                     else:
-                        logits = self.model(x, doc_ids=doc_ids)
+                        logits = self.model(x, position_ids=position_ids)
                         loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
                     loss = loss / cfg.gradient_accumulation_steps
 
@@ -314,11 +320,11 @@ class Trainer:
                 break
             x, y = x.to(self.device), y.to(self.device)
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                doc_ids = self._build_doc_ids(x) if self.intra_doc_mask else None
+                position_ids = self._build_position_ids(x) if self.intra_doc_mask else None
                 if self.is_moe:
-                    logits, _ = self.model(x, doc_ids=doc_ids)
+                    logits, _ = self.model(x, position_ids=position_ids)
                 else:
-                    logits = self.model(x, doc_ids=doc_ids)
+                    logits = self.model(x, position_ids=position_ids)
                 loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             total_loss += loss.item()
             n_batches += 1
