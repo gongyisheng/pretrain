@@ -16,7 +16,7 @@ class ModelConfig:
     attn_res_block_size: int = 2  # number of full layers per block for AttnRes
     attn_res_norm: str = "rmsnorm"  # norm for attn_res keys: "rmsnorm" or "layernorm"
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
-    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
+    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3, L_max ~62800
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
     n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
     n_experts_per_token: int = 2    # top-k experts activated per token
