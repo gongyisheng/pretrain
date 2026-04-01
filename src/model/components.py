@@ -76,14 +76,14 @@ def build_doc_causal_mask_from_position_ids(
     each document (equals the negative sequence-level start index of that doc).
     Two tokens attend iff they share that constant AND j <= i (causal).
 
-    **Precondition:** ``position_ids`` must contain intra-document positions
+    **Precondition:** ``position_ids`` must contain cross-document positions
     starting from 0 at each document boundary — i.e. the values produced by
     ``PretrainDataset._build_position_ids`` or ``Trainer._build_position_ids``.
     Passing absolute sequence positions or any other encoding will silently
     produce an incorrect mask.
 
     Args:
-        position_ids: shape (B, S), dtype long — per-token intra-doc position
+        position_ids: shape (B, S), dtype long — per-token cross-doc position
             (resets to 0 at the token immediately following each EOT token)
         device: target device
         dtype: dtype matching query tensors (required by SDPA)
@@ -206,7 +206,7 @@ class RoPE(nn.Module):
 
         Args:
             x: shape (B, n_heads, S, d_head)
-            position_ids: optional shape (B, S) — per-token intra-doc position.
+            position_ids: optional shape (B, S) — per-token cross-doc position.
                 When provided, cos/sin are gathered by index rather than sliced
                 sequentially, enabling per-document position resets.
                 Only supported with the torch backend (not triton).

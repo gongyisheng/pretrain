@@ -27,11 +27,11 @@ training:
   backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/intra_doc_mask/qwen3_57m_baseline"
+  checkpoint_dir: "checkpoints/cross_doc_mask/qwen3_57m_baseline"
   checkpoint_every: 5000
   eval_every: 500
   eval_steps: 100
-  intra_doc_mask: false
+  cross_doc_mask: false
 
 optimizer:
   name: "adamw"
@@ -45,6 +45,6 @@ scheduler:
   min_lr: 6e-5
 
 logging:
-  wandb_project: "pretrain-intra-doc-mask"
+  wandb_project: "pretrain-cross-doc-mask"
   wandb_run_name: "qwen3-57m-baseline"
   log_every: 10

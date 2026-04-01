@@ -43,12 +43,12 @@ class Trainer:
         set_backend(config.training.backend)
         self._cross_entropy = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
 
-        if config.training.intra_doc_mask and config.training.backend == "triton":
+        if config.training.cross_doc_mask and config.training.backend == "triton":
             raise ValueError(
-                "intra_doc_mask is not supported with the triton backend. "
+                "cross_doc_mask is not supported with the triton backend. "
                 "Use training.backend=torch instead."
             )
-        self.intra_doc_mask = config.training.intra_doc_mask
+        self.cross_doc_mask = config.training.cross_doc_mask
         self.eot_token_id = config.data.eot_token_id
 
         # Model
@@ -150,7 +150,7 @@ class Trainer:
             return next(train_iter), train_iter
 
     def _build_position_ids(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute per-token intra-document position IDs from EOT token positions.
+        """Compute per-token cross-document position IDs from EOT token positions.
 
         position_ids[b, i] = position of token i within its document.
         Resets to 0 for the token immediately after each EOT token.
@@ -220,7 +220,7 @@ class Trainer:
                         next_x, next_y = next_x_cpu.to(self.device), next_y_cpu.to(self.device)
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                    position_ids = self._build_position_ids(x) if self.intra_doc_mask else None
+                    position_ids = self._build_position_ids(x) if self.cross_doc_mask else None
                     if self.is_moe:
                         logits, aux_loss = self.model(x, position_ids=position_ids)
                         ce_loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
@@ -320,7 +320,7 @@ class Trainer:
                 break
             x, y = x.to(self.device), y.to(self.device)
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                position_ids = self._build_position_ids(x) if self.intra_doc_mask else None
+                position_ids = self._build_position_ids(x) if self.cross_doc_mask else None
                 if self.is_moe:
                     logits, _ = self.model(x, position_ids=position_ids)
                 else:

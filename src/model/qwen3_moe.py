@@ -95,7 +95,7 @@ class Qwen3MoEModel(nn.Module):
         """Returns (logits, aux_loss).
 
         position_ids is accepted for API compatibility but not used — MoE does not
-        support intra_doc_mask (triton guard in Trainer prevents this combination).
+        support cross_doc_mask (triton guard in Trainer prevents this combination).
         """
         x = self.drop(self.token_emb(idx))
         aux_loss = torch.tensor(0.0, device=idx.device)
