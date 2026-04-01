@@ -116,25 +116,17 @@ class RoPE(nn.Module):
         self.register_buffer("cos", torch.cos(angles))
         self.register_buffer("sin", torch.sin(angles))
 
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         """Apply rotary position embeddings.
 
         Args:
             x: shape (B, n_heads, S, d_head)
-            position_ids: optional shape (B, S) — per-token cross-doc position.
-                When provided, cos/sin are gathered by index rather than sliced
-                sequentially, enabling per-document position resets.
-                Only supported with the torch backend (not triton).
+            position_ids: shape (B, S) — per-token position used to gather
+                cos/sin tables, supporting per-document position resets.
         """
-        # x: (B, n_heads, S, d_head)
-        if position_ids is not None:
-            # position_ids: (B, S) — gather cos/sin for each per-doc position
-            cos = self.cos[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
-            sin = self.sin[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
-        else:
-            S = x.shape[2]
-            cos = self.cos[:S][None, None, :, :].to(x.dtype)          # (1, 1, S, d_head)
-            sin = self.sin[:S][None, None, :, :].to(x.dtype)          # (1, 1, S, d_head)
+        # position_ids: (B, S) — gather cos/sin for each position
+        cos = self.cos[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
+        sin = self.sin[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         return _rope(x, cos, sin)
 
 
@@ -221,8 +213,8 @@ class GroupedQueryAttention(nn.Module):
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_kv_heads, S, self.d_head)
 
         if rope is not None:
-            q = rope(q, position_ids=position_ids)
-            k = rope(k, position_ids=position_ids)
+            q = rope(q, position_ids)
+            k = rope(k, position_ids)
 
         # Expand KV heads for GQA (expand+reshape avoids memory allocation vs repeat_interleave)
         k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)

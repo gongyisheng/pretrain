@@ -100,14 +100,10 @@ class Qwen3Model(nn.Module):
     def forward(
         self,
         idx: torch.Tensor,
-        position_ids: torch.Tensor = None,
+        position_ids: torch.Tensor,
         return_logits: bool = True,
     ) -> torch.Tensor:
         x = self.drop(self.token_emb(idx))
-
-        B, S = idx.shape
-        if position_ids is None:
-            position_ids = torch.arange(S, device=idx.device).unsqueeze(0).expand(B, S)
         attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
 
         if self.config.attn_res:

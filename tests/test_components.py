@@ -147,24 +147,28 @@ def _tiny_moe_config():
     )
 
 
+def _moe_pos(B, S):
+    return torch.arange(S).unsqueeze(0).expand(B, S)
+
+
 def test_qwen3_moe_model_returns_tuple():
     model = Qwen3MoEModel(_tiny_moe_config(), max_seq_len=32)
     x = torch.randint(0, 256, (2, 8))
-    out = model(x)
+    out = model(x, position_ids=_moe_pos(2, 8))
     assert isinstance(out, tuple) and len(out) == 2
 
 
 def test_qwen3_moe_model_logits_shape():
     model = Qwen3MoEModel(_tiny_moe_config(), max_seq_len=32)
     x = torch.randint(0, 256, (2, 8))
-    logits, aux_loss = model(x)
+    logits, aux_loss = model(x, position_ids=_moe_pos(2, 8))
     assert logits.shape == (2, 8, 256)
 
 
 def test_qwen3_moe_aux_loss_is_scalar_and_nonneg():
     model = Qwen3MoEModel(_tiny_moe_config(), max_seq_len=32)
     x = torch.randint(0, 256, (2, 8))
-    _, aux_loss = model(x)
+    _, aux_loss = model(x, position_ids=_moe_pos(2, 8))
     assert aux_loss.ndim == 0
     assert aux_loss.item() >= 0.0
 
@@ -219,14 +223,6 @@ def test_rope_forward_with_position_ids_shape():
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)  # (B, S)
     out = rope(x, position_ids=pos)
     assert out.shape == (2, 4, 8, 16)
-
-
-def test_rope_forward_with_position_ids_sequential_matches_no_ids():
-    """Sequential position_ids must produce the same result as no position_ids."""
-    rope = RoPE(d_head=16, max_seq_len=32)
-    x = torch.randn(2, 4, 8, 16)
-    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    assert torch.allclose(rope(x, position_ids=pos), rope(x), atol=1e-6)
 
 
 def test_rope_forward_reset_position_ids_differ():

@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from src.model.components import GroupedQueryAttention, RMSNorm, RoPE, SparseMoEBlock
 from src.utils.config import ModelConfig
+from src.utils.masking_utils import build_causal_mask
 
 
 class Qwen3MoETransformerBlock(nn.Module):
@@ -33,8 +34,8 @@ class Qwen3MoETransformerBlock(nn.Module):
             capacity_factor,
         )
 
-    def forward(self, x: torch.Tensor, rope: RoPE) -> tuple:
-        x = x + self.attn(self.ln1(x), rope)
+    def forward(self, x: torch.Tensor, rope: RoPE, attn_mask: torch.Tensor, position_ids: torch.Tensor) -> tuple:
+        x = x + self.attn(self.ln1(x), rope, attn_mask=attn_mask, position_ids=position_ids)
         ffn_out, aux_loss = self.ffn(self.ln2(x))
         x = x + ffn_out
         return x, aux_loss
@@ -91,16 +92,13 @@ class Qwen3MoEModel(nn.Module):
             torch.nn.init.normal_(module.expert_gate_up, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor = None) -> tuple:
-        """Returns (logits, aux_loss).
-
-        position_ids is accepted for API compatibility but not used — MoE does not
-        support cross_doc_mask (triton guard in Trainer prevents this combination).
-        """
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor) -> tuple:
+        """Returns (logits, aux_loss)."""
         x = self.drop(self.token_emb(idx))
+        attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
         aux_loss = torch.tensor(0.0, device=idx.device)
         for block in self.blocks:
-            x, block_aux = block(x, rope=self.rope)
+            x, block_aux = block(x, self.rope, attn_mask, position_ids)
             aux_loss = aux_loss + block_aux
         x = self.ln_f(x)
         logits = self.lm_head(x)

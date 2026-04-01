@@ -64,14 +64,11 @@ class GPT2Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor = None, return_logits: bool = True) -> torch.Tensor:
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, return_logits: bool = True) -> torch.Tensor:
         B, S = idx.shape
         # Absolute position embedding always uses 0..S-1, never intra-doc position_ids
         pos = torch.arange(0, S, device=idx.device).unsqueeze(0)
         x = self.drop(self.token_emb(idx) + self.pos_emb(pos))
-
-        if position_ids is None:
-            position_ids = torch.arange(S, device=idx.device).unsqueeze(0).expand(B, S)
         attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
 
         if self.config.attn_res:

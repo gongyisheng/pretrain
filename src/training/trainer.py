@@ -349,10 +349,12 @@ class Trainer:
         for _ in range(max_new_tokens):
             # truncate context to max_seq_len if generation grows long
             idx_cond = idx[:, -self.config.max_seq_len:]
+            B, S = idx_cond.shape
+            pos_ids = torch.arange(S, device=self.device).unsqueeze(0).expand(B, S)
             if self.is_moe:
-                logits, _ = self.model(idx_cond)
+                logits, _ = self.model(idx_cond, position_ids=pos_ids)
             else:
-                logits = self.model(idx_cond)
+                logits = self.model(idx_cond, position_ids=pos_ids)
             logits = logits[:, -1, :]  # take last token's logits
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # sample from distribution

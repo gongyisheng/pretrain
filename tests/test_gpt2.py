@@ -11,11 +11,15 @@ def _small_config():
     return ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, dropout=0.0)
 
 
+def _pos(B, S):
+    return torch.arange(S).unsqueeze(0).expand(B, S)
+
+
 def test_gpt2_forward_shape():
     config = _small_config()
     model = GPT2Model(config, max_seq_len=128)
     x = torch.randint(0, 256, (2, 32))
-    logits = model(x)
+    logits = model(x, position_ids=_pos(2, 32))
     assert logits.shape == (2, 32, 256)
 
 
@@ -23,7 +27,7 @@ def test_gpt2_loss():
     config = _small_config()
     model = GPT2Model(config, max_seq_len=128)
     x = torch.randint(0, 256, (2, 32))
-    logits = model(x)
+    logits = model(x, position_ids=_pos(2, 32))
     loss = torch.nn.functional.cross_entropy(
         logits[:, :-1].reshape(-1, 256), x[:, 1:].reshape(-1)
     )
