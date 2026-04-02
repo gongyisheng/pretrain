@@ -44,38 +44,14 @@ nohup bash experiments/dropout/run.sh > logs/dropout.log 2>&1 &
 | 0.95 | |
 | 0.99 | |
 
-## Notes on Dropout Mechanics
+## Notes on Dropout
 
-### 1. What dropout is: the sub-network view
+Dropout zeros `p` fraction of activations each forward pass and scales survivors by `1/(1-p)`. The intuition is the sub-network view: each step trains a different randomly sampled sub-network, and over many steps the model learns robust features that don't depend on any specific neuron being present.
 
-Each forward pass, dropout zeros `p` fraction of activations and scales survivors by `1/(1-p)` to preserve expected magnitude. This is equivalent to sampling a random sub-network — only the active neurons participate in that step's computation and weight update. Over many steps, all sub-networks get trained, producing an implicit ensemble effect that reduces overfitting.
+Dropout must live in the forward pass because the backward pass is derived from it — the chain rule propagates zero gradient through zeroed activations automatically. Applying it only to gradients would compute gradients of a different function than the one that produced the loss, breaking gradient descent.
 
-### 2. Why dropout must be in the forward pass
+In this codebase dropout is applied at three positions: after the embedding lookup (`dropout_embd`), after the attention output projection (`dropout_attn`), and after the FFN activation (`dropout_ffn`). The embedding position is the most aggressive since there is no residual fallback — dropped dimensions corrupt the base `x` that all subsequent residual additions build on. The attention and FFN positions sit before the residual add, so the original `x` always provides a fallback. Dropout is never applied to the lm_head logits because zeroing random vocab entries distorts the softmax distribution with no regularization benefit.
 
-Dropout cannot be applied only in the backward pass. The backward pass is derived from the forward graph via chain rule — it computes gradients of exactly the function that was evaluated. If a unit is zeroed in the forward pass, its gradient is automatically zero; no special backward handling is needed. Conversely, zeroing gradients without zeroing activations would compute gradients of a different function than the one that produced the loss, breaking gradient descent. Forward and backward must be consistent.
+The `1/(1-p)` scaling preserves the expected gradient magnitude across dropout rates, but variance grows sharply with `p`. At `p=0.9` a weight receives gradient either 0 (90% of steps) or 10× (10% of steps) — same mean, 9× higher variance. This means sparser, spikier updates and slower effective learning. At extreme rates the model collapses onto the residual connections, bypassing the sublayers entirely.
 
-### 3. Where to apply: embd, attn, ffn — not lm_head
-
-| Position | Field | Notes |
-|---|---|---|
-| After embedding | `dropout_embd` | No residual fallback — corruption propagates as the base `x` into all layers |
-| After attention out_proj | `dropout_attn` | Residual `x` provides a fallback if output is dropped |
-| After FFN activation | `dropout_ffn` | Classic MLP dropout position; most natural location |
-| lm_head output (logits) | — | Never. Logits go directly into softmax; zeroing vocab entries distorts the probability distribution and destabilizes training |
-
-### 4. Effect: regularization vs. noise
-
-Dropout regularizes by preventing co-adaptation between neurons, but introduces gradient noise. The `1/(1-p)` scaling preserves the **mean** gradient, but **variance** grows with `p`:
-
-```
-# p=0.9: each weight's gradient per step
-step 1-9:  0.0   (dropped, 90% of the time)
-step 10:   10.0  (survived, scaled 10×)
-mean = 1.0 (same as no dropout), variance = 9× higher
-```
-
-High dropout means sparse, spiky weight updates. Gradient clipping bounds the spikes, but at extreme `p` (≥0.5) the model learns to rely on the residual connections and largely ignore the sublayers.
-
-### 5. Why modern LLMs don't use dropout
-
-At scale, **training data is the regularizer**. A model trained on hundreds of billions of tokens has little opportunity to overfit — the bottleneck is underfitting, not overfitting. Dropout slows convergence (noisier gradients, sparser updates) without providing regularization benefit when data is abundant. LLaMA, Qwen, Mistral and most post-2020 models set `p=0.0` for pretraining. Dropout remains useful for small-scale training or fine-tuning on limited data, which is why this sweep uses a 57M model.
+Modern LLMs (LLaMA, Qwen, Mistral) set `p=0.0` for pretraining because training data is the regularizer at scale. With hundreds of billions of tokens the bottleneck is underfitting, not overfitting, and dropout only adds noise that slows convergence. It remains useful for small models or fine-tuning on limited data — which is why this sweep is run on a 57M model.
