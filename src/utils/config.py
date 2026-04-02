@@ -11,7 +11,7 @@ class ModelConfig:
     d_model: int = 768
     intermediate_size: int = 0  # 0 means 4 * d_model, set in post_init
     vocab_size: int = 50257
-    dropout_embedding: float = 0.0
+    dropout_embd: float = 0.0
     dropout_attn: float = 0.0
     dropout_ffn: float = 0.0
     attn_res: bool = False        # enable Block Attention Residuals (works with any arch)

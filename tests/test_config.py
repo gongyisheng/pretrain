@@ -14,7 +14,7 @@ def _write_yaml(tmp_dir, data):
 
 MINIMAL_CONFIG = {
     "max_seq_len": 128,
-    "model": {"arch": "gpt2", "n_layers": 2, "n_heads": 2, "d_model": 64, "vocab_size": 256, "dropout_embedding": 0.0, "dropout_attn": 0.0, "dropout_ffn": 0.0},
+    "model": {"arch": "gpt2", "n_layers": 2, "n_heads": 2, "d_model": 64, "vocab_size": 256, "dropout_embd": 0.0, "dropout_attn": 0.0, "dropout_ffn": 0.0},
     "data": {"dataset": "test", "tokenizer_path": "tok", "data_dir": "data/", "val_split": 0.01, "num_workers": 0},
     "training": {
         "batch_size": 2, "gradient_accumulation_steps": 1, "max_steps": 10,

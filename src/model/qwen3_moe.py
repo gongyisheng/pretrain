@@ -42,7 +42,7 @@ class Qwen3MoEModel(nn.Module):
         self.config = config
 
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
-        self.drop = nn.Dropout(config.dropout_embedding)
+        self.drop = nn.Dropout(config.dropout_embd)
         self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
 
         self.blocks = nn.ModuleList([

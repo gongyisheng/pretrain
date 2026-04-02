@@ -8,7 +8,7 @@ model:
   d_model: 512
   moe_intermediate_size: 128
   vocab_size: 50257
-  dropout_embedding: 0.0
+  dropout_embd: 0.0
   dropout_attn: 0.0
   dropout_ffn: 0.0
   rope_theta: 10000.0

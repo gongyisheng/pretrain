@@ -30,7 +30,7 @@ class GPT2Model(nn.Module):
         self.padded_vocab_size = ((config.vocab_size + pad_multiple - 1) // pad_multiple) * pad_multiple
         self.token_emb = nn.Embedding(self.padded_vocab_size, config.d_model)
         self.pos_emb = nn.Embedding(max_seq_len, config.d_model)
-        self.drop = nn.Dropout(config.dropout_embedding)
+        self.drop = nn.Dropout(config.dropout_embd)
 
         self.blocks = nn.ModuleList([
             GPT2TransformerBlock(
