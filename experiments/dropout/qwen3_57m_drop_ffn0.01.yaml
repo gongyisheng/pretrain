@@ -1,0 +1,50 @@
+max_seq_len: 1024
+
+model:
+  arch: "qwen3"
+  n_layers: 8
+  n_heads: 8
+  n_kv_heads: 4
+  d_model: 512
+  vocab_size: 50257
+  dropout_embd: 0.0
+  dropout_attn: 0.0
+  dropout_ffn: 0.01
+  rope_theta: 10000.0
+  qk_norm: true
+
+data:
+  dataset: "openwebtext"
+  tokenizer_path: "tokenizers/custom_bpe_50k"
+  data_dir: "data/"
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  max_steps: 10000
+  mixed_precision: "bf16"
+  backend: "torch"
+  activation_checkpointing: false
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/dropout/dropout_ffn/qwen3_drop_ffn0.01/"
+  checkpoint_every: 5000
+  eval_every: 1000
+  eval_steps: 200
+
+optimizer:
+  name: "adamw"
+  lr: 6e-4
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 1000
+  min_lr: 6e-5
+
+logging:
+  wandb_project: "pretrain-dropout"
+  wandb_run_name: "qwen3-57m-drop-ffn0.01"
+  log_every: 10

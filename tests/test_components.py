@@ -14,12 +14,12 @@ def backend():
 class _MinimalTransformerBlock(BaseTransformerBlock):
     """Minimal concrete subclass of BaseTransformerBlock used in tests."""
 
-    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float = 0.0, dropout_ffn: float = 0.0):
         super().__init__(d_model)
         self.ln1 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_heads, dropout)
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn)
         self.ln2 = nn.LayerNorm(d_model)
-        self.ffn = GeluFFN(d_model, intermediate_size, dropout)
+        self.ffn = GeluFFN(d_model, intermediate_size, dropout_ffn)
 
     def attn_sublayer(self, x: torch.Tensor, **kwargs) -> torch.Tensor:  # noqa: ARG002
         return self.attn(self.ln1(x))
@@ -29,14 +29,14 @@ class _MinimalTransformerBlock(BaseTransformerBlock):
 
 
 def test_multihead_attention_output_shape():
-    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout=0.0)
+    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0)
     x = torch.randn(2, 16, 64)
     out = mha(x)
     assert out.shape == (2, 16, 64)
 
 
 def test_multihead_attention_is_causal():
-    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout=0.0)
+    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0)
     mha.eval()
     x = torch.randn(1, 8, 64)
     out_full = mha(x)
@@ -47,14 +47,14 @@ def test_multihead_attention_is_causal():
 
 
 def test_transformer_block_output_shape():
-    block = _MinimalTransformerBlock(d_model=64, n_heads=4, intermediate_size=256, dropout=0.0)
+    block = _MinimalTransformerBlock(d_model=64, n_heads=4, intermediate_size=256, dropout_attn=0.0)
     x = torch.randn(2, 16, 64)
     out = block(x)
     assert out.shape == (2, 16, 64)
 
 
 def test_transformer_block_residual():
-    block = _MinimalTransformerBlock(d_model=64, n_heads=4, intermediate_size=256, dropout=0.0)
+    block = _MinimalTransformerBlock(d_model=64, n_heads=4, intermediate_size=256, dropout_attn=0.0)
     x = torch.randn(2, 16, 64)
     out = block(x)
     assert not torch.allclose(out, x)
@@ -131,7 +131,6 @@ def _tiny_moe_config():
         d_model=64,
         intermediate_size=64,
         vocab_size=256,
-        dropout=0.0,
         rope_theta=10000.0,
         qk_norm=True,
         n_experts=4,

@@ -32,7 +32,7 @@ def _tiny_config(tmp_dir):
 
     return TrainConfig(
         max_seq_len=64,
-        model=ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=4096, dropout=0.0),
+        model=ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=4096),
         data=DataConfig(dataset="test", tokenizer_path=tok_path, data_dir=tmp_dir, val_split=0.01, num_workers=0),
         training=TrainingConfig(
             batch_size=4, gradient_accumulation_steps=1, max_steps=5,
@@ -93,7 +93,6 @@ def _tiny_moe_config(tmp_dir):
             d_model=64,
             intermediate_size=32,
             vocab_size=4096,
-            dropout=0.0,
             n_experts=4,
             n_experts_per_token=2,
             moe_aux_loss_coef=0.01,

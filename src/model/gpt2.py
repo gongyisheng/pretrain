@@ -6,12 +6,12 @@ from src.utils.config import ModelConfig
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout: float, qk_norm: bool = False, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_heads, dropout, qk_norm=qk_norm)
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn, qk_norm=qk_norm)
         self.ln2 = nn.LayerNorm(d_model)
-        self.ffn = GeluFFN(d_model, intermediate_size, dropout)
+        self.ffn = GeluFFN(d_model, intermediate_size, dropout_ffn)
 
     def attn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
         return self.attn(self.ln1(x))
@@ -30,14 +30,15 @@ class GPT2Model(nn.Module):
         self.padded_vocab_size = ((config.vocab_size + pad_multiple - 1) // pad_multiple) * pad_multiple
         self.token_emb = nn.Embedding(self.padded_vocab_size, config.d_model)
         self.pos_emb = nn.Embedding(max_seq_len, config.d_model)
-        self.drop = nn.Dropout(config.dropout)
+        self.drop = nn.Dropout(config.dropout_embd)
 
         self.blocks = nn.ModuleList([
             GPT2TransformerBlock(
                 d_model=config.d_model,
                 n_heads=config.n_heads,
                 intermediate_size=config.intermediate_size,
-                dropout=config.dropout,
+                dropout_attn=config.dropout_attn,
+                dropout_ffn=config.dropout_ffn,
                 qk_norm=config.qk_norm,
                 attn_res=config.attn_res,
                 attn_res_block_size=config.attn_res_block_size,

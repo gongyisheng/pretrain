@@ -8,7 +8,6 @@ model:
   d_model: 512
   moe_intermediate_size: 128
   vocab_size: 50257
-  dropout: 0.0
   rope_theta: 10000.0
   qk_norm: true
   n_experts: 16
