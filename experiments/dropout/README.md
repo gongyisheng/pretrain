@@ -46,7 +46,7 @@ nohup bash experiments/dropout/run.sh > logs/dropout.log 2>&1 &
 
 ## Notes on Dropout
 
-Dropout zeros `p` fraction of activations each forward pass and scales survivors by `1/(1-p)`. The intuition is the sub-network view: each step trains a different randomly sampled sub-network, and over many steps the model learns robust features that don't depend on any specific neuron being present.
+Dropout zeros `p` fraction of activations each forward pass and scales survivors by `1/(1-p)`. It is a regularization technique that prevents overfitting by adding noise to the network — forcing it to not rely on any specific neuron. The intuition is the sub-network view: each step trains a different randomly sampled sub-network, and over many steps the model learns robust features that don't depend on any specific neuron being present.
 
 Dropout must live in the forward pass because the backward pass is derived from it — the chain rule propagates zero gradient through zeroed activations automatically. Applying it only to gradients would compute gradients of a different function than the one that produced the loss, breaking gradient descent.
 
