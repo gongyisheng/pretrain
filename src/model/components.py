@@ -127,7 +127,7 @@ class RoPE(nn.Module):
 # --- Attention ---
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0, qk_norm: bool = False):
+    def __init__(self, d_model: int, n_heads: int, dropout_attn: float = 0.0, qk_norm: bool = False):
         super().__init__()
         assert d_model % n_heads == 0
         self.n_heads = n_heads
@@ -138,8 +138,7 @@ class MultiHeadAttention(nn.Module):
         self.k_proj = nn.Linear(d_model, d_model)
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
-        self.attn_dropout = nn.Dropout(dropout)
-        self.resid_dropout = nn.Dropout(dropout)
+        self.attn_dropout = nn.Dropout(dropout_attn)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.d_head)
@@ -158,7 +157,7 @@ class MultiHeadAttention(nn.Module):
         out = _flash_attn(q, k, v, causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
-        return self.resid_dropout(self.out_proj(out))
+        return self.attn_dropout(self.out_proj(out))
 
 
 class GroupedQueryAttention(nn.Module):
@@ -167,7 +166,7 @@ class GroupedQueryAttention(nn.Module):
         d_model: int,
         n_heads: int,
         n_kv_heads: int,
-        dropout: float = 0.0,
+        dropout_attn: float = 0.0,
         qk_norm: bool = False,
     ):
         super().__init__()
@@ -183,8 +182,7 @@ class GroupedQueryAttention(nn.Module):
         self.k_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
         self.v_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
-        self.attn_dropout = nn.Dropout(dropout)
-        self.resid_dropout = nn.Dropout(dropout)
+        self.attn_dropout = nn.Dropout(dropout_attn)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.d_head)
@@ -210,17 +208,17 @@ class GroupedQueryAttention(nn.Module):
         out = _flash_attn(q, k, v, causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
-        return self.resid_dropout(self.out_proj(out))
+        return self.attn_dropout(self.out_proj(out))
 
 
 # --- FFN ---
 
 class GeluFFN(nn.Module):
-    def __init__(self, d_model: int, intermediate_size: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, dropout_ffn: float = 0.0):
         super().__init__()
         self.fc1 = nn.Linear(d_model, intermediate_size)
         self.fc2 = nn.Linear(intermediate_size, d_model)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout_ffn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
@@ -231,12 +229,12 @@ class GeluFFN(nn.Module):
 
 
 class SwiGluFFN(nn.Module):
-    def __init__(self, d_model: int, intermediate_size: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, dropout_ffn: float = 0.0):
         super().__init__()
         self.gate_proj = nn.Linear(d_model, intermediate_size, bias=False)
         self.up_proj = nn.Linear(d_model, intermediate_size, bias=False)
         self.down_proj = nn.Linear(intermediate_size, d_model, bias=False)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout_ffn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate = self.gate_proj(x)
@@ -284,7 +282,7 @@ class SparseMoEBlock(nn.Module):
     account for this when comparing runs across different k values.
     """
 
-    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout: float = 0.0, capacity_factor: float = None):
+    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout_ffn: float = 0.0, capacity_factor: float = None):
         super().__init__()
         self.n_experts = n_experts
         self.n_experts_per_token = n_experts_per_token
@@ -295,7 +293,7 @@ class SparseMoEBlock(nn.Module):
         # gate and up are fused into one tensor to save memory (one bmm instead of two)
         self.expert_gate_up = nn.Parameter(torch.empty(n_experts, 2 * intermediate_size, d_model))
         self.expert_down = nn.Parameter(torch.empty(n_experts, d_model, intermediate_size))
-        self.expert_dropout = nn.Dropout(dropout)
+        self.expert_dropout = nn.Dropout(dropout_ffn)
 
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)

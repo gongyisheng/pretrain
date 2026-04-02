@@ -6,7 +6,9 @@ model:
   n_heads: 12
   d_model: 768
   vocab_size: 50257
-  dropout: 0.0
+  dropout_embedding: 0.0
+  dropout_attn: 0.0
+  dropout_ffn: 0.0
 
 data:
   dataset: "openwebtext"
