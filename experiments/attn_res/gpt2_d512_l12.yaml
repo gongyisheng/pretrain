@@ -6,7 +6,6 @@ model:
   n_heads: 8
   d_model: 512
   vocab_size: 50257
-  dropout: 0.0
   attn_res: true
   attn_res_block_size: 2  # boundaries at layers 0, 2, ..., 10 → 6 blocks
 
