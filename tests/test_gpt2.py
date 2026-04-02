@@ -9,7 +9,7 @@ set_backend("torch")
 
 
 def _small_config():
-    return ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, dropout=0.0)
+    return ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256)
 
 
 def _pos(B, S):

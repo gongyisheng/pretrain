@@ -43,3 +43,15 @@ nohup bash experiments/dropout/run.sh > logs/dropout.log 2>&1 &
 | 0.9 | |
 | 0.95 | |
 | 0.99 | |
+
+## Notes on Dropout
+
+Dropout zeros `p` fraction of activations each forward pass and scales survivors by `1/(1-p)`. It is a regularization technique that prevents overfitting by adding noise to the network, forcing it to not rely on any specific neuron. The intuition is the sub-network view: each step trains a different randomly sampled sub-network, and over many steps the model learns robust features that don't depend on any specific neuron being present.
+
+Dropout must live in the forward pass because the backward pass is derived from it — the chain rule propagates zero gradient through zeroed activations automatically. Applying it only to gradients would compute gradients of a different function than the one that produced the loss, breaking gradient descent.
+
+In this codebase dropout is applied at three positions: after the embedding lookup (`dropout_embd`), after the attention output projection (`dropout_attn`), and after the FFN activation (`dropout_ffn`). The embedding position is the most aggressive since there is no residual fallback — dropped dimensions corrupt the base `x` that all subsequent residual additions build on. The attention and FFN positions sit before the residual add, so the original `x` always provides a fallback. Dropout is never applied to the lm_head logits because zeroing random vocab entries distorts the softmax distribution with no regularization benefit.
+
+The `1/(1-p)` scaling preserves the expected gradient magnitude across dropout rates, but variance grows sharply with `p`. At `p=0.9` a weight receives gradient either 0 (90% of steps) or 10× (10% of steps) — same mean, 9× higher variance. This means sparser, spikier updates and slower effective learning. At extreme rates the model collapses onto the residual connections, bypassing the sublayers entirely.
+
+Modern LLMs (LLaMA, Qwen, Mistral) set `p=0.0` for pretraining because training data is the regularizer at scale. Pretraining passes through the corpus only once — each sample is seen exactly once — so the model never has a chance to memorize training examples, making overfitting structurally unlikely. With hundreds of billions of tokens the bottleneck is underfitting, not overfitting, and dropout only adds noise that slows convergence. It remains useful for small models or fine-tuning on limited data — which is why this sweep is run on a 57M model.

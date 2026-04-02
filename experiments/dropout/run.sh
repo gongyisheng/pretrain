@@ -5,12 +5,38 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-for config in qwen3_57m_drop0.0 qwen3_57m_drop0.01 qwen3_57m_drop0.02 qwen3_57m_drop0.05 qwen3_57m_drop0.1 qwen3_57m_drop0.2 qwen3_57m_drop0.5 qwen3_57m_drop0.9 qwen3_57m_drop0.95 qwen3_57m_drop0.99; do
-    echo "=== ${config} ==="
-    echo "Started at: $(date)"
+RATES="0.0 0.01 0.02 0.05 0.1 0.2 0.5 0.9 0.95 0.99"
+
+echo "=== All dropout (embd+attn+ffn) ==="
+for rate in $RATES; do
+    config="qwen3_57m_drop${rate}"
+    echo "--- ${config} --- Started at: $(date)"
     uv run python scripts/train.py --config "experiments/dropout/${config}.yaml"
     echo "Finished at: $(date)"
-    echo ""
+done
+
+echo "=== Embedding dropout only ==="
+for rate in $RATES; do
+    config="qwen3_57m_drop_embd${rate}"
+    echo "--- ${config} --- Started at: $(date)"
+    uv run python scripts/train.py --config "experiments/dropout/${config}.yaml"
+    echo "Finished at: $(date)"
+done
+
+echo "=== Attention dropout only ==="
+for rate in $RATES; do
+    config="qwen3_57m_drop_attn${rate}"
+    echo "--- ${config} --- Started at: $(date)"
+    uv run python scripts/train.py --config "experiments/dropout/${config}.yaml"
+    echo "Finished at: $(date)"
+done
+
+echo "=== FFN dropout only ==="
+for rate in $RATES; do
+    config="qwen3_57m_drop_ffn${rate}"
+    echo "--- ${config} --- Started at: $(date)"
+    uv run python scripts/train.py --config "experiments/dropout/${config}.yaml"
+    echo "Finished at: $(date)"
 done
 
 echo "=== All dropout runs complete ==="

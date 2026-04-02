@@ -13,23 +13,12 @@ from src.utils.config import ModelConfig
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        n_kv_heads: int,
-        intermediate_size: int,
-        dropout: float,
-        qk_norm: bool = False,
-        **kwargs,
-    ):
+    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = RMSNorm(d_model)
-        self.attn = GroupedQueryAttention(
-            d_model, n_heads, n_kv_heads, dropout, qk_norm
-        )
+        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm)
         self.ln2 = RMSNorm(d_model)
-        self.ffn = SwiGluFFN(d_model, intermediate_size, dropout)
+        self.ffn = SwiGluFFN(d_model, intermediate_size, dropout_ffn)
 
     def attn_sublayer(
         self,
@@ -57,29 +46,26 @@ class Qwen3Model(nn.Module):
             (config.vocab_size + pad_multiple - 1) // pad_multiple
         ) * pad_multiple
         self.token_emb = nn.Embedding(self.padded_vocab_size, config.d_model)
-        self.drop = nn.Dropout(config.dropout)
+        self.drop = nn.Dropout(config.dropout_embd)
         # No pos_emb — positioning handled by RoPE inside each attention layer
-        self.rope = RoPE(
-            config.d_model // config.n_heads, max_seq_len, config.rope_theta
-        )
+        self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
 
-        self.blocks = nn.ModuleList(
-            [
-                Qwen3TransformerBlock(
-                    d_model=config.d_model,
-                    n_heads=config.n_heads,
-                    n_kv_heads=config.n_kv_heads,
-                    intermediate_size=config.intermediate_size,
-                    dropout=config.dropout,
-                    qk_norm=config.qk_norm,
-                    attn_res=config.attn_res,
-                    attn_res_block_size=config.attn_res_block_size,
-                    attn_res_norm=config.attn_res_norm,
-                    layer_idx=i,
-                )
-                for i in range(config.n_layers)
-            ]
-        )
+        self.blocks = nn.ModuleList([
+            Qwen3TransformerBlock(
+                d_model=config.d_model,
+                n_heads=config.n_heads,
+                n_kv_heads=config.n_kv_heads,
+                intermediate_size=config.intermediate_size,
+                dropout_attn=config.dropout_attn,
+                dropout_ffn=config.dropout_ffn,
+                qk_norm=config.qk_norm,
+                attn_res=config.attn_res,
+                attn_res_block_size=config.attn_res_block_size,
+                attn_res_norm=config.attn_res_norm,
+                layer_idx=i,
+            )
+            for i in range(config.n_layers)
+        ])
 
         self.ln_f = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=False)
