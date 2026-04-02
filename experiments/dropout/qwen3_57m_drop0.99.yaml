@@ -7,7 +7,9 @@ model:
   n_kv_heads: 4
   d_model: 512
   vocab_size: 50257
-  dropout: 0.99
+  dropout_embd: 0.99
+  dropout_attn: 0.99
+  dropout_ffn: 0.99
   rope_theta: 10000.0
   qk_norm: true
 
