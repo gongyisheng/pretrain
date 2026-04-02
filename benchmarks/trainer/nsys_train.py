@@ -4,8 +4,11 @@ Run with:
     nsys profile -o logs/profiles/gpt2_torch python benchmarks/trainer/nsys_train.py --config configs/gpt2_124m.yaml --backend torch
     nsys profile -o logs/profiles/gpt2_triton python benchmarks/trainer/nsys_train.py --config configs/gpt2_124m.yaml --backend triton
 
+    nsys profile --capture-range=cudaProfilerApi -o logs/profiles/qwen3_torch python benchmarks/trainer/nsys_train.py --config configs/qwen3_145m.yaml --backend torch
+
 Then analyze:
     nsys stats logs/profiles/gpt2_torch.nsys-rep
+    nsys stats --report cuda_gpu_kern_sum logs/profiles/qwen3_torch.nsys-rep
 """
 import argparse
 import sys
