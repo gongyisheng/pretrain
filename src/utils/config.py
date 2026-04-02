@@ -57,7 +57,7 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 1000
     eval_steps: int = 200
-    cross_doc_mask: bool = True
+    intra_doc_masking: bool = True
 
 
 @dataclass
