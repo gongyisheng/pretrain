@@ -125,6 +125,7 @@ class RoPE(nn.Module):
                 cos/sin tables, supporting per-document position resets.
         """
         # position_ids: (B, S) — gather cos/sin for each position
+        # TODO: the fansy index performance is bad, need to fuse to rope kernel
         cos = self.cos[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         sin = self.sin[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         return _rope(x, cos, sin)
