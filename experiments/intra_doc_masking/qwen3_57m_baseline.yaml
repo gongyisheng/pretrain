@@ -45,6 +45,6 @@ scheduler:
   min_lr: 6e-5
 
 logging:
-  wandb_project: "pretrain-cross-doc-mask"
+  wandb_project: "pretrain-intra-doc-masking"
   wandb_run_name: "qwen3-57m-baseline"
   log_every: 10
