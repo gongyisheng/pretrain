@@ -228,8 +228,11 @@ class Trainer:
                     x, y = next_token_targets(input_ids)
                     # packing=False: position_ids < 0 marks padding — derive loss mask
                     loss_mask = None if self.config.data.packing else (position_ids >= 0)
-                    mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                    attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
+                    if self.config.training.intra_doc_masking:
+                        mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                        attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
+                    else:
+                        attn_mask = None
                     logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
                     loss = compute_loss(logits, y, loss_mask, self._loss_fn)
                     if aux_loss is not None:
@@ -330,8 +333,11 @@ class Trainer:
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
                 x, y = next_token_targets(input_ids)
                 loss_mask = None if self.config.data.packing else (position_ids >= 0)
-                mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
+                if self.config.training.intra_doc_masking:
+                    mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                    attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
+                else:
+                    attn_mask = None
                 logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
                 loss = compute_loss(logits, y, loss_mask, self._loss_fn)
             total_loss += loss.item()

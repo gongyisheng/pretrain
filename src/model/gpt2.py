@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttention
 from src.utils.config import ModelConfig
-from src.utils.masking_utils import build_causal_mask
+
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
@@ -69,8 +69,6 @@ class GPT2Model(nn.Module):
         # Absolute position embedding always uses 0..S-1, never intra-doc position_ids
         pos = torch.arange(0, S, device=idx.device).unsqueeze(0)
         x = self.drop(self.token_emb(idx) + self.pos_emb(pos))
-        if attn_mask is None:
-            attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
 
         if self.config.attn_res:
             attn_res_ctx = []

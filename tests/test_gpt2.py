@@ -3,6 +3,7 @@ from src.model.components import set_backend
 from src.model.gpt2 import GPT2Model
 from src.model.registry import build_model
 from src.utils.config import ModelConfig
+from src.utils.masking_utils import build_causal_mask
 
 set_backend("torch")
 
@@ -75,12 +76,13 @@ def test_gpt2_position_ids_blocks_cross_doc():
     x[0, 4] = eot_id  # EOT at position 4: doc0=[0..4], doc1=[5..15]
     # position_ids: doc0 → 0,1,2,3,4 ; doc1 → 0,1,2,3,4,5,6,7,8,9,10
     position_ids = torch.tensor([[0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
+    attn_mask = build_causal_mask(position_ids, x.device, torch.float32)
 
-    logits_base, _ = model(x, position_ids=position_ids)
+    logits_base, _ = model(x, position_ids=position_ids, attn_mask=attn_mask)
 
     x2 = x.clone()
     x2[0, :4] = torch.randint(1, 256, (4,))   # change doc0 tokens (not the EOT)
-    logits_modified, _ = model(x2, position_ids=position_ids)
+    logits_modified, _ = model(x2, position_ids=position_ids, attn_mask=attn_mask)
 
     # doc1 positions (5..15) must be unaffected
     assert torch.allclose(logits_base[0, 5:], logits_modified[0, 5:], atol=1e-4), \

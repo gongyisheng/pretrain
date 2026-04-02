@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from src.model.components import GroupedQueryAttention, RMSNorm, RoPE, SparseMoEBlock
 from src.utils.config import ModelConfig
-from src.utils.masking_utils import build_causal_mask
+
 
 
 class Qwen3MoETransformerBlock(nn.Module):
@@ -95,8 +95,6 @@ class Qwen3MoEModel(nn.Module):
     def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask: torch.Tensor = None) -> tuple:
         """Returns (logits, aux_loss)."""
         x = self.drop(self.token_emb(idx))
-        if attn_mask is None:
-            attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
         aux_loss = torch.tensor(0.0, device=idx.device)
         for block in self.blocks:
             x, block_aux = block(x, self.rope, position_ids, attn_mask)

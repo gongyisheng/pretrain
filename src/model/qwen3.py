@@ -9,7 +9,7 @@ from src.model.components import (
     SwiGluFFN,
 )
 from src.utils.config import ModelConfig
-from src.utils.masking_utils import build_causal_mask
+
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):
@@ -105,8 +105,6 @@ class Qwen3Model(nn.Module):
         return_logits: bool = True,
     ) -> torch.Tensor:
         x = self.drop(self.token_emb(idx))
-        if attn_mask is None:
-            attn_mask = build_causal_mask(position_ids, idx.device, x.dtype)
 
         if self.config.attn_res:
             attn_res_ctx = []

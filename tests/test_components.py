@@ -279,12 +279,13 @@ def test_qwen3_position_ids_blocks_cross_doc():
     x = torch.randint(1, 256, (1, 8))
     x[0, 3] = eot_id  # doc0=[0..3], doc1=[4..7]
     position_ids = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])
+    attn_mask = build_causal_mask(position_ids, x.device, torch.float32)
 
-    logits_base, _ = model(x, position_ids=position_ids)
+    logits_base, _ = model(x, position_ids=position_ids, attn_mask=attn_mask)
 
     x2 = x.clone()
     x2[0, :3] = torch.randint(1, 256, (3,))
-    logits_modified, _ = model(x2, position_ids=position_ids)
+    logits_modified, _ = model(x2, position_ids=position_ids, attn_mask=attn_mask)
 
     assert torch.allclose(logits_base[0, 4:], logits_modified[0, 4:], atol=1e-4), \
         "doc1 logits changed when doc0 tokens were modified"
