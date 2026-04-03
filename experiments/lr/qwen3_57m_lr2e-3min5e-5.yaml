@@ -25,7 +25,7 @@ training:
   backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/lr/qwen3_lr2e-3/"
+  checkpoint_dir: "checkpoints/lr/qwen3_lr2e-3_min5e-5/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -39,9 +39,9 @@ optimizer:
 scheduler:
   name: "cosine"
   warmup_steps: 1000
-  min_lr: 2e-4
+  min_lr: 5e-5
 
 logging:
   wandb_project: "pretrain-lr"
-  wandb_run_name: "qwen3-57m-lr2e-3"
+  wandb_run_name: "qwen3-57m-lr2e-3-min-5e-5"
   log_every: 10
