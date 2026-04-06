@@ -23,7 +23,7 @@ data:
 training:
   batch_size: 4
   gradient_accumulation_steps: 8
-  max_steps: 10000
+  max_steps: 50000
   mixed_precision: "bf16"
   backend: "torch"
   activation_checkpointing: false
@@ -48,3 +48,6 @@ logging:
   wandb_project: "pretrain-dropout"
   wandb_run_name: "qwen3-57m-drop-attn0.05"
   log_every: 10
+
+debug:
+  max_steps: 10000
