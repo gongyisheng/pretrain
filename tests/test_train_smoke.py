@@ -17,6 +17,8 @@ def backend(request):
 
 
 def _run_dry_run(config_path, backend):
+    if backend == "triton":
+        pytest.skip("triton backend does not support explicit attention masks")
     overrides = [
         f"debug.max_steps={STEPS}",
         f"training.eval_every={STEPS + 1}",

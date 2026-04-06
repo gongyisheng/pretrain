@@ -5,6 +5,7 @@ from src.model.components import BaseTransformerBlock, GeluFFN, MultiHeadAttenti
 from src.utils.config import ModelConfig
 
 
+
 class GPT2TransformerBlock(BaseTransformerBlock):
     def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, **kwargs):
         super().__init__(d_model, **kwargs)
@@ -13,8 +14,8 @@ class GPT2TransformerBlock(BaseTransformerBlock):
         self.ln2 = nn.LayerNorm(d_model)
         self.ffn = GeluFFN(d_model, intermediate_size, dropout_ffn)
 
-    def attn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
-        return self.attn(self.ln1(x))
+    def attn_sublayer(self, x: torch.Tensor, attn_mask: torch.Tensor = None) -> torch.Tensor:
+        return self.attn(self.ln1(x), attn_mask=attn_mask)
 
     def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
         return self.ffn(self.ln2(x))
@@ -64,21 +65,21 @@ class GPT2Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, return_logits: bool = True) -> torch.Tensor:
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask: torch.Tensor = None, return_logits: bool = True) -> torch.Tensor:
         B, S = idx.shape
+        # Absolute position embedding always uses 0..S-1, never intra-doc position_ids
         pos = torch.arange(0, S, device=idx.device).unsqueeze(0)
-
         x = self.drop(self.token_emb(idx) + self.pos_emb(pos))
 
         if self.config.attn_res:
             attn_res_ctx = []
             for block in self.blocks:
-                x, attn_res_ctx = block(x, attn_res_ctx)
+                x, attn_res_ctx = block(x, attn_res_ctx, attn_mask=attn_mask)
         else:
             for block in self.blocks:
-                x = block(x)
+                x = block(x, attn_mask=attn_mask)
 
         x = self.ln_f(x)
         if return_logits:
-            return self.lm_head(x)
+            return self.lm_head(x), None
         return x

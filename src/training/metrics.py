@@ -49,7 +49,7 @@ class MetricsTracker:
     # Log dict assembly
     # ------------------------------------------------------------------
 
-    def build_log_dict(
+    def build_train_log_dict(
         self,
         *,
         loss: float,
@@ -106,6 +106,21 @@ class MetricsTracker:
         self._grad_clip_steps = 0
         self._steps_since_log = 0
 
+        return d
+
+    def build_eval_log_dict(
+        self,
+        *,
+        avg_loss: float,
+        avg_aux_loss: float | None = None,
+    ) -> dict[str, float]:
+        """Assemble validation metrics dict for logging."""
+        d: dict[str, float] = {
+            "val/loss": avg_loss,
+            "val/perplexity": min(float(torch.exp(torch.tensor(avg_loss))), 1e6),
+        }
+        if self.is_moe and avg_aux_loss is not None:
+            d["val/aux_loss"] = avg_aux_loss - self._aux_floor
         return d
 
     # ------------------------------------------------------------------

@@ -16,6 +16,8 @@ from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
+from src.training.loss import next_token_targets, compute_loss
+from src.utils.masking_utils import build_causal_mask
 from src.kernel.triton.cross_entropy import triton_cross_entropy
 from src.kernel.torch.cross_entropy import torch_cross_entropy
 
@@ -41,7 +43,23 @@ class Trainer:
         # Backend selection: "torch" (torch.compile) or "triton" (custom kernels)
         from src.model.components import set_backend
         set_backend(config.training.backend)
-        self._cross_entropy = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
+        self._loss_fn = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
+
+        if config.training.backend == "triton":
+            raise ValueError(
+                "The triton backend does not support explicit attention masks. "
+                "Use training.backend=torch instead."
+            )
+
+        # Tokenizer — loaded early to provide special token IDs to the dataset
+        self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
+        if self.tokenizer is not None:
+            eot_id = self.tokenizer.token_to_id("<|endoftext|>")
+            self.eot_token_id = eot_id if eot_id is not None else 0
+        else:
+            self.eot_token_id = 0  # fallback for tests without a real tokenizer
+        # EOT doubles as the padding token (no dedicated pad token in the current tokenizer)
+        self.pad_token_id = self.eot_token_id
 
         # Model
         self.model = build_model(config).to(self.device)
@@ -63,8 +81,13 @@ class Trainer:
         # Data
         train_path = os.path.join(config.data.data_dir, "train.bin")
         val_path = os.path.join(config.data.data_dir, "val.bin")
-        self.train_dataset = PretrainDataset(train_path, config.max_seq_len)
-        self.val_dataset = PretrainDataset(val_path, config.max_seq_len)
+        dataset_kwargs = dict(
+            packing=config.data.packing,
+            eot_token_id=self.eot_token_id,
+            pad_token_id=self.pad_token_id,
+        )
+        self.train_dataset = PretrainDataset(train_path, config.max_seq_len, **dataset_kwargs)
+        self.val_dataset = PretrainDataset(val_path, config.max_seq_len, **dataset_kwargs)
 
         nw = config.data.num_workers
         self.train_loader = DataLoader(
@@ -87,6 +110,13 @@ class Trainer:
         self.amp_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(enabled=(self.use_amp and self.amp_dtype == torch.float16))
 
+        # Disable assert_indirect_indexing to avoid spurious CUDA assertions during
+        # torchinductor autotuning, which may dispatch kernel test runs on a stream
+        # that doesn't respect wait_stream(prefetch_stream), causing RoPE's
+        # position_ids[i] lookup to read uninitialized GPU memory.
+        import torch._inductor.config as inductor_config
+        inductor_config.assert_indirect_indexing = False
+
         if self.is_moe and config.model.moe_expert_capacity_factor is None:
             # Dynamic capacity uses .item() — can't compile the full model
             for block in self.model.blocks:
@@ -107,9 +137,6 @@ class Trainer:
                             return torch.utils.checkpoint.checkpoint(b._original_forward, x, use_reentrant=False, **kwargs)
                         return ckpt_forward
                     block.forward = make_ckpt_forward(block)
-
-        # Tokenizer (may be None when tokenizer_path is empty, e.g. in tests)
-        self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
 
         # Metrics
         self.metrics = MetricsTracker(config, self.n_non_emb_params, self.device)
@@ -170,13 +197,15 @@ class Trainer:
             accum_loss_tensor = torch.zeros(1, device=self.device)
 
             # Prefetch first batch
-            (x_cpu, y_cpu), train_iter = self._next_batch(train_iter)
+            batch_cpu, train_iter = self._next_batch(train_iter)
+            input_ids_cpu, position_ids_cpu = batch_cpu[0], batch_cpu[1]
             if prefetch_stream is not None:
                 with torch.cuda.stream(prefetch_stream):
-                    x = x_cpu.to(self.device, non_blocking=True)
-                    y = y_cpu.to(self.device, non_blocking=True)
+                    input_ids = input_ids_cpu.to(self.device, non_blocking=True)
+                    position_ids = position_ids_cpu.to(self.device, non_blocking=True)
             else:
-                x, y = x_cpu.to(self.device), y_cpu.to(self.device)
+                input_ids = input_ids_cpu.to(self.device)
+                position_ids = position_ids_cpu.to(self.device)
 
             for micro_step in range(cfg.gradient_accumulation_steps):
                 # Wait for current batch transfer to complete
@@ -185,22 +214,29 @@ class Trainer:
 
                 # Start prefetching next batch while computing
                 if micro_step < cfg.gradient_accumulation_steps - 1:
-                    (next_x_cpu, next_y_cpu), train_iter = self._next_batch(train_iter)
+                    next_batch_cpu, train_iter = self._next_batch(train_iter)
+                    next_input_ids_cpu, next_position_ids_cpu = next_batch_cpu[0], next_batch_cpu[1]
                     if prefetch_stream is not None:
                         with torch.cuda.stream(prefetch_stream):
-                            next_x = next_x_cpu.to(self.device, non_blocking=True)
-                            next_y = next_y_cpu.to(self.device, non_blocking=True)
+                            next_input_ids = next_input_ids_cpu.to(self.device, non_blocking=True)
+                            next_position_ids = next_position_ids_cpu.to(self.device, non_blocking=True)
                     else:
-                        next_x, next_y = next_x_cpu.to(self.device), next_y_cpu.to(self.device)
+                        next_input_ids = next_input_ids_cpu.to(self.device)
+                        next_position_ids = next_position_ids_cpu.to(self.device)
 
                 with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                    if self.is_moe:
-                        logits, aux_loss = self.model(x)
-                        ce_loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-                        loss = ce_loss + self.config.model.moe_aux_loss_coef * aux_loss
+                    x, y = next_token_targets(input_ids)
+                    # packing=False: position_ids < 0 marks padding — derive loss mask
+                    loss_mask = None if self.config.data.packing else (position_ids >= 0)
+                    if self.config.training.intra_doc_masking:
+                        mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                        attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
                     else:
-                        logits = self.model(x)
-                        loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                        attn_mask = None
+                    logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
+                    loss = compute_loss(logits, y, loss_mask, self._loss_fn)
+                    if aux_loss is not None:
+                        loss = loss + self.config.model.moe_aux_loss_coef * aux_loss
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
@@ -209,7 +245,7 @@ class Trainer:
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
-                    x, y = next_x, next_y
+                    input_ids, position_ids = next_input_ids, next_position_ids
 
             # Gradient clipping
             self.scaler.unscale_(self.optimizer)
@@ -242,11 +278,11 @@ class Trainer:
                 elapsed = time.time() - t_last_log
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
                 lr = self.optimizer.param_groups[0]["lr"]
-                log_dict = self.metrics.build_log_dict(
+                log_dict = self.metrics.build_train_log_dict(
                     loss=accum_loss, total_tokens=self.total_tokens, lr=lr,
                     grad_norm=grad_norm_val, tokens_per_sec=tokens_per_sec,
                     elapsed=elapsed, model=self.model, scaler=self.scaler,
-                    aux_loss=aux_loss.item() if self.is_moe else None,
+                    aux_loss=aux_loss.item() if aux_loss is not None else None,
                 )
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
@@ -286,26 +322,37 @@ class Trainer:
     def _evaluate(self):
         self.model.eval()
         total_loss = 0.0
+        total_aux_loss = 0.0
         n_batches = 0
 
-        for i, (x, y) in enumerate(self.val_loader):
+        for i, batch in enumerate(self.val_loader):
             if i >= self.config.training.eval_steps:
                 break
-            x, y = x.to(self.device), y.to(self.device)
+            input_ids = batch[0].to(self.device)
+            position_ids = batch[1].to(self.device)
             with torch.amp.autocast(self.device, dtype=self.amp_dtype, enabled=self.use_amp):
-                if self.is_moe:
-                    logits, _ = self.model(x)
+                x, y = next_token_targets(input_ids)
+                loss_mask = None if self.config.data.packing else (position_ids >= 0)
+                if self.config.training.intra_doc_masking:
+                    mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                    attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
                 else:
-                    logits = self.model(x)
-                loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-                logits = self.model(x)
+                    attn_mask = None
+                logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
+                loss = compute_loss(logits, y, loss_mask, self._loss_fn)
             total_loss += loss.item()
+            if aux_loss is not None:
+                total_aux_loss += aux_loss.item()
             n_batches += 1
 
         avg_loss = total_loss / max(n_batches, 1)
-        ppl = min(float(torch.exp(torch.tensor(avg_loss))), 1e6)
-        self.logger.log({"val/loss": avg_loss, "val/perplexity": ppl}, step=self.step)
-        print(f"\n[eval] val_loss={avg_loss:.4f} | val_ppl={ppl:.2f}")
+        avg_aux_loss = (total_aux_loss / max(n_batches, 1)) if total_aux_loss > 0 else None
+        log_dict = self.metrics.build_eval_log_dict(avg_loss=avg_loss, avg_aux_loss=avg_aux_loss)
+        self.logger.log(log_dict, step=self.step)
+        eval_msg = f"\n[eval] val_loss={avg_loss:.4f} | val_ppl={log_dict['val/perplexity']:.2f}"
+        if "val/aux_loss" in log_dict:
+            eval_msg += f" | val_aux_loss={log_dict['val/aux_loss']:.4f}"
+        print(eval_msg)
 
         self._generate_sample()
         self.model.train()
@@ -321,10 +368,9 @@ class Trainer:
         for _ in range(max_new_tokens):
             # truncate context to max_seq_len if generation grows long
             idx_cond = idx[:, -self.config.max_seq_len:]
-            if self.is_moe:
-                logits, _ = self.model(idx_cond)
-            else:
-                logits = self.model(idx_cond)
+            B, S = idx_cond.shape
+            pos_ids = torch.arange(S, device=self.device).unsqueeze(0).expand(B, S)
+            logits, _ = self.model(idx_cond, position_ids=pos_ids)
             logits = logits[:, -1, :]  # take last token's logits
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # sample from distribution

@@ -18,7 +18,7 @@ class ModelConfig:
     attn_res_block_size: int = 2  # number of full layers per block for AttnRes
     attn_res_norm: str = "rmsnorm"  # norm for attn_res keys: "rmsnorm" or "layernorm"
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
-    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
+    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3, L_max ~62800
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
     n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
     n_experts_per_token: int = 2    # top-k experts activated per token
@@ -43,6 +43,7 @@ class DataConfig:
     data_dir: str = "data/"
     val_split: float = 0.01
     num_workers: int = 4
+    packing: bool = True
 
 
 @dataclass
@@ -58,6 +59,7 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 1000
     eval_steps: int = 200
+    intra_doc_masking: bool = True
 
 
 @dataclass
@@ -82,7 +84,7 @@ class LoggingConfig:
     wandb_run_name: str = ""
     wandb_group: str = ""  # group name for comparing runs in W&B (e.g. "dtype-sweep")
     log_every: int = 10
-    log_layer_grad_norms: bool = False  # log per-layer gradient norms to W&B
+    log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
 
 
 @dataclass
@@ -150,6 +152,8 @@ def _coerce_types(dc_class, raw_dict: dict) -> dict:
     field_types = {f.name: f.type for f in dataclasses.fields(dc_class)}
     coerced = {}
     for k, v in raw_dict.items():
+        if k not in field_types:
+            continue  # silently ignore unknown/deprecated YAML fields
         expected = field_types.get(k)
         if expected == float and isinstance(v, str):
             v = float(v)

@@ -116,11 +116,18 @@ class RoPE(nn.Module):
         self.register_buffer("cos", torch.cos(angles))
         self.register_buffer("sin", torch.sin(angles))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, n_heads, S, d_head)
-        S = x.shape[2]
-        cos = self.cos[:S][None, None, :, :].to(x.dtype)      # (1, 1, S, d_head)
-        sin = self.sin[:S][None, None, :, :].to(x.dtype)      # (1, 1, S, d_head)
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """Apply rotary position embeddings.
+
+        Args:
+            x: shape (B, n_heads, S, d_head)
+            position_ids: shape (B, S) — per-token position used to gather
+                cos/sin tables, supporting per-document position resets.
+        """
+        # position_ids: (B, S) — gather cos/sin for each position
+        # TODO: the fansy index performance is bad, need to fuse to rope kernel
+        cos = self.cos[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
+        sin = self.sin[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         return _rope(x, cos, sin)
 
 
@@ -144,7 +151,7 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_heads, S, d_head)
         k = self.k_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
@@ -154,8 +161,14 @@ class MultiHeadAttention(nn.Module):
             q = self.q_norm(q.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
 
-        out = _flash_attn(q, k, v, causal=True)
+        if rope is not None:
+            assert position_ids is not None, "position_ids cannot be None when using RoPE"
+            q = rope(q, position_ids=position_ids)
+            k = rope(k, position_ids=position_ids)
 
+        is_causal = attn_mask is None
+        out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
+        out = self.attn_dropout(out)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.out_proj(out))
 
@@ -188,7 +201,7 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, rope: RoPE) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask: torch.Tensor = None) -> torch.Tensor:
         B, S, H = x.shape
 
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)    # (B, n_heads, S, d_head)
@@ -199,14 +212,18 @@ class GroupedQueryAttention(nn.Module):
             q = self.q_norm(q.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
             k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_kv_heads, S, self.d_head)
 
-        q = rope(q)
-        k = rope(k)
+        if rope is not None:
+            assert position_ids is not None, "position_ids cannot be None when using RoPE"
+            q = rope(q, position_ids)
+            k = rope(k, position_ids)
 
         # Expand KV heads for GQA (expand+reshape avoids memory allocation vs repeat_interleave)
         k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
         v = v[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
-        out = _flash_attn(q, k, v, causal=True)
 
+        is_causal = attn_mask is None
+        out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
+        out = self.attn_dropout(out)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.out_proj(out))
 

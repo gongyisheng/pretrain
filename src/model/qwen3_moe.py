@@ -5,6 +5,7 @@ from src.model.components import GroupedQueryAttention, RMSNorm, RoPE, SparseMoE
 from src.utils.config import ModelConfig
 
 
+
 class Qwen3MoETransformerBlock(nn.Module):
     def __init__(
         self,
@@ -25,8 +26,8 @@ class Qwen3MoETransformerBlock(nn.Module):
         self.ln2 = RMSNorm(d_model)
         self.ffn = SparseMoEBlock(d_model, moe_intermediate_size, n_experts, n_experts_per_token, dropout_ffn, capacity_factor)
 
-    def forward(self, x: torch.Tensor, rope: RoPE) -> tuple:
-        x = x + self.attn(self.ln1(x), rope)
+    def forward(self, x: torch.Tensor, rope: RoPE, position_ids: torch.Tensor, attn_mask: torch.Tensor) -> tuple:
+        x = x + self.attn(self.ln1(x), rope, position_ids=position_ids, attn_mask=attn_mask)
         ffn_out, aux_loss = self.ffn(self.ln2(x))
         x = x + ffn_out
         return x, aux_loss
@@ -38,7 +39,9 @@ class Qwen3MoEModel(nn.Module):
     def __init__(self, config: ModelConfig, max_seq_len: int = 2048):
         super().__init__()
         if config.attn_res:
-            raise ValueError("Qwen3MoEModel does not support attn_res. Set attn_res=False.")
+            raise ValueError(
+                "Qwen3MoEModel does not support attn_res. Set attn_res=False."
+            )
         self.config = config
 
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
@@ -78,17 +81,12 @@ class Qwen3MoEModel(nn.Module):
             torch.nn.init.normal_(module.expert_gate_up, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor) -> tuple:
-        """Returns (logits, aux_loss).
-
-        aux_loss is the raw accumulated load-balancing loss across all MoE blocks.
-        The caller (trainer) scales it by config.moe_aux_loss_coef before adding
-        to the cross-entropy loss.
-        """
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask: torch.Tensor = None) -> tuple:
+        """Returns (logits, aux_loss)."""
         x = self.drop(self.token_emb(idx))
         aux_loss = torch.tensor(0.0, device=idx.device)
         for block in self.blocks:
-            x, block_aux = block(x, rope=self.rope)
+            x, block_aux = block(x, self.rope, position_ids, attn_mask)
             aux_loss = aux_loss + block_aux
         x = self.ln_f(x)
         logits = self.lm_head(x)
