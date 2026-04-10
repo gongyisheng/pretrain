@@ -49,7 +49,7 @@ class DataConfig:
 class TrainingConfig:
     batch_size: int = 16
     gradient_accumulation_steps: int = 16
-    max_steps: int = 100000
+    max_steps: int = 5000
     mixed_precision: str = "bf16"
     activation_checkpointing: bool = False
     backend: str = "torch"  # "torch" (torch.compile) or "triton" (custom kernels)
@@ -57,9 +57,9 @@ class TrainingConfig:
     seed: int = 42
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
-    checkpoint_every: int = 5000
-    eval_every: int = 1000
-    eval_steps: int = 200
+    checkpoint_every: int = 500
+    eval_every: int = 100
+    eval_steps: int = 25
 
 
 @dataclass
@@ -74,7 +74,7 @@ class OptimizerConfig:
 @dataclass
 class SchedulerConfig:
     name: str = "cosine"
-    warmup_steps: int = 2000
+    warmup_steps: int = 100
     min_lr: float = 6e-5
 
 
