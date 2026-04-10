@@ -48,11 +48,13 @@ class DataConfig:
 @dataclass
 class TrainingConfig:
     batch_size: int = 16
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 16
     max_steps: int = 100000
     mixed_precision: str = "bf16"
     activation_checkpointing: bool = False
     backend: str = "torch"  # "torch" (torch.compile) or "triton" (custom kernels)
+    use_deterministic_algo: bool = False
+    seed: int = 42
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
     checkpoint_every: int = 5000

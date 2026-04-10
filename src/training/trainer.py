@@ -34,12 +34,13 @@ class Trainer:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-        # Prefer deterministic CUDA algorithms (warn instead of crash if unavailable)
-        # os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-        # torch.use_deterministic_algorithms(True, warn_only=True)
+        # Prefer deterministic CUDA algorithms
+        if config.training.use_deterministic_algo:
+            os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+            torch.use_deterministic_algorithms(True, warn_only=True)
 
         # Seed for reproducibility
-        self._seed(42)
+        self._seed(config.training.seed)
 
         # Backend selection: "torch" (torch.compile) or "triton" (custom kernels)
         set_backend(config.training.backend)
@@ -70,7 +71,7 @@ class Trainer:
 
         nw = config.data.num_workers
         g = torch.Generator()
-        g.manual_seed(42)
+        g.manual_seed(config.training.seed)
         self.train_loader = DataLoader(
             self.train_dataset, batch_size=config.training.batch_size,
             shuffle=True, num_workers=nw, pin_memory=True,
