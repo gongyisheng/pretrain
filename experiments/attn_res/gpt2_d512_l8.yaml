@@ -17,16 +17,16 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  max_steps: 65000
+  batch_size: 8
+  gradient_accumulation_steps: 32
+  max_steps: 8000
   mixed_precision: "bf16"
   activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/attn_res/gpt2_d512_l8/"
-  checkpoint_every: 5000
-  eval_every: 1000
-  eval_steps: 200
+  checkpoint_every: 500
+  eval_every: 100
+  eval_steps: 25
 
 optimizer:
   name: "adamw"
@@ -37,7 +37,7 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 1500
+  warmup_steps: 150
   min_lr: 8e-5
 
 logging:
