@@ -9,7 +9,7 @@ RATES="0.0 0.01 0.02 0.05 0.1 0.2 0.5 0.9 0.95 0.99"
 
 echo "=== All dropout (embd+attn+ffn) ==="
 for rate in $RATES; do
-    config="qwen3_57m_drop${rate}"
+    config="qwen3_57m_drop_all${rate}"
     echo "--- ${config} --- Started at: $(date)"
     uv run python scripts/train.py --config "experiments/dropout/${config}.yaml"
     echo "Finished at: $(date)"

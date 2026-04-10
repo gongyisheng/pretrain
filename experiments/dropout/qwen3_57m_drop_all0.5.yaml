@@ -7,9 +7,9 @@ model:
   n_kv_heads: 4
   d_model: 512
   vocab_size: 50257
-  dropout_embd: 0.1
-  dropout_attn: 0.1
-  dropout_ffn: 0.1
+  dropout_embd: 0.5
+  dropout_attn: 0.5
+  dropout_ffn: 0.5
   rope_theta: 10000.0
   qk_norm: true
 
@@ -21,17 +21,17 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  max_steps: 50000
+  batch_size: 8
+  gradient_accumulation_steps: 32
+  max_steps: 5000
   mixed_precision: "bf16"
   backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/dropout/qwen3_drop0.1/"
-  checkpoint_every: 5000
-  eval_every: 1000
-  eval_steps: 200
+  checkpoint_dir: "checkpoints/dropout/qwen3_drop0.5/"
+  checkpoint_every: 500
+  eval_every: 100
+  eval_steps: 25
 
 optimizer:
   name: "adamw"
@@ -41,13 +41,13 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 1000
+  warmup_steps: 100
   min_lr: 6e-5
 
 logging:
   wandb_project: "pretrain-dropout"
-  wandb_run_name: "qwen3-57m-drop0.1"
+  wandb_run_name: "qwen3-57m-drop-all0.5"
   log_every: 10
 
 debug:
-  max_steps: 10000
+  max_steps: 1000
