@@ -11,6 +11,7 @@ from tqdm import tqdm
 from src.model.registry import build_model
 from src.data.dataset import PretrainDataset
 from src.data.tokenizer import load_tokenizer
+from src.model.components import set_backend
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
@@ -38,7 +39,6 @@ class Trainer:
         self._seed(42)
 
         # Backend selection: "torch" (torch.compile) or "triton" (custom kernels)
-        from src.model.components import set_backend
         set_backend(config.training.backend)
         self._cross_entropy = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
 
@@ -66,10 +66,13 @@ class Trainer:
         self.val_dataset = PretrainDataset(val_path, config.max_seq_len)
 
         nw = config.data.num_workers
+        g = torch.Generator()
+        g.manual_seed(42)
         self.train_loader = DataLoader(
             self.train_dataset, batch_size=config.training.batch_size,
             shuffle=True, num_workers=nw, pin_memory=True,
             persistent_workers=nw > 0,
+            generator=g, worker_init_fn=Trainer._worker_init_fn,
         )
         self.val_loader = DataLoader(
             self.val_dataset, batch_size=config.training.batch_size,
@@ -132,6 +135,12 @@ class Trainer:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
+
+    @staticmethod
+    def _worker_init_fn(worker_id):
+        seed = torch.initial_seed() % 2**32
+        np.random.seed(seed)
+        random.seed(seed)
 
     def _next_batch(self, train_iter):
         try:
