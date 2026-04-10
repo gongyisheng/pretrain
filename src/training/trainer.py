@@ -71,13 +71,13 @@ class Trainer:
         self.train_loader = DataLoader(
             self.train_dataset, batch_size=config.training.batch_size,
             shuffle=True, num_workers=nw, pin_memory=True,
-            persistent_workers=nw > 0, prefetch_factor=2 if nw > 0 else None,
+            persistent_workers=nw > 0, prefetch_factor=1 if nw > 0 else None,
             generator=g, worker_init_fn=Trainer._worker_init_fn,
         )
         self.val_loader = DataLoader(
             self.val_dataset, batch_size=config.training.batch_size,
             shuffle=False, num_workers=nw, pin_memory=True,
-            persistent_workers=nw > 0, prefetch_factor=2 if nw > 0 else None,
+            persistent_workers=nw > 0, prefetch_factor=1 if nw > 0 else None,
             generator=g, worker_init_fn=Trainer._worker_init_fn,
         )
 
