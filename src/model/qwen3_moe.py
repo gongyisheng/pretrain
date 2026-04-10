@@ -42,7 +42,7 @@ class Qwen3MoEModel(nn.Module):
         self.config = config
 
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
-        self.drop = nn.Dropout(config.dropout_embd)
+        self.dropout = nn.Dropout(config.dropout_embd)
         self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
 
         self.blocks = nn.ModuleList([
@@ -85,7 +85,7 @@ class Qwen3MoEModel(nn.Module):
         The caller (trainer) scales it by config.moe_aux_loss_coef before adding
         to the cross-entropy loss.
         """
-        x = self.drop(self.token_emb(idx))
+        x = self.dropout(self.token_emb(idx))
         aux_loss = torch.tensor(0.0, device=idx.device)
         for block in self.blocks:
             x, block_aux = block(x, rope=self.rope)

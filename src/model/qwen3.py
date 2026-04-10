@@ -29,7 +29,7 @@ class Qwen3Model(nn.Module):
         pad_multiple = 128
         self.padded_vocab_size = ((config.vocab_size + pad_multiple - 1) // pad_multiple) * pad_multiple
         self.token_emb = nn.Embedding(self.padded_vocab_size, config.d_model)
-        self.drop = nn.Dropout(config.dropout_embd)
+        self.dropout = nn.Dropout(config.dropout_embd)
         # No pos_emb — positioning handled by RoPE inside each attention layer
         self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
 
@@ -67,7 +67,7 @@ class Qwen3Model(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx: torch.Tensor, return_logits: bool = True) -> torch.Tensor:
-        x = self.drop(self.token_emb(idx))
+        x = self.dropout(self.token_emb(idx))
 
         if self.config.attn_res:
             attn_res_ctx = []
