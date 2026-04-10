@@ -18,7 +18,7 @@ data:
   tokenizer_path: "tokenizers/custom_bpe_50k"
   data_dir: "data/"
   val_split: 0.01
-  num_workers: 0
+  num_workers: 4
 
 training:
   batch_size: 4
