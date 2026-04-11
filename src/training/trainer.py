@@ -349,7 +349,7 @@ class Trainer:
             idx = torch.cat([idx, next_token], dim=1)
         token_ids = idx[0].tolist()
         generated_text = self.tokenizer.decode(token_ids)
-        self.logger.log_text("generated_text", generated_text, step=self.step)
+        self.logger.log_text("val-sample/generations", generated_text, step=self.step)
 
     def _save_checkpoint(self, suffix: str = "", extra: dict = None):
         name = f"step_{self.step}_{suffix}.pt" if suffix else f"step_{self.step}.pt"
