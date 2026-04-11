@@ -22,8 +22,6 @@ class MetricsTracker:
         if self.is_moe:
             self._aux_floor = config.model.n_layers * config.model.n_experts_per_token
 
-        self.loss_history: list[float] = []
-        self.perf_metrics: list[dict] = []
         self._grad_clip_steps = 0
         self._steps_since_log = 0
         self._skipped_steps = 0
@@ -44,7 +42,6 @@ class MetricsTracker:
         scale_after: float,
     ):
         """Call after grad clip + scaler.step/update on every training step."""
-        self.loss_history.append(loss)
         if not math.isfinite(loss):
             raise RuntimeError(f"Loss is {loss} at step {step}, stopping training")
         if grad_norm_val > grad_clip:
@@ -60,7 +57,6 @@ class MetricsTracker:
     def build_log_dict(
         self,
         *,
-        step: int,
         loss: float,
         total_tokens: int,
         lr: float,
@@ -110,13 +106,6 @@ class MetricsTracker:
         # Per-layer gradient norms
         if self.config.logging.log_layer_grad_norms:
             d.update(self.compute_layer_grad_norms(model))
-
-        # Record perf metrics for benchmarking
-        self.perf_metrics.append({
-            "step": step,
-            "tokens_per_sec": tokens_per_sec,
-            "total_tokens": total_tokens,
-        })
 
         # Reset per-window counters
         self._grad_clip_steps = 0

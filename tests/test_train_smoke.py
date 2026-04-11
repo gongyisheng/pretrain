@@ -22,13 +22,18 @@ def _run_dry_run(config_path, backend):
         f"training.eval_every={STEPS + 1}",
         f"training.checkpoint_every={STEPS + 1}",
         f"training.backend={backend}",
+        "logging.log_every=1",
     ]
     config = load_config(config_path, overrides=overrides)
     trainer = Trainer(config, wandb_enabled=False)
+    losses = []
+    trainer.logger.register_on_log_hook(
+        lambda step, metrics: losses.append(metrics["train/loss"])
+    )
     trainer.train()
     assert trainer.step == STEPS
-    assert len(trainer.metrics.loss_history) == STEPS
-    assert all(loss > 0 for loss in trainer.metrics.loss_history)
+    assert len(losses) == STEPS
+    assert all(loss > 0 for loss in losses[1:])
 
 
 def test_gpt2_dry_run(backend):

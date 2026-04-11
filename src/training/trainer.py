@@ -255,7 +255,7 @@ class Trainer:
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
                 lr = self.optimizer.param_groups[0]["lr"]
                 log_dict = self.metrics.build_log_dict(
-                    step=self.step, loss=accum_loss, total_tokens=self.total_tokens, lr=lr,
+                    loss=accum_loss, total_tokens=self.total_tokens, lr=lr,
                     grad_norm=grad_norm_val, tokens_per_sec=tokens_per_sec,
                     elapsed=elapsed, model=self.model, scaler=self.scaler,
                     aux_loss=aux_loss.item() if self.is_moe else None,
@@ -280,11 +280,6 @@ class Trainer:
             # Checkpoint
             if self.step % cfg.checkpoint_every == 0:
                 self._save_checkpoint()
-
-        # Final loss sync for the last step
-        if prev_loss_tensor is not None:
-            accum_loss = prev_loss_tensor.item()
-            self.metrics.loss_history[-1] = accum_loss
 
         pbar.close()
         self.logger.finish()

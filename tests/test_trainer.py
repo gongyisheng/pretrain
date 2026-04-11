@@ -70,9 +70,13 @@ def test_trainer_loss_decreases():
         config.training.eval_every = 100
         config.training.checkpoint_every = 100
         trainer = Trainer(config, wandb_enabled=False)
+        losses = []
+        trainer.logger.register_on_log_hook(
+            lambda step, metrics: losses.append(metrics["train/loss"])
+        )
         trainer.train()
-        # loss_history[0] is always 0.0 due to deferred loss logging (prev_loss_tensor is None on step 1)
-        assert trainer.metrics.loss_history[1] > trainer.metrics.loss_history[-1]
+        # losses[0] is always 0.0 due to deferred loss logging (prev_loss_tensor is None on step 1)
+        assert losses[1] > losses[-1]
 
 
 def _tiny_moe_config(tmp_dir):
