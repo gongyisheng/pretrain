@@ -84,3 +84,12 @@ Custom chart: X=`train/flops` (log scale), Y=`train/loss` (log scale), grouped b
 ## Results
 
 TODO
+
+## Notes
+
+### GPT-2 stability requires deterministic mode
+
+GPT-2 + AttnRes becomes unstable (loss spikes / divergence) when trained without `use_deterministic_algo: true`. Enabling deterministic CUDA ops resolves this. All GPT-2 configs have this flag set. Qwen3 does not exhibit this issue and runs without it.
+
+<!-- TODO: attach loss curve comparison (deterministic vs non-deterministic) -->
+

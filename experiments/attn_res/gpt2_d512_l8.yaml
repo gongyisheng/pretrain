@@ -21,6 +21,7 @@ training:
   gradient_accumulation_steps: 32
   max_steps: 8000
   mixed_precision: "bf16"
+  use_deterministic_algo: true
   activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/attn_res/gpt2_d512_l8/"
