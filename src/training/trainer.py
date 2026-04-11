@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import time
@@ -178,6 +179,8 @@ class Trainer:
             # This overlaps the .item() sync with the current step's data prefetch
             if prev_loss_tensor is not None:
                 accum_loss = prev_loss_tensor.item()
+                if not math.isfinite(accum_loss):
+                    raise RuntimeError(f"Loss is {accum_loss} at step {self.step}, stopping training")
 
             # Accumulate loss as tensor to avoid CUDA sync every micro-step
             accum_loss_tensor = torch.zeros(1, device=self.device)
@@ -290,6 +293,8 @@ class Trainer:
         # Final loss sync for the last step
         if prev_loss_tensor is not None:
             accum_loss = prev_loss_tensor.item()
+            if not math.isfinite(accum_loss):
+                raise RuntimeError(f"Loss is {accum_loss} at step {self.step}, stopping training")
             self.loss_history[-1] = accum_loss
 
         pbar.close()
