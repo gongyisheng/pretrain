@@ -27,8 +27,8 @@ def _run_dry_run(config_path, backend):
     trainer = Trainer(config, wandb_enabled=False)
     trainer.train()
     assert trainer.step == STEPS
-    assert len(trainer.loss_history) == STEPS
-    assert all(loss > 0 for loss in trainer.loss_history)
+    assert len(trainer.metrics.loss_history) == STEPS
+    assert all(loss > 0 for loss in trainer.metrics.loss_history)
 
 
 def test_gpt2_dry_run(backend):

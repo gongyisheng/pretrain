@@ -72,7 +72,7 @@ def test_trainer_loss_decreases():
         trainer = Trainer(config, wandb_enabled=False)
         trainer.train()
         # loss_history[0] is always 0.0 due to deferred loss logging (prev_loss_tensor is None on step 1)
-        assert trainer.loss_history[1] > trainer.loss_history[-1]
+        assert trainer.metrics.loss_history[1] > trainer.metrics.loss_history[-1]
 
 
 def _tiny_moe_config(tmp_dir):

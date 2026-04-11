@@ -1,4 +1,3 @@
-import math
 import os
 import random
 import time
@@ -27,8 +26,6 @@ class Trainer:
         self.config = config
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.step = 0
-        self.loss_history = []
-        self.debug_metrics = []  # per-step: {"step", "tokens_per_sec", "total_tokens"}
 
         # Enable TF32 for matmuls on Ampere+ GPUs
         torch.set_float32_matmul_precision('high')
@@ -179,8 +176,6 @@ class Trainer:
             # This overlaps the .item() sync with the current step's data prefetch
             if prev_loss_tensor is not None:
                 accum_loss = prev_loss_tensor.item()
-                if not math.isfinite(accum_loss):
-                    raise RuntimeError(f"Loss is {accum_loss} at step {self.step}, stopping training")
 
             # Accumulate loss as tensor to avoid CUDA sync every micro-step
             accum_loss_tensor = torch.zeros(1, device=self.device)
@@ -237,10 +232,12 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.metrics.on_step(
-                grad_norm_val, 
+                accum_loss,
+                self.step,
+                grad_norm_val,
                 cfg.grad_clip,
-                self.scaler.is_enabled(), 
-                scale_before, 
+                self.scaler.is_enabled(),
+                scale_before,
                 self.scaler.get_scale()
             )
             self.scheduler.step()
@@ -250,7 +247,6 @@ class Trainer:
 
             self.step += 1
             self.total_tokens += self.tokens_per_step
-            self.loss_history.append(accum_loss)
             pbar.update(1)
 
             # Logging (uses accum_loss from *previous* step — 1-step delay, no impact on training)
@@ -259,18 +255,13 @@ class Trainer:
                 tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
                 lr = self.optimizer.param_groups[0]["lr"]
                 log_dict = self.metrics.build_log_dict(
-                    loss=accum_loss, total_tokens=self.total_tokens, lr=lr,
+                    step=self.step, loss=accum_loss, total_tokens=self.total_tokens, lr=lr,
                     grad_norm=grad_norm_val, tokens_per_sec=tokens_per_sec,
                     elapsed=elapsed, model=self.model, scaler=self.scaler,
                     aux_loss=aux_loss.item() if self.is_moe else None,
                 )
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
-                self.debug_metrics.append({
-                    "step": self.step,
-                    "tokens_per_sec": tokens_per_sec,
-                    "total_tokens": self.total_tokens,
-                })
                 t_last_log = time.time()
                 tokens_since_log = 0
 
@@ -293,9 +284,7 @@ class Trainer:
         # Final loss sync for the last step
         if prev_loss_tensor is not None:
             accum_loss = prev_loss_tensor.item()
-            if not math.isfinite(accum_loss):
-                raise RuntimeError(f"Loss is {accum_loss} at step {self.step}, stopping training")
-            self.loss_history[-1] = accum_loss
+            self.metrics.loss_history[-1] = accum_loss
 
         pbar.close()
         self.logger.finish()
