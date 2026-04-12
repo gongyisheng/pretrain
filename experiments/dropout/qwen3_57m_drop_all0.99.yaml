@@ -28,7 +28,7 @@ training:
   backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/dropout/qwen3_drop0.99/"
+  checkpoint_dir: "checkpoints/dropout/dropout_all/qwen3_drop_all0.99/"
   checkpoint_every: 500
   eval_every: 100
   eval_steps: 25
