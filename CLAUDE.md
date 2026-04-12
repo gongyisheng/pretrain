@@ -75,6 +75,8 @@ Kernels must support float32, float16, and bfloat16. Never hardcode a dtype or c
 
 `experiments/` contains self-contained experiment folders (e.g., `scaling_law/`, `attn_res/`) each with their own configs, run scripts, and results. Scaling law experiments sweep model sizes (16M–145M) across both architectures.
 
+Every experiment folder must include a `README.md` with: hypothesis, setup table (configs, key params, approx param counts), run command, results table (filled in after running), and notes.
+
 Experiment YAML configs should explicitly set `batch_size`, `gradient_accumulation_steps`, `checkpoint_every`, `eval_every`, and `eval_steps` to the default values from `src/utils/config.py` (16, 16, 500, 100, 25) unless the experiment intentionally changes them.
 
 Standard LR by model size (from scaling law experiments, `min_lr` = `lr / 10`):

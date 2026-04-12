@@ -20,6 +20,7 @@ class ModelConfig:
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
     rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
+    tie_word_embeddings: bool = True  # tie lm_head.weight to token_emb.weight
     n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
     n_experts_per_token: int = 2    # top-k experts activated per token
     moe_intermediate_size: int = 0               # per-expert FFN hidden dim; 0 = same as intermediate_size

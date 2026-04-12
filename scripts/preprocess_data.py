@@ -28,6 +28,8 @@ def main():
     tokenizer = load_tokenizer(config.data.tokenizer_path)
     eot_token = tokenizer.token_to_id("<|endoftext|>")
 
+    dtype = np.uint32 if config.model.vocab_size > 65535 else dtype
+
     os.makedirs(config.data.data_dir, exist_ok=True)
     tmp_path = os.path.join(config.data.data_dir, "all_tokens.bin")
     train_path = os.path.join(config.data.data_dir, "train.bin")
@@ -49,7 +51,7 @@ def main():
             buffer.append(eot_token)
 
             if len(buffer) >= CHUNK_SIZE:
-                chunk = np.array(buffer, dtype=np.uint16)
+                chunk = np.array(buffer, dtype=dtype)
                 f.write(chunk.tobytes())
                 total_tokens += len(buffer)
                 buffer = []
@@ -58,22 +60,22 @@ def main():
                 print(f"  Tokenized {i+1} documents ({total_tokens + len(buffer):,} tokens)")
 
         if buffer:
-            chunk = np.array(buffer, dtype=np.uint16)
+            chunk = np.array(buffer, dtype=dtype)
             f.write(chunk.tobytes())
             total_tokens += len(buffer)
 
     print(f"Total tokens: {total_tokens:,}")
 
     # Pass 2: Split into train/val via memmap
-    all_data = np.memmap(tmp_path, dtype=np.uint16, mode="r")
+    all_data = np.memmap(tmp_path, dtype=dtype, mode="r")
     n_val = int(len(all_data) * config.data.val_split)
     n_train = len(all_data) - n_val
 
-    train_data = np.memmap(train_path, dtype=np.uint16, mode="w+", shape=(n_train,))
+    train_data = np.memmap(train_path, dtype=dtype, mode="w+", shape=(n_train,))
     train_data[:] = all_data[:n_train]
     train_data.flush()
 
-    val_data = np.memmap(val_path, dtype=np.uint16, mode="w+", shape=(n_val,))
+    val_data = np.memmap(val_path, dtype=dtype, mode="w+", shape=(n_val,))
     val_data[:] = all_data[n_train:]
     val_data.flush()
 
@@ -83,7 +85,7 @@ def main():
     print(f"Train: {n_train:,} tokens -> {train_path}")
     print(f"Val:   {n_val:,} tokens -> {val_path}")
 
-    verify = np.memmap(train_path, dtype=np.uint16, mode="r")
+    verify = np.memmap(train_path, dtype=dtype, mode="r")
     sample_ids = verify[:100].tolist()
     decoded = tokenizer.decode(sample_ids)
     print(f"\nSample (first 100 tokens decoded):\n{decoded[:500]}")
