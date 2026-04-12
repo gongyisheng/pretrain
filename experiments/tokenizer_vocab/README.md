@@ -11,7 +11,7 @@ A moderate vocab size (~50k) sits at a sweet spot: large enough to avoid excessi
 All tokenizers are trained using BPE on OpenWebText (1M samples, same dataset used for pretraining). The 50k tokenizer (`tokenizers/custom_bpe_50k`) is already trained and reused.
 
 ```bash
-# Step 1: train tokenizers + preprocess data (10k, 20k, 100k, 200k — 50k already exists)
+# Step 1: train tokenizers (10k, 20k, 100k, 200k) + preprocess data (all 5 sizes)
 nohup bash experiments/tokenizer_vocab/run_tokenizer.sh > logs/tokenizer_vocab_prep.log 2>&1 &
 
 # Step 2: train models
@@ -28,7 +28,7 @@ Each vocab size requires its own preprocessed data because token IDs differ acro
 |---|---|---|---|---|
 | qwen3_57m_vocab10k | 10000 | tokenizers/custom_bpe_10k | data/vocab_10k/ | ~5M |
 | qwen3_57m_vocab20k | 20000 | tokenizers/custom_bpe_20k | data/vocab_20k/ | ~10M |
-| qwen3_57m_vocab50k | 50257 | tokenizers/custom_bpe_50k | data/ | ~26M |
+| qwen3_57m_vocab50k | 50257 | tokenizers/custom_bpe_50k | data/vocab_50k/ | ~26M |
 | qwen3_57m_vocab100k | 100000 | tokenizers/custom_bpe_100k | data/vocab_100k/ | ~51M |
 | qwen3_57m_vocab200k | 200000 | tokenizers/custom_bpe_200k | data/vocab_200k/ | ~103M |
 
