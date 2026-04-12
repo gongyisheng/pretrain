@@ -28,7 +28,7 @@ def main():
     tokenizer = load_tokenizer(config.data.tokenizer_path)
     eot_token = tokenizer.token_to_id("<|endoftext|>")
 
-    dtype = np.uint32 if config.model.vocab_size > 65535 else dtype
+    dtype = np.uint32 if config.model.vocab_size > 65535 else np.uint16
 
     os.makedirs(config.data.data_dir, exist_ok=True)
     tmp_path = os.path.join(config.data.data_dir, "all_tokens.bin")
