@@ -72,7 +72,7 @@ class Qwen3Model(nn.Module):
         if self.config.attn_res:
             attn_res_ctx = []
             for block in self.blocks:
-                x, attn_res_ctx = block(x, attn_res_ctx, self.rope)
+                x, attn_res_ctx = block(x, attn_res_ctx, rope=self.rope)
         else:
             for block in self.blocks:
                 x = block(x, rope=self.rope)

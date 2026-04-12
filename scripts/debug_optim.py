@@ -28,7 +28,7 @@ def param_group(name: str) -> str:
         return "norm/scale"
     if any(t in name for t in ("attn_res_proj", "mlp_res_proj")):
         return "attn_res_proj"
-    if any(t in name for t in ("q_proj", "k_proj", "v_proj", "out_proj", "attn")):
+    if any(t in name for t in ("q_proj", "k_proj", "v_proj", "o_proj", "attn")):
         return "attention"
     if any(t in name for t in ("fc", "ffn", "mlp", "gate_proj", "up_proj", "down_proj")):
         return "ffn"

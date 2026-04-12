@@ -1,14 +1,9 @@
 """Training metrics: per-step tracking, log_dict assembly, per-layer grad norms."""
 
 import math
-import re
-from collections import defaultdict
-
 import torch
 
 from src.utils.config import TrainConfig
-
-_BLOCK_RE = re.compile(r"^blocks\.(\d+)\.(.+)$")
 
 
 class MetricsTracker:
@@ -119,44 +114,22 @@ class MetricsTracker:
 
     @staticmethod
     def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-        """Compute L2 gradient norms grouped by layer/component.
+        """Compute per-parameter L2 gradient norms.
 
-        Groups:
-            grad_norm/embedding          - token_emb, pos_emb
-            grad_norm/blocks.{i}.attn    - ln1 + attention params for block i
-            grad_norm/blocks.{i}.ffn     - ln2 + FFN params for block i
-            grad_norm/blocks.{i}.router  - MoE router params (MoE only)
-            grad_norm/final_norm         - ln_f
-
-        Each group norm is sqrt(sum of squared per-param norms).
+        Each parameter (e.g. blocks.0.attn.q_proj.weight) gets its own key
+        under grad_norm/. Automatically handles the _orig_mod. prefix added
+        by torch.compile.
         """
-        group_sq: dict[str, float] = defaultdict(float)
+        norms: dict[str, float] = {}
 
         for name, param in model.named_parameters():
             if param.grad is None:
                 continue
+            # torch.compile wraps model in OptimizedModule, prepending "_orig_mod."
+            name = name.removeprefix("_orig_mod.")
+            norms[f"grad_norm/{name}"] = param.grad.data.norm(2.0).item()
 
-            sq = param.grad.data.norm(2.0).item() ** 2
-
-            if name.startswith(("token_emb.", "pos_emb.", "lm_head.")):
-                group_sq["grad_norm/embedding"] += sq
-            elif name.startswith("ln_f."):
-                group_sq["grad_norm/final_norm"] += sq
-            elif (m := _BLOCK_RE.match(name)):
-                idx = m.group(1)
-                rest = m.group(2)
-                if rest.startswith(("ln1.", "attn.")):
-                    group_sq[f"grad_norm/blocks.{idx}.attn"] += sq
-                elif rest.startswith("ffn.router."):
-                    group_sq[f"grad_norm/blocks.{idx}.router"] += sq
-                elif rest.startswith(("ln2.", "ffn.")):
-                    group_sq[f"grad_norm/blocks.{idx}.ffn"] += sq
-                else:
-                    group_sq[f"grad_norm/blocks.{idx}.other"] += sq
-            else:
-                group_sq["grad_norm/other"] += sq
-
-        return {key: val**0.5 for key, val in group_sq.items()}
+        return norms
 
     # ------------------------------------------------------------------
     # GPU peak FLOPS estimation

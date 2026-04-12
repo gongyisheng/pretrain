@@ -137,7 +137,7 @@ class MultiHeadAttention(nn.Module):
         self.q_proj = nn.Linear(d_model, d_model)
         self.k_proj = nn.Linear(d_model, d_model)
         self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
+        self.o_proj = nn.Linear(d_model, d_model)
         self.attn_dropout = nn.Dropout(dropout_attn)
 
         if qk_norm:
@@ -157,7 +157,7 @@ class MultiHeadAttention(nn.Module):
         out = _flash_attn(q, k, v, causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
-        return self.attn_dropout(self.out_proj(out))
+        return self.attn_dropout(self.o_proj(out))
 
 
 class GroupedQueryAttention(nn.Module):
@@ -181,7 +181,7 @@ class GroupedQueryAttention(nn.Module):
         self.q_proj = nn.Linear(d_model, n_heads * self.d_head, bias=False)
         self.k_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
         self.v_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
-        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.o_proj = nn.Linear(d_model, d_model, bias=False)
         self.attn_dropout = nn.Dropout(dropout_attn)
 
         if qk_norm:
@@ -208,7 +208,7 @@ class GroupedQueryAttention(nn.Module):
         out = _flash_attn(q, k, v, causal=True)
 
         out = out.transpose(1, 2).reshape(B, S, H)
-        return self.attn_dropout(self.out_proj(out))
+        return self.attn_dropout(self.o_proj(out))
 
 
 # --- FFN ---
