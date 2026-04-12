@@ -15,6 +15,7 @@ from src.utils.config import load_config
 from src.data.tokenizer import load_tokenizer
 
 CHUNK_SIZE = 1024 * 1024  # write in chunks of ~1M tokens
+BATCH_SIZE = 1024  # documents per encode_batch call (uses all CPUs)
 
 
 def main():
@@ -43,28 +44,44 @@ def main():
     buffer = []
 
     with open(tmp_path, "wb") as f:
+        doc_batch = []
+        n_docs = 0
+
         for i, sample in enumerate(ds):
             if args.max_samples and i >= args.max_samples:
                 break
-            ids = tokenizer.encode(sample["text"]).ids
-            buffer.extend(ids)
-            buffer.append(eot_token)
+            doc_batch.append(sample["text"])
 
-            if len(buffer) >= CHUNK_SIZE:
-                chunk = np.array(buffer, dtype=dtype)
-                f.write(chunk.tobytes())
-                total_tokens += len(buffer)
-                buffer = []
+            if len(doc_batch) >= BATCH_SIZE:
+                encoded = tokenizer.encode_batch(doc_batch)
+                for enc in encoded:
+                    buffer.extend(enc.ids)
+                    buffer.append(eot_token)
+                n_docs += len(doc_batch)
+                doc_batch = []
 
-            if (i + 1) % 10000 == 0:
-                print(f"  Tokenized {i+1} documents ({total_tokens + len(buffer):,} tokens)")
+                if len(buffer) >= CHUNK_SIZE:
+                    chunk = np.array(buffer, dtype=dtype)
+                    f.write(chunk.tobytes())
+                    total_tokens += len(buffer)
+                    buffer = []
+
+                if n_docs % 10000 < BATCH_SIZE:
+                    print(f"  Tokenized {n_docs} documents ({total_tokens + len(buffer):,} tokens)")
+
+        if doc_batch:
+            encoded = tokenizer.encode_batch(doc_batch)
+            for enc in encoded:
+                buffer.extend(enc.ids)
+                buffer.append(eot_token)
+            n_docs += len(doc_batch)
 
         if buffer:
             chunk = np.array(buffer, dtype=dtype)
             f.write(chunk.tobytes())
             total_tokens += len(buffer)
 
-    print(f"Total tokens: {total_tokens:,}")
+    print(f"Total: {n_docs:,} documents, {total_tokens:,} tokens")
 
     # Pass 2: Split into train/val via memmap
     all_data = np.memmap(tmp_path, dtype=dtype, mode="r")
