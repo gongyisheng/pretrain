@@ -1,0 +1,46 @@
+max_seq_len: 1024
+
+model:
+  arch: "qwen3"
+  n_layers: 8
+  n_heads: 8
+  n_kv_heads: 4
+  d_model: 512
+  vocab_size: 50257
+  rope_theta: 10000.0
+  qk_norm: true
+
+data:
+  dataset: "openwebtext"
+  tokenizer_path: "tokenizers/custom_bpe_50k"
+  data_dir: "data/"
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 16
+  gradient_accumulation_steps: 16
+  max_steps: 5000
+  mixed_precision: "bf16"
+  backend: "torch"
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/qk_norm/qwen3_57m_qk_norm_on/"
+  checkpoint_every: 500
+  eval_every: 100
+  eval_steps: 25
+
+optimizer:
+  name: "adamw"
+  lr: 6e-4
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 200
+  min_lr: 6e-5
+
+logging:
+  wandb_project: "pretrain-qk-norm"
+  wandb_run_name: "qwen3-57m-qk-norm-on"
+  log_every: 10
