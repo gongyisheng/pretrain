@@ -64,8 +64,8 @@ class Trainer:
         # Data
         train_path = os.path.join(config.data.data_dir, "train.bin")
         val_path = os.path.join(config.data.data_dir, "val.bin")
-        self.train_dataset = PretrainDataset(train_path, config.max_seq_len)
-        self.val_dataset = PretrainDataset(val_path, config.max_seq_len)
+        self.train_dataset = PretrainDataset(train_path, config.max_seq_len, config.model.vocab_size)
+        self.val_dataset = PretrainDataset(val_path, config.max_seq_len, config.model.vocab_size)
 
         nw = config.data.num_workers
         g = torch.Generator()

@@ -9,9 +9,10 @@ class PretrainDataset(Dataset):
     Each sample returns (x, y) where y = x shifted by 1 token (next-token prediction).
     """
 
-    def __init__(self, bin_path: str, seq_len: int):
+    def __init__(self, bin_path: str, seq_len: int, vocab_size: int = 65535):
         self.seq_len = seq_len
-        self.data = np.memmap(bin_path, dtype=np.uint16, mode="r")
+        dtype = np.uint32 if vocab_size > 65535 else np.uint16
+        self.data = np.memmap(bin_path, dtype=dtype, mode="r")
         self.n_sequences = len(self.data) // seq_len - 1
 
     def __len__(self):
