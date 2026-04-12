@@ -25,7 +25,7 @@ training:
   mixed_precision: "bf16"
   backend: "torch"
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/tie_emb/qwen3_57m_tied/"
+  checkpoint_dir: "checkpoints/tie_word_embd/qwen3_57m_tied/"
   checkpoint_every: 500
   eval_every: 100
   eval_steps: 25
@@ -42,6 +42,6 @@ scheduler:
   min_lr: 6e-5
 
 logging:
-  wandb_project: "pretrain-tie-emb"
+  wandb_project: "pretrain-tie-word-embd"
   wandb_run_name: "qwen3-57m-tied"
   log_every: 10
