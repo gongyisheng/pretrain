@@ -11,14 +11,11 @@ A moderate vocab size (~50k) sits at a sweet spot: large enough to avoid excessi
 All tokenizers are trained using BPE on OpenWebText (1M samples, same dataset used for pretraining). The 50k tokenizer (`tokenizers/custom_bpe_50k`) is already trained and reused.
 
 ```bash
-# Step 1: train tokenizers (10k, 20k, 100k, 200k — 50k already exists)
-nohup bash experiments/tokenizer_vocab/train_tokenizers.sh > logs/tokenizer_vocab_tok.log 2>&1 &
+# Step 1: train tokenizers + preprocess data (10k, 20k, 100k, 200k — 50k already exists)
+nohup bash experiments/tokenizer_vocab/run_tokenizer.sh > logs/tokenizer_vocab_prep.log 2>&1 &
 
-# Step 2: preprocess data for each vocab size
-nohup bash experiments/tokenizer_vocab/preprocess_data.sh > logs/tokenizer_vocab_data.log 2>&1 &
-
-# Step 3: train models
-nohup bash experiments/tokenizer_vocab/run.sh > logs/tokenizer_vocab.log 2>&1 &
+# Step 2: train models
+nohup bash experiments/tokenizer_vocab/run_train.sh > logs/tokenizer_vocab.log 2>&1 &
 ```
 
 Each vocab size requires its own preprocessed data because token IDs differ across tokenizers.

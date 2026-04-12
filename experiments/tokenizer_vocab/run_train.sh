@@ -1,7 +1,7 @@
 #!/bin/bash
 # Train models for all vocab sizes
-# Usage: nohup bash experiments/tokenizer_vocab/run.sh > logs/tokenizer_vocab.log 2>&1 &
-# Prerequisites: run train_tokenizers.sh and preprocess_data.sh first
+# Usage: nohup bash experiments/tokenizer_vocab/run_train.sh > logs/tokenizer_vocab.log 2>&1 &
+# Prerequisites: run run_tokenizer.sh first
 
 set -e
 cd "$(dirname "$0")/../.."
