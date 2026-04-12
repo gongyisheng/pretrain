@@ -63,7 +63,8 @@ class Qwen3MoEModel(nn.Module):
 
         self.ln_f = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        self.lm_head.weight = self.token_emb.weight  # weight tying
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.token_emb.weight  # weight tying
 
         self.apply(self._init_weights)
 

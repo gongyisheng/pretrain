@@ -54,7 +54,8 @@ class Qwen3Model(nn.Module):
         self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=False)
 
         # Weight tying
-        self.lm_head.weight = self.token_emb.weight
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.token_emb.weight
 
         self.apply(self._init_weights)
 
