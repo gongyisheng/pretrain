@@ -181,6 +181,7 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
         debug=DebugConfig(
             spike=SpikeConfig(**_coerce_types(SpikeConfig, raw.get("debug", {}).get("spike", {}))),
+            max_steps=raw.get("debug", {}).get("max_steps", 0),
         ),
     )
 
