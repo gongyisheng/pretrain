@@ -1,19 +1,15 @@
 max_seq_len: 1024
 
 model:
-  arch: "qwen3_moe"
+  arch: "qwen3"
   n_layers: 8
   n_heads: 8
   n_kv_heads: 4
   d_model: 512
-  moe_intermediate_size: 128
   vocab_size: 50257
   rope_theta: 10000.0
   qk_norm: true
-  moe_n_experts: 16
-  moe_n_experts_per_token: 16
-  moe_aux_loss_coef: 0.01
-  moe_expert_capacity_factor: 1.25
+  attn_bias: true
 
 data:
   dataset: "openwebtext"
@@ -23,17 +19,16 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 8
-  gradient_accumulation_steps: 4
-  max_steps: 60000
+  batch_size: 16
+  gradient_accumulation_steps: 16
+  max_steps: 5000
   mixed_precision: "bf16"
-  activation_checkpointing: false
   backend: "torch"
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/moe/qwen3_moe_57m_a57m/"
-  checkpoint_every: 5000
-  eval_every: 1000
-  eval_steps: 200
+  checkpoint_dir: "checkpoints/bias/qwen3_57m_bias_attn/"
+  checkpoint_every: 500
+  eval_every: 100
+  eval_steps: 25
 
 optimizer:
   name: "adamw"
@@ -43,10 +38,11 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 1500
+  warmup_steps: 200
   min_lr: 6e-5
 
 logging:
-  wandb_project: "pretrain-moe"
-  wandb_run_name: "qwen3-moe-57m-a57m"
+  wandb_project: "pretrain-bias"
+  wandb_run_name: "qwen3-57m-bias-attn"
+  wandb_group: "bias-ablation"
   log_every: 10

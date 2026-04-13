@@ -6,6 +6,8 @@ model:
   n_heads: 4
   d_model: 256
   vocab_size: 50257
+  attn_bias: true
+  mlp_bias: true
 
 data:
   dataset: "openwebtext"

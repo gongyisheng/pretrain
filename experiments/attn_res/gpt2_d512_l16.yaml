@@ -6,6 +6,8 @@ model:
   n_heads: 8
   d_model: 512
   vocab_size: 50257
+  attn_bias: true
+  mlp_bias: true
   attn_res: true
   attn_res_block_size: 2  # boundaries at layers 0, 2, ..., 14 → 8 blocks
 

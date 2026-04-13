@@ -75,16 +75,16 @@ def test_config_moe_fields():
         **MINIMAL_CONFIG,
         "model": {
             **MINIMAL_CONFIG["model"],
-            "n_experts": 8,
-            "n_experts_per_token": 2,
+            "moe_n_experts": 8,
+            "moe_n_experts_per_token": 2,
             "moe_aux_loss_coef": 0.02,
         },
     }
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, data)
         config = load_config(path)
-        assert config.model.n_experts == 8
-        assert config.model.n_experts_per_token == 2
+        assert config.model.moe_n_experts == 8
+        assert config.model.moe_n_experts_per_token == 2
         assert config.model.moe_aux_loss_coef == 0.02
 
 
@@ -92,6 +92,6 @@ def test_config_moe_fields_defaults():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         config = load_config(path)
-        assert config.model.n_experts == 0
-        assert config.model.n_experts_per_token == 2
+        assert config.model.moe_n_experts == 0
+        assert config.model.moe_n_experts_per_token == 2
         assert config.model.moe_aux_loss_coef == 0.01

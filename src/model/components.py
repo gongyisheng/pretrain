@@ -127,17 +127,17 @@ class RoPE(nn.Module):
 # --- Attention ---
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout_attn: float = 0.0, qk_norm: bool = False):
+    def __init__(self, d_model: int, n_heads: int, dropout_attn: float = 0.0, qk_norm: bool = False, bias: bool = True):
         super().__init__()
         assert d_model % n_heads == 0
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.qk_norm = qk_norm
 
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.o_proj = nn.Linear(d_model, d_model)
+        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
+        self.k_proj = nn.Linear(d_model, d_model, bias=bias)
+        self.v_proj = nn.Linear(d_model, d_model, bias=bias)
+        self.o_proj = nn.Linear(d_model, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout_attn)
 
         if qk_norm:
@@ -168,6 +168,7 @@ class GroupedQueryAttention(nn.Module):
         n_kv_heads: int,
         dropout_attn: float = 0.0,
         qk_norm: bool = False,
+        bias: bool = False,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -178,10 +179,10 @@ class GroupedQueryAttention(nn.Module):
         self.d_head = d_model // n_heads
         self.qk_norm = qk_norm
 
-        self.q_proj = nn.Linear(d_model, n_heads * self.d_head, bias=False)
-        self.k_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
-        self.v_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
-        self.o_proj = nn.Linear(d_model, d_model, bias=False)
+        self.q_proj = nn.Linear(d_model, n_heads * self.d_head, bias=bias)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=bias)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=bias)
+        self.o_proj = nn.Linear(d_model, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout_attn)
 
         if qk_norm:
@@ -214,10 +215,10 @@ class GroupedQueryAttention(nn.Module):
 # --- FFN ---
 
 class GeluFFN(nn.Module):
-    def __init__(self, d_model: int, intermediate_size: int, dropout_ffn: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, dropout_ffn: float = 0.0, bias: bool = True):
         super().__init__()
-        self.fc1 = nn.Linear(d_model, intermediate_size)
-        self.fc2 = nn.Linear(intermediate_size, d_model)
+        self.fc1 = nn.Linear(d_model, intermediate_size, bias=bias)
+        self.fc2 = nn.Linear(intermediate_size, d_model, bias=bias)
         self.dropout = nn.Dropout(dropout_ffn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -229,11 +230,11 @@ class GeluFFN(nn.Module):
 
 
 class SwiGluFFN(nn.Module):
-    def __init__(self, d_model: int, intermediate_size: int, dropout_ffn: float = 0.0):
+    def __init__(self, d_model: int, intermediate_size: int, dropout_ffn: float = 0.0, bias: bool = False):
         super().__init__()
-        self.gate_proj = nn.Linear(d_model, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(d_model, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, d_model, bias=False)
+        self.gate_proj = nn.Linear(d_model, intermediate_size, bias=bias)
+        self.up_proj = nn.Linear(d_model, intermediate_size, bias=bias)
+        self.down_proj = nn.Linear(intermediate_size, d_model, bias=bias)
         self.dropout = nn.Dropout(dropout_ffn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -282,7 +283,7 @@ class SparseMoEBlock(nn.Module):
     account for this when comparing runs across different k values.
     """
 
-    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout_ffn: float = 0.0, capacity_factor: float = None):
+    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout_ffn: float = 0.0, capacity_factor: float = None, bias: bool = False):
         super().__init__()
         self.n_experts = n_experts
         self.n_experts_per_token = n_experts_per_token
@@ -293,6 +294,12 @@ class SparseMoEBlock(nn.Module):
         # gate and up are fused into one tensor to save memory (one bmm instead of two)
         self.expert_gate_up = nn.Parameter(torch.empty(n_experts, 2 * intermediate_size, d_model))
         self.expert_down = nn.Parameter(torch.empty(n_experts, d_model, intermediate_size))
+        if bias:
+            self.expert_gate_up_bias = nn.Parameter(torch.zeros(n_experts, 2 * intermediate_size))
+            self.expert_down_bias = nn.Parameter(torch.zeros(n_experts, d_model))
+        else:
+            self.expert_gate_up_bias = None
+            self.expert_down_bias = None
         self.expert_dropout = nn.Dropout(dropout_ffn)
 
     def forward(self, x: torch.Tensor):
@@ -329,7 +336,7 @@ class SparseMoEBlock(nn.Module):
         padded_input = _moe_scatter_in(x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity)
 
         # --- Batched expert FFN: fused gate+up bmm, then down bmm ---
-        expert_out = _moe_expert_ffn(padded_input, self.expert_gate_up, self.expert_down)
+        expert_out = _moe_expert_ffn(padded_input, self.expert_gate_up, self.expert_down, self.expert_gate_up_bias, self.expert_down_bias)
         expert_out = self.expert_dropout(expert_out)
 
         # --- Scatter results back with routing weights ---
@@ -368,7 +375,8 @@ def _block_attn_res(
     V = torch.stack(attn_res_ctx + [x])            # (N+1, B, S, D)
     w = proj.weight.view(-1)
     if isinstance(norm, nn.LayerNorm):
-        return _attn_res_aggregate_layernorm(V, w, norm.weight, norm.bias, norm.eps)
+        bias = norm.bias if norm.bias is not None else torch.zeros_like(norm.weight)
+        return _attn_res_aggregate_layernorm(V, w, norm.weight, bias, norm.eps)
     return _attn_res_aggregate_rmsnorm(V, w, norm.weight, norm.eps)
 
 class BaseTransformerBlock(nn.Module):

@@ -11,19 +11,21 @@ class Qwen3MoETransformerBlock(nn.Module):
         d_model: int,
         n_heads: int,
         n_kv_heads: int,
-        moe_intermediate_size: int,
+        intermediate_size: int,
         n_experts: int,
         n_experts_per_token: int,
         dropout_attn: float,
         dropout_ffn: float,
         qk_norm: bool = False,
         capacity_factor: float = None,
+        attn_bias: bool = False,
+        mlp_bias: bool = False,
     ):
         super().__init__()
         self.ln1 = RMSNorm(d_model)
-        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm)
+        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm, bias=attn_bias)
         self.ln2 = RMSNorm(d_model)
-        self.ffn = SparseMoEBlock(d_model, moe_intermediate_size, n_experts, n_experts_per_token, dropout_ffn, capacity_factor)
+        self.ffn = SparseMoEBlock(d_model, intermediate_size, n_experts, n_experts_per_token, dropout_ffn, capacity_factor, bias=mlp_bias)
 
     def forward(self, x: torch.Tensor, rope: RoPE) -> tuple:
         x = x + self.attn(self.ln1(x), rope)
@@ -50,19 +52,21 @@ class Qwen3MoEModel(nn.Module):
                 d_model=config.d_model,
                 n_heads=config.n_heads,
                 n_kv_heads=config.n_kv_heads,
-                moe_intermediate_size=config.moe_intermediate_size,
-                n_experts=config.n_experts,
-                n_experts_per_token=config.n_experts_per_token,
+                intermediate_size=config.moe_intermediate_size,
+                n_experts=config.moe_n_experts,
+                n_experts_per_token=config.moe_n_experts_per_token,
                 dropout_attn=config.dropout_attn,
                 dropout_ffn=config.dropout_ffn,
                 qk_norm=config.qk_norm,
                 capacity_factor=config.moe_expert_capacity_factor,
+                attn_bias=config.attn_bias,
+                mlp_bias=config.mlp_bias,
             )
             for _ in range(config.n_layers)
         ])
 
         self.ln_f = RMSNorm(config.d_model)
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=config.lm_head_bias)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.token_emb.weight  # weight tying
 

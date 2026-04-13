@@ -6,12 +6,12 @@ from src.utils.config import ModelConfig
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = True, mlp_bias: bool = True, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn, qk_norm=qk_norm)
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn, qk_norm=qk_norm, bias=attn_bias)
         self.ln2 = nn.LayerNorm(d_model)
-        self.ffn = GeluFFN(d_model, intermediate_size, dropout_ffn)
+        self.ffn = GeluFFN(d_model, intermediate_size, dropout_ffn, bias=mlp_bias)
 
     def attn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
         return self.attn(self.ln1(x))
@@ -40,6 +40,8 @@ class GPT2Model(nn.Module):
                 dropout_attn=config.dropout_attn,
                 dropout_ffn=config.dropout_ffn,
                 qk_norm=config.qk_norm,
+                attn_bias=config.attn_bias,
+                mlp_bias=config.mlp_bias,
                 attn_res=config.attn_res,
                 attn_res_block_size=config.attn_res_block_size,
                 attn_res_norm=config.attn_res_norm,
@@ -49,7 +51,7 @@ class GPT2Model(nn.Module):
         ])
 
         self.ln_f = nn.LayerNorm(config.d_model)
-        self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=config.lm_head_bias)
 
         # Weight tying
         if config.tie_word_embeddings:

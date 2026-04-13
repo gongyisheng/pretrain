@@ -15,7 +15,7 @@ class MetricsTracker:
         self.device = device
         self.is_moe = config.model.arch == "qwen3_moe"
         if self.is_moe:
-            self._aux_floor = config.model.n_layers * config.model.n_experts_per_token
+            self._aux_floor = config.model.n_layers * config.model.moe_n_experts_per_token
 
         self._grad_clip_steps = 0
         self._steps_since_log = 0

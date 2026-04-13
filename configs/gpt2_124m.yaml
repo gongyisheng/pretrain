@@ -6,6 +6,8 @@ model:
   n_heads: 12
   d_model: 768
   vocab_size: 50257
+  attn_bias: true
+  mlp_bias: true
   dropout_embd: 0.0
   dropout_attn: 0.0
   dropout_ffn: 0.0

@@ -22,7 +22,7 @@ _QWEN3_CFG = ModelConfig(
 )
 _QWEN3_MOE_CFG = ModelConfig(
     arch="qwen3_moe", n_layers=2, n_heads=2, n_kv_heads=1, d_model=64, vocab_size=256,
-    qk_norm=True, n_experts=4, n_experts_per_token=2, moe_intermediate_size=128,
+    qk_norm=True, moe_n_experts=4, moe_n_experts_per_token=2, moe_intermediate_size=128,
 )
 _GPT2_ATTN_RES_CFG = ModelConfig(
     arch="gpt2", n_layers=4, n_heads=2, d_model=64, vocab_size=256,

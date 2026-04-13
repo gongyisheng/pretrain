@@ -133,8 +133,8 @@ def _tiny_moe_config():
         vocab_size=256,
         rope_theta=10000.0,
         qk_norm=True,
-        n_experts=4,
-        n_experts_per_token=2,
+        moe_n_experts=4,
+        moe_n_experts_per_token=2,
         moe_aux_loss_coef=0.01,
     )
 

@@ -10,8 +10,8 @@ model:
   vocab_size: 50257
   rope_theta: 10000.0
   qk_norm: true
-  n_experts: 16
-  n_experts_per_token: 4
+  moe_n_experts: 16
+  moe_n_experts_per_token: 4
   moe_aux_loss_coef: 0.01
   moe_expert_capacity_factor: 1.25
 
