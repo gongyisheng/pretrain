@@ -18,8 +18,8 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 64
-  gradient_accumulation_steps: 1
+  batch_size: 16
+  gradient_accumulation_steps: 16
   max_steps: 5000
   mixed_precision: "bf16"
   backend: "torch"
@@ -27,7 +27,7 @@ training:
   use_deterministic_algo: true
   seed: 42
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/grad_accum/qwen3_57m_ga_1/"
+  checkpoint_dir: "checkpoints/determinism/qwen3_57m_eff_batch_256_ga_16_determin/"
   checkpoint_every: 500
   eval_every: 100
   eval_steps: 25
@@ -44,6 +44,9 @@ scheduler:
   min_lr: 6e-5
 
 logging:
-  wandb_project: "pretrain-grad-accum"
-  wandb_run_name: "qwen3-57m-ga-1"
+  wandb_project: "pretrain-determinism"
+  wandb_run_name: "qwen3-57m-eff-batch-256-ga-16-determin"
   log_every: 10
+
+debug:
+  max_steps: 1000
