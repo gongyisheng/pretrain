@@ -18,8 +18,8 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 16
-  gradient_accumulation_steps: 16
+  batch_size: 8
+  gradient_accumulation_steps: 32
   max_steps: 50000
   mixed_precision: "bf16"
   backend: "torch"
