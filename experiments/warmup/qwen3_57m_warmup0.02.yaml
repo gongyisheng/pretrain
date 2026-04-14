@@ -20,13 +20,13 @@ data:
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
-  max_steps: 5000
+  max_steps: 75000
   mixed_precision: "bf16"
   backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/warmup/qwen3_57m_warmup100/"
-  checkpoint_every: 500
+  checkpoint_dir: "checkpoints/warmup/qwen3_57m_warmup0.02/"
+  checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
 
@@ -38,7 +38,7 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 100
+  warmup_steps: 1500
   min_lr: 6e-5
 
 logging:
