@@ -32,7 +32,7 @@ training:
 
 optimizer:
   name: "adamw"
-  lr: 2e-4
+  lr: 3e-4
   lr_mult:
     lm_head: 0.1
   weight_decay: 0.1
@@ -41,7 +41,7 @@ optimizer:
 scheduler:
   name: "cosine"
   warmup_steps: 1500
-  min_lr: 2e-5
+  min_lr: 3e-5
 
 logging:
   wandb_project: "pretrain-lm-head-lr"
