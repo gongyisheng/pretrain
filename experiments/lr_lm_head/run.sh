@@ -1,31 +1,27 @@
 #!/bin/bash
-# Sweep lm_head_lr_mult on Qwen3 57M and 0.5B (untied runs + one tied baseline per scale).
-# Usage: nohup bash experiments/lm_head_lr/run.sh > logs/lm_head_lr.log 2>&1 &
+# Sweep lr_mult.lm_head on Qwen3 57M and 0.5B (untied runs + one tied baseline per scale).
+# Usage: nohup bash experiments/lr_lm_head/run.sh > logs/lr_lm_head.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
 
-configs=(
-    qwen3_57m_tied
-    qwen3_57m_untied_mult1.0
-    qwen3_57m_untied_mult0.5
-    qwen3_57m_untied_mult0.3
-    qwen3_57m_untied_mult0.2
-    qwen3_57m_untied_mult0.1
-    qwen3_0.5b_tied
-    qwen3_0.5b_untied_mult1.0
-    qwen3_0.5b_untied_mult0.5
-    qwen3_0.5b_untied_mult0.3
-    qwen3_0.5b_untied_mult0.2
-    qwen3_0.5b_untied_mult0.1
-)
+sizes=(57m 0.5b)
+mults=(1.0 0.5 0.3 0.2 0.1)
 
-for config in "${configs[@]}"; do
+run() {
+    local config="$1"
     echo "=== ${config} ==="
     echo "Started at: $(date)"
-    uv run python scripts/train.py --config "experiments/lm_head_lr/${config}.yaml"
+    uv run python scripts/train.py --config "experiments/lr_lm_head/${config}.yaml"
     echo "Finished at: $(date)"
     echo ""
+}
+
+for size in "${sizes[@]}"; do
+    run "qwen3_${size}_tied"
+    for mult in "${mults[@]}"; do
+        run "qwen3_${size}_untied_mult${mult}"
+    done
 done
 
-echo "=== All lm_head_lr runs complete ==="
+echo "=== All lr_lm_head runs complete ==="
