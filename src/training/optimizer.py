@@ -1,25 +1,46 @@
 import math
+import re
 import torch
 from src.utils.config import TrainConfig
 
 
 def build_optimizer(model: torch.nn.Module, config: TrainConfig) -> torch.optim.Optimizer:
-    """Build optimizer with weight decay applied only to non-bias, non-layernorm params."""
-    decay_params = []
-    no_decay_params = []
+    """Build optimizer with weight decay applied only to non-bias, non-layernorm params.
+
+    Each key in `config.optimizer.lr_mult` is a regular expression. A parameter
+    is assigned to the first pattern (in dict insertion order) that
+    `re.search`-matches its name; matched params go into their own AdamW group
+    with that multiplier. Params matching no pattern fall into the default
+    groups with `lr_mult=1.0`. Within every group, weight decay still follows
+    the standard rule (`ndim >= 2` and no `"ln"`/`"bias"` in the name → decay).
+
+    Tied mode: `lm_head.weight is token_emb.weight`, so the param is enumerated
+    only under `token_emb.weight` — an `lm_head` pattern in `lr_mult` is a
+    silent no-op.
+    """
+    patterns = [(re.compile(k), k) for k in config.optimizer.lr_mult.keys()]
+    wd = config.optimizer.weight_decay
+    groups: dict = {}  # (matched_pattern_key_or_None, is_no_decay) -> [params]
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if param.ndim < 2 or "ln" in name or "bias" in name:
-            no_decay_params.append(param)
-        else:
-            decay_params.append(param)
+        matched = None
+        for rx, key in patterns:
+            if rx.search(name):
+                matched = key
+                break
+        is_no_decay = param.ndim < 2 or "ln" in name or "bias" in name
+        groups.setdefault((matched, is_no_decay), []).append(param)
 
-    param_groups = [
-        {"params": decay_params, "weight_decay": config.optimizer.weight_decay},
-        {"params": no_decay_params, "weight_decay": 0.0},
-    ]
+    param_groups = []
+    for (matched, is_no_decay), params in groups.items():
+        mult = config.optimizer.lr_mult.get(matched, 1.0) if matched else 1.0
+        param_groups.append({
+            "params": params,
+            "weight_decay": 0.0 if is_no_decay else wd,
+            "lr_mult": mult,
+        })
 
     optimizer = torch.optim.AdamW(
         param_groups,
@@ -46,7 +67,7 @@ class CosineWarmupScheduler:
         self.current_step += 1
         lr = self.get_lr()
         for pg in self.optimizer.param_groups:
-            pg["lr"] = lr
+            pg["lr"] = lr * pg.get("lr_mult", 1.0)
 
     def get_lr(self):
         if self.current_step < self.warmup_steps:

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import Dict, List, Optional
 import yaml
 
 
@@ -70,6 +70,7 @@ class TrainingConfig:
 class OptimizerConfig:
     name: str = "adamw"
     lr: float = 6e-4
+    lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})  # per-pattern LR multipliers. Keys are regexes matched against parameter names via re.search; first key (in insertion order) to match wins. Effective LR for a matched param = lr * lr_mult[key]. In tied mode `lm_head.weight is token_emb.weight`, so the param is enumerated only under `token_emb.weight` and an `lm_head` entry is a no-op.
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
@@ -125,9 +126,9 @@ def _apply_overrides(config: TrainConfig, overrides: List[str]):
         parts = key.split(".")
         obj = config
         for part in parts[:-1]:
-            obj = getattr(obj, part)
+            obj = obj[part] if isinstance(obj, dict) else getattr(obj, part)
         field_name = parts[-1]
-        current = getattr(obj, field_name)
+        current = obj.get(field_name) if isinstance(obj, dict) else getattr(obj, field_name)
         if isinstance(current, bool):
             value = value.lower() in ("true", "1", "yes")
         elif isinstance(current, int):
@@ -143,7 +144,10 @@ def _apply_overrides(config: TrainConfig, overrides: List[str]):
                     value = int(value)
                 except ValueError:
                     pass
-        setattr(obj, field_name, value)
+        if isinstance(obj, dict):
+            obj[field_name] = value
+        else:
+            setattr(obj, field_name, value)
 
 
 def _coerce_types(dc_class, raw_dict: dict) -> dict:

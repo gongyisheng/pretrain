@@ -1,0 +1,49 @@
+max_seq_len: 1024
+
+model:
+  arch: "qwen3"
+  n_layers: 28
+  n_heads: 16
+  n_kv_heads: 8
+  d_model: 1024
+  vocab_size: 50257
+  rope_theta: 10000.0
+  qk_norm: true
+  tie_word_embeddings: true
+
+data:
+  dataset: "openwebtext"
+  tokenizer_path: "tokenizers/custom_bpe_50k"
+  data_dir: "data/"
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  max_steps: 50000
+  mixed_precision: "bf16"
+  backend: "torch"
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/lm_head_lr/qwen3_0.5b_tied/"
+  checkpoint_every: 5000
+  eval_every: 100
+  eval_steps: 25
+
+optimizer:
+  name: "adamw"
+  lr: 2e-4
+  lr_mult:
+    lm_head: 1.0  # no-op in tied mode
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 1500
+  min_lr: 2e-5
+
+logging:
+  wandb_project: "pretrain-lm-head-lr"
+  wandb_run_name: "qwen3-0.5b-tied"
+  log_every: 10
