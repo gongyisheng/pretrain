@@ -2,16 +2,16 @@ max_seq_len: 1024
 
 model:
   arch: "qwen3_moe"
-  n_layers: 8
-  n_heads: 8
-  n_kv_heads: 4
-  d_model: 512
+  n_layers: 16
+  n_heads: 16
+  n_kv_heads: 8
+  d_model: 1024
   moe_intermediate_size: 128
   vocab_size: 50257
   rope_theta: 10000.0
   qk_norm: true
-  moe_n_experts: 16
-  moe_n_experts_per_token: 16
+  moe_n_experts: 64
+  moe_n_experts_per_token: 1
   moe_aux_loss_coef: 0.01
   moe_expert_capacity_factor: 1.25
 
@@ -25,28 +25,28 @@ data:
 training:
   batch_size: 8
   gradient_accumulation_steps: 4
-  max_steps: 60000
+  max_steps: 50000
   mixed_precision: "bf16"
   activation_checkpointing: false
   backend: "torch"
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/moe/qwen3_moe_57m_a57m/"
+  checkpoint_dir: "checkpoints/moe/qwen3_moe_506m_a109m/"
   checkpoint_every: 5000
-  eval_every: 1000
-  eval_steps: 200
+  eval_every: 100
+  eval_steps: 25
 
 optimizer:
   name: "adamw"
-  lr: 6e-4
+  lr: 2e-4
   weight_decay: 0.1
   betas: [0.9, 0.95]
 
 scheduler:
   name: "cosine"
   warmup_steps: 1500
-  min_lr: 6e-5
+  min_lr: 2e-5
 
 logging:
   wandb_project: "pretrain-moe"
-  wandb_run_name: "qwen3-moe-57m-a57m"
+  wandb_run_name: "qwen3-moe-506m-a109m"
   log_every: 10
