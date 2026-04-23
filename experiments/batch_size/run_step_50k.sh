@@ -5,7 +5,9 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-for config in qwen3_57m_bs_16k qwen3_57m_bs_64k qwen3_57m_bs_256k qwen3_57m_bs_1m; do
+step=50k
+for bs in 16k 64k 256k 1m; do
+    config="qwen3_57m_bs_${bs}_step_${step}"
     echo "=== ${config} ==="
     echo "Started at: $(date)"
     uv run python scripts/train.py --config "experiments/batch_size/${config}.yaml"

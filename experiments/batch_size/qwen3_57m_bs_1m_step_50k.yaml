@@ -19,13 +19,13 @@ data:
 
 training:
   batch_size: 8
-  gradient_accumulation_steps: 32
+  gradient_accumulation_steps: 128
   max_steps: 50000
   mixed_precision: "bf16"
   backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/batch_size/qwen3_bs_256k/"
+  checkpoint_dir: "checkpoints/batch_size/qwen3_bs_1m_step_50k/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -43,5 +43,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-batch-size"
-  wandb_run_name: "qwen3-57m-bs-256k"
+  wandb_run_name: "qwen3-57m-bs-1m-step-50k"
   log_every: 10
