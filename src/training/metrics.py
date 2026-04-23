@@ -9,9 +9,9 @@ from src.utils.config import TrainConfig
 class MetricsTracker:
     """Tracks and assembles training metrics for W&B logging."""
 
-    def __init__(self, config: TrainConfig, n_non_emb_params: int, device: str):
+    def __init__(self, config: TrainConfig, n_active_non_emb_params: int, device: str):
         self.config = config
-        self.n_non_emb_params = n_non_emb_params
+        self.n_active_non_emb_params = n_active_non_emb_params
         self.device = device
         self.is_moe = config.model.arch == "qwen3_moe"
         if self.is_moe:
@@ -70,7 +70,7 @@ class MetricsTracker:
             # train
             "train/loss": loss,
             "train/perplexity": min(float(torch.exp(torch.tensor(loss))), 1e6),
-            "train/flops": 6 * self.n_non_emb_params * total_tokens,
+            "train/flops": 6 * self.n_active_non_emb_params * total_tokens,
             "train/total_tokens": total_tokens,
             # optim
             "optim/lr": lr,
@@ -86,7 +86,7 @@ class MetricsTracker:
 
         # MFU
         if self._gpu_peak_flops and tokens_per_sec > 0:
-            flops_per_sec = 6 * self.n_non_emb_params * tokens_per_sec
+            flops_per_sec = 6 * self.n_active_non_emb_params * tokens_per_sec
             d["perf/mfu"] = flops_per_sec / self._gpu_peak_flops
 
         # GPU memory

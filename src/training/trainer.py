@@ -56,14 +56,34 @@ class Trainer:
             p.numel() for name, p in self.model.named_parameters()
             if "emb" in name
         )
+        # For MoE, FLOPs use active params (k experts activated) not total params.
+        # Replace total expert FFN params with the k-active subset in the count.
+        if self.is_moe:
+            mc = config.model
+            expert_ffn_per_layer = mc.moe_n_experts * 3 * mc.moe_intermediate_size * mc.d_model
+            active_ffn_per_layer = mc.moe_n_experts_per_token * 3 * mc.moe_intermediate_size * mc.d_model
+            if mc.mlp_bias:
+                expert_ffn_per_layer += mc.moe_n_experts * (2 * mc.moe_intermediate_size + mc.d_model)
+                active_ffn_per_layer += mc.moe_n_experts_per_token * (2 * mc.moe_intermediate_size + mc.d_model)
+            self.n_active_non_emb_params = (
+                self.n_non_emb_params
+                - mc.n_layers * expert_ffn_per_layer
+                + mc.n_layers * active_ffn_per_layer
+            )
+        else:
+            self.n_active_non_emb_params = self.n_non_emb_params
         self.tokens_per_step = (
             config.training.batch_size
             * config.training.gradient_accumulation_steps
             * config.max_seq_len
         )
         self.total_tokens = 0
-        print(f"Model: {config.model.arch} | {n_params / 1e6:.1f}M params "
-              f"({self.n_non_emb_params / 1e6:.1f}M non-embedding) | device={self.device}")
+        if self.is_moe:
+            print(f"Model: {config.model.arch} | {n_params / 1e6:.1f}M total params "
+                  f"({self.n_active_non_emb_params / 1e6:.1f}M active non-embedding) | device={self.device}")
+        else:
+            print(f"Model: {config.model.arch} | {n_params / 1e6:.1f}M params "
+                  f"({self.n_non_emb_params / 1e6:.1f}M non-embedding) | device={self.device}")
 
         # Data
         train_path = os.path.join(config.data.data_dir, "train.bin")
@@ -121,7 +141,7 @@ class Trainer:
         self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
 
         # Metrics
-        self.metrics = MetricsTracker(config, self.n_non_emb_params, self.device)
+        self.metrics = MetricsTracker(config, self.n_active_non_emb_params, self.device)
 
         # Logger
         self.logger = WandbLogger(config, enabled=wandb_enabled)
