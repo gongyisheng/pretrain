@@ -19,15 +19,15 @@ data:
 
 training:
   batch_size: 8
-  gradient_accumulation_steps: 128
-  max_steps: 12500
+  gradient_accumulation_steps: 32
+  max_steps: 50000
   mixed_precision: "bf16"
   backend: "torch"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/batch_size/qwen3_bs_1m_step_12k/"
-  checkpoint_every: 1250
-  eval_every: 250
+  checkpoint_dir: "checkpoints/batch_size/qwen3_bs_256k_token_13b/"
+  checkpoint_every: 1000
+  eval_every: 1000
   eval_steps: 200
 
 optimizer:
@@ -38,10 +38,10 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 250
+  warmup_steps: 1000
   min_lr: 6e-5
 
 logging:
   wandb_project: "pretrain-batch-size"
-  wandb_run_name: "qwen3-57m-bs-1m-step-12k"
+  wandb_run_name: "qwen3-57m-bs-256k-token-13b"
   log_every: 10

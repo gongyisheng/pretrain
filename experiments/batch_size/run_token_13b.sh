@@ -6,11 +6,9 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-declare -A STEPS=( [16k]=800k [64k]=200k [256k]=50k [1m]=12k )
-
+token=13b
 for bs in 16k 64k 256k 1m; do
-    step=${STEPS[$bs]}
-    config="qwen3_57m_bs_${bs}_step_${step}"
+    config="qwen3_57m_bs_${bs}_token_${token}"
     echo "=== ${config} ==="
     echo "Started at: $(date)"
     uv run python scripts/train.py --config "experiments/batch_size/${config}.yaml"
