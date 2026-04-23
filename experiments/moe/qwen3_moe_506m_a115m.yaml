@@ -24,27 +24,27 @@ data:
 
 training:
   batch_size: 8
-  gradient_accumulation_steps: 4
-  max_steps: 50000
+  gradient_accumulation_steps: 32
+  max_steps: 15000
   mixed_precision: "bf16"
   activation_checkpointing: false
   backend: "torch"
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/moe/qwen3_moe_506m_a115m/"
   checkpoint_every: 5000
-  eval_every: 100
+  eval_every: 1000
   eval_steps: 25
 
 optimizer:
   name: "adamw"
-  lr: 2e-4
+  lr: 5e-4
   weight_decay: 0.1
   betas: [0.9, 0.95]
 
 scheduler:
   name: "cosine"
-  warmup_steps: 1500
-  min_lr: 2e-5
+  warmup_steps: 300
+  min_lr: 5e-5
 
 logging:
   wandb_project: "pretrain-moe"
