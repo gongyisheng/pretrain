@@ -182,6 +182,7 @@ class Trainer:
 
         train_iter = iter(self.train_loader)
         accum_loss = 0.0
+        accum_aux_loss = 0.0
         t_last_log = time.time()
         tokens_since_log = 0
 
@@ -190,6 +191,7 @@ class Trainer:
 
         # Deferred loss: keep previous step's loss tensor to read while next step runs
         prev_loss_tensor = None
+        prev_aux_loss_tensor = None
 
         stop_at = self.config.debug.max_steps if self.config.debug.max_steps > 0 else cfg.max_steps
         pbar = tqdm(total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True)
@@ -200,9 +202,12 @@ class Trainer:
             # This overlaps the .item() sync with the current step's data prefetch
             if prev_loss_tensor is not None:
                 accum_loss = prev_loss_tensor.item()
+            if prev_aux_loss_tensor is not None:
+                accum_aux_loss = prev_aux_loss_tensor.item()
 
             # Accumulate loss as tensor to avoid CUDA sync every micro-step
             accum_loss_tensor = torch.zeros(1, device=self.device)
+            accum_aux_loss_tensor = torch.zeros(1, device=self.device) if self.is_moe else None
 
             # Prefetch first batch
             (x_cpu, y_cpu), train_iter = self._next_batch(train_iter)
@@ -240,6 +245,8 @@ class Trainer:
 
                 self.scaler.scale(loss).backward()
                 accum_loss_tensor += loss.detach()
+                if self.is_moe:
+                    accum_aux_loss_tensor += aux_loss.detach() / cfg.gradient_accumulation_steps
                 tokens_since_log += x.numel()
 
                 # Swap to prefetched batch
@@ -268,6 +275,7 @@ class Trainer:
 
             # Defer loss sync to next iteration (save tensor, read later)
             prev_loss_tensor = accum_loss_tensor
+            prev_aux_loss_tensor = accum_aux_loss_tensor
 
             self.step += 1
             self.total_tokens += self.tokens_per_step
@@ -282,7 +290,7 @@ class Trainer:
                     loss=accum_loss, total_tokens=self.total_tokens, lr=lr,
                     grad_norm=grad_norm_val, tokens_per_sec=tokens_per_sec,
                     elapsed=elapsed, model=self.model, scaler=self.scaler,
-                    aux_loss=aux_loss.item() if self.is_moe else None,
+                    aux_loss=accum_aux_loss if self.is_moe else None,
                 )
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
@@ -324,7 +332,6 @@ class Trainer:
                 else:
                     logits = self.model(x)
                 loss = self._cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-                logits = self.model(x)
             total_loss += loss.item()
             n_batches += 1
 
@@ -368,6 +375,7 @@ class Trainer:
             "scheduler": self.scheduler.state_dict(),
             "grad_scaler": self.scaler.state_dict(),
             "step": self.step,
+            "total_tokens": self.total_tokens,
             "config": self.config.to_dict(),
             "rng_states": {
                 "python": random.getstate(),
@@ -390,7 +398,9 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.scaler.load_state_dict(checkpoint["grad_scaler"])
         self.step = checkpoint["step"]
-        self.total_tokens = self.step * self.tokens_per_step
+        # Prefer the saved token count so resumes with a different batch_size or ga
+        # don't silently corrupt the running total. Fall back for old checkpoints.
+        self.total_tokens = checkpoint.get("total_tokens", self.step * self.tokens_per_step)
 
         rng = checkpoint.get("rng_states", {})
         if "python" in rng:
