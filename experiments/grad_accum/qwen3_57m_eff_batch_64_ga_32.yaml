@@ -20,15 +20,14 @@ data:
 training:
   batch_size: 2
   gradient_accumulation_steps: 32
-  max_steps: 10000
+  max_steps: 50000
   mixed_precision: "bf16"
   backend: "torch"
   activation_checkpointing: false
-  use_deterministic_algo: true
   seed: 42
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/grad_accum/qwen3_57m_ga_32/"
-  checkpoint_every: 500
+  checkpoint_dir: "checkpoints/grad_accum/qwen3_57m_eff_batch_64_ga_32/"
+  checkpoint_every: 1000
   eval_every: 100
   eval_steps: 25
 
@@ -40,13 +39,13 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 100
+  warmup_steps: 1500
   min_lr: 6e-5
 
 logging:
   wandb_project: "pretrain-grad-accum"
-  wandb_run_name: "qwen3-57m-ga-32"
+  wandb_run_name: "qwen3-57m-eff-batch-64-ga-32"
   log_every: 10
 
 debug:
-  max_steps: 500
+  max_steps: 5000
