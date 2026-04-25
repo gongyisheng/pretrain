@@ -25,6 +25,7 @@ Thumbs.db
 
 # AI
 .claude
+docs/superpowers
 
 # ML related
 checkpoints/
