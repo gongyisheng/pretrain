@@ -6,6 +6,31 @@ A subtle interaction between `torch.compile` and the standard "async H2D copy on
 
 ---
 
+## Background
+
+**H2D copy** — moving a tensor from CPU (host) to GPU (device) memory:
+```python
+x = x_cpu.to("cuda", non_blocking=True)   # the H2D copy
+```
+`non_blocking=True` enqueues the copy on the GPU and returns immediately, so it can overlap with compute.
+
+**CUDA streams (intuition).** Think of the GPU as a chef cooking meals (training steps) and the data as ingredients in a fridge (CPU RAM). Without a prefetch stream, the chef has to walk to the fridge, come back, cook, walk again — kitchen idle while walking. With a prefetch stream, you hire a **helper** who fetches the *next* batch's ingredients while the chef cooks the *current* batch. As long as the chef **waits** for the helper before starting, this is faster. The bug, in this analogy: the chef is correctly told to wait for delivery, but no one tells the kitchen manager (the allocator) that the chef is still using the current ingredients — so the manager hands that counter slot back to the helper, who plops the next batch on top of food the chef hasn't finished yet.
+
+**CUDA streams (precise).** A stream is a queue the GPU executes in order; different streams can run concurrently. The trainer uses two: the **default stream** for compute, and a **prefetch stream** carrying H2D copies of the next batch alongside the current batch's compute. Two sync primitives matter, and they cover *different* concerns:
+
+| Call | What it orders |
+|---|---|
+| `consumer.wait_stream(producer)` | the next *kernel* on `consumer` waits for `producer`'s queue |
+| `tensor.record_stream(consumer)` | the *allocator* waits before reusing `tensor`'s storage |
+
+Our bug came from having only the first.
+
+**`torch.compile` / Inductor** — `torch.compile(model)` is the front door; **Inductor** is the back end that lowers ops into fused Triton + cuBLAS kernels and schedules them. Net effect vs eager: instead of issuing one launch per Python op as it goes, Inductor enqueues a whole forward (or forward+backward) worth of launches in one shot, possibly reordered. That widens the gap between "Python returns from `model(x)`" and "the GPU actually reads `x`'s bytes" — and that widened gap is exactly where the race lives.
+
+**CUDA caching allocator** — GPU memory is owned by PyTorch's [caching allocator](https://zdevito.github.io/2022/08/04/cuda-caching-allocator.html); when the last Python reference to a tensor drops, its storage may be reused for the next allocation. The allocator decides "is this storage free yet?" by tracking the streams it knows about. `wait_stream` doesn't put the consumer stream on the allocator's radar; only `record_stream` does. So with only `wait_stream`, the allocator marks `x`'s storage free as soon as the *prefetch* stream finishes the H2D copy — while default-stream kernels are still about to read `x` — and the next H2D of `x_next` happily overwrites `x`'s slot. In eager mode the timing usually saves you (some default-stream kernels have already started by then); under compile the window stretches and the race fires.
+
+---
+
 ## 1. The symptom
 
 We were sweeping gradient-accumulation configurations at fixed effective batch (`eff_batch = batch_size × gradient_accumulation_steps = 64`) on a Qwen3-57M model and saw a striking non-monotonic divergence:
