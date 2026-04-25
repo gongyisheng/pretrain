@@ -1080,7 +1080,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "tokenizers", specifier = ">=0.22" },
-    { name = "torch", specifier = ">=2.9" },
+    { name = "torch", specifier = ">=2.10" },
     { name = "torchao", specifier = ">=0.16" },
     { name = "triton", specifier = ">=3.6" },
     { name = "wandb", specifier = ">=0.26.0" },

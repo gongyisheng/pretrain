@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Pretraining experiments — different architectures, datasets, hyperparameters"
 requires-python = ">=3.12"
 dependencies = [
-    "torch>=2.9",
+    "torch>=2.10",
     "tokenizers>=0.22",
     "datasets>=4.5",
     "wandb>=0.26.0",
