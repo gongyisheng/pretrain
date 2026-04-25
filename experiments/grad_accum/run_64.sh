@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-GA_STEPS=(1 2 4 8 16 32 64)
+GA_STEPS=(2 4 8 16 32 64)
 
 for ga in "${GA_STEPS[@]}"; do
     config="experiments/grad_accum/qwen3_57m_eff_batch_64_ga_${ga}.yaml"
