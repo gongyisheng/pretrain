@@ -222,6 +222,15 @@ class Trainer:
                 # Wait for current batch transfer to complete
                 if prefetch_stream is not None:
                     torch.cuda.current_stream().wait_stream(prefetch_stream)
+                    # record_stream tells the caching allocator that x/y are
+                    # in use on the current stream. Without it the allocator
+                    # only tracks them against prefetch_stream and may free
+                    # their storage as soon as the H2D copy finishes — while
+                    # torch.compile's graph is still consuming them on the
+                    # default stream. That race silently corrupts inputs and
+                    # biases the gradient (worst case: ~+0.6 nats val gap).
+                    x.record_stream(torch.cuda.current_stream())
+                    y.record_stream(torch.cuda.current_stream())
 
                 # Start prefetching next batch while computing
                 if micro_step < cfg.gradient_accumulation_steps - 1:
