@@ -34,12 +34,8 @@ class Trainer:
 
         # Prefer deterministic CUDA algorithms
         if config.training.use_deterministic_algo:
-            # cannot achieve true deterministic due to torch's SDPA
             os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-            # TODO: Due to torch cross entropy kernel bug
-            # It cannot handle padded vocab when use deterministic algo
-            # Error is causing OOB index, disable for now until fix
-            # torch.use_deterministic_algorithms(True, warn_only=True)
+            torch.use_deterministic_algorithms(True, warn_only=True)
 
         # Seed for reproducibility
         self._seed(config.training.seed)
