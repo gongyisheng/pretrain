@@ -10,7 +10,7 @@ Usage:
     python benchmarks/trainer/bench_train.py --config configs/gpt2_124m.yaml
 
     # Benchmark Qwen3 145M (triton backend)
-    python benchmarks/trainer/bench_train.py --config configs/qwen3_145m.yaml --backend triton
+    python benchmarks/trainer/bench_train.py --config configs/qwen3_57m.yaml --backend triton
 
     # Benchmark Qwen3 MoE 57M (torch backend)
     python benchmarks/trainer/bench_train.py --config configs/qwen3_moe_133m.yaml
@@ -102,8 +102,8 @@ def run_all_benchmarks(steps=10, warmup=5):
     configs = [
         ("configs/gpt2_124m.yaml", "torch"),
         ("configs/gpt2_124m.yaml", "triton"),
-        ("configs/qwen3_145m.yaml", "torch"),
-        ("configs/qwen3_145m.yaml", "triton"),
+        ("configs/qwen3_57m.yaml", "torch"),
+        ("configs/qwen3_57m.yaml", "triton"),
         ("configs/qwen3_moe_133m.yaml", "torch"),
         ("configs/qwen3_moe_133m.yaml", "triton"),
     ]

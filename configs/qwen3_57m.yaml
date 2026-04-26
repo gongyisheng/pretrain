@@ -1,15 +1,17 @@
 max_seq_len: 1024
 
 model:
-  arch: "gpt2"
-  n_layers: 20
+  arch: "qwen3"
+  n_layers: 8
   n_heads: 8
+  n_kv_heads: 4
   d_model: 512
   vocab_size: 50257
-  attn_bias: true
-  mlp_bias: true
-  attn_res: true
-  attn_res_block_size: 2  # boundaries at layers 0, 2, ..., 22 → 12 blocks
+  dropout_embd: 0.0
+  dropout_attn: 0.0
+  dropout_ffn: 0.0
+  rope_theta: 10000.0
+  qk_norm: true
 
 data:
   dataset: "openwebtext"
@@ -21,29 +23,29 @@ data:
 training:
   batch_size: 8
   gradient_accumulation_steps: 32
-  max_steps: 15000
+  max_steps: 50000
   mixed_precision: "bf16"
-  use_deterministic_algo: true
+  backend: "torch"
   activation_checkpointing: false
+  seed: 42
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/attn_res/gpt2_d512_l20/"
-  checkpoint_every: 500
-  eval_every: 100
+  checkpoint_dir: "checkpoints/qwen3_57m/"
+  checkpoint_every: 5000
+  eval_every: 1000
   eval_steps: 25
 
 optimizer:
   name: "adamw"
-  lr: 6e-4
+  lr: 5e-4
   weight_decay: 0.1
   betas: [0.9, 0.95]
-  eps: 1e-6
 
 scheduler:
   name: "cosine"
-  warmup_steps: 300
-  min_lr: 6e-5
+  warmup_steps: 1500
+  min_lr: 5e-5
 
 logging:
-  wandb_project: "pretrain-attn-res"
-  wandb_run_name: "gpt2-d512-l20"
+  wandb_project: "pretrain"
+  wandb_run_name: "qwen3-57m"
   log_every: 10

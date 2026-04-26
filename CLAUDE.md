@@ -23,7 +23,7 @@ uv run ruff format --check src/ tests/
 
 # Train
 uv run python scripts/train.py --config configs/gpt2_124m.yaml
-uv run python scripts/train.py --config configs/qwen3_145m.yaml --no-wandb
+uv run python scripts/train.py --config configs/qwen3_57m.yaml --no-wandb
 uv run python scripts/train.py --config configs/gpt2_124m.yaml --resume checkpoints/step_1000.pt
 
 # CLI config overrides

@@ -41,4 +41,4 @@ def test_gpt2_dry_run(backend):
 
 
 def test_qwen3_dry_run(backend):
-    _run_dry_run("configs/qwen3_145m.yaml", backend)
+    _run_dry_run("configs/qwen3_57m.yaml", backend)
