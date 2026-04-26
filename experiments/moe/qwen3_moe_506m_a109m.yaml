@@ -25,7 +25,7 @@ data:
 training:
   batch_size: 8
   gradient_accumulation_steps: 32
-  max_steps: 15000
+  max_steps: 50000
   mixed_precision: "bf16"
   activation_checkpointing: false
   backend: "torch"
@@ -43,7 +43,7 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 300
+  warmup_steps: 1000
   min_lr: 5e-5
 
 logging:
