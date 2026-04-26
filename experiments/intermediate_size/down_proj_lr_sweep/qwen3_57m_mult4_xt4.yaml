@@ -1,0 +1,56 @@
+max_seq_len: 1024
+
+model:
+  arch: "qwen3"
+  n_layers: 8
+  n_heads: 8
+  n_kv_heads: 4
+  d_model: 512
+  intermediate_size: 2048
+  vocab_size: 50257
+  rope_theta: 10000.0
+  qk_norm: true
+
+data:
+  dataset: "openwebtext"
+  tokenizer_path: "tokenizers/custom_bpe_50k"
+  data_dir: "data/"
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 32
+  max_steps: 50000
+  mixed_precision: "bf16"
+  backend: "torch"
+  activation_checkpointing: false
+  seed: 42
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/intermediate_size/down_proj_lr_sweep/qwen3_57m_mult4_xt4/"
+  checkpoint_every: 5000
+  eval_every: 1000
+  eval_steps: 25
+
+optimizer:
+  name: "adamw"
+  lr: 5e-4
+  lr_mult:
+    down_proj: 4.0
+    lm_head: 1.0
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 1500
+  min_lr: 5e-5
+
+logging:
+  wandb_project: "pretrain-intermediate-size-down-proj-lr-sweep"
+  wandb_run_name: "qwen3-57m-mult4-xt4"
+  wandb_group: "mult4"
+  log_every: 10
+
+debug:
+  max_steps: 12000
