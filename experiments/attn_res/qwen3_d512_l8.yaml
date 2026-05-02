@@ -22,26 +22,26 @@ data:
 training:
   batch_size: 8
   gradient_accumulation_steps: 32
-  max_steps: 8000
+  max_steps: 50000
   mixed_precision: "bf16"
   activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/attn_res/qwen3_d512_l8/"
-  checkpoint_every: 500
-  eval_every: 100
-  eval_steps: 25
+  checkpoint_every: 5000
+  eval_every: 1000
+  eval_steps: 200
 
 optimizer:
   name: "adamw"
-  lr: 8e-4
+  lr: 5e-4
   weight_decay: 0.1
   betas: [0.9, 0.95]
   eps: 1e-6
 
 scheduler:
   name: "cosine"
-  warmup_steps: 150
-  min_lr: 8e-5
+  warmup_steps: 1500
+  min_lr: 5e-5
 
 logging:
   wandb_project: "pretrain-attn-res"
