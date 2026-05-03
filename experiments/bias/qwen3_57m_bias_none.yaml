@@ -43,5 +43,4 @@ scheduler:
 logging:
   wandb_project: "pretrain-bias"
   wandb_run_name: "qwen3-57m-bias-none"
-  wandb_group: "bias-ablation"
   log_every: 10
