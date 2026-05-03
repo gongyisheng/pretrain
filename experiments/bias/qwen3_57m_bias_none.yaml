@@ -37,7 +37,7 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 200
+  warmup_steps: 1500
   min_lr: 6e-5
 
 logging:
