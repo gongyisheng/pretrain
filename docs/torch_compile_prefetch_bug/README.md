@@ -4,6 +4,8 @@ A subtle interaction between `torch.compile` and the standard "async H2D copy on
 
 **TL;DR**: The trainer prefetched the next mini-batch on a side CUDA stream with `non_blocking=True`, then `wait_stream`'d before consuming it. With `torch.compile`, the compiled graph schedules launches more aggressively than eager mode, opening a window in which the **caching allocator can free the input tensor's storage before the compiled graph finishes reading it** — because `wait_stream` only orders kernels, not allocator lifetimes. The fix is to also call `tensor.record_stream(current_stream())` after the wait, so the allocator knows the consumer stream is using the tensor.
 
+fix commit: https://github.com/gongyisheng/pretrain/commit/b853ef3c4b7bfac44b475231d710bbe7237d00f3
+
 ---
 
 ## Background
