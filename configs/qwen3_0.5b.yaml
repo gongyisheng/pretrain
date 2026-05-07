@@ -7,8 +7,11 @@ model:
   n_kv_heads: 8
   d_model: 1024
   vocab_size: 50257
+  dropout_embd: 0.0
+  dropout_attn: 0.0
+  dropout_ffn: 0.0
   rope_theta: 10000.0
-  qk_norm: false
+  qk_norm: true
 
 data:
   dataset: "openwebtext"
@@ -23,10 +26,12 @@ training:
   max_steps: 50000
   mixed_precision: "bf16"
   backend: "torch"
+  activation_checkpointing: false
+  seed: 42
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/qk_norm/qwen3_0.5b_qk_norm_off/"
+  checkpoint_dir: "checkpoints/qwen3_0.5b/"
   checkpoint_every: 5000
-  eval_every: 100
+  eval_every: 1000
   eval_steps: 25
 
 optimizer:
@@ -41,6 +46,6 @@ scheduler:
   min_lr: 2e-5
 
 logging:
-  wandb_project: "pretrain-qk-norm"
-  wandb_run_name: "qwen3-0.5b-qk-norm-off"
+  wandb_project: "pretrain"
+  wandb_run_name: "qwen3-0.5b"
   log_every: 10
