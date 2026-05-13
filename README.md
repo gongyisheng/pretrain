@@ -14,7 +14,7 @@ Notable pins:
 
 ```bash
 uv sync
-wandb login   # required unless you pass --no-wandb to train.py
+uv run wandb login   # required unless you pass --no-wandb to train.py
 ```
 
 ## Data & tokenizer
