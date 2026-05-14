@@ -1,5 +1,9 @@
 """Unit tests for src/utils/gpu_select.py."""
 
+import importlib.util
+import pathlib
+import sys
+
 import pytest
 
 from src.utils.gpu_select import GpuInfo, parse_nvidia_smi, pick_available
@@ -94,3 +98,75 @@ def test_pick_custom_thresholds_accepts():
 def test_pick_custom_thresholds_rejects():
     gpus = [GpuInfo(index=0, util_pct=30, free_mib=4096)]
     assert pick_available(gpus, max_util_pct=20, min_free_mib=2048) is None
+
+
+# --- CLI integration ---
+
+
+def _load_cli_module():
+    """Load scripts/pick_free_gpu.py as a module (scripts/ has no __init__.py)."""
+    path = (
+        pathlib.Path(__file__).resolve().parent.parent / "scripts" / "pick_free_gpu.py"
+    )
+    spec = importlib.util.spec_from_file_location("pick_free_gpu", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["pick_free_gpu"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_cli_prints_first_available_gpu(monkeypatch, capsys):
+    cli = _load_cli_module()
+
+    def fake_query():
+        return "0, 50, 24000\n1, 5, 24000\n"
+
+    monkeypatch.setattr(cli, "query_nvidia_smi", fake_query)
+    monkeypatch.setattr(cli, "POLL_INTERVAL_S", 0)
+
+    cli.main()
+    out = capsys.readouterr().out.strip()
+    assert out == "1"
+
+
+def test_cli_waits_until_gpu_free(monkeypatch, capsys):
+    cli = _load_cli_module()
+
+    calls = {"n": 0}
+
+    def fake_query():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return "0, 80, 24000\n"  # busy
+        return "0, 2, 24000\n"  # idle
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(cli, "query_nvidia_smi", fake_query)
+    monkeypatch.setattr(cli, "POLL_INTERVAL_S", 0)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: sleeps.append(s))
+
+    cli.main()
+    assert capsys.readouterr().out.strip() == "0"
+    assert calls["n"] == 3
+    assert len(sleeps) == 2  # slept before each of the first two retries
+
+
+def test_cli_retries_on_nvidia_smi_error(monkeypatch, capsys):
+    import subprocess
+
+    cli = _load_cli_module()
+    calls = {"n": 0}
+
+    def fake_query():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise subprocess.CalledProcessError(1, ["nvidia-smi"], stderr="boom")
+        return "0, 0, 24000\n"
+
+    monkeypatch.setattr(cli, "query_nvidia_smi", fake_query)
+    monkeypatch.setattr(cli, "POLL_INTERVAL_S", 0)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+
+    cli.main()
+    assert capsys.readouterr().out.strip() == "0"
+    assert calls["n"] == 2
