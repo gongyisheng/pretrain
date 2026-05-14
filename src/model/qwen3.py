@@ -13,12 +13,12 @@ from src.utils.config import ModelConfig
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = False, mlp_bias: bool = False, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = RMSNorm(d_model)
-        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm)
+        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm, bias=attn_bias)
         self.ln2 = RMSNorm(d_model)
-        self.ffn = SwiGluFFN(d_model, intermediate_size, dropout_ffn)
+        self.ffn = SwiGluFFN(d_model, intermediate_size, dropout_ffn, bias=mlp_bias)
 
     def attn_sublayer(
         self,
@@ -46,7 +46,7 @@ class Qwen3Model(nn.Module):
             (config.vocab_size + pad_multiple - 1) // pad_multiple
         ) * pad_multiple
         self.token_emb = nn.Embedding(self.padded_vocab_size, config.d_model)
-        self.drop = nn.Dropout(config.dropout_embd)
+        self.dropout_emb = nn.Dropout(config.dropout_embd)
         # No pos_emb — positioning handled by RoPE inside each attention layer
         self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
 
@@ -59,6 +59,8 @@ class Qwen3Model(nn.Module):
                 dropout_attn=config.dropout_attn,
                 dropout_ffn=config.dropout_ffn,
                 qk_norm=config.qk_norm,
+                attn_bias=config.attn_bias,
+                mlp_bias=config.mlp_bias,
                 attn_res=config.attn_res,
                 attn_res_block_size=config.attn_res_block_size,
                 attn_res_norm=config.attn_res_norm,
@@ -68,10 +70,11 @@ class Qwen3Model(nn.Module):
         ])
 
         self.ln_f = RMSNorm(config.d_model)
-        self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=config.lm_head_bias)
 
         # Weight tying
-        self.lm_head.weight = self.token_emb.weight
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.token_emb.weight
 
         self.apply(self._init_weights)
 
@@ -90,7 +93,7 @@ class Qwen3Model(nn.Module):
         attn_mask: torch.Tensor = None,
         return_logits: bool = True,
     ) -> torch.Tensor:
-        x = self.drop(self.token_emb(idx))
+        x = self.dropout_emb(self.token_emb(idx))
 
         if self.config.attn_res:
             attn_res_ctx = []

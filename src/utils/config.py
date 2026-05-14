@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import Dict, List, Optional
 import yaml
 
 
@@ -20,8 +20,12 @@ class ModelConfig:
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
     rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3, L_max ~62800
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
-    n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
-    n_experts_per_token: int = 2    # top-k experts activated per token
+    tie_word_embeddings: bool = True  # tie lm_head.weight to token_emb.weight
+    attn_bias: bool = False           # bias in attention Q/K/V/O projections
+    mlp_bias: bool = False            # bias in MLP layers (fc1/fc2 or gate/up/down)
+    lm_head_bias: bool = False        # bias in lm_head output projection
+    moe_n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
+    moe_n_experts_per_token: int = 2    # top-k experts activated per token
     moe_intermediate_size: int = 0               # per-expert FFN hidden dim; 0 = same as intermediate_size
     moe_aux_loss_coef: float = 0.01 # Switch Transformer load-balancing loss coefficient
     moe_expert_capacity_factor: Optional[float] = None  # None = dynamic (no dropping); float = fixed capacity, enables torch.compile
@@ -49,11 +53,13 @@ class DataConfig:
 @dataclass
 class TrainingConfig:
     batch_size: int = 16
-    gradient_accumulation_steps: int = 4
-    max_steps: int = 100000
+    gradient_accumulation_steps: int = 16
+    max_steps: int = 5000
     mixed_precision: str = "bf16"
     activation_checkpointing: bool = False
     backend: str = "torch"  # "torch" (torch.compile) or "triton" (custom kernels)
+    use_deterministic_algo: bool = False
+    seed: int = 42
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
     checkpoint_every: int = 5000
@@ -66,6 +72,7 @@ class TrainingConfig:
 class OptimizerConfig:
     name: str = "adamw"
     lr: float = 6e-4
+    lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})  # per-pattern LR multipliers. Keys are regexes matched against parameter names via re.search; first key (in insertion order) to match wins. Effective LR for a matched param = lr * lr_mult[key]. In tied mode `lm_head.weight is token_emb.weight`, so the param is enumerated only under `token_emb.weight` and an `lm_head` entry is a no-op.
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
@@ -74,7 +81,7 @@ class OptimizerConfig:
 @dataclass
 class SchedulerConfig:
     name: str = "cosine"
-    warmup_steps: int = 2000
+    warmup_steps: int = 100
     min_lr: float = 6e-5
 
 
@@ -121,9 +128,9 @@ def _apply_overrides(config: TrainConfig, overrides: List[str]):
         parts = key.split(".")
         obj = config
         for part in parts[:-1]:
-            obj = getattr(obj, part)
+            obj = obj[part] if isinstance(obj, dict) else getattr(obj, part)
         field_name = parts[-1]
-        current = getattr(obj, field_name)
+        current = obj.get(field_name) if isinstance(obj, dict) else getattr(obj, field_name)
         if isinstance(current, bool):
             value = value.lower() in ("true", "1", "yes")
         elif isinstance(current, int):
@@ -139,7 +146,10 @@ def _apply_overrides(config: TrainConfig, overrides: List[str]):
                     value = int(value)
                 except ValueError:
                     pass
-        setattr(obj, field_name, value)
+        if isinstance(obj, dict):
+            obj[field_name] = value
+        else:
+            setattr(obj, field_name, value)
 
 
 def _coerce_types(dc_class, raw_dict: dict) -> dict:
@@ -179,6 +189,7 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
         debug=DebugConfig(
             spike=SpikeConfig(**_coerce_types(SpikeConfig, raw.get("debug", {}).get("spike", {}))),
+            max_steps=raw.get("debug", {}).get("max_steps", 0),
         ),
     )
 

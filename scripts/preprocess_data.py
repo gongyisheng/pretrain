@@ -15,6 +15,7 @@ from src.utils.config import load_config
 from src.data.tokenizer import load_tokenizer
 
 CHUNK_SIZE = 1024 * 1024  # write in chunks of ~1M tokens
+BATCH_SIZE = 1024  # documents per encode_batch call (uses all CPUs)
 
 
 def main():
@@ -27,6 +28,8 @@ def main():
     config = load_config(args.config)
     tokenizer = load_tokenizer(config.data.tokenizer_path)
     eot_token = tokenizer.token_to_id("<|endoftext|>")
+
+    dtype = np.uint32 if config.model.vocab_size > 65535 else np.uint16
 
     os.makedirs(config.data.data_dir, exist_ok=True)
     tmp_path = os.path.join(config.data.data_dir, "all_tokens.bin")
@@ -41,39 +44,55 @@ def main():
     buffer = []
 
     with open(tmp_path, "wb") as f:
+        doc_batch = []
+        n_docs = 0
+
         for i, sample in enumerate(ds):
             if args.max_samples and i >= args.max_samples:
                 break
-            ids = tokenizer.encode(sample["text"]).ids
-            buffer.extend(ids)
-            buffer.append(eot_token)
+            doc_batch.append(sample["text"])
 
-            if len(buffer) >= CHUNK_SIZE:
-                chunk = np.array(buffer, dtype=np.uint16)
-                f.write(chunk.tobytes())
-                total_tokens += len(buffer)
-                buffer = []
+            if len(doc_batch) >= BATCH_SIZE:
+                encoded = tokenizer.encode_batch(doc_batch)
+                for enc in encoded:
+                    buffer.extend(enc.ids)
+                    buffer.append(eot_token)
+                n_docs += len(doc_batch)
+                doc_batch = []
 
-            if (i + 1) % 10000 == 0:
-                print(f"  Tokenized {i+1} documents ({total_tokens + len(buffer):,} tokens)")
+                if len(buffer) >= CHUNK_SIZE:
+                    chunk = np.array(buffer, dtype=dtype)
+                    f.write(chunk.tobytes())
+                    total_tokens += len(buffer)
+                    buffer = []
+
+                if n_docs % 10000 < BATCH_SIZE:
+                    print(f"  Tokenized {n_docs} documents ({total_tokens + len(buffer):,} tokens)")
+
+        if doc_batch:
+            encoded = tokenizer.encode_batch(doc_batch)
+            for enc in encoded:
+                buffer.extend(enc.ids)
+                buffer.append(eot_token)
+            n_docs += len(doc_batch)
 
         if buffer:
-            chunk = np.array(buffer, dtype=np.uint16)
+            chunk = np.array(buffer, dtype=dtype)
             f.write(chunk.tobytes())
             total_tokens += len(buffer)
 
-    print(f"Total tokens: {total_tokens:,}")
+    print(f"Total: {n_docs:,} documents, {total_tokens:,} tokens")
 
     # Pass 2: Split into train/val via memmap
-    all_data = np.memmap(tmp_path, dtype=np.uint16, mode="r")
+    all_data = np.memmap(tmp_path, dtype=dtype, mode="r")
     n_val = int(len(all_data) * config.data.val_split)
     n_train = len(all_data) - n_val
 
-    train_data = np.memmap(train_path, dtype=np.uint16, mode="w+", shape=(n_train,))
+    train_data = np.memmap(train_path, dtype=dtype, mode="w+", shape=(n_train,))
     train_data[:] = all_data[:n_train]
     train_data.flush()
 
-    val_data = np.memmap(val_path, dtype=np.uint16, mode="w+", shape=(n_val,))
+    val_data = np.memmap(val_path, dtype=dtype, mode="w+", shape=(n_val,))
     val_data[:] = all_data[n_train:]
     val_data.flush()
 
@@ -83,7 +102,7 @@ def main():
     print(f"Train: {n_train:,} tokens -> {train_path}")
     print(f"Val:   {n_val:,} tokens -> {val_path}")
 
-    verify = np.memmap(train_path, dtype=np.uint16, mode="r")
+    verify = np.memmap(train_path, dtype=dtype, mode="r")
     sample_ids = verify[:100].tolist()
     decoded = tokenizer.decode(sample_ids)
     print(f"\nSample (first 100 tokens decoded):\n{decoded[:500]}")

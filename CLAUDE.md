@@ -23,7 +23,7 @@ uv run ruff format --check src/ tests/
 
 # Train
 uv run python scripts/train.py --config configs/gpt2_124m.yaml
-uv run python scripts/train.py --config configs/qwen3_145m.yaml --no-wandb
+uv run python scripts/train.py --config configs/qwen3_57m.yaml --no-wandb
 uv run python scripts/train.py --config configs/gpt2_124m.yaml --resume checkpoints/step_1000.pt
 
 # CLI config overrides
@@ -74,3 +74,21 @@ Kernels must support float32, float16, and bfloat16. Never hardcode a dtype or c
 ### Experiments
 
 `experiments/` contains self-contained experiment folders (e.g., `scaling_law/`, `attn_res/`) each with their own configs, run scripts, and results. Scaling law experiments sweep model sizes (16M–145M) across both architectures.
+
+Every experiment folder must include a `README.md` with: hypothesis, setup table (configs, key params, approx param counts), run command, results table (filled in after running), and notes.
+
+Experiment YAML configs should explicitly set `batch_size`, `gradient_accumulation_steps`, `checkpoint_every`, `eval_every`, and `eval_steps` to the default values from `src/utils/config.py` (16, 16, 500, 100, 25) unless the experiment intentionally changes them.
+
+Standard LR by model size (from scaling law experiments, `min_lr` = `lr / 10`):
+
+| Model size | lr | min_lr |
+|---|---|---|
+| ~16M | 1e-3 | 1e-4 |
+| ~30M | 8e-4 | 8e-5 |
+| ~57M | 6e-4 | 6e-5 |
+| ~124-145M | 6e-4 | 6e-5 |
+
+Training duration and warmup:
+- `total_tokens` = model params x 20-40 (Chinchilla range, 30x is a good default)
+- `max_steps` = `total_tokens` / (`batch_size` x `gradient_accumulation_steps` x `max_seq_len`)
+- `warmup_steps` = 2%-5% of `max_steps`

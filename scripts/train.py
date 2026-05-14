@@ -20,9 +20,12 @@ def main():
         if arg.startswith("--") and "=" in arg:
             overrides.append(arg.removeprefix("--"))
 
-    config = load_config(args.config, overrides=overrides if overrides else None)
-    trainer = Trainer(config, wandb_enabled=not args.no_wandb, resume_from=args.resume)
-    trainer.train()
+    try:
+        config = load_config(args.config, overrides=overrides if overrides else None)
+        trainer = Trainer(config, wandb_enabled=not args.no_wandb, resume_from=args.resume)
+        trainer.train()
+    except Exception as e:
+        print(f"[train.py] Run failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

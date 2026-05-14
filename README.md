@@ -1,199 +1,53 @@
 # Pretrain
 
-Pretraining experiments on a single GPU — different architectures, datasets, hyperparameters, and see what actually works.
+A research playground for LLM pretraining and model architecture exploration.
+Pure PyTorch (>=12GB VRAM).
 
-Pure PyTorch, no frameworks, no magic (>=12GB VRAM).
-
-## Roadmap
-
-GPT-2 (MHA) is the baseline. All experiments compare against it.
-
-### Attention
-
-| Experiment | Status | Description |
-|---|---|---|
-| MHA (GPT-2 baseline) | Done | Standard multi-head attention — our reference point |
-| GQA | Planned | Grouped-query attention (Llama 2 style) — fewer KV heads, same quality? |
-| MQA | Planned | Multi-query attention — single KV head, how far can we push it? |
-| MLA | Planned | Multi-head latent attention (DeepSeek-V2) — compress KV into latent space |
-| Linear Attention | Planned | RetNet / RWKV-style — can we kill quadratic complexity and keep quality? |
-| Sliding Window | Planned | Mistral-style local + global attention mix |
-
-### Beyond Attention
-
-| Experiment | Status | Description |
-|---|---|---|
-| Sparse MoE | Planned | Mixture of Experts — more parameters, same compute |
-| Diffusion LM | Planned | Diffusion-based language modeling — text generation without autoregression |
-| Multimodal | Planned | Vision-language from scratch — how hard is it really? |
-
-### Frontier & Exotic
-
-| Experiment | Status | Description |
-|---|---|---|
-| mHC | Planned | Multi-head chunked attention — efficient long-context |
-| DeepSeek OCR | Planned | DeepSeek's optical character reasoning approach |
-| DeepSeek Engram | Planned | Persistent memory across context — learned engrams |
-| State Space (Mamba) | Planned | S4/Mamba — the RNN strikes back |
-| Hyena | Planned | Long convolutions as attention replacement |
-
-### Dataset
-
-| Experiment | Status | Description |
-|---|---|---|
-| Coding Corpus | Planned | Train model on coding data (e.g., The Stack) — compare against OpenWebText baseline |
-| Multi-language | Planned | Train on multi-language corpora — cross-lingual transfer and tokenizer efficiency |
-
-### Infra & Kernel Speedups
-
-| Experiment | Status | Description |
-|---|---|---|
-| Triton FlashAttention | Planned | Custom Triton kernel for fused attention (MHA/GQA/MQA) |
-| Fused Softmax | Planned | Triton fused online softmax — avoid materializing full attention matrix |
-| Fused MLP | Planned | Fused GeLU / SwiGLU MLP kernel — one read, one write |
-| Fused LayerNorm / RMSNorm | Planned | Triton fused norm kernels — eliminate extra memory passes |
-| Fused Cross-Entropy | Planned | Fused logit + softmax + loss — skip materializing logits |
-| Custom Optimizer | Planned | Implement AdamW and Muon from scratch — custom weight decay, momentum, Newton-style updates |
-| Custom Tokenizer | Planned | Byte-level BPE tokenizer from scratch — no HF dependency |
-| FP8/FP4 Training | Planned | Low-precision training — measure throughput gains vs. loss quality tradeoff |
-
-### Evaluation
-
-| Experiment | Status | Description |
-|---|---|---|
-| Scaling Law | Planned | Reproduce Chinchilla/Kaplan scaling laws — sweep model size vs. tokens vs. compute |
-| Tokenizer Quality | Planned | Measure compression ratio and fertility across corpora (English, code, multi-language) |
-| Training Efficiency | Planned | Compare tokens/sec, peak VRAM, and FLOPs utilization across architectures and kernels |
-| Weight Visualization | Planned | Layer weight distribution and gradient flow — detect vanishing/exploding gradients |
-| Attention Visualization | Planned | Attention score heatmaps — inspect head specialization and pattern formation |
-
-> Results are posted weekly. Check the `experiments/` folder for write-ups and W&B links.
-
-## Project Structure
-
-```
-pretrain/
-├── configs/                  # Standard configs (paper baselines)
-│   └── gpt2_124m.yaml       # GPT-2 124M baseline
-├── src/
-│   ├── model/                # Model architectures
-│   │   ├── components.py     # Shared blocks (attention, MLP, norms)
-│   │   ├── gpt2.py           # GPT-2 (baseline)
-│   │   └── registry.py       # Model registry
-│   ├── data/                 # Data pipeline
-│   │   ├── tokenizer.py      # Custom BPE tokenizer
-│   │   └── dataset.py        # Memory-mapped .bin dataset
-│   ├── training/             # Training loop
-│   │   ├── trainer.py        # Core training loop
-│   │   ├── optimizer.py      # AdamW + cosine warmup scheduler
-│   │   └── logger.py         # W&B logging wrapper
-│   └── utils/
-│       └── config.py         # TrainConfig dataclass + YAML loader
-├── scripts/
-│   ├── run_pipeline.sh       # End-to-end: preprocess + train
-│   ├── train.py              # Training entry point
-│   ├── train_tokenizer.py    # Train custom BPE tokenizer
-│   ├── preprocess_data.py    # Tokenize dataset → .bin files
-│   └── eval.py               # Standalone evaluation
-├── experiments/              # Self-contained experiments (configs + results)
-│   └── scaling_law/         # Kaplan/Chinchilla IsoLoss reproduction
-├── tests/
-└── pyproject.toml
-```
-
-## Quick Start
+## Install
+Requires python >=3.12
+Notable pins:
+- `torch>=2.10`
+- `triton>=3.6`
+- `tokenizers>=0.22`
+- `datasets>=4.5`
+- `wandb>=0.26`
 
 ```bash
 uv sync
-
-# Run the full pipeline (preprocess OpenWebText + train GPT-2 baseline)
-nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
-
-# Or step by step
-uv run python scripts/train_tokenizer.py --config configs/gpt2_124m.yaml
-uv run python scripts/preprocess_data.py --config configs/gpt2_124m.yaml
-uv run python scripts/train.py --config configs/gpt2_124m.yaml
-uv run python scripts/eval.py --config configs/gpt2_124m.yaml --checkpoint checkpoints/step_50000.pt
-
-# CLI overrides
-uv run python scripts/train.py --config configs/gpt2_124m.yaml --optimizer.lr 6e-4
+uv run wandb login   # required unless you pass --no-wandb to train.py
 ```
 
-## Experiments
+## Data & tokenizer
 
-All architecture experiments live in `experiments/`. Each experiment is self-contained with its own config, custom code, and documentation.
-
-```
-experiments/
-├── scaling_law/
-│   ├── README.md              # Hypothesis, setup, results
-│   ├── gpt2_16m.yaml          # Experiment-specific configs
-│   ├── gpt2_30m.yaml
-│   ├── gpt2_55m.yaml
-│   ├── gpt2_124m.yaml
-│   └── results/               # W&B exports, plots
-├── gqa_attention/
-│   ├── README.md
-│   ├── config.yaml
-│   └── attention.py           # Custom component
-└── ...
-```
-
-### Running an experiment
+Option A — download prebuilt tokenizer and tokenized `.bin` files from [gongyisheng/openwebtext-exp](https://huggingface.co/datasets/gongyisheng/openwebtext-exp) (recommended, skips ~hours of preprocessing):
 
 ```bash
-uv run python scripts/train.py --config experiments/scaling_law/gpt2_16m.yaml
+uv run hf download gongyisheng/openwebtext-exp --repo-type dataset --local-dir .
 ```
 
-### Experiment workflow
+Option B — build from scratch:
 
-1. Create `experiments/<name>/` with configs, custom code, and a `README.md`
-2. Train and compare against baseline on W&B
-3. Record results in the experiment's `README.md` and `results/`
-4. If results are good, graduate the code into `src/` and config into `configs/`
-
-## Adding a New Architecture
-
-1. Create `src/model/<name>.py` with the model class
-2. Add it to `MODEL_REGISTRY` in `registry.py`
-3. Create a config YAML in `configs/`
-
-The training loop, data pipeline, and scripts work unchanged — only the model is swapped.
-
-## Data Pipeline
-
-```
-HuggingFace dataset (streaming)
-  → Tokenize with custom BPE
-  → Concatenate into one long sequence
-  → Split into train/val (99%/1%)
-  → Chunk into fixed-length blocks (1024 tokens)
-  → Save as memory-mapped .bin files (uint16)
+```bash
+uv run python scripts/train_tokenizer.py --config configs/gpt2_124m.yaml
+uv run python scripts/preprocess_data.py --config configs/gpt2_124m.yaml
 ```
 
-Data is preprocessed once and reused across all experiments.
+## Train
 
-## Training Features
+Pick a config from `configs/` and launch training:
 
-| Feature | Detail |
-|---|---|
-| Mixed precision | `torch.amp` (fp16/bf16) |
-| Gradient accumulation | Simulate larger batch sizes |
-| Gradient clipping | `max_norm=1.0` |
-| Activation checkpointing | Trade compute for VRAM |
-| Checkpointing | Full state saved to `.pt`, resume from any checkpoint |
-| W&B logging | Loss, perplexity, FLOPs, lr, grad norm, tokens/sec |
+```bash
+uv run python scripts/train.py --config configs/gpt2_124m.yaml        # GPT-2 124M (MHA baseline)
+uv run python scripts/train.py --config configs/qwen3_57m.yaml        # Qwen3 57M (GQA + RoPE + RMSNorm + SwiGLU)
+uv run python scripts/train.py --config configs/qwen3_moe_133m.yaml   # Qwen3 MoE 133M
+```
 
-## Dependencies
+Override config values from the CLI, disable W&B, or resume from a checkpoint:
 
-Managed with [uv](https://docs.astral.sh/uv/). See `pyproject.toml` for the full list.
+```bash
+uv run python scripts/train.py --config configs/gpt2_124m.yaml --no-wandb
+uv run python scripts/train.py --config configs/gpt2_124m.yaml --optimizer.lr=1e-4 --training.backend=triton
+uv run python scripts/train.py --config configs/gpt2_124m.yaml --resume checkpoints/step_1000.pt
+```
 
-| Package | Version | Purpose |
-|---|---|---|
-| `torch` | >=2.9 | Model, training, mixed precision |
-| `triton` | >=3.6 | Custom GPU kernels |
-| `tokenizers` | >=0.22 | BPE tokenizer (Rust-backed) |
-| `datasets` | >=4.5 | HuggingFace dataset streaming |
-| `wandb` | >=0.24 | Experiment tracking |
-| `pyyaml` | >=6.0 | Config parsing |
-| `numpy` | >=2.4 | Memory-mapped data files |
+Architecture-specific experiments (attention variants, MoE, scaling laws, etc.) live in `experiments/` with their own configs and write-ups.

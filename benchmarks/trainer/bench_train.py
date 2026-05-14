@@ -2,7 +2,7 @@
 Training throughput benchmark for GPT-2, Qwen3, and Qwen3 MoE.
 
 Runs the Trainer for a short number of steps with W&B disabled.
-Uses per-step debug_metrics to compute steady-state throughput,
+Registers an on_log hook to capture per-step throughput,
 excluding warmup steps (torch.compile tracing, CUDA caching, etc.).
 
 Usage:
@@ -10,7 +10,7 @@ Usage:
     python benchmarks/trainer/bench_train.py --config configs/gpt2_124m.yaml
 
     # Benchmark Qwen3 145M (triton backend)
-    python benchmarks/trainer/bench_train.py --config configs/qwen3_145m.yaml --backend triton
+    python benchmarks/trainer/bench_train.py --config configs/qwen3_57m.yaml --backend triton
 
     # Benchmark Qwen3 MoE 57M (torch backend)
     python benchmarks/trainer/bench_train.py --config configs/qwen3_moe_133m.yaml
@@ -34,8 +34,8 @@ from src.training.trainer import Trainer
 def run_benchmark(config_path, backend=None, steps=10, warmup=5):
     """Run a training throughput benchmark using the Trainer.
 
-    Runs all steps in a single train() call. Uses per-step debug_metrics
-    from the Trainer to compute throughput excluding warmup steps.
+    Runs all steps in a single train() call. Registers an on_log hook
+    to capture throughput, excluding warmup steps.
     """
     total_steps = warmup + steps
     overrides = [
@@ -51,10 +51,19 @@ def run_benchmark(config_path, backend=None, steps=10, warmup=5):
     config = load_config(config_path, overrides=overrides)
     trainer = Trainer(config, wandb_enabled=False)
 
+    perf_metrics = []
+    trainer.logger.register_on_log_hook(
+        lambda step, metrics: perf_metrics.append({
+            "step": step,
+            "tokens_per_sec": metrics["perf/tokens_per_sec"],
+            "total_tokens": metrics["train/total_tokens"],
+        })
+    )
+
     trainer.train()
 
     # Average tokens_per_sec from measured steps (warmup excluded)
-    measured = [m for m in trainer.debug_metrics if m["step"] > warmup]
+    measured = [m for m in perf_metrics if m["step"] > warmup]
     tok_per_sec = sum(m["tokens_per_sec"] for m in measured) / len(measured)
     measured_tokens = steps * trainer.tokens_per_step
     elapsed = measured_tokens / tok_per_sec if tok_per_sec > 0 else 0
@@ -93,8 +102,8 @@ def run_all_benchmarks(steps=10, warmup=5):
     configs = [
         ("configs/gpt2_124m.yaml", "torch"),
         ("configs/gpt2_124m.yaml", "triton"),
-        ("configs/qwen3_145m.yaml", "torch"),
-        ("configs/qwen3_145m.yaml", "triton"),
+        ("configs/qwen3_57m.yaml", "torch"),
+        ("configs/qwen3_57m.yaml", "triton"),
         ("configs/qwen3_moe_133m.yaml", "torch"),
         ("configs/qwen3_moe_133m.yaml", "triton"),
     ]

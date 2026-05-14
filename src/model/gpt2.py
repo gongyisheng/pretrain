@@ -7,12 +7,12 @@ from src.utils.config import ModelConfig
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = True, mlp_bias: bool = True, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn, qk_norm=qk_norm)
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn, qk_norm=qk_norm, bias=attn_bias)
         self.ln2 = nn.LayerNorm(d_model)
-        self.ffn = GeluFFN(d_model, intermediate_size, dropout_ffn)
+        self.ffn = GeluFFN(d_model, intermediate_size, dropout_ffn, bias=mlp_bias)
 
     def attn_sublayer(self, x: torch.Tensor, attn_mask: torch.Tensor = None) -> torch.Tensor:
         return self.attn(self.ln1(x), attn_mask=attn_mask)
@@ -31,7 +31,7 @@ class GPT2Model(nn.Module):
         self.padded_vocab_size = ((config.vocab_size + pad_multiple - 1) // pad_multiple) * pad_multiple
         self.token_emb = nn.Embedding(self.padded_vocab_size, config.d_model)
         self.pos_emb = nn.Embedding(max_seq_len, config.d_model)
-        self.drop = nn.Dropout(config.dropout_embd)
+        self.dropout_emb = nn.Dropout(config.dropout_embd)
 
         self.blocks = nn.ModuleList([
             GPT2TransformerBlock(
@@ -41,6 +41,8 @@ class GPT2Model(nn.Module):
                 dropout_attn=config.dropout_attn,
                 dropout_ffn=config.dropout_ffn,
                 qk_norm=config.qk_norm,
+                attn_bias=config.attn_bias,
+                mlp_bias=config.mlp_bias,
                 attn_res=config.attn_res,
                 attn_res_block_size=config.attn_res_block_size,
                 attn_res_norm=config.attn_res_norm,
@@ -50,10 +52,11 @@ class GPT2Model(nn.Module):
         ])
 
         self.ln_f = nn.LayerNorm(config.d_model)
-        self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=config.lm_head_bias)
 
         # Weight tying
-        self.lm_head.weight = self.token_emb.weight
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.token_emb.weight
 
         self.apply(self._init_weights)
 
@@ -69,7 +72,8 @@ class GPT2Model(nn.Module):
         B, S = idx.shape
         # Absolute position embedding always uses 0..S-1, never intra-doc position_ids
         pos = torch.arange(0, S, device=idx.device).unsqueeze(0)
-        x = self.drop(self.token_emb(idx) + self.pos_emb(pos))
+
+        x = self.dropout_emb(self.token_emb(idx) + self.pos_emb(pos))
 
         if self.config.attn_res:
             attn_res_ctx = []

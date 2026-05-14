@@ -11,6 +11,7 @@ from tqdm import tqdm
 from src.model.registry import build_model
 from src.data.dataset import PretrainDataset
 from src.data.tokenizer import load_tokenizer
+from src.model.components import set_backend
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
@@ -27,21 +28,21 @@ class Trainer:
         self.config = config
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.step = 0
-        self.loss_history = []
-        self.debug_metrics = []  # per-step: {"step", "tokens_per_sec", "total_tokens"}
 
         # Enable TF32 for matmuls on Ampere+ GPUs
         torch.set_float32_matmul_precision('high')
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
 
+        # Prefer deterministic CUDA algorithms
+        if config.training.use_deterministic_algo:
+            os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+            torch.use_deterministic_algorithms(True, warn_only=True)
 
         # Seed for reproducibility
-        self._seed(42)
+        self._seed(config.training.seed)
 
         # Backend selection: "torch" (torch.compile) or "triton" (custom kernels)
-        from src.model.components import set_backend
         set_backend(config.training.backend)
         self._loss_fn = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
 
@@ -69,14 +70,34 @@ class Trainer:
             p.numel() for name, p in self.model.named_parameters()
             if "emb" in name
         )
+        # For MoE, FLOPs use active params (k experts activated) not total params.
+        # Replace total expert FFN params with the k-active subset in the count.
+        if self.is_moe:
+            mc = config.model
+            expert_ffn_per_layer = mc.moe_n_experts * 3 * mc.moe_intermediate_size * mc.d_model
+            active_ffn_per_layer = mc.moe_n_experts_per_token * 3 * mc.moe_intermediate_size * mc.d_model
+            if mc.mlp_bias:
+                expert_ffn_per_layer += mc.moe_n_experts * (2 * mc.moe_intermediate_size + mc.d_model)
+                active_ffn_per_layer += mc.moe_n_experts_per_token * (2 * mc.moe_intermediate_size + mc.d_model)
+            self.n_active_non_emb_params = (
+                self.n_non_emb_params
+                - mc.n_layers * expert_ffn_per_layer
+                + mc.n_layers * active_ffn_per_layer
+            )
+        else:
+            self.n_active_non_emb_params = self.n_non_emb_params
         self.tokens_per_step = (
             config.training.batch_size
             * config.training.gradient_accumulation_steps
             * config.max_seq_len
         )
         self.total_tokens = 0
-        print(f"Model: {config.model.arch} | {n_params / 1e6:.1f}M params "
-              f"({self.n_non_emb_params / 1e6:.1f}M non-embedding) | device={self.device}")
+        if self.is_moe:
+            print(f"Model: {config.model.arch} | {n_params / 1e6:.1f}M total params "
+                  f"({self.n_active_non_emb_params / 1e6:.1f}M active non-embedding) | device={self.device}")
+        else:
+            print(f"Model: {config.model.arch} | {n_params / 1e6:.1f}M params "
+                  f"({self.n_non_emb_params / 1e6:.1f}M non-embedding) | device={self.device}")
 
         # Data
         train_path = os.path.join(config.data.data_dir, "train.bin")
@@ -86,19 +107,23 @@ class Trainer:
             eot_token_id=self.eot_token_id,
             pad_token_id=self.pad_token_id,
         )
-        self.train_dataset = PretrainDataset(train_path, config.max_seq_len, **dataset_kwargs)
-        self.val_dataset = PretrainDataset(val_path, config.max_seq_len, **dataset_kwargs)
+        self.train_dataset = PretrainDataset(train_path, config.max_seq_len, config.model.vocab_size, **dataset_kwargs)
+        self.val_dataset = PretrainDataset(val_path, config.max_seq_len, config.model.vocab_size, **dataset_kwargs)
 
         nw = config.data.num_workers
+        g = torch.Generator()
+        g.manual_seed(config.training.seed)
         self.train_loader = DataLoader(
             self.train_dataset, batch_size=config.training.batch_size,
             shuffle=True, num_workers=nw, pin_memory=True,
-            persistent_workers=nw > 0,
+            persistent_workers=nw > 0, prefetch_factor=1 if nw > 0 else None,
+            generator=g, worker_init_fn=Trainer._worker_init_fn,
         )
         self.val_loader = DataLoader(
             self.val_dataset, batch_size=config.training.batch_size,
             shuffle=False, num_workers=nw, pin_memory=True,
-            persistent_workers=nw > 0,
+            persistent_workers=nw > 0, prefetch_factor=1 if nw > 0 else None,
+            generator=g, worker_init_fn=Trainer._worker_init_fn,
         )
 
         # Optimizer & scheduler
@@ -139,7 +164,7 @@ class Trainer:
                     block.forward = make_ckpt_forward(block)
 
         # Metrics
-        self.metrics = MetricsTracker(config, self.n_non_emb_params, self.device)
+        self.metrics = MetricsTracker(config, self.n_active_non_emb_params, self.device)
 
         # Logger
         self.logger = WandbLogger(config, enabled=wandb_enabled)
@@ -161,6 +186,12 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
 
+    @staticmethod
+    def _worker_init_fn(worker_id):
+        seed = torch.initial_seed() % 2**32
+        np.random.seed(seed)
+        random.seed(seed)
+
     def _next_batch(self, train_iter):
         try:
             return next(train_iter), train_iter
@@ -174,6 +205,7 @@ class Trainer:
 
         train_iter = iter(self.train_loader)
         accum_loss = 0.0
+        accum_aux_loss = 0.0
         t_last_log = time.time()
         tokens_since_log = 0
 
@@ -182,6 +214,7 @@ class Trainer:
 
         # Deferred loss: keep previous step's loss tensor to read while next step runs
         prev_loss_tensor = None
+        prev_aux_loss_tensor = None
 
         stop_at = self.config.debug.max_steps if self.config.debug.max_steps > 0 else cfg.max_steps
         pbar = tqdm(total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True)
@@ -192,9 +225,12 @@ class Trainer:
             # This overlaps the .item() sync with the current step's data prefetch
             if prev_loss_tensor is not None:
                 accum_loss = prev_loss_tensor.item()
+            if prev_aux_loss_tensor is not None:
+                accum_aux_loss = prev_aux_loss_tensor.item()
 
             # Accumulate loss as tensor to avoid CUDA sync every micro-step
             accum_loss_tensor = torch.zeros(1, device=self.device)
+            accum_aux_loss_tensor = torch.zeros(1, device=self.device) if self.is_moe else None
 
             # Prefetch first batch
             batch_cpu, train_iter = self._next_batch(train_iter)
@@ -211,6 +247,15 @@ class Trainer:
                 # Wait for current batch transfer to complete
                 if prefetch_stream is not None:
                     torch.cuda.current_stream().wait_stream(prefetch_stream)
+                    # record_stream tells the caching allocator that x/y are
+                    # in use on the current stream. Without it the allocator
+                    # only tracks them against prefetch_stream and may free
+                    # their storage as soon as the H2D copy finishes — while
+                    # torch.compile's graph is still consuming them on the
+                    # default stream. That race silently corrupts inputs and
+                    # biases the gradient (worst case: ~+0.6 nats val gap).
+                    x.record_stream(torch.cuda.current_stream())
+                    y.record_stream(torch.cuda.current_stream())
 
                 # Start prefetching next batch while computing
                 if micro_step < cfg.gradient_accumulation_steps - 1:
@@ -241,6 +286,8 @@ class Trainer:
 
                 self.scaler.scale(loss).backward()
                 accum_loss_tensor += loss.detach()
+                if self.is_moe:
+                    accum_aux_loss_tensor += aux_loss.detach() / cfg.gradient_accumulation_steps
                 tokens_since_log += x.numel()
 
                 # Swap to prefetched batch
@@ -257,20 +304,22 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.metrics.on_step(
-                grad_norm_val, 
+                accum_loss,
+                self.step,
+                grad_norm_val,
                 cfg.grad_clip,
-                self.scaler.is_enabled(), 
-                scale_before, 
+                self.scaler.is_enabled(),
+                scale_before,
                 self.scaler.get_scale()
             )
             self.scheduler.step()
 
             # Defer loss sync to next iteration (save tensor, read later)
             prev_loss_tensor = accum_loss_tensor
+            prev_aux_loss_tensor = accum_aux_loss_tensor
 
             self.step += 1
             self.total_tokens += self.tokens_per_step
-            self.loss_history.append(accum_loss)
             pbar.update(1)
 
             # Logging (uses accum_loss from *previous* step — 1-step delay, no impact on training)
@@ -286,11 +335,6 @@ class Trainer:
                 )
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}", tok_s=f"{tokens_per_sec:.0f}")
-                self.debug_metrics.append({
-                    "step": self.step,
-                    "tokens_per_sec": tokens_per_sec,
-                    "total_tokens": self.total_tokens,
-                })
                 t_last_log = time.time()
                 tokens_since_log = 0
 
@@ -309,11 +353,6 @@ class Trainer:
             # Checkpoint
             if self.step % cfg.checkpoint_every == 0:
                 self._save_checkpoint()
-
-        # Final loss sync for the last step
-        if prev_loss_tensor is not None:
-            accum_loss = prev_loss_tensor.item()
-            self.loss_history[-1] = accum_loss
 
         pbar.close()
         self.logger.finish()
@@ -377,7 +416,7 @@ class Trainer:
             idx = torch.cat([idx, next_token], dim=1)
         token_ids = idx[0].tolist()
         generated_text = self.tokenizer.decode(token_ids)
-        self.logger.log_text("generated_text", generated_text, step=self.step)
+        self.logger.log_text("val-sample/generations", generated_text, step=self.step)
 
     def _save_checkpoint(self, suffix: str = "", extra: dict = None):
         name = f"step_{self.step}_{suffix}.pt" if suffix else f"step_{self.step}.pt"
@@ -388,6 +427,7 @@ class Trainer:
             "scheduler": self.scheduler.state_dict(),
             "grad_scaler": self.scaler.state_dict(),
             "step": self.step,
+            "total_tokens": self.total_tokens,
             "config": self.config.to_dict(),
             "rng_states": {
                 "python": random.getstate(),
@@ -410,7 +450,9 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.scaler.load_state_dict(checkpoint["grad_scaler"])
         self.step = checkpoint["step"]
-        self.total_tokens = self.step * self.tokens_per_step
+        # Prefer the saved token count so resumes with a different batch_size or ga
+        # don't silently corrupt the running total. Fall back for old checkpoints.
+        self.total_tokens = checkpoint.get("total_tokens", self.step * self.tokens_per_step)
 
         rng = checkpoint.get("rng_states", {})
         if "python" in rng:

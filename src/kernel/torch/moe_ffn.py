@@ -7,6 +7,8 @@ def torch_moe_expert_ffn(
     padded_input: torch.Tensor,
     expert_gate_up: torch.Tensor,
     expert_down: torch.Tensor,
+    expert_gate_up_bias: torch.Tensor = None,
+    expert_down_bias: torch.Tensor = None,
 ) -> torch.Tensor:
     """Fused batched expert FFN: gate_up bmm → chunk → SwiGLU → down bmm.
 
@@ -17,11 +19,18 @@ def torch_moe_expert_ffn(
         padded_input: (E, C, D) — padded token embeddings per expert
         expert_gate_up: (E, 2*I, D) — stacked gate+up projection weights
         expert_down: (E, D, I) — stacked down projection weights
+        expert_gate_up_bias: (E, 2*I) — optional bias for gate+up projection
+        expert_down_bias: (E, D) — optional bias for down projection
 
     Returns:
         (E, C, D) — expert output
     """
     gate_up = torch.bmm(padded_input, expert_gate_up.mT)  # (E, C, 2*I)
+    if expert_gate_up_bias is not None:
+        gate_up = gate_up + expert_gate_up_bias.unsqueeze(1)
     gate, up = gate_up.chunk(2, dim=-1)                     # each (E, C, I)
     hidden = F.silu(gate) * up                               # (E, C, I)
-    return torch.bmm(hidden, expert_down.mT)                # (E, C, D)
+    out = torch.bmm(hidden, expert_down.mT)                  # (E, C, D)
+    if expert_down_bias is not None:
+        out = out + expert_down_bias.unsqueeze(1)
+    return out

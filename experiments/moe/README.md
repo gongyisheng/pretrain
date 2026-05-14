@@ -1,39 +1,50 @@
 # MoE Experiments
 
-Grid search over `n_experts_per_token` (top-k) for Qwen3 MoE architecture.
+## Scale-up to 0.5B
 
-## Base Architecture
+Single config scaling the MoE architecture to ~500M total params.
+
+### Architecture
 
 | Param | Value |
 |-------|-------|
-| `d_model` | 384 |
-| `n_layers` | 8 |
-| `n_heads` | 6 |
-| `n_kv_heads` | 3 |
-| `intermediate_size` (per expert) | 512 |
-| `n_experts` | 8 |
+| `d_model` | 1024 |
+| `n_layers` | 16 |
+| `n_heads` | 16 |
+| `n_kv_heads` | 8 |
+| `moe_intermediate_size` (per expert) | 128 |
+| `moe_n_experts` | 64 |
+| `moe_n_experts_per_token` | 4 |
 | `vocab_size` | 50257 |
 
-Total params: ~61M. Active params scale with `n_experts_per_token`.
+Total params: ~506M (weight-tied). Active per token: ~128M.
 
-## Grid Search Configs
+Sparsity: 4/64 = 6.25% of experts active per token (matches Qwen3-0.6B-MoE ratio).
 
-| Config | k | Active params |
-|--------|---|---------------|
-| `qwen3_moe_61m_a28m` | 1 | ~28M |
-| `qwen3_moe_61m_a32m` | 2 | ~32M |
-| `qwen3_moe_61m_a42m` | 4 | ~42M |
-| `qwen3_moe_61m_a61m` | 8 | ~61M (dense-equiv) |
+### Grid Search Configs
 
-## Running
+| Config | k | Active params | Sparsity |
+|--------|---|---------------|----------|
+| `qwen3_moe_506m_a109m` | 1 | ~109M | 1.6% |
+| `qwen3_moe_506m_a115m` | 2 | ~115M | 3.1% |
+| `qwen3_moe_506m_a128m` | 4 | ~128M | 6.3% |
+| `qwen3_moe_506m_a153m` | 8 | ~153M | 12.5% |
+| `qwen3_moe_506m_a204m` | 16 | ~204M | 25% |
+| `qwen3_moe_506m_a304m` | 32 | ~304M | 50% |
+| `qwen3_moe_506m_a506m` | 64 | ~506M | 100% (dense-equiv) |
+
+### Running
 
 ```bash
 # All configs sequentially:
-nohup bash experiments/moe/qwen3_moe/run.sh > logs/moe_grid.log 2>&1 &
+nohup bash experiments/moe/qwen3_moe/run.sh > logs/moe_500m.log 2>&1 &
 
 # Single config:
-python scripts/train.py --config experiments/moe/qwen3_moe/qwen3_moe_61m_a32m.yaml
+uv run python scripts/train.py --config experiments/moe/qwen3_moe_506m_a128m.yaml
 ```
+
+> **Memory note:** Model params + optimizer ~6GB (BF16). If activations OOM on your GPU,
+> add `--training.activation_checkpointing=true`.
 
 ## Aux Loss
 

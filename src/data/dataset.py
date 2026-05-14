@@ -28,6 +28,7 @@ class PretrainDataset(Dataset):
         self,
         bin_path: str,
         seq_len: int,
+        vocab_size: int,
         packing: bool = True,
         eot_token_id: int = 0,
         pad_token_id: int = 0,
@@ -36,7 +37,8 @@ class PretrainDataset(Dataset):
         self.packing = packing
         self.pad_token_id = pad_token_id
         self.eot_token_id = eot_token_id
-        self.data = np.memmap(bin_path, dtype=np.uint16, mode="r")
+        dtype = np.uint32 if vocab_size > 65535 else np.uint16
+        self.data = np.memmap(bin_path, dtype=dtype, mode="r")
 
         if packing:
             self.n_sequences = len(self.data) // seq_len - 1

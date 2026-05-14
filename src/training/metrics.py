@@ -1,25 +1,21 @@
 """Training metrics: per-step tracking, log_dict assembly, per-layer grad norms."""
 
-import re
-from collections import defaultdict
-
+import math
 import torch
 
 from src.utils.config import TrainConfig
-
-_BLOCK_RE = re.compile(r"^blocks\.(\d+)\.(.+)$")
 
 
 class MetricsTracker:
     """Tracks and assembles training metrics for W&B logging."""
 
-    def __init__(self, config: TrainConfig, n_non_emb_params: int, device: str):
+    def __init__(self, config: TrainConfig, n_active_non_emb_params: int, device: str):
         self.config = config
-        self.n_non_emb_params = n_non_emb_params
+        self.n_active_non_emb_params = n_active_non_emb_params
         self.device = device
         self.is_moe = config.model.arch == "qwen3_moe"
         if self.is_moe:
-            self._aux_floor = config.model.n_layers * config.model.n_experts_per_token
+            self._aux_floor = config.model.n_layers * config.model.moe_n_experts_per_token
 
         self._grad_clip_steps = 0
         self._steps_since_log = 0
@@ -32,6 +28,8 @@ class MetricsTracker:
 
     def on_step(
         self,
+        loss: float,
+        step: int,
         grad_norm_val: float,
         grad_clip: float,
         scaler_enabled: bool,
@@ -39,6 +37,8 @@ class MetricsTracker:
         scale_after: float,
     ):
         """Call after grad clip + scaler.step/update on every training step."""
+        if not math.isfinite(loss):
+            raise RuntimeError(f"Loss is {loss} at step {step}, stopping training")
         if grad_norm_val > grad_clip:
             self._grad_clip_steps += 1
         self._steps_since_log += 1
@@ -70,7 +70,7 @@ class MetricsTracker:
             # train
             "train/loss": loss,
             "train/perplexity": min(float(torch.exp(torch.tensor(loss))), 1e6),
-            "train/flops": 6 * self.n_non_emb_params * total_tokens,
+            "train/flops": 6 * self.n_active_non_emb_params * total_tokens,
             "train/total_tokens": total_tokens,
             # optim
             "optim/lr": lr,
@@ -86,7 +86,7 @@ class MetricsTracker:
 
         # MFU
         if self._gpu_peak_flops and tokens_per_sec > 0:
-            flops_per_sec = 6 * self.n_non_emb_params * tokens_per_sec
+            flops_per_sec = 6 * self.n_active_non_emb_params * tokens_per_sec
             d["perf/mfu"] = flops_per_sec / self._gpu_peak_flops
 
         # GPU memory
@@ -129,44 +129,22 @@ class MetricsTracker:
 
     @staticmethod
     def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-        """Compute L2 gradient norms grouped by layer/component.
+        """Compute per-parameter L2 gradient norms.
 
-        Groups:
-            grad_norm/embedding          - token_emb, pos_emb
-            grad_norm/blocks.{i}.attn    - ln1 + attention params for block i
-            grad_norm/blocks.{i}.ffn     - ln2 + FFN params for block i
-            grad_norm/blocks.{i}.router  - MoE router params (MoE only)
-            grad_norm/final_norm         - ln_f
-
-        Each group norm is sqrt(sum of squared per-param norms).
+        Each parameter (e.g. blocks.0.attn.q_proj.weight) gets its own key
+        under grad_norm/. Automatically handles the _orig_mod. prefix added
+        by torch.compile.
         """
-        group_sq: dict[str, float] = defaultdict(float)
+        norms: dict[str, float] = {}
 
         for name, param in model.named_parameters():
             if param.grad is None:
                 continue
+            # torch.compile wraps model in OptimizedModule, prepending "_orig_mod."
+            name = name.removeprefix("_orig_mod.")
+            norms[f"grad_norm/{name}"] = param.grad.data.norm(2.0).item()
 
-            sq = param.grad.data.norm(2.0).item() ** 2
-
-            if name.startswith(("token_emb.", "pos_emb.", "lm_head.")):
-                group_sq["grad_norm/embedding"] += sq
-            elif name.startswith("ln_f."):
-                group_sq["grad_norm/final_norm"] += sq
-            elif (m := _BLOCK_RE.match(name)):
-                idx = m.group(1)
-                rest = m.group(2)
-                if rest.startswith(("ln1.", "attn.")):
-                    group_sq[f"grad_norm/blocks.{idx}.attn"] += sq
-                elif rest.startswith("ffn.router."):
-                    group_sq[f"grad_norm/blocks.{idx}.router"] += sq
-                elif rest.startswith(("ln2.", "ffn.")):
-                    group_sq[f"grad_norm/blocks.{idx}.ffn"] += sq
-                else:
-                    group_sq[f"grad_norm/blocks.{idx}.other"] += sq
-            else:
-                group_sq["grad_norm/other"] += sq
-
-        return {key: val**0.5 for key, val in group_sq.items()}
+        return norms
 
     # ------------------------------------------------------------------
     # GPU peak FLOPS estimation
