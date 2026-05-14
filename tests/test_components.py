@@ -185,7 +185,7 @@ def test_torch_flash_attn_with_attn_mask():
 
 
 def test_mha_attn_mask_output_shape():
-    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout=0.0)
+    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0)
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
     attn_mask = build_causal_mask(pos, device=x.device, dtype=x.dtype)
@@ -196,7 +196,7 @@ def test_mha_attn_mask_output_shape():
 def test_mha_attn_mask_blocks_cross_doc_attention():
     """Token in doc1 must not be influenced by tokens in doc0."""
     torch.manual_seed(0)
-    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout=0.0)
+    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0)
     mha.eval()
 
     x = torch.randn(1, 4, 64)
@@ -239,7 +239,7 @@ def test_rope_forward_reset_position_ids_differ():
 def test_gqa_forward_with_position_ids_shape():
     """GroupedQueryAttention accepts position_ids and returns correct shape."""
     rope = RoPE(d_head=16, max_seq_len=32)
-    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout=0.0)
+    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0)
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
     out = gqa(x, rope, position_ids=pos)
@@ -254,7 +254,6 @@ def _tiny_qwen3_config():
         n_kv_heads=2,
         d_model=64,
         vocab_size=256,
-        dropout=0.0,
         rope_theta=10000.0,
         qk_norm=True,
     )

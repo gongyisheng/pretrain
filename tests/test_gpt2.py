@@ -48,7 +48,7 @@ def test_gpt2_no_bias():
     config = ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=False, mlp_bias=False)
     model = GPT2Model(config, max_seq_len=128)
     x = torch.randint(0, 256, (2, 32))
-    logits = model(x)
+    logits, _ = model(x, position_ids=_pos(2, 32))
     assert logits.shape == (2, 32, 256)
     # Verify no linear layers (except lm_head which is already bias=False) have bias
     for name, module in model.named_modules():
@@ -60,7 +60,7 @@ def test_gpt2_attn_bias_only():
     config = ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=True, mlp_bias=False)
     model = GPT2Model(config, max_seq_len=128)
     x = torch.randint(0, 256, (2, 32))
-    logits = model(x)
+    logits, _ = model(x, position_ids=_pos(2, 32))
     assert logits.shape == (2, 32, 256)
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):

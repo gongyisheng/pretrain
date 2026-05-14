@@ -50,7 +50,8 @@ class _FakeTrainConfig:
 def _populate_grads(model, vocab_size: int):
     """Run a forward/backward pass to populate .grad on all parameters."""
     idx = torch.randint(0, vocab_size, (1, 16))
-    out = model(idx)
+    position_ids = torch.arange(16).unsqueeze(0)
+    out = model(idx, position_ids=position_ids)
     # MoE models return (logits, aux_loss)
     logits = out[0] if isinstance(out, tuple) else out
     logits.sum().backward()
