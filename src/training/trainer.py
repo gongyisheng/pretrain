@@ -18,7 +18,11 @@ from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
 from src.training.loss import next_token_targets, compute_loss
 from src.utils.masking_utils import build_causal_mask
-from src.kernel.torch.cross_entropy import torch_cross_entropy
+
+
+@torch.compile
+def _cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    return F.cross_entropy(logits, targets)
 
 
 class Trainer:
@@ -40,7 +44,7 @@ class Trainer:
         # Seed for reproducibility
         self._seed(config.training.seed)
 
-        self._loss_fn = torch_cross_entropy
+        self._loss_fn = _cross_entropy
 
         # Tokenizer — loaded early to provide special token IDs to the dataset
         self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None

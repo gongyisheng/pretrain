@@ -1,13 +1,11 @@
 import torch
 import torch.nn as nn
 
-from src.model.components import (
-    BaseTransformerBlock,
-    GroupedQueryAttention,
-    RMSNorm,
-    RoPE,
-    SwiGluFFN,
-)
+from src.model.attention import GroupedQueryAttention
+from src.model.block import BaseTransformerBlock
+from src.model.ffn import SwiGluFFN
+from src.model.norm import RMSNorm
+from src.model.rope import RoPE
 from src.utils.config import ModelConfig
 
 

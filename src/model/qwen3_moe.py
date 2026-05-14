@@ -1,7 +1,10 @@
 import torch
 import torch.nn as nn
 
-from src.model.components import GroupedQueryAttention, RMSNorm, RoPE, SparseMoEBlock
+from src.model.attention import GroupedQueryAttention
+from src.model.moe import SparseMoEBlock
+from src.model.norm import RMSNorm
+from src.model.rope import RoPE
 from src.utils.config import ModelConfig
 
 

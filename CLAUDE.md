@@ -38,9 +38,9 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 ## Architecture
 
-### Kernels
+### Model layers
 
-Fused ops live in `src/kernel/torch/` (RMSNorm, RoPE, SwiGLU, FlashAttn, MoE routing/scatter/FFN, cross-entropy) and are imported directly by `src/model/components.py` and `src/training/trainer.py`.
+Layers live in `src/model/` split by concern: `norm.py` (RMSNorm), `rope.py`, `attention.py` (MHA + GQA), `ffn.py` (GeluFFN, SwiGluFFN), `moe.py` (router + sparse block), `block.py` (BaseTransformerBlock + AttnRes helpers). Fused `@torch.compile` ops (rmsnorm, rope, swiglu, flash_attn, moe routing/scatter/ffn) are private module-level functions inside the file of their owning class. Cross-entropy is inlined at the top of `src/training/trainer.py`.
 
 ### Model registry
 
@@ -60,14 +60,14 @@ Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated ui
 
 ## Development Rules
 
-### Workflow for kernel/model changes
+### Workflow for layer/model changes
 
 1. Run related tests before and after changes to confirm nothing breaks.
 2. For perf-sensitive changes, run `benchmarks/trainer/bench_train.py` before/after to guard against regressions.
 
-### Kernel dtype handling
+### Dtype handling
 
-Kernels must support float32, float16, and bfloat16. Never hardcode a dtype or cast input tensors to a specific dtype. Preserve the caller's dtype throughout — accept it, compute in it (or an explicitly documented accumulation dtype like float32 for reductions), and return in it.
+Fused ops must support float32, float16, and bfloat16. Never hardcode a dtype or cast input tensors to a specific dtype. Preserve the caller's dtype throughout — accept it, compute in it (or an explicitly documented accumulation dtype like float32 for reductions), and return in it.
 
 ### Experiments
 
