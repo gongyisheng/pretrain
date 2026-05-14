@@ -52,7 +52,7 @@ jobs:
 
             const has_model = matchAny([
               /^src\/model\//,
-              /^src\/kernel\/torch\//,
+              /^src\/layers\//,
             ]);
             const has_data = matchAny([
               /^src\/data\//,
@@ -101,7 +101,7 @@ jobs:
       - name: Run data tests (CPU only)
         env:
           CUDA_VISIBLE_DEVICES: ""
-        run: uv run pytest tests/test_dataset.py -v
+        run: uv run pytest tests/fast/data/ -v
 
   test-model:
     needs: [prepare]
@@ -129,9 +129,9 @@ jobs:
           CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
         run: |
           uv run pytest \
-            tests/test_components.py \
-            tests/test_gpt2.py \
-            tests/test_masking_utils.py \
+            tests/fast/layers/ \
+            tests/fast/model/ \
+            tests/fast/utils/test_masking_utils.py \
             -v
 
   test-training:
@@ -160,9 +160,7 @@ jobs:
           CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
         run: |
           uv run pytest \
-            tests/test_config.py \
-            tests/test_metrics.py \
-            tests/test_optimizer.py \
-            tests/test_trainer.py \
-            tests/test_train_smoke.py \
+            tests/fast/training/ \
+            tests/fast/utils/test_config.py \
+            tests/e2e/ \
             -v
