@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.model.norm import RMSNorm
+from src.layers.norm import RMSNorm
 
 
 @torch.compile(dynamic=True)

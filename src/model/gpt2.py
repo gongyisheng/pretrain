@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 
-from src.model.attention import MultiHeadAttention
-from src.model.block import BaseTransformerBlock
-from src.model.ffn import GeluFFN
+from src.layers.attention import MultiHeadAttention
+from src.layers.block import BaseTransformerBlock
+from src.layers.ffn import GeluFFN
 from src.utils.config import ModelConfig
 
 

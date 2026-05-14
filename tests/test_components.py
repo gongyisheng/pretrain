@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
-from src.model.attention import GroupedQueryAttention, MultiHeadAttention
-from src.model.block import BaseTransformerBlock
-from src.model.ffn import GeluFFN
-from src.model.moe import MoERouter, SparseMoEBlock
-from src.model.rope import RoPE
+from src.layers.attention import GroupedQueryAttention, MultiHeadAttention
+from src.layers.block import BaseTransformerBlock
+from src.layers.ffn import GeluFFN
+from src.layers.moe import MoERouter, SparseMoEBlock
+from src.layers.rope import RoPE
 from src.utils.masking_utils import build_causal_mask
 from src.model.qwen3 import Qwen3Model
 from src.model.qwen3_moe import Qwen3MoEModel

@@ -38,9 +38,9 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 ## Architecture
 
-### Model layers
+### Layers vs. models
 
-Layers live in `src/model/` split by concern: `norm.py` (RMSNorm), `rope.py`, `attention.py` (MHA + GQA), `ffn.py` (GeluFFN, SwiGluFFN), `moe.py` (router + sparse block), `block.py` (BaseTransformerBlock + AttnRes helpers). Fused `@torch.compile` ops (rmsnorm, rope, swiglu, flash_attn, moe routing/scatter/ffn) are private module-level functions inside the file of their owning class. Cross-entropy is inlined at the top of `src/training/trainer.py`.
+Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm), `rope.py`, `attention.py` (MHA + GQA), `ffn.py` (GeluFFN, SwiGluFFN), `moe.py` (router + sparse block), `block.py` (BaseTransformerBlock + AttnRes helpers). Full architectures live in `src/model/` (`gpt2.py`, `qwen3.py`, `qwen3_moe.py`) and compose layers from `src/layers/`. Fused `@torch.compile` ops (rmsnorm, rope, swiglu, flash_attn, moe routing/scatter/ffn) are private module-level functions inside the file of their owning class. Cross-entropy is inlined at the top of `src/training/trainer.py`.
 
 ### Model registry
 

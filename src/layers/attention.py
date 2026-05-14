@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.model.norm import RMSNorm
+from src.layers.norm import RMSNorm
 
 if TYPE_CHECKING:
-    from src.model.rope import RoPE
+    from src.layers.rope import RoPE
 
 
 @torch.compile
