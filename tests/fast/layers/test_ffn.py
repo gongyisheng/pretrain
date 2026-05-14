@@ -39,8 +39,8 @@ def test_ffn_silu_ungated_matches_formula():
 
 # --- Gated FFN (GLU family) ---
 
-def test_ffn_swiglu_matches_formula():
-    """gated=True, activation=silu → SwiGLU."""
+def test_ffn_silu_glu_matches_formula():
+    """gated=True, activation=silu (literature: SwiGLU)."""
     ffn = FFN(d_model=64, intermediate_size=128, activation="silu", gated=True, dropout=0.0)
     ffn.eval()
     x = torch.randn(2, 16, 64)
@@ -48,8 +48,8 @@ def test_ffn_swiglu_matches_formula():
     assert torch.allclose(ffn(x), ref, atol=1e-5)
 
 
-def test_ffn_geglu_matches_formula():
-    """gated=True, activation=gelu → GeGLU."""
+def test_ffn_gelu_glu_matches_formula():
+    """gated=True, activation=gelu (literature: GeGLU)."""
     ffn = FFN(d_model=64, intermediate_size=128, activation="gelu", gated=True, dropout=0.0)
     ffn.eval()
     x = torch.randn(2, 16, 64)
@@ -57,8 +57,8 @@ def test_ffn_geglu_matches_formula():
     assert torch.allclose(ffn(x), ref, atol=1e-5)
 
 
-def test_ffn_reglu_matches_formula():
-    """gated=True, activation=relu → ReGLU."""
+def test_ffn_relu_glu_matches_formula():
+    """gated=True, activation=relu (literature: ReGLU)."""
     ffn = FFN(d_model=64, intermediate_size=128, activation="relu", gated=True, dropout=0.0)
     ffn.eval()
     x = torch.randn(2, 16, 64)

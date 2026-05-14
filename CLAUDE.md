@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. Two model architectures: GPT-2 (MHA baseline) and Qwen3 (GQA + RoPE + RMSNorm + SwiGLU). Kernels use `torch.compile`-fused ops from `src/kernel/torch/`.
+Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. Two model architectures: GPT-2 (MHA baseline) and Qwen3 (GQA + RoPE + RMSNorm + SwiGLU). Fused `@torch.compile` ops live inside their owning layer files under `src/layers/`.
 
 ## Commands
 
