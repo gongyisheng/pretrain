@@ -11,7 +11,6 @@ from tqdm import tqdm
 from src.model.registry import build_model
 from src.data.dataset import PretrainDataset
 from src.data.tokenizer import load_tokenizer
-from src.model.components import set_backend
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
@@ -19,7 +18,6 @@ from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
 from src.training.loss import next_token_targets, compute_loss
 from src.utils.masking_utils import build_causal_mask
-from src.kernel.triton.cross_entropy import triton_cross_entropy
 from src.kernel.torch.cross_entropy import torch_cross_entropy
 
 
@@ -42,15 +40,7 @@ class Trainer:
         # Seed for reproducibility
         self._seed(config.training.seed)
 
-        # Backend selection: "torch" (torch.compile) or "triton" (custom kernels)
-        set_backend(config.training.backend)
-        self._loss_fn = triton_cross_entropy if config.training.backend == "triton" else torch_cross_entropy
-
-        if config.training.backend == "triton":
-            raise ValueError(
-                "The triton backend does not support explicit attention masks. "
-                "Use training.backend=torch instead."
-            )
+        self._loss_fn = torch_cross_entropy
 
         # Tokenizer — loaded early to provide special token IDs to the dataset
         self.tokenizer = load_tokenizer(config.data.tokenizer_path) if config.data.tokenizer_path else None
@@ -148,7 +138,6 @@ class Trainer:
                 block.attn = torch.compile(block.attn)
         else:
             self.model = torch.compile(self.model)
-        print(f"[trainer] backend={config.training.backend}")
 
         # Activation checkpointing
         if config.training.activation_checkpointing:

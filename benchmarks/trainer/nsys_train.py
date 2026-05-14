@@ -2,14 +2,12 @@
 
 Run with:
     mkdir logs/profiles
-    nsys profile -o logs/profiles/gpt2_torch python benchmarks/trainer/nsys_train.py --config configs/gpt2_124m.yaml --backend torch
-    nsys profile -o logs/profiles/gpt2_triton python benchmarks/trainer/nsys_train.py --config configs/gpt2_124m.yaml --backend triton
-
-    nsys profile --capture-range=cudaProfilerApi -o logs/profiles/qwen3_torch python benchmarks/trainer/nsys_train.py --config configs/qwen3_57m.yaml --backend torch
+    nsys profile -o logs/profiles/gpt2 python benchmarks/trainer/nsys_train.py --config configs/gpt2_124m.yaml
+    nsys profile --capture-range=cudaProfilerApi -o logs/profiles/qwen3 python benchmarks/trainer/nsys_train.py --config configs/qwen3_57m.yaml
 
 Then analyze:
-    nsys stats logs/profiles/gpt2_torch.nsys-rep
-    nsys stats --report cuda_gpu_kern_sum logs/profiles/qwen3_torch.nsys-rep
+    nsys stats logs/profiles/gpt2.nsys-rep
+    nsys stats --report cuda_gpu_kern_sum logs/profiles/qwen3.nsys-rep
 """
 import argparse
 import sys
@@ -25,7 +23,6 @@ from src.training.trainer import Trainer
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--backend", choices=["torch", "triton"], required=True)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--steps", type=int, default=5)
     args = parser.parse_args()
@@ -36,7 +33,6 @@ def main():
         f"training.eval_every={total + 1}",
         f"training.checkpoint_every={total + 1}",
         "logging.log_every=1",
-        f"training.backend={args.backend}",
     ]
     config = load_config(args.config, overrides=overrides)
     trainer = Trainer(config, wandb_enabled=False)

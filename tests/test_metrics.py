@@ -3,12 +3,9 @@
 import pytest
 import torch
 
-from src.model.components import set_backend
 from src.model.registry import build_model
 from src.training.metrics import MetricsTracker
 from src.utils.config import ModelConfig
-
-set_backend("torch")
 
 # ---------------------------------------------------------------------------
 # Small model configs matching real architectures

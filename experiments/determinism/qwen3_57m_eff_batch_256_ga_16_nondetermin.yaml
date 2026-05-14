@@ -22,7 +22,6 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: "bf16"
-  backend: "torch"
   activation_checkpointing: false
   use_deterministic_algo: false
   seed: 42

@@ -57,7 +57,6 @@ class TrainingConfig:
     max_steps: int = 5000
     mixed_precision: str = "bf16"
     activation_checkpointing: bool = False
-    backend: str = "torch"  # "torch" (torch.compile) or "triton" (custom kernels)
     use_deterministic_algo: bool = False
     seed: int = 42
     grad_clip: float = 1.0
