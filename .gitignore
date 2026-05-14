@@ -28,10 +28,10 @@ Thumbs.db
 docs/superpowers
 
 # ML related
-checkpoints/
-data/
-tokenizers/
-wandb/
+/checkpoints/
+/data/
+/tokenizers/
+/wandb/
 
 # logs
 logs/
