@@ -55,12 +55,65 @@ def test_mha_attn_mask_blocks_cross_doc_attention():
 
     assert torch.allclose(out_base[0, 2:], out_modified[0, 2:], atol=1e-5), \
         "doc1 tokens were affected by changes to doc0 tokens"
+    assert not torch.allclose(out_base[0, :2], out_modified[0, :2], atol=1e-5), \
+        "doc0 tokens were NOT affected by changes to themselves (attention not working?)"
 
 
 # --- GroupedQueryAttention ---
 
-def test_gqa_forward_with_position_ids_shape():
-    """GroupedQueryAttention accepts position_ids and returns correct shape."""
+def test_gqa_output_shape():
+    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0)
+    x = torch.randn(2, 16, 64)
+    out = gqa(x)
+    assert out.shape == (2, 16, 64)
+
+
+def test_gqa_is_causal():
+    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0)
+    gqa.eval()
+    x = torch.randn(1, 8, 64)
+    out_full = gqa(x)
+    x2 = x.clone()
+    x2[0, 7, :] = torch.randn(64)
+    out_modified = gqa(x2)
+    assert torch.allclose(out_full[0, :7], out_modified[0, :7], atol=1e-6)
+
+
+def test_gqa_attn_mask_output_shape():
+    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0)
+    x = torch.randn(2, 8, 64)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    attn_mask = build_causal_mask(pos, device=x.device, dtype=x.dtype)
+    out = gqa(x, attn_mask=attn_mask)
+    assert out.shape == (2, 8, 64)
+
+
+def test_gqa_attn_mask_blocks_cross_doc_attention():
+    """Token in doc1 must not be influenced by tokens in doc0; doc0 still sees its own changes."""
+    torch.manual_seed(0)
+    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0)
+    gqa.eval()
+
+    x = torch.randn(1, 4, 64)
+    # position_ids [0,1,0,1]: doc0=[pos0,pos1], doc1=[pos2,pos3]
+    pos = torch.tensor([[0, 1, 0, 1]])
+    attn_mask = build_causal_mask(pos, device=x.device, dtype=x.dtype)
+
+    out_base = gqa(x, attn_mask=attn_mask)
+
+    x2 = x.clone()
+    x2[0, 0, :] = torch.randn(64)
+    x2[0, 1, :] = torch.randn(64)
+    out_modified = gqa(x2, attn_mask=attn_mask)
+
+    assert torch.allclose(out_base[0, 2:], out_modified[0, 2:], atol=1e-5), \
+        "doc1 tokens were affected by changes to doc0 tokens"
+    assert not torch.allclose(out_base[0, :2], out_modified[0, :2], atol=1e-5), \
+        "doc0 tokens were NOT affected by changes to themselves (attention not working?)"
+
+
+def test_gqa_forward_with_rope_and_position_ids_shape():
+    """GroupedQueryAttention with rope+position_ids returns correct shape."""
     rope = RoPE(d_head=16, max_seq_len=32)
     gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0)
     x = torch.randn(2, 8, 64)
@@ -133,3 +186,26 @@ def test_mha_attn_mask_matches_sdpa_reference():
     ref = mha.o_proj(attn.transpose(1, 2).reshape(B, S, d_model))
 
     assert torch.allclose(mha(x, attn_mask=attn_mask), ref, atol=1e-5)
+
+
+def test_gqa_attn_mask_matches_sdpa_reference():
+    """With an explicit attn_mask (no is_causal), GQA matches SDPA with expanded KV heads."""
+    torch.manual_seed(0)
+    B, S, d_model, n_heads, n_kv_heads = 1, 4, 64, 4, 2
+    d_head = d_model // n_heads
+    n_groups = n_heads // n_kv_heads
+    gqa = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn=0.0)
+    gqa.eval()
+    x = torch.randn(B, S, d_model)
+    pos = torch.tensor([[0, 1, 0, 1]])  # two docs
+    attn_mask = build_causal_mask(pos, device=x.device, dtype=x.dtype)
+
+    q = gqa.q_proj(x).reshape(B, S, n_heads, d_head).transpose(1, 2)
+    k = gqa.k_proj(x).reshape(B, S, n_kv_heads, d_head).transpose(1, 2)
+    v = gqa.v_proj(x).reshape(B, S, n_kv_heads, d_head).transpose(1, 2)
+    k = k.repeat_interleave(n_groups, dim=1)
+    v = v.repeat_interleave(n_groups, dim=1)
+    attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False, scale=1.0 / (d_head**0.5))
+    ref = gqa.o_proj(attn.transpose(1, 2).reshape(B, S, d_model))
+
+    assert torch.allclose(gqa(x, attn_mask=attn_mask), ref, atol=1e-5)

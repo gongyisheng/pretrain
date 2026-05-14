@@ -121,3 +121,5 @@ def test_qwen3_position_ids_blocks_cross_doc():
 
     assert torch.allclose(logits_base[0, 4:], logits_modified[0, 4:], atol=1e-4), \
         "doc1 logits changed when doc0 tokens were modified"
+    assert not torch.allclose(logits_base[0, :3], logits_modified[0, :3], atol=1e-4), \
+        "doc0 logits did NOT change when doc0 tokens were modified (model not propagating inputs?)"
