@@ -6,16 +6,16 @@ Registers an on_log hook to capture per-step throughput,
 excluding warmup steps (torch.compile tracing, CUDA caching, etc.).
 
 Usage:
-    # Benchmark GPT-2 124M (torch backend)
+    # Benchmark GPT-2 124M
     python benchmarks/trainer/bench_train.py --config configs/gpt2_124m.yaml
 
-    # Benchmark Qwen3 145M (triton backend)
-    python benchmarks/trainer/bench_train.py --config configs/qwen3_57m.yaml --backend triton
+    # Benchmark Qwen3 57M
+    python benchmarks/trainer/bench_train.py --config configs/qwen3_57m.yaml
 
-    # Benchmark Qwen3 MoE 57M (torch backend)
+    # Benchmark Qwen3 MoE 133M
     python benchmarks/trainer/bench_train.py --config configs/qwen3_moe_133m.yaml
 
-    # Run all model/backend combinations
+    # Run all model configs
     python benchmarks/trainer/bench_train.py --all
 """
 import argparse
@@ -31,7 +31,7 @@ from src.utils.config import load_config
 from src.training.trainer import Trainer
 
 
-def run_benchmark(config_path, backend=None, steps=10, warmup=5):
+def run_benchmark(config_path, steps=10, warmup=5):
     """Run a training throughput benchmark using the Trainer.
 
     Runs all steps in a single train() call. Registers an on_log hook
@@ -45,8 +45,6 @@ def run_benchmark(config_path, backend=None, steps=10, warmup=5):
         f"training.checkpoint_every={total_steps + 1}",
         "logging.log_every=1",
     ]
-    if backend:
-        overrides.append(f"training.backend={backend}")
 
     config = load_config(config_path, overrides=overrides)
     trainer = Trainer(config, wandb_enabled=False)
@@ -72,7 +70,6 @@ def run_benchmark(config_path, backend=None, steps=10, warmup=5):
         "config": config_path,
         "arch": config.model.arch,
         "params_M": round(sum(p.numel() for p in trainer.model.parameters()) / 1e6, 1),
-        "backend": config.training.backend,
         "batch_size": config.training.batch_size,
         "grad_accum": config.training.gradient_accumulation_steps,
         "seq_len": config.max_seq_len,
@@ -88,7 +85,7 @@ def run_benchmark(config_path, backend=None, steps=10, warmup=5):
     }
 
     print(f"\n{'=' * 60}")
-    print(f"  {results['arch']} | {results['params_M']}M | backend={results['backend']}")
+    print(f"  {results['arch']} | {results['params_M']}M")
     print(f"  GPU: {results['gpu']}")
     print(f"  {results['measured_steps']} steps in {results['elapsed_sec']:.1f}s (after {warmup} warmup)")
     print(f"  Tokens/sec: {results['tok_per_sec']:,}")
@@ -98,34 +95,31 @@ def run_benchmark(config_path, backend=None, steps=10, warmup=5):
 
 
 def run_all_benchmarks(steps=10, warmup=5):
-    """Run benchmarks for all model/backend combinations."""
+    """Run benchmarks for all model configs."""
     configs = [
-        ("configs/gpt2_124m.yaml", "torch"),
-        ("configs/gpt2_124m.yaml", "triton"),
-        ("configs/qwen3_57m.yaml", "torch"),
-        ("configs/qwen3_57m.yaml", "triton"),
-        ("configs/qwen3_moe_133m.yaml", "torch"),
-        ("configs/qwen3_moe_133m.yaml", "triton"),
+        "configs/gpt2_124m.yaml",
+        "configs/qwen3_57m.yaml",
+        "configs/qwen3_moe_133m.yaml",
     ]
 
     all_results = []
-    for config_path, backend in configs:
+    for config_path in configs:
         if not os.path.exists(config_path):
             print(f"Skipping {config_path} (not found)")
             continue
-        results = run_benchmark(config_path, backend=backend, steps=steps, warmup=warmup)
+        results = run_benchmark(config_path, steps=steps, warmup=warmup)
         all_results.append(results)
         torch.cuda.empty_cache()
 
     # Summary table
-    print(f"\n{'=' * 70}")
-    print(f"{'SUMMARY':^70}")
-    print(f"{'=' * 70}")
-    print(f"{'Model':<12} {'Params':>8} {'Backend':>8} {'tok/s':>12} {'elapsed':>10}")
-    print(f"{'-' * 70}")
+    print(f"\n{'=' * 60}")
+    print(f"{'SUMMARY':^60}")
+    print(f"{'=' * 60}")
+    print(f"{'Model':<12} {'Params':>8} {'tok/s':>12} {'elapsed':>10}")
+    print(f"{'-' * 60}")
     for r in all_results:
-        print(f"{r['arch']:<12} {r['params_M']:>7.1f}M {r['backend']:>8} {r['tok_per_sec']:>12,} {r['elapsed_sec']:>9.1f}s")
-    print(f"{'=' * 70}")
+        print(f"{r['arch']:<12} {r['params_M']:>7.1f}M {r['tok_per_sec']:>12,} {r['elapsed_sec']:>9.1f}s")
+    print(f"{'=' * 60}")
 
     # Save results
     os.makedirs("logs/benchmarks", exist_ok=True)
@@ -140,12 +134,10 @@ def run_all_benchmarks(steps=10, warmup=5):
 def main():
     parser = argparse.ArgumentParser(description="Training throughput benchmark")
     parser.add_argument("--config", type=str, help="Path to config YAML")
-    parser.add_argument("--backend", type=str, choices=["torch", "triton"], default=None,
-                        help="Override backend (default: use config value)")
     parser.add_argument("--steps", type=int, default=10, help="Measured steps to run (default: 10)")
     parser.add_argument("--warmup", type=int, default=5, help="Warmup steps excluded from measurement (default: 5)")
     parser.add_argument("--all", action="store_true",
-                        help="Run all model/backend combinations")
+                        help="Run all model configs")
     parser.add_argument("--save", type=str, default=None,
                         help="Save results JSON to this path")
     args = parser.parse_args()
@@ -157,7 +149,7 @@ def main():
     if not args.config:
         parser.error("--config is required (or use --all)")
 
-    results = run_benchmark(args.config, backend=args.backend, steps=args.steps, warmup=args.warmup)
+    results = run_benchmark(args.config, steps=args.steps, warmup=args.warmup)
 
     if args.save:
         os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)

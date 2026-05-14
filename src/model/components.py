@@ -2,54 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# --- Backend selection ---
-# "torch" uses @torch.compile fused kernels; "triton" uses hand-written Triton kernels.
-# Kernel implementations live in src/kernel/{torch,triton}/.
-
-_rmsnorm         = None
-_rope            = None
-_swiglu          = None
-_flash_attn      = None
-_moe_expert_ffn  = None
-_moe_scatter_in  = None
-_moe_scatter_out = None
-_moe_routing     = None
-
-
-def set_backend(backend: str):
-    global _rmsnorm, _rope, _swiglu, _flash_attn, _moe_expert_ffn, _moe_scatter_in, _moe_scatter_out, _moe_routing
-    if backend == "torch":
-        from src.kernel.torch.rmsnorm import torch_rmsnorm
-        from src.kernel.torch.rope import torch_rope
-        from src.kernel.torch.swiglu import torch_swiglu
-        from src.kernel.torch.flashattn import torch_flash_attn
-        from src.kernel.torch.moe_ffn import torch_moe_expert_ffn
-        from src.kernel.torch.moe_scatter import torch_moe_scatter_in, torch_moe_scatter_out
-        from src.kernel.torch.moe_routing import torch_moe_routing
-        _rmsnorm = torch_rmsnorm
-        _rope = torch_rope
-        _swiglu = torch_swiglu
-        _flash_attn = torch_flash_attn
-        _moe_expert_ffn = torch_moe_expert_ffn
-        _moe_scatter_in, _moe_scatter_out = torch_moe_scatter_in, torch_moe_scatter_out
-        _moe_routing = torch_moe_routing
-    elif backend == "triton":
-        from src.kernel.torch.rmsnorm import torch_rmsnorm
-        from src.kernel.triton.rope import triton_rope
-        from src.kernel.triton.swiglu import triton_swiglu
-        from src.kernel.triton.flashattn import triton_flash_attn
-        from src.kernel.triton.moe_ffn import triton_moe_expert_ffn
-        from src.kernel.triton.moe_scatter import triton_moe_scatter_in, triton_moe_scatter_out
-        from src.kernel.triton.moe_routing import triton_moe_routing
-        _rmsnorm = torch_rmsnorm
-        _rope = triton_rope
-        _swiglu = triton_swiglu
-        _flash_attn = triton_flash_attn
-        _moe_expert_ffn = triton_moe_expert_ffn
-        _moe_scatter_in, _moe_scatter_out = triton_moe_scatter_in, triton_moe_scatter_out
-        _moe_routing = triton_moe_routing
-    else:
-        raise ValueError(f"Unknown backend: {backend}. Use 'torch' or 'triton'.")
+from src.kernel.torch.rmsnorm import torch_rmsnorm
+from src.kernel.torch.rope import torch_rope
+from src.kernel.torch.swiglu import torch_swiglu
+from src.kernel.torch.flashattn import torch_flash_attn
+from src.kernel.torch.moe_ffn import torch_moe_expert_ffn
+from src.kernel.torch.moe_scatter import torch_moe_scatter_in, torch_moe_scatter_out
+from src.kernel.torch.moe_routing import torch_moe_routing
 
 
 @torch.compile(dynamic=True)
@@ -94,7 +53,7 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_shape = x.shape
-        out = _rmsnorm(x.reshape(-1, orig_shape[-1]), self.weight, self.eps)
+        out = torch_rmsnorm(x.reshape(-1, orig_shape[-1]), self.weight, self.eps)
         return out.reshape(orig_shape)
 
 
@@ -128,7 +87,7 @@ class RoPE(nn.Module):
         # TODO: the fansy index performance is bad, need to fuse to rope kernel
         cos = self.cos[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         sin = self.sin[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
-        return _rope(x, cos, sin)
+        return torch_rope(x, cos, sin)
 
 
 # --- Attention ---
@@ -167,7 +126,7 @@ class MultiHeadAttention(nn.Module):
             k = rope(k, position_ids=position_ids)
 
         is_causal = attn_mask is None
-        out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
+        out = torch_flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
         out = self.attn_dropout(out)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
@@ -223,7 +182,7 @@ class GroupedQueryAttention(nn.Module):
         v = v[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
 
         is_causal = attn_mask is None
-        out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
+        out = torch_flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
         out = self.attn_dropout(out)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
@@ -257,7 +216,7 @@ class SwiGluFFN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate = self.gate_proj(x)
         up = self.up_proj(x)
-        x = self.down_proj(_swiglu(gate, up))
+        x = self.down_proj(torch_swiglu(gate, up))
         x = self.dropout(x)
         return x
 
@@ -333,7 +292,7 @@ class SparseMoEBlock(nn.Module):
         if self.capacity_factor is not None:
             # --- Optimized routing with capacity filtering ---
             sorted_expert_ids, sorted_token_ids, sorted_weights, positions, capacity, expert_counts = (
-                _moe_routing(top_indices, top_weights, E, self.capacity_factor)
+                torch_moe_routing(top_indices, top_weights, E, self.capacity_factor)
             )
         else:
             # --- Dynamic capacity: no tokens dropped ---
@@ -350,14 +309,14 @@ class SparseMoEBlock(nn.Module):
             positions = torch.arange(len(sorted_expert_ids), device=x.device) - offsets[sorted_expert_ids]
 
         # --- Build padded input: (E, capacity, D) ---
-        padded_input = _moe_scatter_in(x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity)
+        padded_input = torch_moe_scatter_in(x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity)
 
         # --- Batched expert FFN: fused gate+up bmm, then down bmm ---
-        expert_out = _moe_expert_ffn(padded_input, self.expert_gate_up, self.expert_down, self.expert_gate_up_bias, self.expert_down_bias)
+        expert_out = torch_moe_expert_ffn(padded_input, self.expert_gate_up, self.expert_down, self.expert_gate_up_bias, self.expert_down_bias)
         expert_out = self.expert_dropout(expert_out)
 
         # --- Scatter results back with routing weights ---
-        output = _moe_scatter_out(expert_out, sorted_expert_ids, sorted_token_ids, positions, sorted_weights, T)
+        output = torch_moe_scatter_out(expert_out, sorted_expert_ids, sorted_token_ids, positions, sorted_weights, T)
 
         # --- Switch Transformer load-balancing auxiliary loss ---
         with torch.no_grad():

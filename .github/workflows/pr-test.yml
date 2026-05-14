@@ -1,0 +1,194 @@
+name: PR Test
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'configs/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+concurrency:
+  group: pr-test-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: [self-hosted]
+    outputs:
+      has_model: ${{ steps.detect.outputs.has_model }}
+      has_data: ${{ steps.detect.outputs.has_data }}
+      has_training: ${{ steps.detect.outputs.has_training }}
+      has_utils: ${{ steps.detect.outputs.has_utils }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: detect
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === 'workflow_dispatch') {
+              core.setOutput('has_model', 'true');
+              core.setOutput('has_data', 'true');
+              core.setOutput('has_training', 'true');
+              core.setOutput('has_utils', 'true');
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              { owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, per_page: 100 }
+            );
+            const names = files.map(f => f.filename);
+
+            const matchAny = (regexps) => names.some(n => regexps.some(r => r.test(n)));
+
+            const has_model = matchAny([
+              /^src\/model\//,
+              /^src\/kernel\/torch\//,
+            ]);
+            const has_data = matchAny([
+              /^src\/data\//,
+            ]);
+            const has_training = matchAny([
+              /^src\/training\//,
+              /^scripts\/train\.py$/,
+              /^src\/utils\/config\.py$/,
+            ]);
+            const has_utils = matchAny([
+              /^src\/utils\/gpu_select\.py$/,
+              /^scripts\/pick_free_gpu\.py$/,
+            ]);
+
+            core.setOutput('has_model', String(has_model));
+            core.setOutput('has_data', String(has_data));
+            core.setOutput('has_training', String(has_training));
+            core.setOutput('has_utils', String(has_utils));
+
+            core.info(`has_model=${has_model} has_data=${has_data} has_training=${has_training} has_utils=${has_utils}`);
+
+  lint:
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      - run: uv run ruff check src/ tests/
+
+      - run: uv run ruff format --check src/ tests/
+
+  test-data:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_data == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      - name: Run data tests (CPU only)
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: uv run pytest tests/test_dataset.py -v
+
+  test-utils:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_utils == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      - name: Run utils tests (CPU only)
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: uv run pytest tests/test_gpu_select.py -v
+
+  test-model:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_model == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      - name: Pick free GPU
+        id: pick
+        run: |
+          idx=$(uv run python scripts/pick_free_gpu.py)
+          echo "index=$idx" >> "$GITHUB_OUTPUT"
+          echo "Picked GPU $idx"
+
+      - name: Run model tests
+        env:
+          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
+        run: |
+          uv run pytest \
+            tests/test_components.py \
+            tests/test_gpt2.py \
+            tests/test_masking_utils.py \
+            -v
+
+  test-training:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_training == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      - name: Pick free GPU
+        id: pick
+        run: |
+          idx=$(uv run python scripts/pick_free_gpu.py)
+          echo "index=$idx" >> "$GITHUB_OUTPUT"
+          echo "Picked GPU $idx"
+
+      - name: Run training tests
+        env:
+          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
+        run: |
+          uv run pytest \
+            tests/test_config.py \
+            tests/test_metrics.py \
+            tests/test_optimizer.py \
+            tests/test_trainer.py \
+            tests/test_train_smoke.py \
+            -v

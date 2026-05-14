@@ -22,7 +22,6 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: "bf16"
-  backend: "torch"
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/qk_norm/qwen3_57m_qk_norm_on/"
   checkpoint_every: 5000

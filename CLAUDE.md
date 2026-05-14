@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. Two model architectures: GPT-2 (MHA baseline) and Qwen3 (GQA + RoPE + RMSNorm + SwiGLU). Pluggable kernel backends: `torch` (torch.compile fused ops) and `triton` (hand-written Triton kernels).
+Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. Two model architectures: GPT-2 (MHA baseline) and Qwen3 (GQA + RoPE + RMSNorm + SwiGLU). Kernels use `torch.compile`-fused ops from `src/kernel/torch/`.
 
 ## Commands
 
@@ -27,7 +27,7 @@ uv run python scripts/train.py --config configs/qwen3_57m.yaml --no-wandb
 uv run python scripts/train.py --config configs/gpt2_124m.yaml --resume checkpoints/step_1000.pt
 
 # CLI config overrides
-uv run python scripts/train.py --config configs/gpt2_124m.yaml --optimizer.lr=1e-4 --training.backend=triton
+uv run python scripts/train.py --config configs/gpt2_124m.yaml --optimizer.lr=1e-4
 
 # Data preprocessing
 uv run python scripts/preprocess_data.py --config configs/gpt2_124m.yaml
@@ -38,11 +38,9 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 ## Architecture
 
-### Kernel backend system
+### Kernels
 
-`src/model/components.py` holds global function pointers (`_rmsnorm`, `_rope`, `_swiglu`, `_flash_attn`) set by `set_backend("torch"|"triton")`. All model code calls these pointers — never imports kernel functions directly. Kernel implementations live in `src/kernel/torch/` and `src/kernel/triton/`. The backend is selected via `training.backend` in the YAML config.
-
-Cross-entropy has its own selection path in the trainer (`src/kernel/torch/cross_entropy.py` and `src/kernel/triton/cross_entropy.py`), configured by `training.backend`.
+Fused ops live in `src/kernel/torch/` (RMSNorm, RoPE, SwiGLU, FlashAttn, MoE routing/scatter/FFN, cross-entropy) and are imported directly by `src/model/components.py` and `src/training/trainer.py`.
 
 ### Model registry
 
@@ -65,7 +63,7 @@ Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated ui
 ### Workflow for kernel/model changes
 
 1. Run related tests before and after changes to confirm nothing breaks.
-2. Run the relevant benchmark before and after changes to check for performance regression. Avoid merging changes that degrade performance.
+2. For perf-sensitive changes, run `benchmarks/trainer/bench_train.py` before/after to guard against regressions.
 
 ### Kernel dtype handling
 
