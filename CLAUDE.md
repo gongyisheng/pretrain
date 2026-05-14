@@ -40,7 +40,9 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 ### Layers vs. models
 
-Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm), `rope.py`, `attention.py` (MHA + GQA), `ffn.py` (GeluFFN, SwiGluFFN), `moe.py` (router + sparse block), `block.py` (BaseTransformerBlock + AttnRes helpers). Full architectures live in `src/model/` (`gpt2.py`, `qwen3.py`, `qwen3_moe.py`) and compose layers from `src/layers/`. Fused `@torch.compile` ops (rmsnorm, rope, swiglu, flash_attn, moe routing/scatter/ffn) are private module-level functions inside the file of their owning class. Cross-entropy is inlined at the top of `src/training/trainer.py`.
+Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm), `rope.py`, `attention.py` (MHA + GQA), `activation.py` (unary `relu/gelu/silu` + gated `relu_glu/gelu_glu/silu_glu`, each in its own registry: `UNGATED_ACTIVATIONS`, `GATED_ACTIVATIONS`), `ffn.py` (unified `FFN(activation, gated, bias, dropout)`; SwiGLU = `gated=True, activation="silu"`), `moe.py` (router + sparse block), `block.py` (BaseTransformerBlock + AttnRes helpers). Full architectures live in `src/model/` (`gpt2.py`, `qwen3.py`, `qwen3_moe.py`) and compose layers from `src/layers/`. Fused `@torch.compile` ops (rmsnorm, rope, glu variants, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Cross-entropy is inlined at the top of `src/training/trainer.py`.
+
+`ModelConfig` defaults are modern (`mlp_activation="silu"`, `mlp_gated=True`, all biases False); GPT-2 YAML/test configs explicitly opt into the classic convention with `mlp_activation: "gelu"`, `mlp_gated: false`, `attn_bias: true`, `mlp_bias: true`.
 
 ### Model registry
 

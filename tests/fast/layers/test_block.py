@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from src.layers.attention import MultiHeadAttention
 from src.layers.block import BaseTransformerBlock
-from src.layers.ffn import GeluFFN
+from src.layers.ffn import FFN
 
 
 class _MinimalTransformerBlock(BaseTransformerBlock):
@@ -14,7 +14,7 @@ class _MinimalTransformerBlock(BaseTransformerBlock):
         self.ln1 = nn.LayerNorm(d_model)
         self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn)
         self.ln2 = nn.LayerNorm(d_model)
-        self.ffn = GeluFFN(d_model, intermediate_size, dropout_ffn)
+        self.ffn = FFN(d_model, intermediate_size, activation="gelu", dropout=dropout_ffn)
 
     def attn_sublayer(self, x: torch.Tensor, **kwargs) -> torch.Tensor:  # noqa: ARG002
         return self.attn(self.ln1(x))

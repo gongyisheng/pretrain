@@ -6,7 +6,7 @@ from src.utils.masking_utils import build_causal_mask
 
 
 def _small_config():
-    return ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=True, mlp_bias=True)
+    return ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=True, mlp_bias=True, mlp_activation="gelu", mlp_gated=False)
 
 
 def _pos(B, S):

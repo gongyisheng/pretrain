@@ -8,6 +8,8 @@ model:
   vocab_size: 50257
   attn_bias: true
   mlp_bias: true
+  mlp_activation: "gelu"
+  mlp_gated: false
   dropout_embd: 0.0
   dropout_attn: 0.0
   dropout_ffn: 0.0

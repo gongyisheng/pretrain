@@ -1,40 +1,53 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
-@torch.compile
-def _swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Fused: silu(gate) * up in a single pass."""
-    return F.silu(gate) * up
+class FFN(nn.Module):
+    """Configurable feed-forward network.
 
+    Two structural variants selected by `gated`:
+      - gated=False: down_proj(activation(up_proj(x)))
+      - gated=True (GLU family): down_proj(activation(gate_proj(x), up_proj(x)))
 
-class GeluFFN(nn.Module):
-    def __init__(self, d_model: int, intermediate_size: int, dropout_ffn: float = 0.0, bias: bool = True):
+    `up_proj` and `down_proj` are always present; `gate_proj` is only added
+    when `gated=True`. Names match the HF Qwen3 / Llama MLP convention.
+
+    `activation` is one of ``"relu"`` / ``"gelu"`` / ``"silu"``. Combinations:
+        gated=True + activation="silu" → SwiGLU
+        gated=True + activation="gelu" → GeGLU
+        gated=True + activation="relu" → ReGLU
+
+    Bias defaults to False (modern LLM convention); pass `bias=True` for the
+    GPT-2 / classic Transformer convention.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        intermediate_size: int,
+        *,
+        activation: str = "gelu",
+        gated: bool = False,
+        bias: bool = False,
+        dropout: float = 0.0,
+    ):
         super().__init__()
-        self.fc1 = nn.Linear(d_model, intermediate_size, bias=bias)
-        self.fc2 = nn.Linear(intermediate_size, d_model, bias=bias)
-        self.dropout = nn.Dropout(dropout_ffn)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc1(x)
-        x = F.gelu(x)
-        x = self.fc2(x)
-        x = self.dropout(x)
-        return x
-
-
-class SwiGluFFN(nn.Module):
-    def __init__(self, d_model: int, intermediate_size: int, dropout_ffn: float = 0.0, bias: bool = False):
-        super().__init__()
-        self.gate_proj = nn.Linear(d_model, intermediate_size, bias=bias)
+        registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
+        if activation not in registry:
+            raise ValueError(f"Unknown activation: {activation!r}; expected one of {sorted(registry)}")
+        self.gated = gated
+        self.act_fn = registry[activation]
         self.up_proj = nn.Linear(d_model, intermediate_size, bias=bias)
         self.down_proj = nn.Linear(intermediate_size, d_model, bias=bias)
-        self.dropout = nn.Dropout(dropout_ffn)
+        if gated:
+            self.gate_proj = nn.Linear(d_model, intermediate_size, bias=bias)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = self.gate_proj(x)
-        up = self.up_proj(x)
-        x = self.down_proj(_swiglu(gate, up))
-        x = self.dropout(x)
-        return x
+        if self.gated:
+            hidden = self.act_fn(self.gate_proj(x), self.up_proj(x))
+        else:
+            hidden = self.act_fn(self.up_proj(x))
+        return self.dropout(self.down_proj(hidden))

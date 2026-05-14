@@ -22,7 +22,9 @@ class ModelConfig:
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
     tie_word_embeddings: bool = True  # tie lm_head.weight to token_emb.weight
     attn_bias: bool = False           # bias in attention Q/K/V/O projections
-    mlp_bias: bool = False            # bias in MLP layers (fc1/fc2 or gate/up/down)
+    mlp_bias: bool = False            # bias in MLP layers (up_proj/down_proj/gate_proj)
+    mlp_activation: str = "silu"      # "relu" | "gelu" | "silu" (modern default; GPT-2 sets "gelu")
+    mlp_gated: bool = True            # True = GLU-family FFN. silu+gated=SwiGLU; GPT-2 sets False
     lm_head_bias: bool = False        # bias in lm_head output projection
     moe_n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
     moe_n_experts_per_token: int = 2    # top-k experts activated per token

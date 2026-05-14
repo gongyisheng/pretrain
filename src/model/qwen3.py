@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from src.layers.attention import GroupedQueryAttention
 from src.layers.block import BaseTransformerBlock
-from src.layers.ffn import SwiGluFFN
+from src.layers.ffn import FFN
 from src.layers.norm import RMSNorm
 from src.layers.rope import RoPE
 from src.utils.config import ModelConfig
@@ -11,12 +11,12 @@ from src.utils.config import ModelConfig
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = False, mlp_bias: bool = False, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = False, mlp_bias: bool = False, mlp_activation: str = "silu", mlp_gated: bool = True, **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = RMSNorm(d_model)
         self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm, bias=attn_bias)
         self.ln2 = RMSNorm(d_model)
-        self.ffn = SwiGluFFN(d_model, intermediate_size, dropout_ffn, bias=mlp_bias)
+        self.ffn = FFN(d_model, intermediate_size, activation=mlp_activation, gated=mlp_gated, bias=mlp_bias, dropout=dropout_ffn)
 
     def attn_sublayer(
         self,
@@ -59,6 +59,8 @@ class Qwen3Model(nn.Module):
                 qk_norm=config.qk_norm,
                 attn_bias=config.attn_bias,
                 mlp_bias=config.mlp_bias,
+                mlp_activation=config.mlp_activation,
+                mlp_gated=config.mlp_gated,
                 attn_res=config.attn_res,
                 attn_res_block_size=config.attn_res_block_size,
                 attn_res_norm=config.attn_res_norm,
