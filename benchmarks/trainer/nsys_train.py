@@ -1,6 +1,7 @@
 """Minimal training loop for nsys profiling.
 
 Run with:
+    mkdir logs/profiles
     nsys profile -o logs/profiles/gpt2_torch python benchmarks/trainer/nsys_train.py --config configs/gpt2_124m.yaml --backend torch
     nsys profile -o logs/profiles/gpt2_triton python benchmarks/trainer/nsys_train.py --config configs/gpt2_124m.yaml --backend triton
 

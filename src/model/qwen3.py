@@ -1,8 +1,15 @@
 import torch
 import torch.nn as nn
 
-from src.model.components import BaseTransformerBlock, GroupedQueryAttention, RMSNorm, RoPE, SwiGluFFN
+from src.model.components import (
+    BaseTransformerBlock,
+    GroupedQueryAttention,
+    RMSNorm,
+    RoPE,
+    SwiGluFFN,
+)
 from src.utils.config import ModelConfig
+
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):
@@ -13,8 +20,16 @@ class Qwen3TransformerBlock(BaseTransformerBlock):
         self.ln2 = RMSNorm(d_model)
         self.ffn = SwiGluFFN(d_model, intermediate_size, dropout_ffn, bias=mlp_bias)
 
-    def attn_sublayer(self, x: torch.Tensor, rope: RoPE) -> torch.Tensor:
-        return self.attn(self.ln1(x), rope)
+    def attn_sublayer(
+        self,
+        x: torch.Tensor,
+        rope: RoPE,
+        attn_mask: torch.Tensor = None,
+        position_ids: torch.Tensor = None,
+    ) -> torch.Tensor:
+        return self.attn(
+            self.ln1(x), rope, position_ids=position_ids, attn_mask=attn_mask
+        )
 
     def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
         return self.ffn(self.ln2(x))
@@ -27,9 +42,11 @@ class Qwen3Model(nn.Module):
 
         # Pad vocab to multiple of 128 for better matmul alignment
         pad_multiple = 128
-        self.padded_vocab_size = ((config.vocab_size + pad_multiple - 1) // pad_multiple) * pad_multiple
+        self.padded_vocab_size = (
+            (config.vocab_size + pad_multiple - 1) // pad_multiple
+        ) * pad_multiple
         self.token_emb = nn.Embedding(self.padded_vocab_size, config.d_model)
-        self.dropout = nn.Dropout(config.dropout_embd)
+        self.dropout_emb = nn.Dropout(config.dropout_embd)
         # No pos_emb — positioning handled by RoPE inside each attention layer
         self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
 
@@ -69,18 +86,32 @@ class Qwen3Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, return_logits: bool = True) -> torch.Tensor:
-        x = self.dropout(self.token_emb(idx))
+    def forward(
+        self,
+        idx: torch.Tensor,
+        position_ids: torch.Tensor,
+        attn_mask: torch.Tensor = None,
+        return_logits: bool = True,
+    ) -> torch.Tensor:
+        x = self.dropout_emb(self.token_emb(idx))
 
         if self.config.attn_res:
             attn_res_ctx = []
             for block in self.blocks:
-                x, attn_res_ctx = block(x, attn_res_ctx, rope=self.rope)
+                x, attn_res_ctx = block(
+                    x,
+                    attn_res_ctx,
+                    rope=self.rope,
+                    position_ids=position_ids,
+                    attn_mask=attn_mask,
+                )
         else:
             for block in self.blocks:
-                x = block(x, rope=self.rope)
+                x = block(
+                    x, rope=self.rope, position_ids=position_ids, attn_mask=attn_mask
+                )
 
         x = self.ln_f(x)
         if return_logits:
-            return self.lm_head(x)
+            return self.lm_head(x), None
         return x

@@ -120,7 +120,7 @@ def triton_flash_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    causal=True,
+    is_causal=True,
     sm_scale=None
 ):
     """Compute Flash Attention forward pass.
@@ -129,7 +129,7 @@ def triton_flash_attn_fwd(
         q: query tensor [batch, n_heads, seq_q, d_head]
         k: key tensor [batch, n_heads, seq_kv, d_head]
         v: value tensor [batch, n_heads, seq_kv, d_head]
-        causal: apply causal mask (default True)
+        is_causal: apply causal mask (default True)
         sm_scale: softmax scale, defaults to 1/sqrt(d_head)
 
     Returns:
@@ -161,7 +161,7 @@ def triton_flash_attn_fwd(
         k.stride(0), k.stride(1), k.stride(2), k.stride(3),
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        n_heads, seq_q, seq_kv, d_head, causal, sm_scale,
+        n_heads, seq_q, seq_kv, d_head, is_causal, sm_scale,
         BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, BLOCK_D=BLOCK_D,
         num_warps=4, num_stages=2,
     )
@@ -404,7 +404,7 @@ def triton_flash_attn_bwd(
     o: torch.Tensor,
     L: torch.Tensor,
     do: torch.Tensor,
-    causal=True,
+    is_causal=True,
     sm_scale=None,
 ):
     # Ensure all inputs share the same dtype — torch.compile/Inductor may promote
@@ -451,7 +451,7 @@ def triton_flash_attn_bwd(
         do.stride(0), do.stride(1), do.stride(2), do.stride(3),
         dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
         dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
-        n_heads, seq_q, seq_kv, d_head, causal, sm_scale,
+        n_heads, seq_q, seq_kv, d_head, is_causal, sm_scale,
         BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, BLOCK_D=BLOCK_D,
         num_warps=4, num_stages=2,
     )
@@ -464,7 +464,7 @@ def triton_flash_attn_bwd(
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         do.stride(0), do.stride(1), do.stride(2), do.stride(3),
         dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
-        n_heads, seq_q, seq_kv, d_head, causal, sm_scale,
+        n_heads, seq_q, seq_kv, d_head, is_causal, sm_scale,
         BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, BLOCK_D=BLOCK_D,
         num_warps=4, num_stages=2,
     )
@@ -474,10 +474,10 @@ def triton_flash_attn_bwd(
 
 class FlashAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale):
-        o, L = triton_flash_attn_fwd(q, k, v, causal=causal, sm_scale=sm_scale)
+    def forward(ctx, q, k, v, is_causal, sm_scale):
+        o, L = triton_flash_attn_fwd(q, k, v, is_causal=is_causal, sm_scale=sm_scale)
         ctx.save_for_backward(q, k, v, o, L)
-        ctx.causal = causal
+        ctx.is_causal = is_causal
         ctx.sm_scale = sm_scale
         return o
 
@@ -486,20 +486,20 @@ class FlashAttention(torch.autograd.Function):
         q, k, v, o, L = ctx.saved_tensors
         dq, dk, dv = triton_flash_attn_bwd(
             q, k, v, o, L, do,
-            causal=ctx.causal,
+            is_causal=ctx.is_causal,
             sm_scale=ctx.sm_scale,
         )
         return dq, dk, dv, None, None
 
 
-def triton_flash_attn(q, k, v, causal=True, sm_scale=None):
+def triton_flash_attn(q, k, v, is_causal=True, sm_scale=None):
     """Flash Attention with autograd support.
 
     Args:
         q: [batch, n_heads, seq_q, d_head]
         k: [batch, n_heads, seq_kv, d_head]
         v: [batch, n_heads, seq_kv, d_head]
-        causal: apply causal mask (default True)
+        is_causal: apply causal mask (default True)
         sm_scale: softmax scale, defaults to 1/sqrt(d_head)
 
     Returns:
@@ -507,4 +507,4 @@ def triton_flash_attn(q, k, v, causal=True, sm_scale=None):
     """
     if sm_scale is None:
         sm_scale = 1.0 / (q.shape[-1] ** 0.5)
-    return FlashAttention.apply(q, k, v, causal, sm_scale)
+    return FlashAttention.apply(q, k, v, is_causal, sm_scale)

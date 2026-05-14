@@ -18,7 +18,7 @@ class ModelConfig:
     attn_res_block_size: int = 2  # number of full layers per block for AttnRes
     attn_res_norm: str = "rmsnorm"  # norm for attn_res keys: "rmsnorm" or "layernorm"
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
-    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3
+    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3, L_max ~62800
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
     tie_word_embeddings: bool = True  # tie lm_head.weight to token_emb.weight
     attn_bias: bool = False           # bias in attention Q/K/V/O projections
@@ -47,6 +47,7 @@ class DataConfig:
     data_dir: str = "data/"
     val_split: float = 0.01
     num_workers: int = 4
+    packing: bool = True
 
 
 @dataclass
@@ -61,9 +62,10 @@ class TrainingConfig:
     seed: int = 42
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
-    checkpoint_every: int = 500
-    eval_every: int = 100
-    eval_steps: int = 25
+    checkpoint_every: int = 5000
+    eval_every: int = 1000
+    eval_steps: int = 200
+    intra_doc_masking: bool = True
 
 
 @dataclass
@@ -160,6 +162,8 @@ def _coerce_types(dc_class, raw_dict: dict) -> dict:
     field_types = {f.name: f.type for f in dataclasses.fields(dc_class)}
     coerced = {}
     for k, v in raw_dict.items():
+        if k not in field_types:
+            continue  # silently ignore unknown/deprecated YAML fields
         expected = field_types.get(k)
         if expected == float and isinstance(v, str):
             v = float(v)
