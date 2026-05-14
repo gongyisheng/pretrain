@@ -12,12 +12,45 @@ so the workflow can capture it into a step output.
 import subprocess
 import sys
 import time
-
-sys.path.insert(0, ".")
-
-from src.utils.gpu_select import parse_nvidia_smi, pick_available
+from dataclasses import dataclass
 
 POLL_INTERVAL_S = 30
+
+
+@dataclass(frozen=True)
+class GpuInfo:
+    index: int
+    util_pct: int
+    free_mib: int
+
+
+def parse_nvidia_smi(output: str) -> list[GpuInfo]:
+    """Parse CSV body of `nvidia-smi --query-gpu=index,utilization.gpu,memory.free`."""
+    gpus: list[GpuInfo] = []
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
+            raise ValueError(
+                f"Expected 3 comma-separated fields, got {len(parts)}: {line!r}"
+            )
+        idx, util, free = parts
+        gpus.append(GpuInfo(index=int(idx), util_pct=int(util), free_mib=int(free)))
+    return gpus
+
+
+def pick_available(
+    gpus: list[GpuInfo],
+    max_util_pct: int = 10,
+    min_free_mib: int = 8 * 1024,  # 8 GiB
+) -> int | None:
+    """Return the lowest-index GPU whose util and free memory clear thresholds."""
+    for g in gpus:
+        if g.util_pct <= max_util_pct and g.free_mib >= min_free_mib:
+            return g.index
+    return None
 
 
 def query_nvidia_smi() -> str:

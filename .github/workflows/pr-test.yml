@@ -27,7 +27,6 @@ jobs:
       has_model: ${{ steps.detect.outputs.has_model }}
       has_data: ${{ steps.detect.outputs.has_data }}
       has_training: ${{ steps.detect.outputs.has_training }}
-      has_utils: ${{ steps.detect.outputs.has_utils }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +38,6 @@ jobs:
               core.setOutput('has_model', 'true');
               core.setOutput('has_data', 'true');
               core.setOutput('has_training', 'true');
-              core.setOutput('has_utils', 'true');
               return;
             }
 
@@ -64,17 +62,12 @@ jobs:
               /^scripts\/train\.py$/,
               /^src\/utils\/config\.py$/,
             ]);
-            const has_utils = matchAny([
-              /^src\/utils\/gpu_select\.py$/,
-              /^scripts\/pick_free_gpu\.py$/,
-            ]);
 
             core.setOutput('has_model', String(has_model));
             core.setOutput('has_data', String(has_data));
             core.setOutput('has_training', String(has_training));
-            core.setOutput('has_utils', String(has_utils));
 
-            core.info(`has_model=${has_model} has_data=${has_data} has_training=${has_training} has_utils=${has_utils}`);
+            core.info(`has_model=${has_model} has_data=${has_data} has_training=${has_training}`);
 
   lint:
     runs-on: [self-hosted]
@@ -110,25 +103,6 @@ jobs:
           CUDA_VISIBLE_DEVICES: ""
         run: uv run pytest tests/test_dataset.py -v
 
-  test-utils:
-    needs: [prepare]
-    if: needs.prepare.outputs.has_utils == 'true'
-    runs-on: [self-hosted]
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v3
-        with:
-          enable-cache: true
-
-      - run: uv sync --extra dev
-
-      - name: Run utils tests (CPU only)
-        env:
-          CUDA_VISIBLE_DEVICES: ""
-        run: uv run pytest tests/test_gpu_select.py -v
-
   test-model:
     needs: [prepare]
     if: needs.prepare.outputs.has_model == 'true'
@@ -146,7 +120,7 @@ jobs:
       - name: Pick free GPU
         id: pick
         run: |
-          idx=$(uv run python scripts/pick_free_gpu.py)
+          idx=$(uv run python tests/ci/gpu_lock_exec.py)
           echo "index=$idx" >> "$GITHUB_OUTPUT"
           echo "Picked GPU $idx"
 
@@ -177,7 +151,7 @@ jobs:
       - name: Pick free GPU
         id: pick
         run: |
-          idx=$(uv run python scripts/pick_free_gpu.py)
+          idx=$(uv run python tests/ci/gpu_lock_exec.py)
           echo "index=$idx" >> "$GITHUB_OUTPUT"
           echo "Picked GPU $idx"
 
