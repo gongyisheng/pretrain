@@ -1,5 +1,7 @@
 """Unit tests for src/utils/gpu_select.py."""
 
+import pytest
+
 from src.utils.gpu_select import GpuInfo, parse_nvidia_smi, pick_available
 
 
@@ -32,6 +34,11 @@ def test_parse_ignores_blank_lines():
 
 def test_parse_empty_output():
     assert parse_nvidia_smi("") == []
+
+
+def test_parse_raises_on_wrong_field_count():
+    with pytest.raises(ValueError, match="3 comma-separated fields"):
+        parse_nvidia_smi("0, 5\n")
 
 
 # --- pick_available ---
@@ -79,7 +86,11 @@ def test_pick_threshold_boundaries():
     assert pick_available(gpus) == 0
 
 
-def test_pick_custom_thresholds():
+def test_pick_custom_thresholds_accepts():
     gpus = [GpuInfo(index=0, util_pct=30, free_mib=4096)]
     assert pick_available(gpus, max_util_pct=50, min_free_mib=2048) == 0
+
+
+def test_pick_custom_thresholds_rejects():
+    gpus = [GpuInfo(index=0, util_pct=30, free_mib=4096)]
     assert pick_available(gpus, max_util_pct=20, min_free_mib=2048) is None

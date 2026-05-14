@@ -27,7 +27,12 @@ def parse_nvidia_smi(output: str) -> list[GpuInfo]:
         line = raw.strip()
         if not line:
             continue
-        idx, util, free = (part.strip() for part in line.split(","))
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
+            raise ValueError(
+                f"Expected 3 comma-separated fields, got {len(parts)}: {line!r}"
+            )
+        idx, util, free = parts
         gpus.append(GpuInfo(index=int(idx), util_pct=int(util), free_mib=int(free)))
     return gpus
 
@@ -35,7 +40,7 @@ def parse_nvidia_smi(output: str) -> list[GpuInfo]:
 def pick_available(
     gpus: list[GpuInfo],
     max_util_pct: int = 10,
-    min_free_mib: int = 8 * 1024,
+    min_free_mib: int = 8 * 1024,  # 8 GiB
 ) -> int | None:
     for g in gpus:
         if g.util_pct <= max_util_pct and g.free_mib >= min_free_mib:
