@@ -9,8 +9,9 @@ model:
   vocab_size: 50257
   qk_norm: true
   rope_theta: 10000.0
-  attn_res: true
-  attn_res_block_size: 2  # boundaries at layers 0, 2, 4, 6 → 4 blocks
+  residual_cls: "attn_res"
+  residual_kwargs:
+    seal_block_size: 2
 
 data:
   dataset: "openwebtext"

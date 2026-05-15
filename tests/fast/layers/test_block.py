@@ -26,12 +26,12 @@ class _MinimalTransformerBlock(BaseTransformerBlock):
 def test_transformer_block_output_shape():
     block = _MinimalTransformerBlock(d_model=64, n_heads=4, intermediate_size=256, dropout_attn=0.0)
     x = torch.randn(2, 16, 64)
-    out = block(x)
+    out, _ = block(x)
     assert out.shape == (2, 16, 64)
 
 
 def test_transformer_block_residual():
     block = _MinimalTransformerBlock(d_model=64, n_heads=4, intermediate_size=256, dropout_attn=0.0)
     x = torch.randn(2, 16, 64)
-    out = block(x)
+    out, _ = block(x)
     assert not torch.allclose(out, x)

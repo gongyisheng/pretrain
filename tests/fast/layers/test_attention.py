@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from src.layers.attention import GroupedQueryAttention, MultiHeadAttention
-from src.layers.rope import RoPE
+from src.layers.pos_emb import RoPE
 from src.utils.masking_utils import build_causal_mask
 from tests.fast.layers._refs import COMPOUND_DTYPES, gqa_ref, mha_ref, sdpa_ref
 

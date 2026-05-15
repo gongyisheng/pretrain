@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from src.layers.norm import RMSNorm
 
 if TYPE_CHECKING:
-    from src.layers.rope import RoPE
+    from src.layers.pos_emb import RoPE
 
 
 @torch.compile

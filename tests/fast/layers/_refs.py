@@ -93,7 +93,16 @@ UNGATED_ACTIVATIONS_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref
 GATED_ACTIVATIONS_REFS = {"relu": relu_glu_ref, "gelu": gelu_glu_ref, "silu": silu_glu_ref}
 
 
-# ---------------------------- RoPE ----------------------------
+# ---------------------------- Position Embedding ----------------------------
+
+def learned_pos_emb_ref(x: torch.Tensor, embedding_weight: torch.Tensor) -> torch.Tensor:
+    """Eager absolute positional embedding: x + W[:S] (broadcast over batch).
+
+    x: (B, S, D); embedding_weight: (max_seq_len, D).
+    """
+    S = x.shape[1]
+    return x + embedding_weight[:S]
+
 
 def rope_cos_sin_ref(
     d_head: int,

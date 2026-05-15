@@ -23,11 +23,11 @@ _QWEN3_MOE_CFG = ModelConfig(
 )
 _GPT2_ATTN_RES_CFG = ModelConfig(
     arch="gpt2", n_layers=4, n_heads=2, d_model=64, vocab_size=256,
-    attn_res=True, attn_res_block_size=2,
+    residual_cls="attn_res", residual_kwargs={"seal_block_size": 2},
 )
 _QWEN3_ATTN_RES_CFG = ModelConfig(
     arch="qwen3", n_layers=4, n_heads=2, n_kv_heads=1, d_model=64, vocab_size=256,
-    qk_norm=True, attn_res=True, attn_res_block_size=2,
+    qk_norm=True, residual_cls="attn_res", residual_kwargs={"seal_block_size": 2},
 )
 
 

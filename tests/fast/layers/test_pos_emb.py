@@ -1,11 +1,58 @@
 import pytest
 import torch
 
-from src.layers.rope import RoPE
-from tests.fast.layers._refs import SIMPLE_DTYPES, rope_cos_sin_ref, rope_ref
+from src.layers.pos_emb import LearnedPositionalEmbedding, RoPE
+from tests.fast.layers._refs import (
+    SIMPLE_DTYPES,
+    learned_pos_emb_ref,
+    rope_cos_sin_ref,
+    rope_ref,
+)
 
 
-# --- Behavior ---
+# ==================== LearnedPositionalEmbedding ====================
+
+def test_learned_pos_emb_output_shape():
+    pe = LearnedPositionalEmbedding(max_seq_len=32, d_model=16)
+    x = torch.randn(2, 8, 16)
+    assert pe(x).shape == (2, 8, 16)
+
+
+def test_learned_pos_emb_adds_position_dependent_offset():
+    """Output = x + lookup(0..S-1); same x at different positions differs."""
+    pe = LearnedPositionalEmbedding(max_seq_len=32, d_model=16)
+    with torch.no_grad():
+        pe.embedding.weight.copy_(torch.randn(32, 16))
+    x = torch.zeros(1, 4, 16)
+    out = pe(x)
+    # At zero input, output is exactly the position embeddings 0..S-1.
+    assert torch.allclose(out[0], pe.embedding.weight[:4])
+    # Different positions yield different embeddings.
+    assert not torch.allclose(out[0, 0], out[0, 1])
+
+
+def test_learned_pos_emb_uses_absolute_positions():
+    """Output depends only on S, never on input position_ids — same x → same out for any seq length."""
+    pe = LearnedPositionalEmbedding(max_seq_len=32, d_model=16)
+    x = torch.randn(1, 6, 16)
+    out_a = pe(x)
+    out_b = pe(x.clone())
+    assert torch.equal(out_a, out_b)
+
+
+@pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
+def test_learned_pos_emb_matches_ref(dtype, atol):
+    """LearnedPositionalEmbedding(x) = x + embedding.weight[:S]."""
+    torch.manual_seed(0)
+    pe = LearnedPositionalEmbedding(max_seq_len=32, d_model=16).to(dtype)
+    x = torch.randn(2, 8, 16, dtype=dtype)
+    out = pe(x)
+    out_ref = learned_pos_emb_ref(x, pe.embedding.weight)
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+
+
+# ==================== RoPE behavior ====================
 
 def test_rope_forward_with_position_ids_shape():
     rope = RoPE(d_head=16, max_seq_len=32)
@@ -27,7 +74,7 @@ def test_rope_forward_reset_position_ids_differ():
     assert not torch.allclose(out_seq[:, :, 3:, :], out_reset[:, :, 3:, :], atol=1e-6)
 
 
-# --- Numerical parity ---
+# ==================== RoPE numerical parity ====================
 
 @pytest.mark.parametrize("theta", [10000.0, 1000000.0])
 def test_rope_cos_sin_buffers_match_ref(theta):

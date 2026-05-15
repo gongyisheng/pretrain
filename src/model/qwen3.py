@@ -5,7 +5,8 @@ from src.layers.attention import GroupedQueryAttention
 from src.layers.block import BaseTransformerBlock
 from src.layers.ffn import FFN
 from src.layers.norm import RMSNorm
-from src.layers.rope import RoPE
+from src.layers.residual import RESIDUAL_REGISTRY
+from src.layers.pos_emb import RoPE
 from src.utils.config import ModelConfig
 
 
@@ -48,6 +49,9 @@ class Qwen3Model(nn.Module):
         # No pos_emb — positioning handled by RoPE inside each attention layer
         self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
 
+        residual_cls = RESIDUAL_REGISTRY[config.residual_cls]
+        residual_kwargs = config.residual_kwargs
+
         self.blocks = nn.ModuleList([
             Qwen3TransformerBlock(
                 d_model=config.d_model,
@@ -61,10 +65,9 @@ class Qwen3Model(nn.Module):
                 mlp_bias=config.mlp_bias,
                 mlp_activation=config.mlp_activation,
                 mlp_gated=config.mlp_gated,
-                attn_res=config.attn_res,
-                attn_res_block_size=config.attn_res_block_size,
-                attn_res_norm=config.attn_res_norm,
                 layer_idx=i,
+                residual_cls=residual_cls,
+                residual_kwargs=residual_kwargs,
             )
             for i in range(config.n_layers)
         ])
@@ -95,21 +98,15 @@ class Qwen3Model(nn.Module):
     ) -> torch.Tensor:
         x = self.dropout_emb(self.token_emb(idx))
 
-        if self.config.attn_res:
-            attn_res_ctx = []
-            for block in self.blocks:
-                x, attn_res_ctx = block(
-                    x,
-                    attn_res_ctx,
-                    rope=self.rope,
-                    position_ids=position_ids,
-                    attn_mask=attn_mask,
-                )
-        else:
-            for block in self.blocks:
-                x = block(
-                    x, rope=self.rope, position_ids=position_ids, attn_mask=attn_mask
-                )
+        ctx = []
+        for block in self.blocks:
+            x, ctx = block(
+                x,
+                ctx,
+                rope=self.rope,
+                position_ids=position_ids,
+                attn_mask=attn_mask,
+            )
 
         x = self.ln_f(x)
         if return_logits:
