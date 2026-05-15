@@ -1,72 +1,16 @@
-"""Numerical parity tests for the unified FFN module.
-
-Covers both the ungated path (up_proj → act → down_proj) and the gated path
-(down_proj ∘ act(gate_proj(x), up_proj(x))) across activations.
-"""
+"""FFN tests: behavior (shape, bias, error cases) + numerical parity vs ffn_ref."""
 import pytest
 import torch
-import torch.nn.functional as F
 
+from src.layers.activation import UNGATED_ACTIVATIONS
 from src.layers.ffn import FFN
+from tests.fast.layers._refs import SIMPLE_DTYPES, ffn_ref
 
 
-# --- Ungated FFN ---
-
-def test_ffn_gelu_ungated_matches_formula():
-    """FFN(activation=gelu, gated=False) = down_proj(gelu(up_proj(x)))."""
-    ffn = FFN(d_model=64, intermediate_size=256, activation="gelu", gated=False, dropout=0.0)
-    ffn.eval()
-    x = torch.randn(2, 16, 64)
-    ref = ffn.down_proj(F.gelu(ffn.up_proj(x)))
-    assert torch.allclose(ffn(x), ref, atol=1e-5)
+ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
 
 
-def test_ffn_relu_ungated_matches_formula():
-    ffn = FFN(d_model=64, intermediate_size=256, activation="relu", gated=False, dropout=0.0)
-    ffn.eval()
-    x = torch.randn(2, 16, 64)
-    ref = ffn.down_proj(F.relu(ffn.up_proj(x)))
-    assert torch.allclose(ffn(x), ref, atol=1e-5)
-
-
-def test_ffn_silu_ungated_matches_formula():
-    ffn = FFN(d_model=64, intermediate_size=256, activation="silu", gated=False, dropout=0.0)
-    ffn.eval()
-    x = torch.randn(2, 16, 64)
-    ref = ffn.down_proj(F.silu(ffn.up_proj(x)))
-    assert torch.allclose(ffn(x), ref, atol=1e-5)
-
-
-# --- Gated FFN (GLU family) ---
-
-def test_ffn_silu_glu_matches_formula():
-    """gated=True, activation=silu (literature: SwiGLU)."""
-    ffn = FFN(d_model=64, intermediate_size=128, activation="silu", gated=True, dropout=0.0)
-    ffn.eval()
-    x = torch.randn(2, 16, 64)
-    ref = ffn.down_proj(F.silu(ffn.gate_proj(x)) * ffn.up_proj(x))
-    assert torch.allclose(ffn(x), ref, atol=1e-5)
-
-
-def test_ffn_gelu_glu_matches_formula():
-    """gated=True, activation=gelu (literature: GeGLU)."""
-    ffn = FFN(d_model=64, intermediate_size=128, activation="gelu", gated=True, dropout=0.0)
-    ffn.eval()
-    x = torch.randn(2, 16, 64)
-    ref = ffn.down_proj(F.gelu(ffn.gate_proj(x)) * ffn.up_proj(x))
-    assert torch.allclose(ffn(x), ref, atol=1e-5)
-
-
-def test_ffn_relu_glu_matches_formula():
-    """gated=True, activation=relu (literature: ReGLU)."""
-    ffn = FFN(d_model=64, intermediate_size=128, activation="relu", gated=True, dropout=0.0)
-    ffn.eval()
-    x = torch.randn(2, 16, 64)
-    ref = ffn.down_proj(F.relu(ffn.gate_proj(x)) * ffn.up_proj(x))
-    assert torch.allclose(ffn(x), ref, atol=1e-5)
-
-
-# --- Output shapes ---
+# --- Behavior ---
 
 @pytest.mark.parametrize("gated", [False, True])
 def test_ffn_output_shape(gated):
@@ -74,8 +18,6 @@ def test_ffn_output_shape(gated):
     x = torch.randn(2, 16, 64)
     assert ffn(x).shape == (2, 16, 64)
 
-
-# --- Bias ---
 
 @pytest.mark.parametrize("gated", [False, True])
 def test_ffn_default_bias_is_false(gated):
@@ -97,8 +39,6 @@ def test_ffn_bias_true_adds_biases(gated):
         assert ffn.gate_proj.bias is not None
 
 
-# --- Error handling ---
-
 def test_ffn_unknown_activation_raises():
     with pytest.raises(ValueError, match="Unknown activation"):
         FFN(d_model=64, intermediate_size=128, activation="mish")
@@ -107,3 +47,39 @@ def test_ffn_unknown_activation_raises():
 def test_ffn_unknown_activation_in_gated_raises():
     with pytest.raises(ValueError, match="Unknown activation"):
         FFN(d_model=64, intermediate_size=128, activation="mish", gated=True)
+
+
+# --- Numerical parity ---
+
+@pytest.mark.parametrize("activation", ACT_NAMES)
+@pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
+def test_ffn_ungated_matches_ref(activation, dtype, atol):
+    """FFN(gated=False, activation=A) = down_proj(A(up_proj(x)))."""
+    torch.manual_seed(0)
+    ffn = FFN(
+        d_model=64, intermediate_size=256, activation=activation, gated=False, dropout=0.0
+    ).to(dtype)
+    ffn.eval()
+    x = torch.randn(2, 16, 64, dtype=dtype)
+    out = ffn(x)
+    out_ref = ffn_ref(x, ffn.up_proj, ffn.down_proj, activation=activation)
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+
+
+@pytest.mark.parametrize("activation", ACT_NAMES)
+@pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
+def test_ffn_gated_matches_ref(activation, dtype, atol):
+    """FFN(gated=True, activation=A) = down_proj(A(gate_proj(x), up_proj(x)))."""
+    torch.manual_seed(0)
+    ffn = FFN(
+        d_model=64, intermediate_size=128, activation=activation, gated=True, dropout=0.0
+    ).to(dtype)
+    ffn.eval()
+    x = torch.randn(2, 16, 64, dtype=dtype)
+    out = ffn(x)
+    out_ref = ffn_ref(
+        x, ffn.up_proj, ffn.down_proj, activation=activation, gate_proj=ffn.gate_proj
+    )
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)

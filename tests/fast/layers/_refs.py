@@ -93,6 +93,27 @@ UNGATED_ACTIVATIONS_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref
 GATED_ACTIVATIONS_REFS = {"relu": relu_glu_ref, "gelu": gelu_glu_ref, "silu": silu_glu_ref}
 
 
+# ---------------------------- FFN ----------------------------
+
+def ffn_ref(
+    x: torch.Tensor,
+    up_proj: nn.Linear,
+    down_proj: nn.Linear,
+    activation: str,
+    gate_proj: nn.Linear | None = None,
+) -> torch.Tensor:
+    """Eager feed-forward:
+        ungated (gate_proj=None): down_proj(act(up_proj(x)))
+        gated   (gate_proj given): down_proj(act(gate_proj(x), up_proj(x)))
+    `activation` is a key in {U,G}NGATED_ACTIVATIONS_REFS ("relu"/"gelu"/"silu").
+    """
+    if gate_proj is not None:
+        hidden = GATED_ACTIVATIONS_REFS[activation](gate_proj(x), up_proj(x))
+    else:
+        hidden = UNGATED_ACTIVATIONS_REFS[activation](up_proj(x))
+    return down_proj(hidden)
+
+
 # ---------------------------- RoPE ----------------------------
 
 def rope_cos_sin_ref(
