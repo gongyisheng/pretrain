@@ -84,7 +84,7 @@ def build_attention_mask(
         additive tensor for sdpa.
     """
     if attn_implementation == "flex_attention":
-        return build_attention_mask_for_flex_attn(position_ids)
+        return build_attention_mask_for_flex_attn(position_ids, device)
     if attn_implementation == "sdpa":
         return build_attention_mask_for_sdpa(position_ids, device, dtype)
     raise ValueError(
@@ -111,15 +111,15 @@ def build_attention_mask_for_sdpa(
     return additive
 
 
-def build_attention_mask_for_flex_attn(position_ids: torch.Tensor):
+def build_attention_mask_for_flex_attn(position_ids: torch.Tensor, device: torch.device):
     # ``adj`` captured below is constant per document, so the JIT'd kernel
     # tests "same document" with a single int comparison.
     B, S = position_ids.shape
-    adj = torch.arange(S, device=position_ids.device).unsqueeze(0) - position_ids
+    adj = torch.arange(S, device=device).unsqueeze(0) - position_ids
 
     def mask_mod(b, h, q_idx, kv_idx):
         return (q_idx >= kv_idx) & (adj[b, q_idx] == adj[b, kv_idx])
 
     return _create_block_mask_compiled(
-        mask_mod, B=B, H=None, Q_LEN=S, KV_LEN=S, device=position_ids.device,
+        mask_mod, B=B, H=None, Q_LEN=S, KV_LEN=S, device=device,
     )
