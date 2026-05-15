@@ -93,6 +93,43 @@ UNGATED_ACTIVATIONS_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref
 GATED_ACTIVATIONS_REFS = {"relu": relu_glu_ref, "gelu": gelu_glu_ref, "silu": silu_glu_ref}
 
 
+# ---------------------------- RoPE ----------------------------
+
+def rope_cos_sin_ref(
+    d_head: int,
+    max_seq_len: int,
+    theta: float = 10000.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Eager RoPE cos/sin tables.
+
+    inv_freq[k] = 1 / theta^(2k / d_head) for k in [0, d_head/2).
+    angles[p, k] = p * inv_freq[k]; concatenated along the last dim so
+    rotate_half pairs the right components.
+    Returns (cos, sin), each shape (max_seq_len, d_head), fp32.
+    """
+    inv_freq = 1.0 / (theta ** (torch.arange(0, d_head, 2, dtype=torch.float32) / d_head))
+    positions = torch.arange(max_seq_len, dtype=torch.float32)
+    angles = positions[:, None] * inv_freq[None, :]
+    angles = torch.cat([angles, angles], dim=-1)
+    return torch.cos(angles), torch.sin(angles)
+
+
+def rope_ref(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """Eager rotary position embedding: x * cos + rotate_half(x) * sin.
+
+    rotate_half(x): split x last-dim into halves, return concat([-x2, x1]).
+    x: (..., d_head); cos/sin: broadcastable to x's shape, in input dtype.
+    """
+    d = x.shape[-1]
+    x1, x2 = x[..., : d // 2], x[..., d // 2 :]
+    rotated = torch.cat([-x2, x1], dim=-1)
+    return x * cos + rotated * sin
+
+
 # ---------------------------- Attention ----------------------------
 
 def sdpa_ref(
