@@ -1,0 +1,10 @@
+{
+  "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "hostname": "pc2",
+  "commit": "b5d8f30",
+  "config": "experiments/device_parity/qwen3_57m.yaml",
+  "val_loss": 3.1339,
+  "val_ppl": 22.96,
+  "wallclock_sec": 38851,
+  "finished_at": "2026-05-15T03:43:31-07:00"
+}
