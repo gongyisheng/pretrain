@@ -38,6 +38,8 @@ def layernorm_ref(
 
 # ---------------------------- Activations ----------------------------
 
+# --- Ungated (unary): x → act(x) ---
+
 def relu_ref(x: torch.Tensor) -> torch.Tensor:
     """relu(x) = max(x, 0)."""
     return torch.where(x > 0, x, torch.zeros_like(x))
@@ -53,12 +55,22 @@ def silu_ref(x: torch.Tensor) -> torch.Tensor:
     return x * torch.sigmoid(x)
 
 
-UNARY_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref}
+# --- Gated (GLU family): (gate, up) → act(gate) * up ---
+
+def relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return relu_ref(gate) * up
 
 
-def glu_ref(name: str, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Gated activation: act(gate) * up."""
-    return UNARY_REFS[name](gate) * up
+def gelu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return gelu_ref(gate) * up
+
+
+def silu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return silu_ref(gate) * up
+
+
+UNGATED_ACTIVATIONS_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref}
+GATED_ACTIVATIONS_REFS = {"relu": relu_glu_ref, "gelu": gelu_glu_ref, "silu": silu_glu_ref}
 
 
 # ---------------------------- Attention ----------------------------

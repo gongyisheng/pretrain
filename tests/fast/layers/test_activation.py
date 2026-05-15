@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
-from tests.fast.layers._refs import UNARY_REFS, glu_ref
+from tests.fast.layers._refs import GATED_ACTIVATIONS_REFS, UNGATED_ACTIVATIONS_REFS
 
 
 DTYPES = [
@@ -15,14 +15,14 @@ DTYPES = [
 ACT_NAMES = ["relu", "gelu", "silu"]
 
 
-# ---------------------------- Unary ----------------------------
+# ---------------------------- Ungated ----------------------------
 
 @pytest.mark.parametrize("name", ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", DTYPES)
-def test_unary_matches_ref(name, dtype, atol):
-    """Each unary activation matches its eager mathematical definition."""
+def test_ungated_matches_ref(name, dtype, atol):
+    """Each ungated activation matches its eager mathematical definition."""
     act = UNGATED_ACTIVATIONS[name]
-    ref = UNARY_REFS[name]
+    ref = UNGATED_ACTIVATIONS_REFS[name]
     x = torch.randn(2, 16, 64, dtype=dtype)
     out = act(x)
     assert out.dtype == dtype
@@ -30,7 +30,7 @@ def test_unary_matches_ref(name, dtype, atol):
 
 
 @pytest.mark.parametrize("name", ACT_NAMES)
-def test_unary_zero_input(name):
+def test_ungated_zero_input(name):
     """All activations send 0 → 0 (relu: max(0,0); gelu: 0.5*0*(1+0)=0; silu: 0*0.5=0)."""
     act = UNGATED_ACTIVATIONS[name]
     x = torch.zeros(8, 64)
@@ -41,10 +41,10 @@ def test_unary_zero_input(name):
 
 @pytest.mark.parametrize("name", ACT_NAMES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_unary_large_positive_no_overflow(name, dtype):
+def test_ungated_large_positive_no_overflow(name, dtype):
     """Large positive x: all three pass through ~unchanged; output must be finite."""
     act = UNGATED_ACTIVATIONS[name]
-    ref = UNARY_REFS[name]
+    ref = UNGATED_ACTIVATIONS_REFS[name]
     x = torch.full((2, 16, 64), 1000.0, dtype=dtype)
     out = act(x)
     assert torch.isfinite(out).all()
@@ -55,7 +55,7 @@ def test_unary_large_positive_no_overflow(name, dtype):
 
 @pytest.mark.parametrize("name", ACT_NAMES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_unary_large_negative_saturates(name, dtype):
+def test_ungated_large_negative_saturates(name, dtype):
     """Large negative x: relu/gelu/silu all → ~0; sigmoid/exp must not underflow to nan."""
     act = UNGATED_ACTIVATIONS[name]
     x = torch.full((2, 16, 64), -1000.0, dtype=dtype)
@@ -77,7 +77,7 @@ def test_gated_matches_ref(name, dtype, atol):
     assert out.dtype == dtype
     # rtol scales tolerance with magnitude (output ~ act(gate)*up, can be O(10))
     rtol = 0.0 if dtype == torch.float32 else (1e-2 if dtype == torch.bfloat16 else 2e-3)
-    assert torch.allclose(out, glu_ref(name, gate, up), atol=atol, rtol=rtol)
+    assert torch.allclose(out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("name", ACT_NAMES)
@@ -89,7 +89,7 @@ def test_gated_large_input_no_overflow(name, dtype):
     up = torch.full((2, 16, 64), 100.0, dtype=dtype)
     out = act(gate, up)
     assert torch.isfinite(out).all()
-    assert torch.allclose(out, glu_ref(name, gate, up), atol=10.0)
+    assert torch.allclose(out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=10.0)
 
 
 @pytest.mark.parametrize("name", ACT_NAMES)
