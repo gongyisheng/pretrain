@@ -1,4 +1,4 @@
-max_seq_len: 4096
+max_seq_len: 8192
 
 model:
   arch: "qwen3"
@@ -8,7 +8,7 @@ model:
   d_model: 512
   vocab_size: 50257
   dropout: 0.0
-  rope_theta: 500000.0
+  rope_theta: 10000.0
   qk_norm: true
 
 data:
@@ -20,17 +20,17 @@ data:
   eot_token_id: 0
 
 training:
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  max_steps: 20000
+  batch_size: 16
+  gradient_accumulation_steps: 16
+  max_steps: 50000
   mixed_precision: "bf16"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/intra_doc_masking/qwen3_57m_baseline"
+  checkpoint_dir: "checkpoints/intra_doc_masking/qwen3_57m_seqlen_8192_masked"
   checkpoint_every: 5000
-  eval_every: 500
-  eval_steps: 100
-  intra_doc_masking: false
+  eval_every: 100
+  eval_steps: 25
+  intra_doc_masking: true
 
 optimizer:
   name: "adamw"
@@ -40,10 +40,10 @@ optimizer:
 
 scheduler:
   name: "cosine"
-  warmup_steps: 2000
+  warmup_steps: 1500
   min_lr: 6e-5
 
 logging:
   wandb_project: "pretrain-intra-doc-masking"
-  wandb_run_name: "qwen3-57m-baseline"
+  wandb_run_name: "qwen3-57m-seqlen-8192-masked"
   log_every: 10
