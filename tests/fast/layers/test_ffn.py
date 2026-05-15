@@ -23,20 +23,18 @@ def test_ffn_output_shape(gated):
 def test_ffn_default_bias_is_false(gated):
     """FFN defaults to bias=False (Qwen3 / Llama convention)."""
     ffn = FFN(d_model=64, intermediate_size=128, activation="silu", gated=gated)
-    assert ffn.up_proj.bias is None
+    w1 = ffn.gate_up_proj if gated else ffn.up_proj
+    assert w1.bias is None
     assert ffn.down_proj.bias is None
-    if gated:
-        assert ffn.gate_proj.bias is None
 
 
 @pytest.mark.parametrize("gated", [False, True])
 def test_ffn_bias_true_adds_biases(gated):
     """Explicit bias=True adds biases to all projections."""
     ffn = FFN(d_model=64, intermediate_size=128, activation="silu", gated=gated, bias=True)
-    assert ffn.up_proj.bias is not None
+    w1 = ffn.gate_up_proj if gated else ffn.up_proj
+    assert w1.bias is not None
     assert ffn.down_proj.bias is not None
-    if gated:
-        assert ffn.gate_proj.bias is not None
 
 
 def test_ffn_unknown_activation_raises():
@@ -62,7 +60,7 @@ def test_ffn_ungated_matches_ref(activation, dtype, atol):
     ffn.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)
     out = ffn(x)
-    out_ref = ffn_ref(x, ffn.up_proj, ffn.down_proj, activation=activation)
+    out_ref = ffn_ref(x, ffn.down_proj, activation=activation, up_proj=ffn.up_proj)
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
@@ -70,7 +68,7 @@ def test_ffn_ungated_matches_ref(activation, dtype, atol):
 @pytest.mark.parametrize("activation", ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
 def test_ffn_gated_matches_ref(activation, dtype, atol):
-    """FFN(gated=True, activation=A) = down_proj(A(gate_proj(x), up_proj(x)))."""
+    """FFN(gated=True, activation=A) = down_proj(A(gate, up)) with fused gate_up_proj."""
     torch.manual_seed(0)
     ffn = FFN(
         d_model=64, intermediate_size=128, activation=activation, gated=True, dropout=0.0
@@ -79,7 +77,7 @@ def test_ffn_gated_matches_ref(activation, dtype, atol):
     x = torch.randn(2, 16, 64, dtype=dtype)
     out = ffn(x)
     out_ref = ffn_ref(
-        x, ffn.up_proj, ffn.down_proj, activation=activation, gate_proj=ffn.gate_proj
+        x, ffn.down_proj, activation=activation, gate_up_proj=ffn.gate_up_proj
     )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)

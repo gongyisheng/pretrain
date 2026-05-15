@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.layers.ffn import gated_ffn, ungated_ffn
 
 
 def _route(
@@ -81,37 +83,6 @@ def _scatter_out(
     return output
 
 
-@torch.compile
-def _expert_ffn(
-    padded_input: torch.Tensor,
-    expert_gate_up: torch.Tensor,
-    expert_down: torch.Tensor,
-    expert_gate_up_bias: torch.Tensor = None,
-    expert_down_bias: torch.Tensor = None,
-) -> torch.Tensor:
-    """Fused batched expert FFN: gate_up bmm → chunk → SwiGLU → down bmm.
-
-    Args:
-        padded_input: (E, C, D) — padded token embeddings per expert
-        expert_gate_up: (E, 2*I, D) — stacked gate+up projection weights
-        expert_down: (E, D, I) — stacked down projection weights
-        expert_gate_up_bias: (E, 2*I) — optional bias
-        expert_down_bias: (E, D) — optional bias
-
-    Returns:
-        (E, C, D) — expert output
-    """
-    gate_up = torch.bmm(padded_input, expert_gate_up.mT)  # (E, C, 2*I)
-    if expert_gate_up_bias is not None:
-        gate_up = gate_up + expert_gate_up_bias.unsqueeze(1)
-    gate, up = gate_up.chunk(2, dim=-1)                     # each (E, C, I)
-    hidden = F.silu(gate) * up                              # (E, C, I)
-    out = torch.bmm(hidden, expert_down.mT)                 # (E, C, D)
-    if expert_down_bias is not None:
-        out = out + expert_down_bias.unsqueeze(1)
-    return out
-
-
 class MoERouter(nn.Module):
     def __init__(self, d_model: int, n_experts: int, n_experts_per_token: int, normalize: bool = True):
         super().__init__()
@@ -134,37 +105,57 @@ class SparseMoEBlock(nn.Module):
     """Sparse Mixture-of-Experts FFN block with batched expert dispatch.
 
     Expert weights are stored as stacked tensors and processed via torch.bmm,
-    replacing the sequential per-expert loop with 3 batched GEMMs.
+    replacing the sequential per-expert loop with batched GEMMs.
 
-    For each forward pass:
+    Per forward pass:
       - Tokens are routed to top-k experts via MoERouter.
       - Routed tokens are sorted by expert, padded, and stacked into (E, C, D).
       - Batched matmuls compute all experts in parallel.
       - Outputs are gathered back with routing weights.
       - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
 
+    Mirrors FFN's gated/ungated split: by default `gated=True, activation="silu"`
+    (SwiGLU experts); set `gated=False` for ungated experts with the same
+    activation registry as FFN (relu/gelu/silu).
+
     Note: aux_loss scale grows linearly with n_experts_per_token (k). Under balanced
     routing the expected value is approximately k. Callers using moe_aux_loss_coef should
     account for this when comparing runs across different k values.
     """
 
-    def __init__(self, d_model: int, intermediate_size: int, n_experts: int, n_experts_per_token: int, dropout_ffn: float = 0.0, capacity_factor: float = None, bias: bool = False):
+    def __init__(
+        self,
+        d_model: int,
+        intermediate_size: int,
+        n_experts: int,
+        n_experts_per_token: int,
+        dropout_ffn: float = 0.0,
+        capacity_factor: float = None,
+        bias: bool = False,
+        gated: bool = True,
+        activation: str = "silu",
+    ):
         super().__init__()
+        registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
+        if activation not in registry:
+            raise ValueError(f"Unknown activation: {activation!r}; expected one of {sorted(registry)}")
         self.n_experts = n_experts
         self.n_experts_per_token = n_experts_per_token
         self.capacity_factor = capacity_factor
+        self.gated = gated
+        self.act_fn = registry[activation]
         self.router = MoERouter(d_model, n_experts, n_experts_per_token)
 
         # Stacked expert weights: (E, out, in) following nn.Linear convention.
-        # gate and up are fused into one tensor to save memory (one bmm instead of two)
-        self.expert_gate_up = nn.Parameter(torch.empty(n_experts, 2 * intermediate_size, d_model))
-        self.expert_down = nn.Parameter(torch.empty(n_experts, d_model, intermediate_size))
-        if bias:
-            self.expert_gate_up_bias = nn.Parameter(torch.zeros(n_experts, 2 * intermediate_size))
-            self.expert_down_bias = nn.Parameter(torch.zeros(n_experts, d_model))
+        # Gated path fuses gate and up into one tensor (one bmm vs two).
+        if gated:
+            self.expert_gate_up = nn.Parameter(torch.empty(n_experts, 2 * intermediate_size, d_model))
+            self.expert_gate_up_bias = nn.Parameter(torch.zeros(n_experts, 2 * intermediate_size)) if bias else None
         else:
-            self.expert_gate_up_bias = None
-            self.expert_down_bias = None
+            self.expert_up = nn.Parameter(torch.empty(n_experts, intermediate_size, d_model))
+            self.expert_up_bias = nn.Parameter(torch.zeros(n_experts, intermediate_size)) if bias else None
+        self.expert_down = nn.Parameter(torch.empty(n_experts, d_model, intermediate_size))
+        self.expert_down_bias = nn.Parameter(torch.zeros(n_experts, d_model)) if bias else None
         self.expert_dropout = nn.Dropout(dropout_ffn)
 
     def forward(self, x: torch.Tensor):
@@ -200,8 +191,17 @@ class SparseMoEBlock(nn.Module):
         # --- Build padded input: (E, capacity, D) ---
         padded_input = _scatter_in(x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity)
 
-        # --- Batched expert FFN: fused gate+up bmm, then down bmm ---
-        expert_out = _expert_ffn(padded_input, self.expert_gate_up, self.expert_down, self.expert_gate_up_bias, self.expert_down_bias)
+        # --- Batched expert FFN: shared gated/ungated_ffn from layers.ffn (3D x + 3D weights) ---
+        if self.gated:
+            expert_out = gated_ffn(
+                padded_input, self.expert_gate_up, self.expert_down, self.act_fn,
+                self.expert_gate_up_bias, self.expert_down_bias,
+            )
+        else:
+            expert_out = ungated_ffn(
+                padded_input, self.expert_up, self.expert_down, self.act_fn,
+                self.expert_up_bias, self.expert_down_bias,
+            )
         expert_out = self.expert_dropout(expert_out)
 
         # --- Scatter results back with routing weights ---

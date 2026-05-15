@@ -64,8 +64,11 @@ def test_qwen3_matches_hf_qwen3_with_copied_weights():
             our_block.attn.q_norm.weight.copy_(hf_layer.self_attn.q_norm.weight)
             our_block.attn.k_norm.weight.copy_(hf_layer.self_attn.k_norm.weight)
             our_block.ln2.weight.copy_(hf_layer.post_attention_layernorm.weight)
-            our_block.ffn.gate_proj.weight.copy_(hf_layer.mlp.gate_proj.weight)
-            our_block.ffn.up_proj.weight.copy_(hf_layer.mlp.up_proj.weight)
+            # HF stores gate and up as separate projections; ours fuses them into gate_up_proj.
+            # Concat along output dim so chunk(2, dim=-1) recovers (gate, up).
+            our_block.ffn.gate_up_proj.weight.copy_(
+                torch.cat([hf_layer.mlp.gate_proj.weight, hf_layer.mlp.up_proj.weight], dim=0)
+            )
             our_block.ffn.down_proj.weight.copy_(hf_layer.mlp.down_proj.weight)
         ours.ln_f.weight.copy_(hf.model.norm.weight)
 

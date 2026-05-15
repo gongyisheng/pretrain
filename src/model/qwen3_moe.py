@@ -86,7 +86,8 @@ class Qwen3MoEModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
         elif isinstance(module, SparseMoEBlock):
-            torch.nn.init.normal_(module.expert_gate_up, mean=0.0, std=0.02)
+            w1 = module.expert_gate_up if module.gated else module.expert_up
+            torch.nn.init.normal_(w1, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
     def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask: torch.Tensor = None) -> tuple:

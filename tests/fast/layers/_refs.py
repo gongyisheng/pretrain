@@ -27,8 +27,8 @@ COMPOUND_DTYPES = [
 
 
 def rmsnorm_ref(
-    x: torch.Tensor, 
-    weight: torch.Tensor, 
+    x: torch.Tensor,
+    weight: torch.Tensor,
     eps: float
 ) -> torch.Tensor:
     """y = weight * x / sqrt(mean(x^2) + eps), reduction in fp32."""
@@ -93,27 +93,6 @@ UNGATED_ACTIVATIONS_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref
 GATED_ACTIVATIONS_REFS = {"relu": relu_glu_ref, "gelu": gelu_glu_ref, "silu": silu_glu_ref}
 
 
-# ---------------------------- FFN ----------------------------
-
-def ffn_ref(
-    x: torch.Tensor,
-    up_proj: nn.Linear,
-    down_proj: nn.Linear,
-    activation: str,
-    gate_proj: nn.Linear | None = None,
-) -> torch.Tensor:
-    """Eager feed-forward:
-        ungated (gate_proj=None): down_proj(act(up_proj(x)))
-        gated   (gate_proj given): down_proj(act(gate_proj(x), up_proj(x)))
-    `activation` is a key in {U,G}NGATED_ACTIVATIONS_REFS ("relu"/"gelu"/"silu").
-    """
-    if gate_proj is not None:
-        hidden = GATED_ACTIVATIONS_REFS[activation](gate_proj(x), up_proj(x))
-    else:
-        hidden = UNGATED_ACTIVATIONS_REFS[activation](up_proj(x))
-    return down_proj(hidden)
-
-
 # ---------------------------- RoPE ----------------------------
 
 def rope_cos_sin_ref(
@@ -170,7 +149,7 @@ def sdpa_ref(
     dtype = q.dtype
     if scale is None:
         scale = 1.0 / math.sqrt(q.shape[-1])
-    logits = (q @ k.transpose(-1, -2)) * scale      # input dtype
+    logits = (q @ k.mT) * scale                     # input dtype
     if is_causal:
         Sq, Sk = q.shape[-2], k.shape[-2]
         causal = torch.ones(Sq, Sk, dtype=torch.bool, device=q.device).tril()
@@ -241,3 +220,101 @@ def gqa_ref(
     v = v.repeat_interleave(n_groups, dim=1)
     attn = sdpa_ref(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
     return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
+
+
+# ---------------------------- FFN ----------------------------
+
+def ffn_ref(
+    x: torch.Tensor,
+    down_proj: nn.Linear,
+    activation: str,
+    up_proj: nn.Linear | None = None,
+    gate_up_proj: nn.Linear | None = None,
+) -> torch.Tensor:
+    """Eager feed-forward:
+        ungated (up_proj given):     down_proj(act(up_proj(x)))
+        gated   (gate_up_proj given): down_proj(act(gate, up)) where (gate, up) =
+                                       chunk(gate_up_proj(x), 2, dim=-1)
+    `activation` is a key in {UN,}GATED_ACTIVATIONS_REFS ("relu"/"gelu"/"silu").
+    """
+    if (up_proj is None) == (gate_up_proj is None):
+        raise ValueError("Exactly one of up_proj (ungated) or gate_up_proj (gated) must be given")
+    if gate_up_proj is not None:
+        gate, up = gate_up_proj(x).chunk(2, dim=-1)
+        hidden = GATED_ACTIVATIONS_REFS[activation](gate, up)
+    else:
+        hidden = UNGATED_ACTIVATIONS_REFS[activation](up_proj(x))
+    return down_proj(hidden)
+
+
+# ---------------------------- MoE ----------------------------
+
+def moe_router_ref(
+    x: torch.Tensor,
+    gate_weight: torch.Tensor,
+    n_experts_per_token: int,
+    normalize: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Eager MoE router: softmax(x @ gate.T) → topk → optional sum-to-1 normalize.
+    Returns (top_indices, top_weights, router_probs).
+    """
+    logits = x @ gate_weight.T
+    router_probs = logits.softmax(-1)
+    top_weights, top_indices = torch.topk(router_probs, n_experts_per_token, dim=-1)
+    if normalize:
+        top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
+    return top_indices, top_weights, router_probs
+
+
+def sparse_moe_block_ref(
+    x: torch.Tensor,
+    gate_weight: torch.Tensor,
+    expert_down: torch.Tensor,
+    n_experts_per_token: int,
+    activation: str = "silu",
+    expert_gate_up: torch.Tensor | None = None,
+    expert_up: torch.Tensor | None = None,
+    normalize: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Eager sparse MoE: naive per-(token, slot) expert dispatch.
+
+    Mirrors FFN's gated/ungated split:
+      - gated   (expert_gate_up given): hidden = act(gate)*up via GATED_ACTIVATIONS_REFS
+      - ungated (expert_up given):      hidden = act(up)      via UNGATED_ACTIVATIONS_REFS
+    Returns (output (B,S,D), aux_loss scalar) — Switch Transformer load-balancing loss.
+    """
+    if (expert_gate_up is None) == (expert_up is None):
+        raise ValueError("Exactly one of expert_gate_up (gated) or expert_up (ungated) must be given")
+    B, S, D = x.shape
+    T = B * S
+    E = gate_weight.shape[0]
+    x_flat = x.view(T, D)
+
+    top_indices, top_weights, router_probs = moe_router_ref(
+        x_flat, gate_weight, n_experts_per_token, normalize=normalize
+    )
+
+    output = torch.zeros_like(x_flat)
+    for t in range(T):
+        for slot in range(n_experts_per_token):
+            e = top_indices[t, slot].item()
+            w = top_weights[t, slot]
+            if expert_gate_up is not None:
+                gate_up = x_flat[t] @ expert_gate_up[e].T              # (2*I,)
+                g, u = gate_up.chunk(2, dim=-1)
+                hidden = GATED_ACTIVATIONS_REFS[activation](g, u)       # (I,)
+            else:
+                up = x_flat[t] @ expert_up[e].T                         # (I,)
+                hidden = UNGATED_ACTIVATIONS_REFS[activation](up)
+            out_t = hidden @ expert_down[e].T                            # (D,)
+            output[t] = output[t] + w * out_t
+
+    # Switch Transformer aux loss: E * sum_i (f_i * P_i), f_i = #tokens routed to i / T.
+    expert_counts = torch.zeros(E, dtype=torch.long, device=x.device)
+    ones = torch.ones_like(top_indices.flatten())
+    expert_counts.scatter_add_(0, top_indices.flatten(), ones)
+    f = expert_counts.to(x.dtype) / T
+    P = router_probs.mean(0)
+    aux_loss = E * (f * P).sum()
+
+    return output.view(B, S, D), aux_loss

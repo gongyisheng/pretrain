@@ -1,62 +1,19 @@
+"""MoE tests: behavior (shapes, routing properties, aux_loss) + numerical
+parity vs eager refs and HF Qwen3MoeSparseMoeBlock.
+"""
+import pytest
 import torch
 
 from src.layers.moe import MoERouter, SparseMoEBlock
+from tests.fast.layers._refs import (
+    COMPOUND_DTYPES,
+    SIMPLE_DTYPES,
+    moe_router_ref,
+    sparse_moe_block_ref,
+)
 
 
-# --- Numerical parity vs HF Qwen3MoeSparseMoeBlock ---
-
-def test_sparse_moe_block_matches_hf_qwen3_moe():
-    """SparseMoEBlock output matches HF Qwen3MoeSparseMoeBlock with copied weights.
-
-    HF's Qwen3MoeExperts uses the same stacked (E, 2*I, D) / (E, D, I) layout as
-    ours, so weight copies are a direct memcpy. Capacity dropping is disabled
-    (capacity_factor=None) to match HF's no-drop behavior.
-    """
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import (
-        Qwen3MoeConfig,
-        Qwen3MoeSparseMoeBlock,
-    )
-
-    torch.manual_seed(0)
-    d_model, inter, n_experts, top_k = 64, 32, 4, 2
-    B, S = 2, 8
-
-    ours = SparseMoEBlock(
-        d_model=d_model,
-        intermediate_size=inter,
-        n_experts=n_experts,
-        n_experts_per_token=top_k,
-        dropout_ffn=0.0,
-    )
-    # Expert weights are torch.empty by default; initialize before parity check.
-    with torch.no_grad():
-        torch.nn.init.normal_(ours.expert_gate_up, std=0.02)
-        torch.nn.init.normal_(ours.expert_down, std=0.02)
-    ours.eval()
-
-    hf_cfg = Qwen3MoeConfig(
-        hidden_size=d_model,
-        moe_intermediate_size=inter,
-        num_experts=n_experts,
-        num_experts_per_tok=top_k,
-        norm_topk_prob=True,
-    )
-    hf = Qwen3MoeSparseMoeBlock(hf_cfg)
-    hf.eval()
-
-    with torch.no_grad():
-        hf.gate.weight.copy_(ours.router.gate.weight)
-        hf.experts.gate_up_proj.copy_(ours.expert_gate_up)
-        hf.experts.down_proj.copy_(ours.expert_down)
-
-    x = torch.randn(B, S, d_model)
-    our_out, _ = ours(x)
-    hf_out = hf(x)
-
-    assert torch.allclose(our_out, hf_out, atol=1e-5)
-
-
-# --- MoE router ---
+# --- Router behavior ---
 
 def test_moe_router_output_shapes():
     router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
@@ -86,20 +43,18 @@ def test_moe_router_weights_normalized():
 def test_moe_router_weights_unnormalized():
     router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2, normalize=False)
     x = torch.randn(32, 64)
-    _, top_weights, router_probs = router(x)
-    # Weights should be positive (from softmax)
+    _, top_weights, _ = router(x)
     assert (top_weights > 0).all()
-    # Weights should NOT generally sum to 1 (they are raw softmax probabilities)
     sums = top_weights.sum(dim=-1)
     assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
 
 
-# --- SparseMoEBlock ---
+# --- SparseMoEBlock behavior ---
 
 def test_sparse_moe_block_output_shape():
     block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
     x = torch.randn(2, 8, 64)
-    out, aux_loss = block(x)
+    out, _ = block(x)
     assert out.shape == (2, 8, 64)
 
 
@@ -116,5 +71,108 @@ def test_sparse_moe_block_aux_loss_has_grad():
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
     aux_loss.backward()
-    # router gate should receive gradient
     assert block.router.gate.weight.grad is not None
+
+
+# --- Numerical parity ---
+
+@pytest.mark.parametrize("normalize", [True, False])
+@pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
+def test_moe_router_matches_ref(normalize, dtype, atol):
+    torch.manual_seed(0)
+    d_model, n_experts, k = 64, 8, 2
+    router = MoERouter(d_model, n_experts, k, normalize=normalize).to(dtype)
+    router.eval()
+    x = torch.randn(32, d_model, dtype=dtype)
+
+    top_idx, top_w, probs = router(x)
+    top_idx_ref, top_w_ref, probs_ref = moe_router_ref(
+        x, router.gate.weight, k, normalize=normalize
+    )
+
+    assert torch.equal(top_idx, top_idx_ref)
+    assert torch.allclose(top_w, top_w_ref, atol=atol)
+    assert torch.allclose(probs, probs_ref, atol=atol)
+
+
+@pytest.mark.parametrize("gated,activation", [
+    (True, "silu"),   # SwiGLU experts (default; matches HF Qwen3MoE)
+    (False, "gelu"),  # ungated GELU experts (GPT-style)
+    (False, "relu"),  # ungated ReLU experts
+])
+@pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
+def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
+    """SparseMoEBlock output + aux_loss match the eager per-token-loop reference."""
+    torch.manual_seed(0)
+    d_model, inter, n_experts, k = 64, 32, 4, 2
+    block = SparseMoEBlock(
+        d_model=d_model, intermediate_size=inter,
+        n_experts=n_experts, n_experts_per_token=k,
+        dropout_ffn=0.0, gated=gated, activation=activation,
+    )
+    with torch.no_grad():
+        w1 = block.expert_gate_up if gated else block.expert_up
+        torch.nn.init.normal_(w1, std=0.02)
+        torch.nn.init.normal_(block.expert_down, std=0.02)
+    block.to(dtype)
+    block.eval()
+
+    x = torch.randn(2, 8, d_model, dtype=dtype)
+    out, aux = block(x)
+    out_ref, aux_ref = sparse_moe_block_ref(
+        x, block.router.gate.weight, block.expert_down,
+        n_experts_per_token=k, activation=activation, normalize=True,
+        expert_gate_up=block.expert_gate_up if gated else None,
+        expert_up=None if gated else block.expert_up,
+    )
+
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+    assert torch.allclose(aux, aux_ref, atol=atol)
+
+
+def test_sparse_moe_block_matches_hf_qwen3_moe():
+    """SparseMoEBlock output matches HF Qwen3MoeSparseMoeBlock with copied weights.
+
+    HF's Qwen3MoeExperts uses the same stacked (E, 2*I, D) / (E, D, I) layout as
+    ours, so weight copies are a direct memcpy. Capacity dropping is disabled
+    (capacity_factor=None) to match HF's no-drop behavior. fp32 only — HF may
+    upcast internally so dtype-parametrized parity would be noisy.
+    """
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import (
+        Qwen3MoeConfig,
+        Qwen3MoeSparseMoeBlock,
+    )
+
+    torch.manual_seed(0)
+    d_model, inter, n_experts, top_k = 64, 32, 4, 2
+
+    ours = SparseMoEBlock(
+        d_model=d_model, intermediate_size=inter,
+        n_experts=n_experts, n_experts_per_token=top_k, dropout_ffn=0.0,
+    )
+    with torch.no_grad():
+        torch.nn.init.normal_(ours.expert_gate_up, std=0.02)
+        torch.nn.init.normal_(ours.expert_down, std=0.02)
+    ours.eval()
+
+    hf_cfg = Qwen3MoeConfig(
+        hidden_size=d_model,
+        moe_intermediate_size=inter,
+        num_experts=n_experts,
+        num_experts_per_tok=top_k,
+        norm_topk_prob=True,
+    )
+    hf = Qwen3MoeSparseMoeBlock(hf_cfg)
+    hf.eval()
+
+    with torch.no_grad():
+        hf.gate.weight.copy_(ours.router.gate.weight)
+        hf.experts.gate_up_proj.copy_(ours.expert_gate_up)
+        hf.experts.down_proj.copy_(ours.expert_down)
+
+    x = torch.randn(2, 8, d_model)
+    our_out, _ = ours(x)
+    hf_out = hf(x)
+
+    assert torch.allclose(our_out, hf_out, atol=1e-5)
