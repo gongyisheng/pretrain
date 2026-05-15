@@ -7,6 +7,25 @@ import torch
 import torch.nn as nn
 
 
+# Per-dtype atol. SIMPLE = elementwise/reduction, COMPOUND = GEMM+softmax stacks.
+# 1 ULP at output magnitude |x| = 2^(-mantissa_bits) × |x|; here we use |x|~1.
+# fp16/bf16 follow ULP multipliers (5× SIMPLE, 10× COMPOUND);
+# fp32 uses the conventional 1e-5 noise floor (kernel drift dominates over ULP).
+#   fp32 (23-bit mantissa, 1 ULP ≈ 1e-7):  SIMPLE 1e-5 (80×),  COMPOUND 1e-5 (80×)
+#   fp16 (10-bit mantissa, 1 ULP ≈ 1e-3):  SIMPLE 5e-3  (5×),  COMPOUND 1e-2 (10×)
+#   bf16 ( 7-bit mantissa, 1 ULP ≈ 8e-3):  SIMPLE 4e-2  (5×),  COMPOUND 8e-2 (10×)
+SIMPLE_DTYPES = [
+    (torch.float32, 1e-5),
+    (torch.float16, 5e-3),
+    (torch.bfloat16, 4e-2),
+]
+COMPOUND_DTYPES = [
+    (torch.float32, 1e-5),
+    (torch.float16, 1e-2),
+    (torch.bfloat16, 8e-2),
+]
+
+
 def rmsnorm_ref(
     x: torch.Tensor, 
     weight: torch.Tensor, 

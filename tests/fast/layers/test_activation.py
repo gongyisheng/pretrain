@@ -3,15 +3,14 @@ import pytest
 import torch
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
-from tests.fast.layers._refs import GATED_ACTIVATIONS_REFS, UNGATED_ACTIVATIONS_REFS
+from tests.fast.layers._refs import (
+    GATED_ACTIVATIONS_REFS,
+    SIMPLE_DTYPES,
+    UNGATED_ACTIVATIONS_REFS,
+)
 
 
-DTYPES = [
-    (torch.float32, 1e-5),
-    (torch.float16, 5e-3),
-    (torch.bfloat16, 3e-2),
-]
-
+DTYPES = SIMPLE_DTYPES
 ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
 
 

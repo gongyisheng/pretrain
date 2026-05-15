@@ -3,14 +3,10 @@ import pytest
 import torch
 
 from src.layers.norm import LayerNorm, RMSNorm
-from tests.fast.layers._refs import layernorm_ref, rmsnorm_ref
+from tests.fast.layers._refs import SIMPLE_DTYPES, layernorm_ref, rmsnorm_ref
 
 
-DTYPES = [
-    (torch.float32, 1e-5),
-    (torch.float16, 1e-2),
-    (torch.bfloat16, 2e-2),
-]
+NORM_DTYPES = SIMPLE_DTYPES
 
 
 # ---------------------------- LayerNorm ----------------------------
@@ -47,7 +43,7 @@ def test_layernorm_no_bias():
     )
 
 
-@pytest.mark.parametrize("dtype,atol", DTYPES)
+@pytest.mark.parametrize("dtype,atol", NORM_DTYPES)
 def test_layernorm_dtype_parity(dtype, atol):
     d_model = 64
     layer = LayerNorm(d_model, eps=1e-5).to(dtype)
@@ -78,7 +74,7 @@ def test_rmsnorm_matches_ref_random_weight():
     assert torch.allclose(layer(x), rmsnorm_ref(x, layer.weight, layer.eps), atol=1e-5)
 
 
-@pytest.mark.parametrize("dtype,atol", DTYPES)
+@pytest.mark.parametrize("dtype,atol", NORM_DTYPES)
 def test_rmsnorm_dtype_parity(dtype, atol):
     """Output preserves input dtype and matches eager ref within dtype tolerance."""
     d_model = 64
@@ -91,8 +87,8 @@ def test_rmsnorm_dtype_parity(dtype, atol):
 
 # ---------------------------- Numeric edge cases ----------------------------
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_rmsnorm_large_input_no_overflow(dtype):
+@pytest.mark.parametrize("dtype,atol", [(d, a) for d, a in NORM_DTYPES if d != torch.float32])
+def test_rmsnorm_large_input_no_overflow(dtype, atol):
     """fp16: x^2 would overflow (>65504) without fp32 accumulation."""
     d_model = 64
     layer = RMSNorm(d_model, eps=1e-6).to(dtype)
@@ -100,7 +96,7 @@ def test_rmsnorm_large_input_no_overflow(dtype):
     x += torch.randn_like(x) * 10
     out = layer(x)
     assert torch.isfinite(out).all(), "output has inf/nan"
-    assert torch.allclose(out, rmsnorm_ref(x, layer.weight, layer.eps), atol=2e-2)
+    assert torch.allclose(out, rmsnorm_ref(x, layer.weight, layer.eps), atol=atol)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
@@ -114,8 +110,8 @@ def test_rmsnorm_zero_input(dtype):
     assert (out == 0).all()
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_layernorm_large_input_no_overflow(dtype):
+@pytest.mark.parametrize("dtype,atol", [(d, a) for d, a in NORM_DTYPES if d != torch.float32])
+def test_layernorm_large_input_no_overflow(dtype, atol):
     """fp16: (x-mean)^2 with large magnitudes would overflow without fp32 reduction."""
     d_model = 64
     layer = LayerNorm(d_model, eps=1e-5).to(dtype)
@@ -124,7 +120,7 @@ def test_layernorm_large_input_no_overflow(dtype):
     out = layer(x)
     assert torch.isfinite(out).all(), "output has inf/nan"
     assert torch.allclose(
-        out, layernorm_ref(x, layer.weight, layer.bias, layer.eps), atol=2e-2
+        out, layernorm_ref(x, layer.weight, layer.bias, layer.eps), atol=atol
     )
 
 

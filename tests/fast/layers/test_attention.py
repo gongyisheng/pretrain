@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from src.layers.attention import GroupedQueryAttention, MultiHeadAttention
 from src.layers.rope import RoPE
 from src.utils.masking_utils import build_causal_mask
-from tests.fast.layers._refs import gqa_ref, mha_ref, sdpa_ref
+from tests.fast.layers._refs import COMPOUND_DTYPES, gqa_ref, mha_ref, sdpa_ref
 
 
 # ====================== F.scaled_dot_product_attention vs sdpa_ref ======================
@@ -25,11 +25,7 @@ def _make_qkv(B, H, S, D, dtype):
     return q, k, v
 
 
-SDPA_DTYPES = [
-    (torch.float32, 1e-5),
-    (torch.float16, 5e-3),
-    (torch.bfloat16, 5e-2),
-]
+SDPA_DTYPES = COMPOUND_DTYPES
 
 
 @pytest.mark.parametrize("shape", [(2, 4, 8, 16), (1, 8, 32, 32)])
@@ -210,13 +206,7 @@ def _gqa_ref_call(gqa, x, attn_mask=None):
     )
 
 
-# MHA/GQA carry an extra o_proj GEMM after SDPA, so the SDPA-level X5 tolerance
-# gets amplified slightly. Loosen fp16 from 5e-3 → 1e-2; bf16 5e-2 is unchanged.
-MODULE_DTYPES = [
-    (torch.float32, 1e-5),
-    (torch.float16, 1e-2),
-    (torch.bfloat16, 5e-2),
-]
+MODULE_DTYPES = COMPOUND_DTYPES
 
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
