@@ -12,7 +12,7 @@ DTYPES = [
     (torch.bfloat16, 3e-2),
 ]
 
-ACT_NAMES = ["relu", "gelu", "silu"]
+ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
 
 
 # ---------------------------- Ungated ----------------------------
