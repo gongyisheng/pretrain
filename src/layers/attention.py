@@ -54,7 +54,6 @@ class MultiHeadAttention(nn.Module):
 
         is_causal = attn_mask is None
         out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
-        out = self.attn_dropout(out)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
 
@@ -110,6 +109,5 @@ class GroupedQueryAttention(nn.Module):
 
         is_causal = attn_mask is None
         out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
-        out = self.attn_dropout(out)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
