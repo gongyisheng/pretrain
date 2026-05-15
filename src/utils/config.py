@@ -56,7 +56,7 @@ class DataConfig:
 class TrainingConfig:
     batch_size: int = 16
     gradient_accumulation_steps: int = 16
-    max_steps: int = 5000
+    max_steps: int = 50000
     mixed_precision: str = "bf16"
     activation_checkpointing: bool = False
     use_deterministic_algo: bool = False
@@ -64,8 +64,8 @@ class TrainingConfig:
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
     checkpoint_every: int = 5000
-    eval_every: int = 1000
-    eval_steps: int = 200
+    eval_every: int = 100
+    eval_steps: int = 25
     intra_doc_masking: bool = True
 
 
