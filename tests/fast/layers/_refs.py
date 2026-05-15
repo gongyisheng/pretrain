@@ -4,6 +4,7 @@ Eager reference implementations for layer-level numerical parity tests.
 import math
 
 import torch
+import torch.nn as nn
 
 
 def rmsnorm_ref(
@@ -101,3 +102,65 @@ def sdpa_ref(
         logits = logits + attn_mask.to(logits.dtype)
     attn = logits.float().softmax(dim=-1).to(dtype)  # upcast only for softmax, cast back before second GEMM
     return attn @ v
+
+
+def mha_ref(
+    x: torch.Tensor,
+    q_proj: nn.Linear,
+    k_proj: nn.Linear,
+    v_proj: nn.Linear,
+    o_proj: nn.Linear,
+    n_heads: int,
+    q_norm: nn.Module | None = None,
+    k_norm: nn.Module | None = None,
+    rope: nn.Module | None = None,
+    position_ids: torch.Tensor | None = None,
+    attn_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Eager MHA: q/k/v projections → optional qk_norm → optional rope → sdpa_ref → o_proj."""
+    B, S, _ = x.shape
+    d_head = q_proj.out_features // n_heads
+    q = q_proj(x).reshape(B, S, n_heads, d_head).transpose(1, 2)
+    k = k_proj(x).reshape(B, S, n_heads, d_head).transpose(1, 2)
+    v = v_proj(x).reshape(B, S, n_heads, d_head).transpose(1, 2)
+    if q_norm is not None:
+        q = q_norm(q)
+        k = k_norm(k)
+    if rope is not None:
+        q = rope(q, position_ids=position_ids)
+        k = rope(k, position_ids=position_ids)
+    attn = sdpa_ref(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
+    return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
+
+
+def gqa_ref(
+    x: torch.Tensor,
+    q_proj: nn.Linear,
+    k_proj: nn.Linear,
+    v_proj: nn.Linear,
+    o_proj: nn.Linear,
+    n_heads: int,
+    n_kv_heads: int,
+    q_norm: nn.Module | None = None,
+    k_norm: nn.Module | None = None,
+    rope: nn.Module | None = None,
+    position_ids: torch.Tensor | None = None,
+    attn_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Eager GQA: GQA-shaped projections → optional qk_norm → optional rope → KV expansion → sdpa_ref → o_proj."""
+    B, S, _ = x.shape
+    d_head = q_proj.out_features // n_heads
+    n_groups = n_heads // n_kv_heads
+    q = q_proj(x).reshape(B, S, n_heads, d_head).transpose(1, 2)
+    k = k_proj(x).reshape(B, S, n_kv_heads, d_head).transpose(1, 2)
+    v = v_proj(x).reshape(B, S, n_kv_heads, d_head).transpose(1, 2)
+    if q_norm is not None:
+        q = q_norm(q)
+        k = k_norm(k)
+    if rope is not None:
+        q = rope(q, position_ids=position_ids)
+        k = rope(k, position_ids=position_ids)
+    k = k.repeat_interleave(n_groups, dim=1)
+    v = v.repeat_interleave(n_groups, dim=1)
+    attn = sdpa_ref(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
+    return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
