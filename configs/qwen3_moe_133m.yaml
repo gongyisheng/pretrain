@@ -34,8 +34,8 @@ training:
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/qwen3_moe_133m/"
   checkpoint_every: 5000
-  eval_every: 1000
-  eval_steps: 200
+  eval_every: 100
+  eval_steps: 25
 
 optimizer:
   name: "adamw"

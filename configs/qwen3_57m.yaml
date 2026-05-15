@@ -30,7 +30,7 @@ training:
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/qwen3_57m/"
   checkpoint_every: 5000
-  eval_every: 1000
+  eval_every: 100
   eval_steps: 25
 
 optimizer:
