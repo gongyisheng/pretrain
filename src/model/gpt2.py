@@ -4,6 +4,7 @@ import torch.nn as nn
 from src.layers.attention import MultiHeadAttention
 from src.layers.block import BaseTransformerBlock
 from src.layers.ffn import FFN
+from src.layers.norm import LayerNorm
 from src.utils.config import ModelConfig
 
 
@@ -11,9 +12,9 @@ from src.utils.config import ModelConfig
 class GPT2TransformerBlock(BaseTransformerBlock):
     def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = True, mlp_bias: bool = True, mlp_activation: str = "gelu", mlp_gated: bool = False, **kwargs):
         super().__init__(d_model, **kwargs)
-        self.ln1 = nn.LayerNorm(d_model)
+        self.ln1 = LayerNorm(d_model)
         self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn, qk_norm=qk_norm, bias=attn_bias)
-        self.ln2 = nn.LayerNorm(d_model)
+        self.ln2 = LayerNorm(d_model)
         self.ffn = FFN(d_model, intermediate_size, activation=mlp_activation, gated=mlp_gated, bias=mlp_bias, dropout=dropout_ffn)
 
     def attn_sublayer(self, x: torch.Tensor, attn_mask: torch.Tensor = None) -> torch.Tensor:
@@ -55,7 +56,7 @@ class GPT2Model(nn.Module):
             for i in range(config.n_layers)
         ])
 
-        self.ln_f = nn.LayerNorm(config.d_model)
+        self.ln_f = LayerNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, self.padded_vocab_size, bias=config.lm_head_bias)
 
         # Weight tying
