@@ -84,6 +84,13 @@ def _scatter_out(
 
 
 class MoERouter(nn.Module):
+    """MoE top-k router with fp32-pinned gate weight.
+
+    bf16/fp16 rounding of close-competing logits before softmax can flip top-k
+    picks, and low-precision storage can't accept sub-ULP gradient updates.
+    Gate weight stays fp32 via _apply; forward disables autocast around the GEMM.
+    """
+
     def __init__(self, d_model: int, n_experts: int, n_experts_per_token: int, normalize: bool = True):
         super().__init__()
         self.n_experts = n_experts
@@ -91,14 +98,23 @@ class MoERouter(nn.Module):
         self.normalize = normalize
         self.gate = nn.Linear(d_model, n_experts, bias=False)
 
+    def _apply(self, fn, recurse: bool = True):
+        # Pin gate.weight to fp32 across .to(bf16) / .bfloat16() / .float() / etc.
+        result = super()._apply(fn, recurse)
+        if self.gate.weight.dtype != torch.float32:
+            self.gate.weight.data = self.gate.weight.data.float()
+        return result
+
     def forward(self, x: torch.Tensor):
-        # x: (T, d_model)  where T = B*S (flattened)
-        logits = self.gate(x)                                        # (T, n_experts)
-        router_probs = logits.softmax(-1)                            # (T, n_experts)
+        dtype = x.dtype
+        # autocast would downcast the matmul, undoing the fp32 pin.
+        with torch.amp.autocast(device_type=x.device.type, enabled=False):
+            logits = self.gate(x.float())
+            router_probs = logits.softmax(-1)
         top_weights, top_indices = torch.topk(router_probs, self.n_experts_per_token, dim=-1)
         if self.normalize:
             top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
-        return top_indices, top_weights, router_probs
+        return top_indices, top_weights.to(dtype), router_probs.to(dtype)
 
 
 class SparseMoEBlock(nn.Module):

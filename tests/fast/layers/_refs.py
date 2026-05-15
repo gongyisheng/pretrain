@@ -149,23 +149,24 @@ def sdpa_ref(
     is_causal: bool = False,
     scale: float | None = None,
 ) -> torch.Tensor:
-    """Eager scaled-dot-product attention, matching Flash Attention's precision pattern.
+    """Eager scaled-dot-product attention, matching streaming SDPA's precision pattern.
 
-    GEMMs stay in input dtype (tensor cores accumulate in fp32 internally, output cast
-    back); only the softmax runs explicitly in fp32. Mirrors F.scaled_dot_product_attention:
-    attn_mask is additive (-inf for masked, 0 for allowed). Inputs (..., S, D).
+    Q@Kᵀ runs in fp32 (q,k upcast) so the logits matrix isn't quantized to input dtype
+    before softmax — this is what flash / mem-efficient / cuDNN attention do internally.
+    Softmax runs in fp32; attn is cast back to input dtype before the second GEMM with v.
+    Inputs (..., S, D); attn_mask is additive (-inf for masked, 0 for allowed).
     """
     dtype = q.dtype
     if scale is None:
         scale = 1.0 / math.sqrt(q.shape[-1])
-    logits = (q @ k.mT) * scale                     # input dtype
+    logits = (q.float() @ k.float().mT) * scale     # fp32 GEMM, no input-dtype logit quantization
     if is_causal:
         Sq, Sk = q.shape[-2], k.shape[-2]
         causal = torch.ones(Sq, Sk, dtype=torch.bool, device=q.device).tril()
         logits = logits.masked_fill(~causal, float("-inf"))
     if attn_mask is not None:
-        logits = logits + attn_mask.to(logits.dtype)
-    attn = logits.float().softmax(dim=-1).to(dtype)  # upcast only for softmax, cast back before second GEMM
+        logits = logits + attn_mask.float()
+    attn = logits.softmax(dim=-1).to(dtype)         # softmax in fp32, cast back before second GEMM
     return attn @ v
 
 
@@ -265,14 +266,17 @@ def moe_router_ref(
     normalize: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Eager MoE router: softmax(x @ gate.T) → topk → optional sum-to-1 normalize.
+
+    GEMM in fp32 to mirror MoERouter.forward — see there for rationale.
     Returns (top_indices, top_weights, router_probs).
     """
-    logits = x @ gate_weight.T
+    dtype = x.dtype
+    logits = x.float() @ gate_weight.float().T
     router_probs = logits.softmax(-1)
     top_weights, top_indices = torch.topk(router_probs, n_experts_per_token, dim=-1)
     if normalize:
         top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
-    return top_indices, top_weights, router_probs
+    return top_indices, top_weights.to(dtype), router_probs.to(dtype)
 
 
 def sparse_moe_block_ref(

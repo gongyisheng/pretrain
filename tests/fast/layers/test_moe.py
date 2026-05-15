@@ -49,6 +49,61 @@ def test_moe_router_weights_unnormalized():
     assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
 
 
+# --- Router fp32-storage robustness ---
+
+def test_moe_router_gate_weight_stays_fp32_across_dtype_casts():
+    """_apply override keeps gate_weight fp32 across every dtype-changing call."""
+    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
+    assert router.gate.weight.dtype == torch.float32
+
+    for cast in [
+        lambda m: m.to(torch.bfloat16),
+        lambda m: m.bfloat16(),
+        lambda m: m.half(),
+        lambda m: m.to(dtype=torch.bfloat16),
+        lambda m: m.float(),
+    ]:
+        cast(router)
+        assert router.gate.weight.dtype == torch.float32
+
+
+@pytest.mark.parametrize("source_dtype", [torch.bfloat16, torch.float16])
+def test_moe_router_gate_weight_loaded_as_fp32(source_dtype):
+    """Loading a bf16/fp16 state_dict (pre-fix on-disk format) auto-casts up to
+    fp32 via Tensor.copy_() preserving destination dtype."""
+    torch.manual_seed(0)
+    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
+
+    state_dict = router.state_dict()
+    state_dict["gate.weight"] = state_dict["gate.weight"].to(source_dtype)
+    src_values = state_dict["gate.weight"].clone()
+
+    router.load_state_dict(state_dict)
+
+    assert router.gate.weight.dtype == torch.float32
+    assert torch.equal(router.gate.weight, src_values.float())
+
+
+@pytest.mark.parametrize("amp_dtype", [torch.bfloat16, torch.float16])
+def test_moe_router_runs_in_fp32_under_autocast(amp_dtype):
+    """Running inside autocast(bf16/fp16) must produce identical top-k to outside —
+    autocast would otherwise downcast the matmul and undo the fp32 pin."""
+    if not torch.cuda.is_available():
+        pytest.skip("autocast fp16/bf16 path is CUDA-only in this codebase")
+
+    torch.manual_seed(0)
+    d_model, n_experts, k = 512, 64, 4
+    router = MoERouter(d_model, n_experts, k).cuda()
+    router.eval()
+    x = torch.randn(256, d_model, device="cuda", dtype=amp_dtype) * 30
+
+    top_idx_a, _, _ = router(x)
+    with torch.amp.autocast(device_type="cuda", dtype=amp_dtype):
+        top_idx_b, _, _ = router(x)
+
+    assert torch.equal(top_idx_a, top_idx_b)
+
+
 # --- SparseMoEBlock behavior ---
 
 def test_sparse_moe_block_output_shape():
@@ -88,6 +143,29 @@ def test_moe_router_matches_ref(normalize, dtype, atol):
     top_idx, top_w, probs = router(x)
     top_idx_ref, top_w_ref, probs_ref = moe_router_ref(
         x, router.gate.weight, k, normalize=normalize
+    )
+
+    assert torch.equal(top_idx, top_idx_ref)
+    assert torch.allclose(top_w, top_w_ref, atol=atol)
+    assert torch.allclose(probs, probs_ref, atol=atol)
+
+
+@pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
+def test_moe_router_matches_ref_under_saturation(dtype, atol):
+    """Production and ref both upcast to fp32 before softmax, so top-k must
+    agree even when input scale pushes logits into bf16's ULP-flipping band.
+    Shape and x*=30 chosen so 3rd/4th-place competitions are tight enough
+    that an input-dtype GEMM would mis-rank.
+    """
+    torch.manual_seed(0)
+    d_model, n_experts, k = 512, 64, 4
+    router = MoERouter(d_model, n_experts, k).to(dtype)
+    router.eval()
+    x = torch.randn(256, d_model, dtype=dtype) * 30
+
+    top_idx, top_w, probs = router(x)
+    top_idx_ref, top_w_ref, probs_ref = moe_router_ref(
+        x, router.gate.weight, k, normalize=True
     )
 
     assert torch.equal(top_idx, top_idx_ref)
