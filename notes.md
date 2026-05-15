@@ -3,99 +3,93 @@
 Goal: improve `python benchmarks/bench_train.py --config configs/qwen3_57m.yaml`
 on a single CUDA device (cuda:0).
 
-Hardware: NVIDIA GeForce RTX 5060 Ti (sm_120, Blackwell). PyTorch 2.10.0+cu128.
+Hardware: NVIDIA GeForce RTX 5060 Ti (sm_120, Blackwell, 16 GB).
+Software: PyTorch 2.10.0+cu128.
 
 ## Config under test
 
 - arch: qwen3, 8 layers, 8 heads, 4 kv heads, d_model=512, vocab=50257
-- seq_len=1024, batch_size=8, grad_accum=32, bf16
-- qk_norm=true, activation_checkpointing=false
+- seq_len=1024, bf16, qk_norm=true, activation_checkpointing=false
+- effective batch = 256 examples
 
-## Ideas (from full code review)
-
-### High-impact
-1. **SDPA native GQA** (`attention.py:107-108`): drop manual expand+reshape, use
-   `F.scaled_dot_product_attention(..., enable_gqa=True)`.
-2. **Fused cross-entropy** (`trainer.py:24`): avoid materializing `(B*S, V)` logits.
-3. **Rebalance batch / grad-accum**: bs=8/ga=32 → bs=32/ga=8 to reduce launches.
-4. **RoPE indexing** (`pos_emb.py:62-63`, TODO'd): fold the per-call gather and
-   dtype cast into the compiled `_apply_rope` so inductor can fuse them.
-
-### Medium-impact
-5. **Drop reshape around qk-norm** (`attention.py:47-48, 98-99`): apply RMSNorm
-   to the 4D tensor directly — same math, no contiguous copy.
-6. **Bump DataLoader `prefetch_factor`** (`trainer.py:113, 119`): 1 → 4.
-7. **`torch.compile(..., mode="max-autotune")`** or **`mode="reduce-overhead"`**
-   (CUDA graphs).
-8. **Skip embedding dropout when p==0**.
-
-### Low-impact / cleanup
-9. CUDA graphs for the inner micro-step.
-10. Keep accumulated loss on GPU; only sync at `log_every`.
-11. Drop nested `@torch.compile` on inner ops now that the model is compiled.
-12. **Force flash-attention SDPA backend**: on Blackwell, the default backend
-    selection can pick cuDNN attention; eager microbench showed cuDNN was ~150×
-    slower than flash. (Inside the compiled graph this turned out to be a no-op
-    — inductor already picks flash.)
-
-## Baseline
+## Baseline (main)
 
 ```
 20 steps in 69.3s (after 5 warmup)
-Tokens/sec: 75,652
+Tokens/sec: 75,550 (±0.1% across 3 repeats)
 ```
 
-## Results
+## Variants tested
 
-| Variant | tok/s | Δ vs baseline | Decision |
-|---|---|---|---|
-| baseline (main) | 75,652 | — | — |
-| #1 enable_gqa=True | 60,621 | **-19.9%** | revert (regression) |
-| #4 RoPE gather fused + #5 qk-norm 4D + #6 prefetch=4 | 75,559 | -0.1% | net-neutral |
-| #7 reduce-overhead (CUDA graphs) | crashed | — | revert (needs `cudagraph_mark_step_begin` in trainer loop) |
-| #12 flash SDPA forced (excluding cuDNN) | 75,608 | -0.1% | net-neutral |
+| # | Variant | tok/s | Δ | Decision |
+|---|---|---|---|---|
+| 0 | baseline (bs=8, ga=32) | 75,550 | — | — |
+| 1 | SDPA `enable_gqa=True` | 60,621 | **-19.8%** | revert (regression) |
+| 2 | qk-norm drops reshape + RoPE gather fused + prefetch=4 | 75,559 | -0.0% | net-neutral |
+| 3 | `mode="reduce-overhead"` (CUDA graphs) | crash | — | revert; trainer loop needs deeper retrofit |
+| 4 | Force flash-only SDPA backend | 75,608 | -0.1% | net-neutral; inductor already picks flash |
+| 5 | **Liger fused linear+CE** | 37,995 | **-49.7%** | revert (regression) |
+| 6 | **bs=16, ga=16 (eff batch unchanged)** | 77,966 | +3.2% | superseded by #7 |
+| 7 | **bs=32, ga=8 (eff batch unchanged)** | **78,914** | **+4.5%** | **commit** |
+| 8 | bs=64, ga=4 | OOM | — | doesn't fit in 16 GB |
+| 9 | `mode="reduce-overhead"` + `cudagraph_mark_step_begin` + bs=32 | OOM | — | CUDA graph buffers don't fit |
+| 10 | num_workers=8 | 78,899 | 0.0% | data isn't the bottleneck |
+| 11 | num_workers=4, prefetch_factor=4 (with bs=32/ga=8) | 78,900 | 0.0% | data isn't the bottleneck |
 
-All variants produced bit-identical loss values (10.1176 at step 25) → no numerics
-regression. Variance across repeated runs is ~±0.1%.
+All numeric variants produced bit-identical loss curves through step 25 → no
+training-dynamics regression.
 
-## What we learned
+## What worked
 
-1. **`enable_gqa=True` is a measurable regression on this GPU/PyTorch combo**
-   (~20% slower). The manual `expand+reshape` path is faster than SDPA's
-   internal head broadcasting here. Don't apply this on sm_120 / PyTorch 2.10.
-2. **The qk-norm reshape, RoPE-gather fusion, and prefetch_factor changes are
-   all net-zero on this config.** `torch.compile` (default mode) appears to
-   already fuse the gather + cast, and the qk-norm contiguous copy is either
-   fused away or too small to measure at d_head=64, batch=8.
-3. **`mode="reduce-overhead"` is incompatible with the current grad-accum loop**:
-   CUDA graphs flag the input tensor reuse pattern as unsafe. To use it the
-   trainer would need to call `torch.compiler.cudagraph_mark_step_begin()`
-   between micro-steps and/or clone inputs. Real but bigger refactor.
-4. **Inductor already selects flash attention** inside the compiled model on
-   this GPU, even though eager microbench picks the much-slower cuDNN backend.
-   Forcing the backend via `sdpa_kernel` only matters in eager paths.
-5. **The single-precision (fp32) warning** seen at startup (`Mismatch dtype
-   between input and weight ... Cannot dispatch to fused implementation`)
-   is **not** from the qk-norm reshape — it persists after that change.
-   Likely originates from RMSNorm with fp32 weight under bf16 autocast.
-   Worth a follow-up but unrelated to the current bottleneck.
+**Re-balancing `batch_size` / `gradient_accumulation_steps`** is the only
+change that moved throughput. bs=8 → bs=32 (with ga adjusted from 32 → 8 to
+keep effective batch at 256) gives +4.5%. Math is unchanged (same number of
+examples averaged into the gradient); the win is amortizing kernel-launch,
+autocast, and dataloader-handoff overhead over 4× as many tokens per
+micro-step. Capped at bs=32 by the 16 GB memory budget — bs=64 OOMs.
 
-## Decision
+## What didn't work — and why it's interesting
 
-None of the safe local refactors moved throughput. Per the rule "commit if it
-improves, otherwise revert", all changes are reverted on this branch.
+- **Liger fused linear+CE was a 50% regression.** Counterintuitive: avoiding
+  the (B·S, V) ≈ 825 MB bf16 logits tensor should help. It doesn't here
+  because (a) RTX 5060 Ti at this batch size isn't memory-bound on the LM
+  head; (b) Liger's Triton kernel sits *outside* `torch.compile`'s graph, so
+  we lose inductor's fusion of `lm_head_linear → CE`; (c) the chunked Triton
+  kernel adds per-chunk launch overhead that the model is small enough to
+  feel. The win shifts in the opposite direction for larger models /
+  smaller compute-to-memory ratios; keep this in mind for the 0.5B config.
 
-## Where the real wins likely live (out of scope for this attempt)
+- **`enable_gqa=True` was a 20% regression.** PyTorch's internal GQA
+  broadcasting in SDPA is slower than the manual `expand→reshape` we do
+  before flash-attn on sm_120 / 2.10. Manual expansion stays.
 
-- **Fused linear+CE for the LM head** (#2). LM head materialises a
-  ~825 MB bf16 logits tensor at this config — chunked/fused CE typically pays
-  off most for small models with relatively large vocabs.
-- **bs=32/ga=8 (or bs=64/ga=4)** (#3). Effective batch unchanged; per-step
-  launch + accumulation overhead goes down. Likely needs #2 first for memory
-  headroom.
-- **CUDA graphs via `reduce-overhead`** (#7) once the grad-accum loop is
-  retrofitted with `cudagraph_mark_step_begin`. Largest single-lever speedup
-  on small models.
+- **CUDA graphs (`mode="reduce-overhead"`) didn't survive contact** with the
+  trainer's micro-step loop even with `cudagraph_mark_step_begin`. There's
+  cross-iteration tensor reuse (prefetched batches, `record_stream` calls,
+  re-bound `input_ids`/`position_ids`) that the graph capturer flags as
+  unsafe. A real fix would clone all model inputs and rework the prefetch
+  stream interaction — non-trivial; left for a dedicated branch.
 
-These each warrant their own branch with parity verification (loss curve match
-over a few hundred steps) before merging.
+- **qk-norm 4D normalization, RoPE gather fusion, prefetch_factor, flash
+  backend force, num_workers tweaks** — all genuine code/config refactors
+  but all net-zero throughput. `torch.compile` is already fusing or
+  inductor's default backend selection is already optimal at this scale.
+
+## What we're committing
+
+Only the `qwen3_57m.yaml` config change: `batch_size: 8 → 32`,
+`gradient_accumulation_steps: 32 → 8`. Same effective batch (256). +4.5%.
+
+## Where the real wins likely live (out of scope here)
+
+- **Fused linear+CE that lives inside `torch.compile`.** A
+  `@torch.compile`'d custom CE that takes hidden+weight+targets could win
+  back what Liger loses — let inductor fuse the linear with the
+  softmax/log_softmax reduction. Worth ~10% at 0.5B-class configs.
+- **CUDA graphs with a refactored micro-step loop.** Likely the single
+  largest remaining lever (~5-15%) on small-model / launch-bound workloads
+  like this one. Needs trainer surgery: clone inputs, eliminate
+  `record_stream` interactions, decouple eval-path compiled graph.
+- **Use a GPU with more SMs.** `max-autotune-gemm` is disabled here ("Not
+  enough SMs"); on a larger GPU the matmul autotune alone usually buys
+  5-10%.
