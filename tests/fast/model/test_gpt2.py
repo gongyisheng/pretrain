@@ -2,11 +2,11 @@ import torch
 from src.model.gpt2 import GPT2Model
 from src.model.registry import build_model
 from src.utils.config import ModelConfig
-from src.utils.masking_utils import build_causal_mask
+from src.utils.masking_utils import build_attention_mask
 
 
 def _small_config():
-    return ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=True, mlp_bias=True, mlp_activation="gelu", mlp_gated=False)
+    return ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=True, mlp_bias=True, mlp_activation="gelu", mlp_gated=False, attn_implementation="sdpa")
 
 
 def _pos(B, S):
@@ -99,7 +99,7 @@ def test_gpt2_position_ids_blocks_cross_doc():
     x[0, 4] = eot_id  # EOT at position 4: doc0=[0..4], doc1=[5..15]
     # position_ids: doc0 → 0,1,2,3,4 ; doc1 → 0,1,2,3,4,5,6,7,8,9,10
     position_ids = torch.tensor([[0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
-    attn_mask = build_causal_mask(position_ids, x.device, torch.float32)
+    attn_mask = build_attention_mask(position_ids, x.device, torch.float32, attn_implementation="sdpa")
 
     logits_base, _ = model(x, position_ids=position_ids, attn_mask=attn_mask)
 

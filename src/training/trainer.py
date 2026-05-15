@@ -17,7 +17,7 @@ from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
 from src.training.loss import next_token_targets, compute_loss
-from src.utils.masking_utils import build_causal_mask
+from src.utils.masking_utils import build_attention_mask
 
 
 @torch.compile
@@ -268,7 +268,10 @@ class Trainer:
                     loss_mask = None if self.config.data.packing else (position_ids >= 0)
                     if self.config.training.intra_doc_masking:
                         mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                        attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
+                        attn_mask = build_attention_mask(
+                            position_ids, self.device, mask_dtype,
+                            attn_implementation=self.config.model.attn_implementation,
+                        )
                     else:
                         attn_mask = None
                     logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
@@ -367,7 +370,10 @@ class Trainer:
                 loss_mask = None if self.config.data.packing else (position_ids >= 0)
                 if self.config.training.intra_doc_masking:
                     mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                    attn_mask = build_causal_mask(position_ids, self.device, mask_dtype)
+                    attn_mask = build_attention_mask(
+                        position_ids, self.device, mask_dtype,
+                        attn_implementation=self.config.model.attn_implementation,
+                    )
                 else:
                     attn_mask = None
                 logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)

@@ -2,7 +2,7 @@ import torch
 
 from src.model.qwen3 import Qwen3Model
 from src.utils.config import ModelConfig
-from src.utils.masking_utils import build_causal_mask
+from src.utils.masking_utils import build_attention_mask
 
 
 # --- Numerical parity vs HuggingFace Qwen3ForCausalLM ---
@@ -31,6 +31,7 @@ def test_qwen3_matches_hf_qwen3_with_copied_weights():
         vocab_size=vocab_size,
         rope_theta=rope_theta,
         qk_norm=True,
+        attn_implementation="sdpa",  # CPU test; flex_attention requires CUDA
     )
     ours = Qwen3Model(our_cfg, max_seq_len=max_seq_len)
     ours.eval()
@@ -93,6 +94,8 @@ def _tiny_qwen3_config():
         vocab_size=256,
         rope_theta=10000.0,
         qk_norm=True,
+        # FlexAttention is CUDA-only; CPU tests need the sdpa kernel path.
+        attn_implementation="sdpa",
     )
 
 
@@ -114,7 +117,7 @@ def test_qwen3_position_ids_blocks_cross_doc():
     x = torch.randint(1, 256, (1, 8))
     x[0, 3] = eot_id  # doc0=[0..3], doc1=[4..7]
     position_ids = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])
-    attn_mask = build_causal_mask(position_ids, x.device, torch.float32)
+    attn_mask = build_attention_mask(position_ids, x.device, torch.float32, attn_implementation="sdpa")
 
     logits_base, _ = model(x, position_ids=position_ids, attn_mask=attn_mask)
 

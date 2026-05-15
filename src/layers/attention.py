@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import flex_attention
 
 from src.layers.norm import RMSNorm
 
@@ -11,7 +12,7 @@ if TYPE_CHECKING:
 
 
 @torch.compile
-def _flash_attn(q, k, v, attn_mask=None, is_causal=False, sm_scale=None):
+def _sdpa(q, k, v, attn_mask=None, is_causal=False, sm_scale=None):
     if sm_scale is None:
         sm_scale = 1.0 / (q.shape[-1] ** 0.5)
     return F.scaled_dot_product_attention(
@@ -19,10 +20,50 @@ def _flash_attn(q, k, v, attn_mask=None, is_causal=False, sm_scale=None):
     )
 
 
+# Compile flex_attention once at module load. Inside the outer torch.compile
+# this is a no-op; in eager (e.g. unit tests) it provides the fused kernel.
+_flex_attn = torch.compile(flex_attention, dynamic=False)
+
+
+def _call_sdpa(q, k, v, attn_mask):
+    """SDPA path: ``attn_mask`` is either ``None`` (→ ``is_causal=True``) or a
+    dense additive tensor."""
+    is_causal = attn_mask is None
+    return _sdpa(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
+
+
+def _call_flex(q, k, v, attn_mask):
+    """FlexAttention path: ``attn_mask`` is a ``BlockMask``. ``None`` falls
+    back to SDPA's flash + ``is_causal`` so single-token generation works
+    without an explicit mask."""
+    if attn_mask is None:
+        return _sdpa(q, k, v, is_causal=True)
+    return _flex_attn(q, k, v, block_mask=attn_mask)
+
+
+_ATTN_IMPL = {
+    "sdpa": _call_sdpa,
+    "flex_attention": _call_flex,
+}
+
+
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout_attn: float = 0.0, qk_norm: bool = False, bias: bool = True):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dropout_attn: float = 0.0,
+        qk_norm: bool = False,
+        bias: bool = True,
+        attn_implementation: str = "flex_attention",
+    ):
         super().__init__()
         assert d_model % n_heads == 0
+        if attn_implementation not in _ATTN_IMPL:
+            raise ValueError(
+                f"unknown attn_implementation: {attn_implementation!r}; "
+                f"expected one of {sorted(_ATTN_IMPL)}"
+            )
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.qk_norm = qk_norm
@@ -37,7 +78,9 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask: torch.Tensor = None) -> torch.Tensor:
+        self._attn_fn = _ATTN_IMPL[attn_implementation]
+
+    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask=None) -> torch.Tensor:
         B, S, H = x.shape
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_heads, S, d_head)
         k = self.k_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
@@ -52,8 +95,7 @@ class MultiHeadAttention(nn.Module):
             q = rope(q, position_ids=position_ids)
             k = rope(k, position_ids=position_ids)
 
-        is_causal = attn_mask is None
-        out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
+        out = self._attn_fn(q, k, v, attn_mask)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
 
@@ -67,10 +109,16 @@ class GroupedQueryAttention(nn.Module):
         dropout_attn: float = 0.0,
         qk_norm: bool = False,
         bias: bool = False,
+        attn_implementation: str = "flex_attention",
     ):
         super().__init__()
         assert d_model % n_heads == 0
         assert n_heads % n_kv_heads == 0
+        if attn_implementation not in _ATTN_IMPL:
+            raise ValueError(
+                f"unknown attn_implementation: {attn_implementation!r}; "
+                f"expected one of {sorted(_ATTN_IMPL)}"
+            )
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.n_groups = n_heads // n_kv_heads
@@ -87,7 +135,9 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
-    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask: torch.Tensor = None) -> torch.Tensor:
+        self._attn_fn = _ATTN_IMPL[attn_implementation]
+
+    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask=None) -> torch.Tensor:
         B, S, H = x.shape
 
         q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)    # (B, n_heads, S, d_head)
@@ -107,7 +157,6 @@ class GroupedQueryAttention(nn.Module):
         k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
         v = v[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
 
-        is_causal = attn_mask is None
-        out = _flash_attn(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
+        out = self._attn_fn(q, k, v, attn_mask)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))

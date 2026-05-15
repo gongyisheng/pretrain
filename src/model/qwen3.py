@@ -12,10 +12,10 @@ from src.utils.config import ModelConfig
 
 
 class Qwen3TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = False, mlp_bias: bool = False, mlp_activation: str = "silu", mlp_gated: bool = True, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = False, mlp_bias: bool = False, mlp_activation: str = "silu", mlp_gated: bool = True, attn_implementation: str = "flex_attention", **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = RMSNorm(d_model)
-        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm, bias=attn_bias)
+        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm, bias=attn_bias, attn_implementation=attn_implementation)
         self.ln2 = RMSNorm(d_model)
         self.ffn = FFN(d_model, intermediate_size, activation=mlp_activation, gated=mlp_gated, bias=mlp_bias, dropout=dropout_ffn)
 
@@ -23,7 +23,7 @@ class Qwen3TransformerBlock(BaseTransformerBlock):
         self,
         x: torch.Tensor,
         rope: RoPE,
-        attn_mask: torch.Tensor = None,
+        attn_mask=None,
         position_ids: torch.Tensor = None,
     ) -> torch.Tensor:
         return self.attn(
@@ -65,6 +65,7 @@ class Qwen3Model(nn.Module):
                 mlp_bias=config.mlp_bias,
                 mlp_activation=config.mlp_activation,
                 mlp_gated=config.mlp_gated,
+                attn_implementation=config.attn_implementation,
                 layer_idx=i,
                 residual_cls=residual_cls,
                 residual_kwargs=residual_kwargs,
@@ -93,7 +94,7 @@ class Qwen3Model(nn.Module):
         self,
         idx: torch.Tensor,
         position_ids: torch.Tensor,
-        attn_mask: torch.Tensor = None,
+        attn_mask=None,
         return_logits: bool = True,
     ) -> torch.Tensor:
         x = self.dropout_emb(self.token_emb(idx))

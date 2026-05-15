@@ -31,11 +31,12 @@ class Qwen3MoETransformerBlock(BaseTransformerBlock):
         capacity_factor: float = None,
         attn_bias: bool = False,
         mlp_bias: bool = False,
+        attn_implementation: str = "flex_attention",
         **kwargs,
     ):
         super().__init__(d_model, **kwargs)
         self.ln1 = RMSNorm(d_model)
-        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm, bias=attn_bias)
+        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm, bias=attn_bias, attn_implementation=attn_implementation)
         self.ln2 = RMSNorm(d_model)
         self.ffn = SparseMoEBlock(d_model, intermediate_size, n_experts, n_experts_per_token, dropout_ffn, capacity_factor, bias=mlp_bias)
 
@@ -44,7 +45,7 @@ class Qwen3MoETransformerBlock(BaseTransformerBlock):
         x: torch.Tensor,
         rope: RoPE = None,
         position_ids: torch.Tensor = None,
-        attn_mask: torch.Tensor = None,
+        attn_mask=None,
     ) -> torch.Tensor:
         return self.attn(self.ln1(x), rope, position_ids=position_ids, attn_mask=attn_mask)
 
@@ -93,6 +94,7 @@ class Qwen3MoEModel(nn.Module):
                 capacity_factor=config.moe_expert_capacity_factor,
                 attn_bias=config.attn_bias,
                 mlp_bias=config.mlp_bias,
+                attn_implementation=config.attn_implementation,
                 layer_idx=i,
                 residual_cls=residual_cls,
                 residual_kwargs=residual_kwargs,
@@ -119,7 +121,7 @@ class Qwen3MoEModel(nn.Module):
             torch.nn.init.normal_(w1, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask: torch.Tensor = None) -> tuple:
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask=None) -> tuple:
         """Returns (logits, aux_loss).
 
         aux_loss is the raw accumulated load-balancing loss across all MoE blocks.

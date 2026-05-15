@@ -12,14 +12,14 @@ from src.utils.config import ModelConfig
 
 
 class GPT2TransformerBlock(BaseTransformerBlock):
-    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = True, mlp_bias: bool = True, mlp_activation: str = "gelu", mlp_gated: bool = False, **kwargs):
+    def __init__(self, d_model: int, n_heads: int, intermediate_size: int, dropout_attn: float, dropout_ffn: float, qk_norm: bool = False, attn_bias: bool = True, mlp_bias: bool = True, mlp_activation: str = "gelu", mlp_gated: bool = False, attn_implementation: str = "flex_attention", **kwargs):
         super().__init__(d_model, **kwargs)
         self.ln1 = LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn, qk_norm=qk_norm, bias=attn_bias)
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout_attn, qk_norm=qk_norm, bias=attn_bias, attn_implementation=attn_implementation)
         self.ln2 = LayerNorm(d_model)
         self.ffn = FFN(d_model, intermediate_size, activation=mlp_activation, gated=mlp_gated, bias=mlp_bias, dropout=dropout_ffn)
 
-    def attn_sublayer(self, x: torch.Tensor, attn_mask: torch.Tensor = None) -> torch.Tensor:
+    def attn_sublayer(self, x: torch.Tensor, attn_mask=None) -> torch.Tensor:
         return self.attn(self.ln1(x), attn_mask=attn_mask)
 
     def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
@@ -53,6 +53,7 @@ class GPT2Model(nn.Module):
                 mlp_bias=config.mlp_bias,
                 mlp_activation=config.mlp_activation,
                 mlp_gated=config.mlp_gated,
+                attn_implementation=config.attn_implementation,
                 layer_idx=i,
                 residual_cls=residual_cls,
                 residual_kwargs=residual_kwargs,
@@ -77,7 +78,7 @@ class GPT2Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask: torch.Tensor = None, return_logits: bool = True) -> torch.Tensor:
+    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask=None, return_logits: bool = True) -> torch.Tensor:
         x = self.dropout_emb(self.pos_emb(self.token_emb(idx)))
 
         ctx = []

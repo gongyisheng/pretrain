@@ -14,8 +14,6 @@ class ModelConfig:
     dropout_embd: float = 0.0
     dropout_attn: float = 0.0
     dropout_ffn: float = 0.0
-    residual_cls: str = "standard"  # residual strategy name; see src.layers.residual.RESIDUAL_REGISTRY
-    residual_kwargs: dict = field(default_factory=dict)  # kwargs passed to the residual class constructor
     n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
     rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3, L_max ~62800
     qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
@@ -30,6 +28,9 @@ class ModelConfig:
     moe_intermediate_size: int = 0               # per-expert FFN hidden dim; 0 = same as intermediate_size
     moe_aux_loss_coef: float = 0.01 # Switch Transformer load-balancing loss coefficient
     moe_expert_capacity_factor: Optional[float] = None  # None = dynamic (no dropping); float = fixed capacity, enables torch.compile
+    residual_cls: str = "standard"  # residual strategy name; see src.layers.residual.RESIDUAL_REGISTRY
+    residual_kwargs: dict = field(default_factory=dict)  # kwargs passed to the residual class constructor
+    attn_implementation: str = "flex_attention"  # "flex_attention" | "sdpa"
 
 
     def __post_init__(self):

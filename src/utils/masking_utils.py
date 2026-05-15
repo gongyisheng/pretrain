@@ -1,4 +1,8 @@
 import torch
+from torch.nn.attention.flex_attention import create_block_mask
+
+
+_create_block_mask_compiled = torch.compile(create_block_mask, dynamic=False)
 
 
 def build_position_ids(x: torch.Tensor, eot_token_id: int, packing: bool = True) -> torch.Tensor:
@@ -45,36 +49,77 @@ def build_position_ids(x: torch.Tensor, eot_token_id: int, packing: bool = True)
     return torch.where(seen_eot, torch.full_like(pos, -1), pos)
 
 
-def build_causal_mask(
+def build_attention_mask(
+    position_ids: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+    attn_implementation: str,
+):
+    """Build a per-document causal attention mask.
+
+    Both backends implement the same semantics: each token attends only to
+    earlier tokens within the same document. They differ only in
+    representation — which is what each backend's kernel consumes.
+
+    - ``attn_implementation="flex_attention"`` returns a sparse ``BlockMask``
+      that drives ``torch.nn.attention.flex_attention``'s fused Triton kernel.
+      ``device`` is read from ``position_ids``; ``dtype`` is unused.
+    - ``attn_implementation="sdpa"`` returns a dense additive tensor of shape
+      ``(B, 1, S, S)`` (``-inf`` for blocked positions, ``0`` otherwise)
+      compatible with ``F.scaled_dot_product_attention``.
+
+    **Precondition:** ``position_ids`` must contain intra-document positions
+    starting from 0 at each doc boundary — the values produced by
+    ``build_position_ids``. Passing absolute sequence positions silently
+    produces an incorrect mask.
+
+    Args:
+        position_ids: shape (B, S), dtype long.
+        device: target device for the dense mask.
+        dtype: dtype matching the query tensor (SDPA path only).
+        attn_implementation: ``"flex_attention"`` or ``"sdpa"``.
+
+    Returns:
+        ``BlockMask`` for flex_attention, or a ``(B, 1, S, S)`` dense
+        additive tensor for sdpa.
+    """
+    if attn_implementation == "flex_attention":
+        return _build_block_mask(position_ids)
+    if attn_implementation == "sdpa":
+        return _build_dense_mask(position_ids, device, dtype)
+    raise ValueError(
+        f"unknown attn_implementation: {attn_implementation!r}; "
+        "expected one of {'flex_attention', 'sdpa'}"
+    )
+
+
+def _build_dense_mask(
     position_ids: torch.Tensor,
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Build a block-causal additive attention mask from position_ids.
-
-    Exploits the invariant that ``position_ids[b, i] - i`` is constant within
-    each document (equals the negative sequence-level start index of that doc).
-    Two tokens attend iff they share that constant AND j <= i (causal).
-
-    **Precondition:** ``position_ids`` must contain intra-document positions
-    starting from 0 at each document boundary — i.e. the values produced by
-    ``build_position_ids``. Passing absolute sequence positions or
-    any other encoding will silently produce an incorrect mask.
-
-    Args:
-        position_ids: shape (B, S), dtype long — per-token intra-doc position
-            (resets to 0 at the token immediately following each EOT token)
-        device: target device
-        dtype: dtype matching query tensors (required by SDPA)
-
-    Returns:
-        additive mask of shape (B, 1, S, S) — 0.0 for attended positions, -inf otherwise
-    """
+    # The invariant ``position_ids[b, i] - i`` is constant within a document
+    # (equals the negative sequence-level start index of that doc). Two tokens
+    # attend iff they share that constant AND j <= i (causal).
     B, S = position_ids.shape
-    adj = position_ids - torch.arange(S, device=device)       # (B, S), constant per doc
-    same_doc = (adj.unsqueeze(2) == adj.unsqueeze(1))         # (B, S, S)
+    adj = position_ids - torch.arange(S, device=device)
+    same_doc = (adj.unsqueeze(2) == adj.unsqueeze(1))
     causal = torch.ones(S, S, dtype=torch.bool, device=device).tril()
     attend = same_doc & causal
     additive = torch.zeros(B, 1, S, S, dtype=dtype, device=device)
     additive.masked_fill_(~attend.unsqueeze(1), float('-inf'))
     return additive
+
+
+def _build_block_mask(position_ids: torch.Tensor):
+    # ``adj`` captured below is constant per document, so the JIT'd kernel
+    # tests "same document" with a single int comparison.
+    B, S = position_ids.shape
+    adj = torch.arange(S, device=position_ids.device).unsqueeze(0) - position_ids
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        return (q_idx >= kv_idx) & (adj[b, q_idx] == adj[b, kv_idx])
+
+    return _create_block_mask_compiled(
+        mask_mod, B=B, H=None, Q_LEN=S, KV_LEN=S, device=position_ids.device,
+    )

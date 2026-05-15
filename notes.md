@@ -12,84 +12,107 @@ Software: PyTorch 2.10.0+cu128.
 - seq_len=1024, bf16, qk_norm=true, activation_checkpointing=false
 - effective batch = 256 examples
 
-## Baseline (main)
+## Variants tested (in order)
 
-```
-20 steps in 69.3s (after 5 warmup)
-Tokens/sec: 75,550 (±0.1% across 3 repeats)
-```
-
-## Variants tested
-
-| # | Variant | tok/s | Δ | Decision |
+| # | Variant | tok/s | Δ vs main | Committed |
 |---|---|---|---|---|
-| 0 | baseline (bs=8, ga=32) | 75,550 | — | — |
-| 1 | SDPA `enable_gqa=True` | 60,621 | **-19.8%** | revert (regression) |
-| 2 | qk-norm drops reshape + RoPE gather fused + prefetch=4 | 75,559 | -0.0% | net-neutral |
-| 3 | `mode="reduce-overhead"` (CUDA graphs) | crash | — | revert; trainer loop needs deeper retrofit |
-| 4 | Force flash-only SDPA backend | 75,608 | -0.1% | net-neutral; inductor already picks flash |
-| 5 | **Liger fused linear+CE** | 37,995 | **-49.7%** | revert (regression) |
-| 6 | **bs=16, ga=16 (eff batch unchanged)** | 77,966 | +3.2% | superseded by #7 |
-| 7 | **bs=32, ga=8 (eff batch unchanged)** | **78,914** | **+4.5%** | **commit** |
-| 8 | bs=64, ga=4 | OOM | — | doesn't fit in 16 GB |
-| 9 | `mode="reduce-overhead"` + `cudagraph_mark_step_begin` + bs=32 | OOM | — | CUDA graph buffers don't fit |
-| 10 | num_workers=8 | 78,899 | 0.0% | data isn't the bottleneck |
-| 11 | num_workers=4, prefetch_factor=4 (with bs=32/ga=8) | 78,900 | 0.0% | data isn't the bottleneck |
+| 0 | baseline (main, bs=8/ga=32) | 75,550 | — | — |
+| 1 | SDPA `enable_gqa=True` | 60,621 | −19.8% | no (regression) |
+| 2 | qk-norm 4D + RoPE gather fused + prefetch=4 | 75,559 | −0.0% | no (neutral) |
+| 3 | `mode="reduce-overhead"` (CUDA graphs) | crash | — | no |
+| 4 | Force flash-only SDPA backend | 75,608 | −0.1% | no (neutral) |
+| 5 | Liger fused linear+CE | 37,995 | −49.7% | no (regression) |
+| 6 | bs=16/ga=16 | 77,966 | +3.2% | superseded |
+| 7 | **bs=32/ga=8** | **78,914** | **+4.5%** | ✅ commit `296ec01` |
+| 8 | bs=64/ga=4 | OOM | — | — |
+| 9 | num_workers=8, prefetch_factor=4 | 78,900 | 0.0% | no |
+| 10 | **FlexAttention + BlockMask for intra-doc** | **94,540** | **+25.1%** | ✅ this commit |
 
-All numeric variants produced bit-identical loss curves through step 25 → no
-training-dynamics regression.
+All numeric variants produced loss curves matching baseline (within bf16
+tolerance) — no training-dynamics regression.
 
-## What worked
+## The two wins, explained
 
-**Re-balancing `batch_size` / `gradient_accumulation_steps`** is the only
-change that moved throughput. bs=8 → bs=32 (with ga adjusted from 32 → 8 to
-keep effective batch at 256) gives +4.5%. Math is unchanged (same number of
-examples averaged into the gradient); the win is amortizing kernel-launch,
-autocast, and dataloader-handoff overhead over 4× as many tokens per
-micro-step. Capped at bs=32 by the 16 GB memory budget — bs=64 OOMs.
+### Win 1: rebalance bs/ga (`+4.5%`)
 
-## What didn't work — and why it's interesting
+`bs=8/ga=32` → `bs=32/ga=8`. Effective batch unchanged (256). Cuts micro-steps
+per training step from 32 → 8, amortising kernel-launch / autocast / dataloader-
+handoff overhead. Math is unchanged; loss trajectory is bit-identical.
 
-- **Liger fused linear+CE was a 50% regression.** Counterintuitive: avoiding
-  the (B·S, V) ≈ 825 MB bf16 logits tensor should help. It doesn't here
-  because (a) RTX 5060 Ti at this batch size isn't memory-bound on the LM
-  head; (b) Liger's Triton kernel sits *outside* `torch.compile`'s graph, so
-  we lose inductor's fusion of `lm_head_linear → CE`; (c) the chunked Triton
-  kernel adds per-chunk launch overhead that the model is small enough to
-  feel. The win shifts in the opposite direction for larger models /
-  smaller compute-to-memory ratios; keep this in mind for the 0.5B config.
+### Win 2: FlexAttention for intra-doc causal mask (`+19.8% on top`)
 
-- **`enable_gqa=True` was a 20% regression.** PyTorch's internal GQA
-  broadcasting in SDPA is slower than the manual `expand→reshape` we do
-  before flash-attn on sm_120 / 2.10. Manual expansion stays.
+**Root cause** (found via `nsys profile`): the dense `(B, 1, S, S)` additive
+attention mask we passed to SDPA forced PyTorch to dispatch to the
+**memory-efficient attention** backend (cutlass `sm_80` kernels) — flash-attn
+doesn't accept arbitrary masks. memEff is ~1.8× slower than flash at our
+shape, and 23% of GPU time was in attention.
 
-- **CUDA graphs (`mode="reduce-overhead"`) didn't survive contact** with the
-  trainer's micro-step loop even with `cudagraph_mark_step_begin`. There's
-  cross-iteration tensor reuse (prefetched batches, `record_stream` calls,
-  re-bound `input_ids`/`position_ids`) that the graph capturer flags as
-  unsafe. A real fix would clone all model inputs and rework the prefetch
-  stream interaction — non-trivial; left for a dedicated branch.
+**Fix**: replace the dense additive mask with a `BlockMask` driving
+`torch.nn.attention.flex_attention`. FlexAttention compiles a Triton kernel
+from a user-defined `mask_mod` that exploits block sparsity — fully-masked
+128×128 tiles are skipped entirely. Microbench at our exact shape:
 
-- **qk-norm 4D normalization, RoPE gather fusion, prefetch_factor, flash
-  backend force, num_workers tweaks** — all genuine code/config refactors
-  but all net-zero throughput. `torch.compile` is already fusing or
-  inductor's default backend selection is already optimal at this scale.
+| Backend | fwd | bwd | total |
+|---|---|---|---|
+| FlexAttention + BlockMask | 0.56ms | 1.73ms | **2.29ms** |
+| memEff + custom mask (old path) | 3.04ms | 9.93ms | 12.97ms |
+| flash + `is_causal` (no doc separation) | 0.91ms | 3.18ms | 4.09ms |
 
-## What we're committing
+Sparse-block dispatch makes FlexAttention faster than even unmasked flash.
+Intra-doc correctness is preserved.
 
-Only the `qwen3_57m.yaml` config change: `batch_size: 8 → 32`,
-`gradient_accumulation_steps: 32 → 8`. Same effective batch (256). +4.5%.
+## Code design (per follow-up review)
 
-## Where the real wins likely live (out of scope here)
+- **`ModelConfig.attn_implementation: str = "flex_attention"`** (or `"sdpa"`).
+  Drives the kernel choice from config, not from runtime type dispatch.
+- **`build_attention_mask(position_ids, device, dtype, attn_implementation)`**
+  is the single mask builder; returns either a `BlockMask` (flex) or dense
+  additive tensor (sdpa). Old `build_causal_mask` is folded in.
+- **`MultiHeadAttention` / `GroupedQueryAttention`** take `attn_implementation`
+  in `__init__` and stash `self._attn_fn = _ATTN_IMPL[impl]`. Forward just
+  calls `self._attn_fn(q, k, v, attn_mask)` — no isinstance checks.
+- **Trainer** passes `self.config.model.attn_implementation` to
+  `build_attention_mask`; same mask format is consumed at both training and
+  eval call sites.
+- **Tests** parameterize `MHA`/`GQA` mask-using tests over `(impl, device)`
+  pairs (`sdpa-cpu`, `flex-cuda` with skip if no CUDA). A cross-backend
+  parity test pins `out_sdpa ≈ out_flex` on identical Q/K/V/mask.
 
-- **Fused linear+CE that lives inside `torch.compile`.** A
-  `@torch.compile`'d custom CE that takes hidden+weight+targets could win
-  back what Liger loses — let inductor fuse the linear with the
-  softmax/log_softmax reduction. Worth ~10% at 0.5B-class configs.
-- **CUDA graphs with a refactored micro-step loop.** Likely the single
-  largest remaining lever (~5-15%) on small-model / launch-bound workloads
-  like this one. Needs trainer surgery: clone inputs, eliminate
-  `record_stream` interactions, decouple eval-path compiled graph.
-- **Use a GPU with more SMs.** `max-autotune-gemm` is disabled here ("Not
-  enough SMs"); on a larger GPU the matmul autotune alone usually buys
-  5-10%.
+## Discarded ideas (and why)
+
+- **`enable_gqa=True` in SDPA**: 20% regression on Blackwell + PyTorch 2.10.
+  Manual `expand+reshape` stays faster than SDPA's internal GQA broadcasting.
+- **Liger fused linear+CE**: 50% regression. The kernel lives outside
+  `torch.compile`'s graph, so we lose inductor's fusion of linear+softmax;
+  at our (B*S=32k, V=50k) scale, the chunked Triton launch overhead exceeds
+  the memory win. Would likely flip on a bigger model.
+- **CUDA graphs (`reduce-overhead`)**: crashes on the grad-accum loop because
+  of cross-iteration tensor reuse. A real integration needs
+  `cudagraph_mark_step_begin` + input cloning in the trainer; deferred.
+- **Forcing flash via `sdpa_kernel` context**: no effect inside the compiled
+  graph — inductor picks the backend at compile time and the user-level
+  context manager doesn't propagate. (FlexAttention solves the underlying
+  problem differently.)
+- **qk-norm reshape removal / RoPE gather fusion / `prefetch_factor` tweaks /
+  forcing flash backend**: all net-zero. `torch.compile` already fuses these.
+
+## Final results
+
+```
+baseline (main)                : 75,550 tok/s
+bs=32/ga=8 (commit 296ec01)    : 78,914 tok/s   (+4.5%)
++ FlexAttention (this commit)  : 94,540 tok/s   (+25.1% vs main, +19.8% vs prior)
+```
+
+Loss curve: bit-identical to baseline through step 25 (within bf16 rounding).
+Behavior preserved — intra-document causal attention still enforced.
+
+## Where the next wins likely live
+
+- **Inductor-visible fused linear+CE via `@triton_op`** so the kernel stays in
+  the compiled graph (avoids Liger's regression). The LM-head + CE bucket is
+  now ~12% of step time at this throughput, the largest remaining lever.
+- **CUDA graphs** with a trainer-loop retrofit (`cudagraph_mark_step_begin`
+  + input cloning) — typically 5-15% on small models like this one.
+- **`max-autotune-gemm`** is locked out on this GPU ("not enough SMs"); on a
+  larger card the matmul autotune alone usually buys another 5-10%.
