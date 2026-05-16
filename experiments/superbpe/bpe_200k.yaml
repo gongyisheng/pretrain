@@ -1,0 +1,6 @@
+model:
+  vocab_size: 200000
+data:
+  dataset: openwebtext
+  tokenizer_path: tokenizers/experiments/bpe_200k
+  tokenizer_method: bpe

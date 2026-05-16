@@ -1,0 +1,8 @@
+model:
+  vocab_size: 200000
+data:
+  dataset: openwebtext
+  tokenizer_path: tokenizers/experiments/superbpe_200k_t80k
+  tokenizer_method: superbpe
+  tokenizer_transition_size: 80000
+  tokenizer_max_superword_words: 4
