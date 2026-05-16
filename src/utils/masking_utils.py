@@ -2,8 +2,6 @@ import torch
 from torch.nn.attention.flex_attention import create_block_mask
 
 
-_create_block_mask_compiled = torch.compile(create_block_mask, dynamic=False)
-
 
 def build_position_ids(x: torch.Tensor, eot_token_id: int, packing: bool = True) -> torch.Tensor:
     """Compute per-token position IDs from a token sequence.
@@ -109,6 +107,9 @@ def build_attention_mask_for_sdpa(
     additive = torch.zeros(B, 1, S, S, dtype=dtype, device=device)
     additive.masked_fill_(~attend.unsqueeze(1), float('-inf'))
     return additive
+
+
+_create_block_mask_compiled = torch.compile(create_block_mask)
 
 
 def build_attention_mask_for_flex_attn(position_ids: torch.Tensor, device: torch.device):

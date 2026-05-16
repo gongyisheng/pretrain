@@ -20,9 +20,7 @@ def _sdpa(q, k, v, attn_mask=None, is_causal=False, sm_scale=None):
     )
 
 
-# Compile flex_attention once at module load. Inside the outer torch.compile
-# this is a no-op; in eager (e.g. unit tests) it provides the fused kernel.
-_flex_attn = torch.compile(flex_attention, dynamic=False)
+_flex_attn = torch.compile(flex_attention)
 
 
 def _call_sdpa(q, k, v, attn_mask):
