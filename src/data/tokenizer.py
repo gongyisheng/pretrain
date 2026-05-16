@@ -113,6 +113,54 @@ def _stage1_pretokenizer():
     )
 
 
+def _apply_merge_inplace(
+    docs: list,
+    pair_counts,  # Counter
+    a: int,
+    b: int,
+    new_id: int,
+) -> None:
+    """Replace every (a, b) adjacency in docs with new_id; update pair_counts.
+
+    Standard incremental BPE update. We rebuild each doc with a left-to-right
+    scan, and for every replaced position we decrement the broken-up neighbor
+    pairs and increment the newly-formed ones.
+    """
+    # Drop the merged pair itself from pair_counts; it's about to be consumed.
+    del pair_counts[(a, b)]
+    for doc_idx, ids in enumerate(docs):
+        if a not in ids:
+            continue
+        new_ids: list[int] = []
+        i = 0
+        n = len(ids)
+        while i < n:
+            if i + 1 < n and ids[i] == a and ids[i + 1] == b:
+                # Decrement broken-up neighbor pairs.
+                if new_ids:
+                    prev = new_ids[-1]
+                    pair_counts[(prev, a)] -= 1
+                    if pair_counts[(prev, a)] <= 0:
+                        del pair_counts[(prev, a)]
+                if i + 2 < n:
+                    nxt = ids[i + 2]
+                    pair_counts[(b, nxt)] -= 1
+                    if pair_counts[(b, nxt)] <= 0:
+                        del pair_counts[(b, nxt)]
+                # Append the merged token.
+                new_ids.append(new_id)
+                # Increment newly-formed neighbor pairs.
+                if len(new_ids) >= 2:
+                    pair_counts[(new_ids[-2], new_id)] += 1
+                if i + 2 < n:
+                    pair_counts[(new_id, ids[i + 2])] += 1
+                i += 2
+            else:
+                new_ids.append(ids[i])
+                i += 1
+        docs[doc_idx] = new_ids
+
+
 def _build_tokenizer_from_prefix(
     vocab: dict,
     merges: list,
@@ -194,5 +242,56 @@ def _train_superbpe_tokenizer(
     stage1.save(os.path.join(save_path, "stage1.json"))
     print(f"SuperBPE stage 1 done: vocab_size={stage1.get_vocab_size()}")
 
-    # ---- Stage 2 lands in Task 6 ----
-    raise NotImplementedError("SuperBPE stage 2 lands in Task 6")
+    # ---- Stage 2 setup ----
+    import json
+
+    stage1_data = json.loads(open(os.path.join(save_path, "stage1.json")).read())
+    s1_vocab: dict = dict(stage1_data["model"]["vocab"])  # str -> int
+    s1_merges: list = [
+        tuple(m.split(" ", 1)) if isinstance(m, str) else tuple(m)
+        for m in stage1_data["model"]["merges"]
+    ]
+    inv_vocab: dict = {i: tok for tok, i in s1_vocab.items()}
+
+    # Re-encode the entire corpus with stage 1.
+    docs: list[list[int]] = [
+        stage1.encode(t, add_special_tokens=False).ids for t in texts
+    ]
+
+    # Pair counts across each document, no whitespace boundary.
+    from collections import Counter
+
+    pair_counts: Counter = Counter()
+    for ids in docs:
+        for a, b in zip(ids[:-1], ids[1:]):
+            pair_counts[(a, b)] += 1
+
+    vocab = dict(s1_vocab)
+    merges = list(s1_merges)
+
+    # Stage 2 merge loop — no constraints (Task 7 will add them).
+    while len(vocab) < vocab_size and pair_counts:
+        (a, b), best_count = max(pair_counts.items(), key=lambda kv: (kv[1], kv[0]))
+        if best_count <= 0:
+            break
+        new_str = inv_vocab[a] + inv_vocab[b]
+        new_id = len(vocab)
+        vocab[new_str] = new_id
+        inv_vocab[new_id] = new_str
+        merges.append((inv_vocab[a], inv_vocab[b]))
+        _apply_merge_inplace(docs, pair_counts, a, b, new_id)
+
+    print(
+        f"SuperBPE stage 2 done: vocab_size={len(vocab)} "
+        f"(stage-2 merges: {len(merges) - len(s1_merges)})"
+    )
+
+    # ---- Final assembly ----
+    final = Tokenizer(models.BPE(vocab=vocab, merges=merges))
+    final.pre_tokenizer = pre_tokenizers.ByteLevel(
+        add_prefix_space=False, use_regex=False
+    )
+    final.decoder = decoders.ByteLevel()
+    final.save(os.path.join(save_path, "tokenizer.json"))
+    print(f"SuperBPE tokenizer saved to {save_path}/")
+    return final

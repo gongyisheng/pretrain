@@ -206,34 +206,92 @@ def test_prefix_smaller_k_has_smaller_vocab(tmp_path, text_iter):
 
 def test_superbpe_stage1_saves_intermediate(tmp_path, text_iter):
     save = tmp_path / "sbpe"
-    # Stage 2 is still NotImplementedError in this task, so wrap the call.
     # transition_size=399 keeps stage 2's role minimal — we only verify stage 1 here.
-    with pytest.raises(NotImplementedError):
-        # TODO(task-6): remove this pytest.raises wrapper when stage 2 is implemented
-        train_tokenizer(
-            dataset_iter=text_iter(),
-            vocab_size=400,
-            save_path=str(save),
-            method="superbpe",
-            transition_size=399,
-        )
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=400,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=399,
+    )
     assert (save / "stage1.json").exists()
 
 
 def test_superbpe_stage1_vocab_size(tmp_path, text_iter):
     save = tmp_path / "sbpe"
     # transition_size=399 keeps stage 2's role minimal — we only verify stage 1 here.
-    with pytest.raises(NotImplementedError):
-        # TODO(task-6): remove this pytest.raises wrapper when stage 2 is implemented
-        train_tokenizer(
-            dataset_iter=text_iter(),
-            vocab_size=400,
-            save_path=str(save),
-            method="superbpe",
-            transition_size=399,
-        )
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=400,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=399,
+    )
     stage1 = Tokenizer.from_file(str(save / "stage1.json"))
     # Stage 1 trains to transition_size (~400, may be slightly below due to
     # corpus size; HF stops when no more merges available).
     assert stage1.get_vocab_size() <= 400
     assert stage1.get_vocab_size() >= 256  # at least byte alphabet
+
+
+# ---- SuperBPE stage 2 (Task 6) ----
+
+
+def test_superbpe_full_train_succeeds(tmp_path, text_iter):
+    save = tmp_path / "sbpe_400_t200"
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=400,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=200,
+        max_superword_words=99,  # effectively disable cap for this task (guards land in Task 7)
+    )
+    assert (save / "tokenizer.json").exists()
+
+
+def test_superbpe_final_vocab_size(tmp_path, text_iter):
+    save = tmp_path / "sbpe_400_t200"
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=400,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=200,
+        max_superword_words=99,
+    )
+    tok = load_tokenizer(str(save))
+    assert tok.get_vocab_size() == 400
+
+
+def test_superbpe_produces_superword(tmp_path, text_iter):
+    save = tmp_path / "sbpe_600_t300"
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=600,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=300,
+        max_superword_words=99,
+    )
+    tok = load_tokenizer(str(save))
+    vocab = tok.get_vocab()
+    # Ġ not at position 0 = internal whitespace = superword token
+    superwords = [t for t in vocab if "Ġ" in t[1:]]
+    assert len(superwords) > 0, "expected at least one superword token after stage 2"
+
+
+def test_superbpe_decode_roundtrip(tmp_path, text_iter):
+    save = tmp_path / "sbpe_400_t200"
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=400,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=200,
+        max_superword_words=99,
+    )
+    tok = load_tokenizer(str(save))
+    for s in ["the quick brown fox", "she sells seashells", "by the way it works"]:
+        ids = tok.encode(s).ids
+        assert tok.decode(ids) == s, f"roundtrip failed for: {s!r}"
