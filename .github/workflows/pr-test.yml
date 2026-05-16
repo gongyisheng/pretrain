@@ -76,6 +76,8 @@ jobs:
 
   lint:
     runs-on: [self-hosted]
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venvs/${{ hashFiles('uv.lock', 'pyproject.toml') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,12 +85,6 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-
-      - name: Cache .venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
 
       - run: uv sync --extra dev --frozen
 
@@ -101,6 +97,8 @@ jobs:
     if: needs.prepare.outputs.has_data == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 30
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venvs/${{ hashFiles('uv.lock', 'pyproject.toml') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -108,12 +106,6 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-
-      - name: Cache .venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
 
       - run: uv sync --extra dev --frozen
 
@@ -127,6 +119,8 @@ jobs:
     if: needs.prepare.outputs.has_model == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 240
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venvs/${{ hashFiles('uv.lock', 'pyproject.toml') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -134,12 +128,6 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-
-      - name: Cache .venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
 
       - run: uv sync --extra dev --frozen
 
@@ -165,6 +153,8 @@ jobs:
     if: needs.prepare.outputs.has_training == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 240
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venvs/${{ hashFiles('uv.lock', 'pyproject.toml') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -172,12 +162,6 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-
-      - name: Cache .venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
 
       - run: uv sync --extra dev --frozen
 
