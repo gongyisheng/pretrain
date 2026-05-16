@@ -326,25 +326,33 @@ def test_gqa_matches_ref_attn_mask(kind, impl, device, dtype, atol):
 # --- qk_norm parity (Qwen3-style: RMSNorm Q and K before SDPA) ---
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
-def test_mha_qk_norm_matches_ref(dtype, atol):
+@pytest.mark.parametrize("impl", IMPL)
+def test_mha_qk_norm_matches_ref(impl, device, dtype, atol):
+    _skip_if_unsupported(impl, device)
     torch.manual_seed(0)
-    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, qk_norm=True, attn_implementation="sdpa").to(dtype)
+    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, qk_norm=True, attn_implementation=impl).to(dtype)
     mha.eval()
     x = torch.randn(2, 8, 64, dtype=dtype)
-    out = mha(x)
-    out_ref = _mha_ref_call(mha, x)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    attn_mask, ref_mask = _make_attn_mask("causal", impl, pos, x.dtype)
+    out = mha(x, attn_mask=attn_mask)
+    out_ref = _mha_ref_call(mha, x, attn_mask=ref_mask)
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
-def test_gqa_qk_norm_matches_ref(dtype, atol):
+@pytest.mark.parametrize("impl", IMPL)
+def test_gqa_qk_norm_matches_ref(impl, device, dtype, atol):
+    _skip_if_unsupported(impl, device)
     torch.manual_seed(0)
-    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, qk_norm=True, attn_implementation="sdpa").to(dtype)
+    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, qk_norm=True, attn_implementation=impl).to(dtype)
     gqa.eval()
     x = torch.randn(2, 8, 64, dtype=dtype)
-    out = gqa(x)
-    out_ref = _gqa_ref_call(gqa, x)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    attn_mask, ref_mask = _make_attn_mask("causal", impl, pos, x.dtype)
+    out = gqa(x, attn_mask=attn_mask)
+    out_ref = _gqa_ref_call(gqa, x, attn_mask=ref_mask)
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
