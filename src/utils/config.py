@@ -68,7 +68,8 @@ class DataConfig:
     val_split: float = 0.01
     num_workers: int = 4
     packing: bool = True
-    # Tokenizer-training-method fields. Read by scripts/train_tokenizer.py.
+    # Tokenizer-training-method fields. Consumed by scripts/train_tokenizer.py
+    # (CLI wiring lands in Task 10 of docs/superpowers/plans/2026-05-16-superbpe.md).
     # tokenizer_transition_size is required only when tokenizer_method == "superbpe".
     tokenizer_method: str = "bpe"
     tokenizer_transition_size: Optional[int] = None
