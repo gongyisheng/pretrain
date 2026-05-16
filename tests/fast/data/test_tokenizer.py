@@ -1,8 +1,15 @@
 """Behavior tests for src/data/tokenizer.py — BPE and SuperBPE paths."""
 
-import pytest
+import json
 
-from src.data.tokenizer import load_tokenizer, train_tokenizer
+import pytest
+from tokenizers import pre_tokenizers
+
+from src.data.tokenizer import (
+    _build_tokenizer_from_prefix,
+    load_tokenizer,
+    train_tokenizer,
+)
 from src.eval.tokenizer import _bytes_per_token, evaluate
 
 
@@ -124,3 +131,57 @@ def test_evaluate_returns_expected_keys(tmp_path, text_iter):
     assert result["n_docs"] == 20
     assert result["n_tokens"] > 0
     assert abs(result["bytes_per_token"] * result["tokens_per_byte"] - 1.0) < 1e-9
+
+
+# ---- Prefix reconstruction (Task 4) ----
+
+
+def test_prefix_at_full_merges_matches_original(tmp_path, text_iter):
+    save = tmp_path / "bpe_500"
+    tok = train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=500,
+        save_path=str(save),
+        method="bpe",
+    )
+    # Extract vocab + merges from saved tokenizer.json
+    data = json.loads((save / "tokenizer.json").read_text())
+    vocab = data["model"]["vocab"]
+    merges = [
+        tuple(m.split(" ", 1)) if isinstance(m, str) else tuple(m)
+        for m in data["model"]["merges"]
+    ]
+    full_k = len(merges)
+    rebuilt = _build_tokenizer_from_prefix(
+        vocab=vocab,
+        merges=merges,
+        k=full_k,
+        pretok_factory=lambda: pre_tokenizers.ByteLevel(add_prefix_space=False),
+    )
+    s = "the quick brown fox"
+    assert rebuilt.encode(s).ids == tok.encode(s).ids
+
+
+def test_prefix_smaller_k_has_smaller_vocab(tmp_path, text_iter):
+    save = tmp_path / "bpe_500"
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=500,
+        save_path=str(save),
+        method="bpe",
+    )
+    data = json.loads((save / "tokenizer.json").read_text())
+    vocab = data["model"]["vocab"]
+    merges = [
+        tuple(m.split(" ", 1)) if isinstance(m, str) else tuple(m)
+        for m in data["model"]["merges"]
+    ]
+    half_k = len(merges) // 2
+    half = _build_tokenizer_from_prefix(
+        vocab=vocab,
+        merges=merges,
+        k=half_k,
+        pretok_factory=lambda: pre_tokenizers.ByteLevel(add_prefix_space=False),
+    )
+    assert half.get_vocab_size() < len(vocab)
+    assert half.get_vocab_size() == len(vocab) - (len(merges) - half_k)

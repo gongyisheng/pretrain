@@ -91,6 +91,70 @@ def _train_bpe_tokenizer(
     return tokenizer
 
 
+# ---- Helpers shared by superbpe + W&B curve logging ----
+
+# Paper-default whitespace pretokenization regex (from HF tokenizers / GPT-2,
+# without the GPT-2 contraction-split rule). Used in stage 1 only.
+_WHITESPACE_REGEX = r" ?\p{L}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+# Digit-grouping pretok: split runs of digits into groups of 3 from the right.
+_DIGIT_REGEX = r"(?=(\d{3})+(?!\d))"
+
+
+def _stage1_pretokenizer():
+    """Build the stage-1 pretokenizer: regex Split + digit Split + ByteLevel."""
+    from tokenizers import Regex
+
+    return pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Split(Regex(_WHITESPACE_REGEX), behavior="isolated"),
+            pre_tokenizers.Split(Regex(_DIGIT_REGEX), behavior="isolated"),
+            pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
+        ]
+    )
+
+
+def _build_tokenizer_from_prefix(
+    vocab: dict,
+    merges: list,
+    k: int,
+    pretok_factory,
+) -> Tokenizer:
+    """Reconstruct a Tokenizer from the first `k` merges.
+
+    BPE at vocab_size = |alphabet| + |specials| + k is fully determined by
+    `(alphabet ∪ specials ∪ k-merge-derived-tokens, first k merges)`.
+
+    Args:
+        vocab: full vocab dict (token_str -> id) from a trained tokenizer.
+        merges: ordered merge list (each item a (left, right) tuple of strs).
+        k: number of merges to include (0 <= k <= len(merges)).
+        pretok_factory: zero-arg callable returning a pre_tokenizer.
+
+    Returns:
+        A `Tokenizer` whose merge list is `merges[:k]` and whose vocab is
+        the subset of `vocab` consistent with those merges.
+    """
+    assert 0 <= k <= len(merges), f"k={k} out of range [0, {len(merges)}]"
+    kept_merges = merges[:k]
+    # Tokens produced by these merges = ordered concatenation results.
+    merge_results = {a + b for (a, b) in kept_merges}
+    # Tokens that are *not* merge results = the alphabet + specials.
+    base_tokens = {t for t in vocab if t not in {a + b for (a, b) in merges}}
+    kept_tokens = base_tokens | merge_results
+    # Preserve original IDs for kept tokens, compact IDs are reassigned by BPE
+    # constructor based on insertion order, so we sort by original ID.
+    kept_pairs = sorted(
+        ((tok, vocab[tok]) for tok in kept_tokens if tok in vocab),
+        key=lambda p: p[1],
+    )
+    new_vocab = {tok: i for i, (tok, _) in enumerate(kept_pairs)}
+
+    tok = Tokenizer(models.BPE(vocab=new_vocab, merges=kept_merges))
+    tok.pre_tokenizer = pretok_factory()
+    tok.decoder = decoders.ByteLevel()
+    return tok
+
+
 # ---- SuperBPE (added in later tasks) ----
 
 
