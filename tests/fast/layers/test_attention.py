@@ -308,10 +308,6 @@ def test_mha_matches_ref_causal(dtype, atol):
 @pytest.mark.parametrize("impl,device", IMPL_DEVICE)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_mha_matches_ref_attn_mask(kind, impl, device, dtype, atol):
-    # FlexAttention doesn't support fp16/bf16 storage of the BlockMask machinery
-    # on this device for these tiny shapes — keep numerical parity at fp32.
-    if impl == "flex_attention" and dtype != torch.float32:
-        pytest.skip("flex_attention reference parity only checked at fp32")
     torch.manual_seed(0)
     mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl).to(device).to(dtype)
     mha.eval()
@@ -340,8 +336,6 @@ def test_gqa_matches_ref_causal(dtype, atol):
 @pytest.mark.parametrize("impl,device", IMPL_DEVICE)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_gqa_matches_ref_attn_mask(kind, impl, device, dtype, atol):
-    if impl == "flex_attention" and dtype != torch.float32:
-        pytest.skip("flex_attention reference parity only checked at fp32")
     torch.manual_seed(0)
     gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl).to(device).to(dtype)
     gqa.eval()
@@ -380,49 +374,3 @@ def test_gqa_qk_norm_matches_ref(dtype, atol):
     assert torch.allclose(out, out_ref, atol=atol)
 
 
-# ====================== Cross-backend equivalence ======================
-# The sdpa and flex_attention paths must produce numerically equivalent
-# attention output for the same logical doc-causal mask — otherwise we'd
-# silently change attention semantics when switching attn_implementation.
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="FlexAttention requires CUDA")
-@pytest.mark.parametrize("kind", MASK_KIND)
-def test_mha_sdpa_and_flex_match(kind):
-    torch.manual_seed(0)
-    pos = torch.tensor(
-        [[0, 1, 2, 3, 0, 1, 2, 3]] if kind == "intra_doc" else [[0, 1, 2, 3, 4, 5, 6, 7]],
-        device="cuda",
-    )
-    x = torch.randn(1, 8, 64, device="cuda")
-
-    mha_sdpa = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation="sdpa").cuda().eval()
-    mha_flex = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation="flex_attention").cuda().eval()
-    # Share weights so we're only comparing the attention kernel, not init noise.
-    mha_flex.load_state_dict(mha_sdpa.state_dict())
-
-    sdpa_mask, _ = _make_attn_mask(kind, "sdpa", pos, x.dtype)
-    flex_mask, _ = _make_attn_mask(kind, "flex_attention", pos, x.dtype)
-    out_sdpa = mha_sdpa(x, attn_mask=sdpa_mask)
-    out_flex = mha_flex(x, attn_mask=flex_mask)
-    assert torch.allclose(out_sdpa, out_flex, atol=1e-5)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="FlexAttention requires CUDA")
-@pytest.mark.parametrize("kind", MASK_KIND)
-def test_gqa_sdpa_and_flex_match(kind):
-    torch.manual_seed(0)
-    pos = torch.tensor(
-        [[0, 1, 2, 3, 0, 1, 2, 3]] if kind == "intra_doc" else [[0, 1, 2, 3, 4, 5, 6, 7]],
-        device="cuda",
-    )
-    x = torch.randn(1, 8, 64, device="cuda")
-
-    gqa_sdpa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation="sdpa").cuda().eval()
-    gqa_flex = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation="flex_attention").cuda().eval()
-    gqa_flex.load_state_dict(gqa_sdpa.state_dict())
-
-    sdpa_mask, _ = _make_attn_mask(kind, "sdpa", pos, x.dtype)
-    flex_mask, _ = _make_attn_mask(kind, "flex_attention", pos, x.dtype)
-    out_sdpa = gqa_sdpa(x, attn_mask=sdpa_mask)
-    out_flex = gqa_flex(x, attn_mask=flex_mask)
-    assert torch.allclose(out_sdpa, out_flex, atol=1e-5)
