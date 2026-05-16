@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from src.layers.attention import GroupedQueryAttention, MultiHeadAttention
 from src.layers.pos_emb import RoPE
 from src.utils.masking_utils import build_intra_doc_attention_mask
-from tests.fast._attn_helpers import IMPL, MASK_KIND, make_attn_mask, skip_if_unsupported
+from tests.fast.helpers import ATTN_IMPLEMENTATION, MASK_KIND, make_attn_mask, skip_if_unsupported
 from tests.fast.layers._refs import COMPOUND_DTYPES, gqa_ref, mha_ref, sdpa_ref
 
 
@@ -91,7 +91,7 @@ def test_sdpa_softmax_fp32_no_overflow(dtype, atol):
 
 # ============================= MultiHeadAttention behavior =============================
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_mha_attn_mask_output_shape(kind, impl, device):
     skip_if_unsupported(impl, device)
@@ -102,7 +102,7 @@ def test_mha_attn_mask_output_shape(kind, impl, device):
     assert mha(x, attn_mask=attn_mask).shape == (2, 8, 64)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_mha_intra_doc_mask_blocks_cross_doc_attention(impl, device):
     """Token in doc1 must not be influenced by tokens in doc0. Intra-doc only —
     the causal mask doesn't enforce doc boundaries."""
@@ -125,7 +125,7 @@ def test_mha_intra_doc_mask_blocks_cross_doc_attention(impl, device):
     assert not torch.allclose(out_base[0, :2], out_modified[0, :2], atol=1e-5)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_mha_causal_mask_blocks_future(impl, device):
     """Modifying the last token must not change earlier-token outputs."""
     skip_if_unsupported(impl, device)
@@ -146,7 +146,7 @@ def test_mha_causal_mask_blocks_future(impl, device):
 
 # ============================= GroupedQueryAttention behavior =============================
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_gqa_attn_mask_output_shape(kind, impl, device):
     skip_if_unsupported(impl, device)
@@ -157,7 +157,7 @@ def test_gqa_attn_mask_output_shape(kind, impl, device):
     assert gqa(x, attn_mask=attn_mask).shape == (2, 8, 64)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gqa_intra_doc_mask_blocks_cross_doc_attention(impl, device):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
@@ -178,7 +178,7 @@ def test_gqa_intra_doc_mask_blocks_cross_doc_attention(impl, device):
     assert not torch.allclose(out_base[0, :2], out_modified[0, :2], atol=1e-5)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gqa_causal_mask_blocks_future(impl, device):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
@@ -196,7 +196,7 @@ def test_gqa_causal_mask_blocks_future(impl, device):
     assert torch.allclose(out_base[0, :7], out_modified[0, :7], atol=1e-5)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gqa_with_rope_output_shape(impl, device):
     skip_if_unsupported(impl, device)
     rope = RoPE(d_head=16, max_seq_len=32)
@@ -231,7 +231,7 @@ MODULE_DTYPES = COMPOUND_DTYPES
 
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_mha_matches_ref_attn_mask(kind, impl, device, dtype, atol):
     skip_if_unsupported(impl, device)
@@ -248,7 +248,7 @@ def test_mha_matches_ref_attn_mask(kind, impl, device, dtype, atol):
 
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_gqa_matches_ref_attn_mask(kind, impl, device, dtype, atol):
     skip_if_unsupported(impl, device)
@@ -267,7 +267,7 @@ def test_gqa_matches_ref_attn_mask(kind, impl, device, dtype, atol):
 # --- qk_norm parity (Qwen3-style: RMSNorm Q and K before SDPA) ---
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_mha_qk_norm_matches_ref(impl, device, dtype, atol):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
@@ -283,7 +283,7 @@ def test_mha_qk_norm_matches_ref(impl, device, dtype, atol):
 
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gqa_qk_norm_matches_ref(impl, device, dtype, atol):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)

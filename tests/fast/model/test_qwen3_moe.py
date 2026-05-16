@@ -3,7 +3,7 @@ import torch
 
 from src.model.qwen3_moe import Qwen3MoEModel
 from src.utils.config import ModelConfig
-from tests.fast._attn_helpers import IMPL, make_attn_mask, skip_if_unsupported
+from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 
 def _tiny_moe_config(attn_implementation: str = "sdpa"):
@@ -28,7 +28,7 @@ def _moe_pos(B, S):
     return torch.arange(S).unsqueeze(0).expand(B, S)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_qwen3_moe_model_returns_tuple(impl, device):
     skip_if_unsupported(impl, device)
     model = Qwen3MoEModel(_tiny_moe_config(impl), max_seq_len=32)
@@ -39,7 +39,7 @@ def test_qwen3_moe_model_returns_tuple(impl, device):
     assert isinstance(out, tuple) and len(out) == 2
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_qwen3_moe_model_logits_shape(impl, device):
     skip_if_unsupported(impl, device)
     model = Qwen3MoEModel(_tiny_moe_config(impl), max_seq_len=32)
@@ -50,7 +50,7 @@ def test_qwen3_moe_model_logits_shape(impl, device):
     assert logits.shape == (2, 8, 256)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_qwen3_moe_aux_loss_is_scalar_and_nonneg(impl, device):
     skip_if_unsupported(impl, device)
     model = Qwen3MoEModel(_tiny_moe_config(impl), max_seq_len=32)

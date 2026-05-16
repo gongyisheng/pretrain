@@ -5,7 +5,7 @@ import torch.nn as nn
 from src.layers.attention import MultiHeadAttention
 from src.layers.block import BaseTransformerBlock
 from src.layers.ffn import FFN
-from tests.fast._attn_helpers import IMPL, make_attn_mask, skip_if_unsupported
+from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 
 class _MinimalTransformerBlock(BaseTransformerBlock):
@@ -25,7 +25,7 @@ class _MinimalTransformerBlock(BaseTransformerBlock):
         return self.ffn(self.ln2(x))
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_transformer_block_output_shape(impl, device):
     skip_if_unsupported(impl, device)
     block = _MinimalTransformerBlock(d_model=64, n_heads=4, intermediate_size=256, dropout_attn=0.0, attn_implementation=impl)
@@ -36,7 +36,7 @@ def test_transformer_block_output_shape(impl, device):
     assert out.shape == (2, 16, 64)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_transformer_block_residual(impl, device):
     skip_if_unsupported(impl, device)
     block = _MinimalTransformerBlock(d_model=64, n_heads=4, intermediate_size=256, dropout_attn=0.0, attn_implementation=impl)

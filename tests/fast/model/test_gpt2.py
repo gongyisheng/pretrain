@@ -3,7 +3,7 @@ import torch
 from src.model.gpt2 import GPT2Model
 from src.model.registry import build_model
 from src.utils.config import ModelConfig
-from tests.fast._attn_helpers import IMPL, make_attn_mask, skip_if_unsupported
+from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 
 def _small_config(attn_implementation: str = "sdpa"):
@@ -14,7 +14,7 @@ def _pos(B, S):
     return torch.arange(S).unsqueeze(0).expand(B, S)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_forward_shape(impl, device):
     skip_if_unsupported(impl, device)
     model = GPT2Model(_small_config(impl), max_seq_len=128)
@@ -25,7 +25,7 @@ def test_gpt2_forward_shape(impl, device):
     assert logits.shape == (2, 32, 256)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_loss(impl, device):
     skip_if_unsupported(impl, device)
     model = GPT2Model(_small_config(impl), max_seq_len=128)
@@ -48,7 +48,7 @@ def test_gpt2_param_count():
     assert n_params < 1_000_000
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_no_bias(impl, device):
     skip_if_unsupported(impl, device)
     config = ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=False, mlp_bias=False, attn_implementation=impl)
@@ -64,7 +64,7 @@ def test_gpt2_no_bias(impl, device):
             assert module.bias is None, f"{name} should have no bias"
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_attn_bias_only(impl, device):
     skip_if_unsupported(impl, device)
     config = ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=True, mlp_bias=False, attn_implementation=impl)
@@ -93,7 +93,7 @@ def test_registry_build_model():
     assert isinstance(model, GPT2Model)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_forward_with_position_ids(impl, device):
     skip_if_unsupported(impl, device)
     model = GPT2Model(_small_config(impl), max_seq_len=128)
@@ -104,7 +104,7 @@ def test_gpt2_forward_with_position_ids(impl, device):
     assert logits.shape == (2, 32, 256)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_position_ids_blocks_cross_doc(impl, device):
     """Intra-doc mask: modifying doc0 tokens must not change doc1 token outputs."""
     skip_if_unsupported(impl, device)
@@ -130,7 +130,7 @@ def test_gpt2_position_ids_blocks_cross_doc(impl, device):
         "doc1 logits changed when doc0 input tokens were modified"
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_causal_mask_blocks_future(impl, device):
     """Causal mask: modifying the last token must not change earlier-token logits."""
     skip_if_unsupported(impl, device)

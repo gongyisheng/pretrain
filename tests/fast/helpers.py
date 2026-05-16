@@ -16,7 +16,7 @@ from src.utils.masking_utils import (
 # Attention backends to exercise. Device comes from the conftest ``device``
 # fixture (--device=cpu|cuda, default cuda if available else cpu); one device
 # per session. flex_attention is CUDA-only — skipped at runtime when device == "cpu".
-IMPL = ["sdpa", "flex_attention"]
+ATTN_IMPLEMENTATION = ["sdpa", "flex_attention"]
 
 # Mask shapes the trainer builds.
 #   "causal":    pure causal (used during generation / no intra-doc config)

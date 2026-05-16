@@ -3,7 +3,7 @@ import torch
 
 from src.model.qwen3 import Qwen3Model
 from src.utils.config import ModelConfig
-from tests.fast._attn_helpers import IMPL, make_attn_mask, skip_if_unsupported
+from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 
 # --- Numerical parity vs HuggingFace Qwen3ForCausalLM ---
@@ -99,7 +99,7 @@ def _tiny_qwen3_config(attn_implementation: str = "sdpa"):
     )
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_qwen3_forward_with_position_ids_shape(impl, device):
     skip_if_unsupported(impl, device)
     model = Qwen3Model(_tiny_qwen3_config(impl), max_seq_len=32)
@@ -110,7 +110,7 @@ def test_qwen3_forward_with_position_ids_shape(impl, device):
     assert logits.shape == (2, 8, 256)
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_qwen3_position_ids_blocks_cross_doc(impl, device):
     """Intra-doc mask: modifying doc0 tokens must not change doc1 token outputs."""
     skip_if_unsupported(impl, device)
@@ -136,7 +136,7 @@ def test_qwen3_position_ids_blocks_cross_doc(impl, device):
         "doc0 logits did NOT change when doc0 tokens were modified (model not propagating inputs?)"
 
 
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_qwen3_causal_mask_blocks_future(impl, device):
     """Causal mask: modifying the last token must not change earlier-token logits."""
     skip_if_unsupported(impl, device)

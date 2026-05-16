@@ -6,7 +6,7 @@ import torch
 from src.model.registry import build_model
 from src.training.metrics import MetricsTracker
 from src.utils.config import ModelConfig
-from tests.fast._attn_helpers import IMPL, make_attn_mask, skip_if_unsupported
+from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 # ---------------------------------------------------------------------------
 # Small model configs matching real architectures. Factories rather than
@@ -115,7 +115,7 @@ def _assert_keys_match(result: dict, model: torch.nn.Module):
 
 
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_layer_grad_norms_plain_model(arch_id, impl, device):
     """Per-module grad norms should have one key per module on a plain model."""
     skip_if_unsupported(impl, device)
@@ -127,7 +127,7 @@ def test_layer_grad_norms_plain_model(arch_id, impl, device):
 
 
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
-@pytest.mark.parametrize("impl", IMPL)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_layer_grad_norms_compiled_model(arch_id, impl, device):
     """Per-module grad norms must work after torch.compile (which prepends _orig_mod.)."""
     skip_if_unsupported(impl, device)
