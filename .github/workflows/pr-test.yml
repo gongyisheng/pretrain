@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: pr-test-${{ github.event.pull_request.number || github.ref }}
+  group: pr-test-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -182,20 +182,17 @@ jobs:
           echo "index=$idx" >> "$GITHUB_OUTPUT"
           echo "Picked GPU $idx"
 
-      - name: Cache tokenizer + dataset
-        id: cache-hf-data
-        uses: actions/cache@v4
-        with:
-          path: |
-            tokenizers
-            data
-          key: hf-openwebtext-exp-v1
-
-      - name: Download tokenizer + dataset for e2e smoke tests
-        if: steps.cache-hf-data.outputs.cache-hit != 'true'
+      - name: Restore tokenizer + dataset
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run hf download gongyisheng/openwebtext-exp --repo-type dataset --local-dir .
+          HF_DATA_DIR: ${{ runner.tool_cache }}/hf-openwebtext-exp
+        run: |
+          if [ ! -d "$HF_DATA_DIR/tokenizers" ] || [ ! -d "$HF_DATA_DIR/data" ]; then
+            mkdir -p "$HF_DATA_DIR"
+            uv run hf download gongyisheng/openwebtext-exp --repo-type dataset --local-dir "$HF_DATA_DIR"
+          fi
+          ln -sfn "$HF_DATA_DIR/tokenizers" tokenizers
+          ln -sfn "$HF_DATA_DIR/data" data
 
       - name: Run training tests
         env:
