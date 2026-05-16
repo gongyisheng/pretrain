@@ -69,12 +69,9 @@ def build_intra_doc_attention_mask(
     """
     if attn_implementation == "flex_attention":
         return _build_attention_mask_for_flex_attn(position_ids, device)
-    if attn_implementation == "sdpa":
-        return _build_attention_mask_for_sdpa(position_ids, device, dtype)
-    raise ValueError(
-        f"unknown attn_implementation: {attn_implementation!r}; "
-        "expected one of {'flex_attention', 'sdpa'}"
-    )
+    # attn_implementation is validated at ``ModelConfig`` construction; the
+    # only other accepted value here is "sdpa".
+    return _build_attention_mask_for_sdpa(position_ids, device, dtype)
 
 
 def build_causal_attention_mask(
@@ -95,14 +92,11 @@ def build_causal_attention_mask(
     """
     if attn_implementation == "sdpa":
         return None
-    if attn_implementation == "flex_attention":
-        # arange-style positions → adj=0 → mask_mod collapses to (q_idx >= kv_idx).
-        causal_pos = torch.arange(S, device=device).unsqueeze(0).expand(B, S)
-        return _build_attention_mask_for_flex_attn(causal_pos, device)
-    raise ValueError(
-        f"unknown attn_implementation: {attn_implementation!r}; "
-        "expected one of {'flex_attention', 'sdpa'}"
-    )
+    # attn_implementation is validated at ``ModelConfig`` construction; the
+    # only other accepted value here is "flex_attention".
+    # arange-style positions → adj=0 → mask_mod collapses to (q_idx >= kv_idx).
+    causal_pos = torch.arange(S, device=device).unsqueeze(0).expand(B, S)
+    return _build_attention_mask_for_flex_attn(causal_pos, device)
 
 
 def _build_attention_mask_for_sdpa(

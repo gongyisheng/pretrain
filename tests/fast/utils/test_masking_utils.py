@@ -294,12 +294,3 @@ def test_build_causal_attention_mask_runs(impl, device):
         assert mask is not None
 
 
-def test_build_intra_doc_attention_mask_rejects_unknown_impl():
-    pos = torch.tensor([[0, 1, 2]])
-    with pytest.raises(ValueError, match="unknown attn_implementation"):
-        build_intra_doc_attention_mask(pos, pos.device, torch.float32, attn_implementation="nope")
-
-
-def test_build_causal_attention_mask_rejects_unknown_impl():
-    with pytest.raises(ValueError, match="unknown attn_implementation"):
-        build_causal_attention_mask(1, 8, torch.device("cpu"), attn_implementation="nope")
