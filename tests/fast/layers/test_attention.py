@@ -109,13 +109,13 @@ def test_sdpa_matches_ref_custom_scale(dtype, atol):
     assert torch.allclose(out, out_ref, atol=atol)
 
 
-@pytest.mark.parametrize("dtype,atol", [(torch.float16, 5e-2), (torch.bfloat16, 5e-1)])
+@pytest.mark.parametrize("dtype,atol", [(torch.float16, 5e-3), (torch.bfloat16, 5e-2)])
 def test_sdpa_softmax_fp32_no_overflow(dtype, atol):
     """Large q,k: post-scale logits beyond exp()'s representable range in input dtype.
     Without fp32 softmax, exp() would overflow (fp16: >11, bf16: >88) and produce
-    NaN/Inf. atol is generous: at this scale softmax saturates near winner-take-all,
-    so flash-attn's online softmax and the reference's plain softmax can pick
-    different argmax winners. bf16's coarser mantissa amplifies this.
+    NaN/Inf. Both SDPA and ``sdpa_ref`` accumulate in fp32, so at this scale they
+    saturate to the same argmax winner — observed gap is one ULP of the storage
+    dtype (≈2e-3 fp16, ≈2e-2 bf16). atol is one storage ULP with ~2× margin.
     """
     q, k, v = _make_qkv(2, 4, 8, 64, dtype)
     q = q * 30
