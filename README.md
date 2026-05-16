@@ -1,7 +1,6 @@
 # Pretrain
 
 A research playground for LLM pretraining and model architecture exploration.
-Pure PyTorch (>=12GB VRAM).
 
 ## Install
 Requires python >=3.12
