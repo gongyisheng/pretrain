@@ -76,12 +76,13 @@ def test_unknown_method_raises(tmp_path, text_iter):
         )
 
 
-def test_superbpe_missing_transition_size_raises(tmp_path, text_iter):
-    with pytest.raises((ValueError, AssertionError)):
+@pytest.mark.parametrize("ts", [None, 0, -1, 500, 600])
+def test_superbpe_invalid_transition_size_raises(tmp_path, text_iter, ts):
+    with pytest.raises(ValueError):
         train_tokenizer(
             dataset_iter=text_iter(),
             vocab_size=500,
             save_path=str(tmp_path / "x"),
             method="superbpe",
-            transition_size=None,
+            transition_size=ts,
         )

@@ -102,4 +102,6 @@ def _train_superbpe_tokenizer(
     max_superword_words: int,
     special_tokens: Sequence[str],
 ) -> Tokenizer:
-    raise NotImplementedError("SuperBPE trainer lands in Task 8")
+    raise NotImplementedError(
+        "SuperBPE trainer: stage 1 lands in Task 5, stage 2 in Task 6"
+    )
