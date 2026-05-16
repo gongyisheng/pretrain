@@ -68,6 +68,11 @@ class DataConfig:
     val_split: float = 0.01
     num_workers: int = 4
     packing: bool = True
+    # Tokenizer-training-method fields. Read by scripts/train_tokenizer.py.
+    # tokenizer_transition_size is required only when tokenizer_method == "superbpe".
+    tokenizer_method: str = "bpe"
+    tokenizer_transition_size: Optional[int] = None
+    tokenizer_max_superword_words: int = 4
 
 
 @dataclass
