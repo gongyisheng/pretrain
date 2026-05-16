@@ -14,7 +14,5 @@ done
 
 for name in "${names[@]}"; do
     echo "==> Training $name"
-    uv run python scripts/train_tokenizer.py \
-        --config "experiments/superbpe/${name}.yaml" \
-        2>&1 | tee "logs/${name}_train.log"
+    uv run python scripts/train_tokenizer.py --config "experiments/superbpe/${name}.yaml" 
 done
