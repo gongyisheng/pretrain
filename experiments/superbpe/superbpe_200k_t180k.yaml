@@ -3,6 +3,12 @@ model:
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/experiments/superbpe_200k_t180k
-  tokenizer_method: superbpe
-  tokenizer_transition_size: 180000
-  tokenizer_max_superword_words: 4
+  tokenizer_train_method: superbpe
+  tokenizer_train_kwargs:
+    transition_size: 180000
+    max_superword_words: 4
+    eval_num_docs: 1000
+  tokenizer_train_num_samples: 100000
+  tokenizer_train_eval_every: 5000
+logging:
+  wandb_project: superbpe-reproduction

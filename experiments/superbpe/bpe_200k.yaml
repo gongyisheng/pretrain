@@ -8,6 +8,12 @@ data:
   # giving us a BPE baseline whose stage-1 pretokenizer matches SuperBPE —
   # so the head-to-head comparison isolates the curriculum from pretokenizer
   # differences (spec Risk #6).
-  tokenizer_method: superbpe
-  tokenizer_transition_size: 200000
-  tokenizer_max_superword_words: 4
+  tokenizer_train_method: superbpe
+  tokenizer_train_kwargs:
+    transition_size: 200000
+    max_superword_words: 4
+    eval_num_docs: 1000
+  tokenizer_train_num_samples: 100000
+  tokenizer_train_eval_every: 5000
+logging:
+  wandb_project: superbpe-reproduction
