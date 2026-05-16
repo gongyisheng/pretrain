@@ -2,7 +2,7 @@ import pytest
 import tempfile
 import os
 import yaml
-from src.utils.config import TrainConfig, load_config, TrainingConfig, DataConfig
+from src.utils.config import ModelConfig, TrainConfig, load_config, TrainingConfig, DataConfig
 
 
 def _write_yaml(tmp_dir, data):
@@ -133,3 +133,34 @@ data:
     p.write_text(yaml_content)
     cfg = load_config(str(p))
     assert cfg.max_seq_len == 128
+
+
+# ==================== attn_implementation validation ====================
+
+def test_model_config_attn_implementation_default():
+    assert ModelConfig().attn_implementation == "flex_attention"
+
+
+@pytest.mark.parametrize("value", ["flex_attention", "sdpa"])
+def test_model_config_attn_implementation_accepts_valid(value):
+    cfg = ModelConfig(attn_implementation=value)
+    assert cfg.attn_implementation == value
+
+
+@pytest.mark.parametrize("value", ["flash", "FlexAttention", "", "sdpa "])
+def test_model_config_attn_implementation_rejects_invalid(value):
+    with pytest.raises(ValueError, match="unknown attn_implementation"):
+        ModelConfig(attn_implementation=value)
+
+
+def test_load_config_rejects_invalid_attn_implementation(tmp_path):
+    yaml_content = """
+max_seq_len: 128
+model:
+  arch: gpt2
+  attn_implementation: nope
+"""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(yaml_content)
+    with pytest.raises(ValueError, match="unknown attn_implementation"):
+        load_config(str(p))
