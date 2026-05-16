@@ -1,8 +1,9 @@
+import pytest
 import torch
 
 from src.model.qwen3 import Qwen3Model
 from src.utils.config import ModelConfig
-from src.utils.masking_utils import build_intra_doc_attention_mask
+from tests.fast._attn_helpers import IMPL, make_attn_mask, skip_if_unsupported
 
 
 # --- Numerical parity vs HuggingFace Qwen3ForCausalLM ---
@@ -84,7 +85,7 @@ def test_qwen3_matches_hf_qwen3_with_copied_weights():
     assert torch.allclose(our_logits, hf_logits, atol=1e-4)
 
 
-def _tiny_qwen3_config():
+def _tiny_qwen3_config(attn_implementation: str = "sdpa"):
     return ModelConfig(
         arch="qwen3",
         n_layers=2,
@@ -94,30 +95,34 @@ def _tiny_qwen3_config():
         vocab_size=256,
         rope_theta=10000.0,
         qk_norm=True,
-        # FlexAttention is CUDA-only; CPU tests need the sdpa kernel path.
-        attn_implementation="sdpa",
+        attn_implementation=attn_implementation,
     )
 
 
-def test_qwen3_forward_with_position_ids_shape():
-    model = Qwen3Model(_tiny_qwen3_config(), max_seq_len=32)
+@pytest.mark.parametrize("impl", IMPL)
+def test_qwen3_forward_with_position_ids_shape(impl, device):
+    skip_if_unsupported(impl, device)
+    model = Qwen3Model(_tiny_qwen3_config(impl), max_seq_len=32)
     x = torch.randint(0, 256, (2, 8))
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    logits, _ = model(x, position_ids=pos)
+    attn_mask, _ = make_attn_mask("causal", impl, pos, torch.float32)
+    logits, _ = model(x, position_ids=pos, attn_mask=attn_mask)
     assert logits.shape == (2, 8, 256)
 
 
-def test_qwen3_position_ids_blocks_cross_doc():
-    """Modifying doc0 tokens must not change doc1 token outputs."""
+@pytest.mark.parametrize("impl", IMPL)
+def test_qwen3_position_ids_blocks_cross_doc(impl, device):
+    """Intra-doc mask: modifying doc0 tokens must not change doc1 token outputs."""
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
-    model = Qwen3Model(_tiny_qwen3_config(), max_seq_len=32)
+    model = Qwen3Model(_tiny_qwen3_config(impl), max_seq_len=32)
     model.eval()
 
     eot_id = 0
     x = torch.randint(1, 256, (1, 8))
     x[0, 3] = eot_id  # doc0=[0..3], doc1=[4..7]
     position_ids = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])
-    attn_mask = build_intra_doc_attention_mask(position_ids, x.device, torch.float32, attn_implementation="sdpa")
+    attn_mask, _ = make_attn_mask("intra_doc", impl, position_ids, torch.float32)
 
     logits_base, _ = model(x, position_ids=position_ids, attn_mask=attn_mask)
 
@@ -129,3 +134,24 @@ def test_qwen3_position_ids_blocks_cross_doc():
         "doc1 logits changed when doc0 tokens were modified"
     assert not torch.allclose(logits_base[0, :3], logits_modified[0, :3], atol=1e-4), \
         "doc0 logits did NOT change when doc0 tokens were modified (model not propagating inputs?)"
+
+
+@pytest.mark.parametrize("impl", IMPL)
+def test_qwen3_causal_mask_blocks_future(impl, device):
+    """Causal mask: modifying the last token must not change earlier-token logits."""
+    skip_if_unsupported(impl, device)
+    torch.manual_seed(0)
+    model = Qwen3Model(_tiny_qwen3_config(impl), max_seq_len=32)
+    model.eval()
+
+    x = torch.randint(1, 256, (1, 8))
+    position_ids = torch.arange(8).unsqueeze(0)
+    attn_mask, _ = make_attn_mask("causal", impl, position_ids, torch.float32)
+
+    logits_base, _ = model(x, position_ids=position_ids, attn_mask=attn_mask)
+    x2 = x.clone()
+    x2[0, 7] = (x[0, 7] + 1) % 256
+    logits_modified, _ = model(x2, position_ids=position_ids, attn_mask=attn_mask)
+
+    assert torch.allclose(logits_base[0, :7], logits_modified[0, :7], atol=1e-4), \
+        "earlier-position logits changed when only the last input token changed"

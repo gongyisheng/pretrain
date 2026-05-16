@@ -8,47 +8,9 @@ import torch.nn.functional as F
 
 from src.layers.attention import GroupedQueryAttention, MultiHeadAttention
 from src.layers.pos_emb import RoPE
-from src.utils.masking_utils import (
-    build_causal_attention_mask,
-    build_intra_doc_attention_mask,
-)
+from src.utils.masking_utils import build_intra_doc_attention_mask
+from tests.fast._attn_helpers import IMPL, MASK_KIND, make_attn_mask, skip_if_unsupported
 from tests.fast.layers._refs import COMPOUND_DTYPES, gqa_ref, mha_ref, sdpa_ref
-
-
-# Attention backends to test. The device comes from the conftest ``device``
-# fixture (--device=cpu|cuda, default cuda if available else cpu): one device
-# per session, not iterated. flex_attention is CUDA-only — when the session
-# is on CPU, the flex_attention parametrization is skipped at runtime.
-IMPL = ["sdpa", "flex_attention"]
-
-
-def _skip_if_unsupported(impl, device):
-    if impl == "flex_attention" and device == "cpu":
-        pytest.skip("flex_attention requires CUDA")
-
-# Mask shapes the trainer actually builds. "causal" is the pure-causal pattern
-# (no doc boundaries); "intra_doc" blocks attention across document boundaries.
-MASK_KIND = ["causal", "intra_doc"]
-
-
-def _make_attn_mask(kind, impl, position_ids, dtype):
-    """Build the mask the kernel consumes plus a reference-side dense mask.
-
-    The reference implementations (``mha_ref`` / ``gqa_ref``) compute attention
-    manually from a dense additive mask. To compare them apples-to-apples we
-    hand them either ``None`` (when the kernel does pure-causal) or the dense
-    intra-doc mask — never a ``BlockMask``.
-    """
-    B, S = position_ids.shape
-    if kind == "causal":
-        kernel_mask = build_causal_attention_mask(B, S, position_ids.device, attn_implementation=impl)
-        ref_mask = None  # ref uses is_causal=True
-    elif kind == "intra_doc":
-        kernel_mask = build_intra_doc_attention_mask(position_ids, position_ids.device, dtype, attn_implementation=impl)
-        ref_mask = build_intra_doc_attention_mask(position_ids, position_ids.device, dtype, attn_implementation="sdpa")
-    else:
-        raise AssertionError(f"unknown mask kind: {kind!r}")
-    return kernel_mask, ref_mask
 
 
 # ====================== F.scaled_dot_product_attention vs sdpa_ref ======================
@@ -132,11 +94,11 @@ def test_sdpa_softmax_fp32_no_overflow(dtype, atol):
 @pytest.mark.parametrize("impl", IMPL)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_mha_attn_mask_output_shape(kind, impl, device):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl)
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    attn_mask, _ = _make_attn_mask(kind, impl, pos, x.dtype)
+    attn_mask, _ = make_attn_mask(kind, impl, pos, x.dtype)
     assert mha(x, attn_mask=attn_mask).shape == (2, 8, 64)
 
 
@@ -144,14 +106,14 @@ def test_mha_attn_mask_output_shape(kind, impl, device):
 def test_mha_intra_doc_mask_blocks_cross_doc_attention(impl, device):
     """Token in doc1 must not be influenced by tokens in doc0. Intra-doc only —
     the causal mask doesn't enforce doc boundaries."""
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl)
     mha.eval()
 
     x = torch.randn(1, 4, 64)
     pos = torch.tensor([[0, 1, 0, 1]])  # doc0=[pos0,pos1], doc1=[pos2,pos3]
-    attn_mask, _ = _make_attn_mask("intra_doc", impl, pos, x.dtype)
+    attn_mask, _ = make_attn_mask("intra_doc", impl, pos, x.dtype)
 
     out_base = mha(x, attn_mask=attn_mask)
     x2 = x.clone()
@@ -166,14 +128,14 @@ def test_mha_intra_doc_mask_blocks_cross_doc_attention(impl, device):
 @pytest.mark.parametrize("impl", IMPL)
 def test_mha_causal_mask_blocks_future(impl, device):
     """Modifying the last token must not change earlier-token outputs."""
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl)
     mha.eval()
 
     x = torch.randn(1, 8, 64)
     pos = torch.arange(8).unsqueeze(0)
-    attn_mask, _ = _make_attn_mask("causal", impl, pos, x.dtype)
+    attn_mask, _ = make_attn_mask("causal", impl, pos, x.dtype)
 
     out_base = mha(x, attn_mask=attn_mask)
     x2 = x.clone()
@@ -187,24 +149,24 @@ def test_mha_causal_mask_blocks_future(impl, device):
 @pytest.mark.parametrize("impl", IMPL)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_gqa_attn_mask_output_shape(kind, impl, device):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl)
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    attn_mask, _ = _make_attn_mask(kind, impl, pos, x.dtype)
+    attn_mask, _ = make_attn_mask(kind, impl, pos, x.dtype)
     assert gqa(x, attn_mask=attn_mask).shape == (2, 8, 64)
 
 
 @pytest.mark.parametrize("impl", IMPL)
 def test_gqa_intra_doc_mask_blocks_cross_doc_attention(impl, device):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl)
     gqa.eval()
 
     x = torch.randn(1, 4, 64)
     pos = torch.tensor([[0, 1, 0, 1]])
-    attn_mask, _ = _make_attn_mask("intra_doc", impl, pos, x.dtype)
+    attn_mask, _ = make_attn_mask("intra_doc", impl, pos, x.dtype)
 
     out_base = gqa(x, attn_mask=attn_mask)
     x2 = x.clone()
@@ -218,14 +180,14 @@ def test_gqa_intra_doc_mask_blocks_cross_doc_attention(impl, device):
 
 @pytest.mark.parametrize("impl", IMPL)
 def test_gqa_causal_mask_blocks_future(impl, device):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl)
     gqa.eval()
 
     x = torch.randn(1, 8, 64)
     pos = torch.arange(8).unsqueeze(0)
-    attn_mask, _ = _make_attn_mask("causal", impl, pos, x.dtype)
+    attn_mask, _ = make_attn_mask("causal", impl, pos, x.dtype)
 
     out_base = gqa(x, attn_mask=attn_mask)
     x2 = x.clone()
@@ -236,12 +198,12 @@ def test_gqa_causal_mask_blocks_future(impl, device):
 
 @pytest.mark.parametrize("impl", IMPL)
 def test_gqa_with_rope_output_shape(impl, device):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     rope = RoPE(d_head=16, max_seq_len=32)
     gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl)
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    attn_mask, _ = _make_attn_mask("causal", impl, pos, x.dtype)
+    attn_mask, _ = make_attn_mask("causal", impl, pos, x.dtype)
     assert gqa(x, rope, position_ids=pos, attn_mask=attn_mask).shape == (2, 8, 64)
 
 
@@ -272,13 +234,13 @@ MODULE_DTYPES = COMPOUND_DTYPES
 @pytest.mark.parametrize("impl", IMPL)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_mha_matches_ref_attn_mask(kind, impl, device, dtype, atol):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl).to(dtype)
     mha.eval()
     x = torch.randn(1, 4, 64, dtype=dtype)
     pos = torch.tensor([[0, 1, 0, 1]] if kind == "intra_doc" else [[0, 1, 2, 3]])
-    attn_mask, ref_mask = _make_attn_mask(kind, impl, pos, x.dtype)
+    attn_mask, ref_mask = make_attn_mask(kind, impl, pos, x.dtype)
     out = mha(x, attn_mask=attn_mask)
     out_ref = _mha_ref_call(mha, x, attn_mask=ref_mask)
     assert out.dtype == dtype
@@ -289,13 +251,13 @@ def test_mha_matches_ref_attn_mask(kind, impl, device, dtype, atol):
 @pytest.mark.parametrize("impl", IMPL)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_gqa_matches_ref_attn_mask(kind, impl, device, dtype, atol):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl).to(dtype)
     gqa.eval()
     x = torch.randn(1, 4, 64, dtype=dtype)
     pos = torch.tensor([[0, 1, 0, 1]] if kind == "intra_doc" else [[0, 1, 2, 3]])
-    attn_mask, ref_mask = _make_attn_mask(kind, impl, pos, x.dtype)
+    attn_mask, ref_mask = make_attn_mask(kind, impl, pos, x.dtype)
     out = gqa(x, attn_mask=attn_mask)
     out_ref = _gqa_ref_call(gqa, x, attn_mask=ref_mask)
     assert out.dtype == dtype
@@ -307,13 +269,13 @@ def test_gqa_matches_ref_attn_mask(kind, impl, device, dtype, atol):
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("impl", IMPL)
 def test_mha_qk_norm_matches_ref(impl, device, dtype, atol):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, qk_norm=True, attn_implementation=impl).to(dtype)
     mha.eval()
     x = torch.randn(2, 8, 64, dtype=dtype)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    attn_mask, ref_mask = _make_attn_mask("causal", impl, pos, x.dtype)
+    attn_mask, ref_mask = make_attn_mask("causal", impl, pos, x.dtype)
     out = mha(x, attn_mask=attn_mask)
     out_ref = _mha_ref_call(mha, x, attn_mask=ref_mask)
     assert out.dtype == dtype
@@ -323,13 +285,13 @@ def test_mha_qk_norm_matches_ref(impl, device, dtype, atol):
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("impl", IMPL)
 def test_gqa_qk_norm_matches_ref(impl, device, dtype, atol):
-    _skip_if_unsupported(impl, device)
+    skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, qk_norm=True, attn_implementation=impl).to(dtype)
     gqa.eval()
     x = torch.randn(2, 8, 64, dtype=dtype)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    attn_mask, ref_mask = _make_attn_mask("causal", impl, pos, x.dtype)
+    attn_mask, ref_mask = make_attn_mask("causal", impl, pos, x.dtype)
     out = gqa(x, attn_mask=attn_mask)
     out_ref = _gqa_ref_call(gqa, x, attn_mask=ref_mask)
     assert out.dtype == dtype
