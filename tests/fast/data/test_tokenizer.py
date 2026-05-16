@@ -7,6 +7,7 @@ from tokenizers import pre_tokenizers
 
 from src.data.tokenizer import (
     _build_tokenizer_from_prefix,
+    _stage1_pretokenizer,
     load_tokenizer,
     train_tokenizer,
 )
@@ -160,6 +161,19 @@ def test_prefix_at_full_merges_matches_original(tmp_path, text_iter):
     )
     s = "the quick brown fox"
     assert rebuilt.encode(s).ids == tok.encode(s).ids
+
+
+def test_stage1_pretokenizer_pretokenizes_without_error():
+    pt = _stage1_pretokenizer()
+    # Smoke test: pretokenizes a mixed string without raising
+    result = pt.pre_tokenize_str("hello world 123456 foo bar")
+    assert len(result) > 0
+    # Digit grouping should split runs of digits into groups of 3 from the right.
+    # "123456" should produce at least one split (i.e., not a single span).
+    pieces = [p[0] for p in result]
+    assert any("123" in p or "456" in p for p in pieces), (
+        f"expected digit-grouping to fire; got pieces={pieces}"
+    )
 
 
 def test_prefix_smaller_k_has_smaller_vocab(tmp_path, text_iter):

@@ -136,15 +136,20 @@ def _build_tokenizer_from_prefix(
     """
     assert 0 <= k <= len(merges), f"k={k} out of range [0, {len(merges)}]"
     kept_merges = merges[:k]
-    # Tokens produced by these merges = ordered concatenation results.
+    all_merge_results = {a + b for (a, b) in merges}
+    # Tokens that are *not* merge results across the full merge list = alphabet + specials.
+    base_tokens = {t for t in vocab if t not in all_merge_results}
+    # Tokens produced by the first k merges.
     merge_results = {a + b for (a, b) in kept_merges}
-    # Tokens that are *not* merge results = the alphabet + specials.
-    base_tokens = {t for t in vocab if t not in {a + b for (a, b) in merges}}
-    kept_tokens = base_tokens | merge_results
+    # Any token referenced as a merge component must also be present.
+    component_tokens = {part for (a, b) in kept_merges for part in (a, b)}
+    kept_tokens = base_tokens | merge_results | (component_tokens & vocab.keys())
     # Preserve original IDs for kept tokens, compact IDs are reassigned by BPE
     # constructor based on insertion order, so we sort by original ID.
+    for tok in kept_tokens:
+        assert tok in vocab, f"kept token {tok!r} not in vocab — invariant violated"
     kept_pairs = sorted(
-        ((tok, vocab[tok]) for tok in kept_tokens if tok in vocab),
+        ((tok, vocab[tok]) for tok in kept_tokens),
         key=lambda p: p[1],
     )
     new_vocab = {tok: i for i, (tok, _) in enumerate(kept_pairs)}
