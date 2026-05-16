@@ -76,8 +76,6 @@ jobs:
 
   lint:
     runs-on: [self-hosted]
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -87,18 +85,22 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - run: uv sync --extra dev --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - run: uv run ruff check src/ tests/
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - run: uv run ruff format --check src/ tests/
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
   test-data:
     needs: [prepare]
     if: needs.prepare.outputs.has_data == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 30
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -108,10 +110,13 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - run: uv sync --extra dev --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - name: Run data tests (CPU only)
         env:
           CUDA_VISIBLE_DEVICES: ""
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: uv run pytest tests/fast/data/ -v
 
   test-model:
@@ -119,8 +124,6 @@ jobs:
     if: needs.prepare.outputs.has_model == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 240
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -130,9 +133,13 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - run: uv sync --extra dev --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - name: Pick free GPU
         id: pick
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           idx=$(uv run python tests/ci/gpu_lock_exec.py)
           echo "index=$idx" >> "$GITHUB_OUTPUT"
@@ -141,6 +148,7 @@ jobs:
       - name: Run model tests
         env:
           CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run pytest \
             tests/fast/layers/ \
@@ -153,8 +161,6 @@ jobs:
     if: needs.prepare.outputs.has_training == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 240
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -164,9 +170,13 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - run: uv sync --extra dev --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - name: Pick free GPU
         id: pick
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           idx=$(uv run python tests/ci/gpu_lock_exec.py)
           echo "index=$idx" >> "$GITHUB_OUTPUT"
@@ -183,11 +193,14 @@ jobs:
 
       - name: Download tokenizer + dataset for e2e smoke tests
         if: steps.cache-hf-data.outputs.cache-hit != 'true'
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: uv run hf download gongyisheng/openwebtext-exp --repo-type dataset --local-dir .
 
       - name: Run training tests
         env:
           CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run pytest \
             tests/fast/training/ \
