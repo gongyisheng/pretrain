@@ -50,6 +50,8 @@ def evaluate(
         n_tokens += sum(len(e.ids) for e in encs)
     if n_tokens == 0:
         raise ValueError("no tokens produced; corpus may be empty")
+    if n_bytes == 0:
+        raise ValueError("no bytes produced; corpus may be empty")
     return {
         "n_docs": n_docs,
         "n_bytes": n_bytes,
