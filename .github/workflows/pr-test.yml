@@ -77,7 +77,7 @@ jobs:
   lint:
     runs-on: [self-hosted]
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venvs/${{ hashFiles('uv.lock', 'pyproject.toml') }}
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -98,7 +98,7 @@ jobs:
     runs-on: [self-hosted]
     timeout-minutes: 30
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venvs/${{ hashFiles('uv.lock', 'pyproject.toml') }}
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -120,7 +120,7 @@ jobs:
     runs-on: [self-hosted]
     timeout-minutes: 240
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venvs/${{ hashFiles('uv.lock', 'pyproject.toml') }}
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -154,7 +154,7 @@ jobs:
     runs-on: [self-hosted]
     timeout-minutes: 240
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venvs/${{ hashFiles('uv.lock', 'pyproject.toml') }}
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
