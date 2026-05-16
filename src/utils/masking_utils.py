@@ -47,7 +47,7 @@ def build_position_ids(x: torch.Tensor, eot_token_id: int, packing: bool = True)
     return torch.where(seen_eot, torch.full_like(pos, -1), pos)
 
 
-def build_attention_mask(
+def build_intra_doc_attention_mask(
     position_ids: torch.Tensor,
     device: torch.device,
     dtype: torch.dtype,
@@ -55,43 +55,57 @@ def build_attention_mask(
 ):
     """Build a per-document causal attention mask.
 
-    Both backends implement the same semantics: each token attends only to
-    earlier tokens within the same document. They differ only in
-    representation — which is what each backend's kernel consumes.
+    Each token attends only to earlier tokens within the same document.
+    The backends differ only in representation:
 
-    - ``attn_implementation="flex_attention"`` returns a sparse ``BlockMask``
-      that drives ``torch.nn.attention.flex_attention``'s fused Triton kernel.
-      ``device`` is read from ``position_ids``; ``dtype`` is unused.
-    - ``attn_implementation="sdpa"`` returns a dense additive tensor of shape
-      ``(B, 1, S, S)`` (``-inf`` for blocked positions, ``0`` otherwise)
-      compatible with ``F.scaled_dot_product_attention``.
+    - ``flex_attention``: sparse ``BlockMask`` driving flex_attention's fused
+      Triton kernel. ``dtype`` is unused.
+    - ``sdpa``: dense additive ``(B, 1, S, S)`` tensor (``-inf`` blocked,
+      ``0`` attended) compatible with ``F.scaled_dot_product_attention``.
 
     **Precondition:** ``position_ids`` must contain intra-document positions
     starting from 0 at each doc boundary — the values produced by
-    ``build_position_ids``. Passing absolute sequence positions silently
-    produces an incorrect mask.
-
-    Args:
-        position_ids: shape (B, S), dtype long.
-        device: target device for the dense mask.
-        dtype: dtype matching the query tensor (SDPA path only).
-        attn_implementation: ``"flex_attention"`` or ``"sdpa"``.
-
-    Returns:
-        ``BlockMask`` for flex_attention, or a ``(B, 1, S, S)`` dense
-        additive tensor for sdpa.
+    ``build_position_ids``.
     """
     if attn_implementation == "flex_attention":
-        return build_attention_mask_for_flex_attn(position_ids, device)
+        return _build_attention_mask_for_flex_attn(position_ids, device)
     if attn_implementation == "sdpa":
-        return build_attention_mask_for_sdpa(position_ids, device, dtype)
+        return _build_attention_mask_for_sdpa(position_ids, device, dtype)
     raise ValueError(
         f"unknown attn_implementation: {attn_implementation!r}; "
         "expected one of {'flex_attention', 'sdpa'}"
     )
 
 
-def build_attention_mask_for_sdpa(
+def build_causal_attention_mask(
+    B: int,
+    S: int,
+    device: torch.device,
+    attn_implementation: str,
+):
+    """Build a pure causal attention mask (no document separation).
+
+    - ``flex_attention``: ``BlockMask`` whose ``mask_mod`` only enforces
+      ``q_idx >= kv_idx``. Required because ``flex_attention`` has no
+      ``is_causal`` shortcut — passing ``block_mask=None`` would be
+      bidirectional attention.
+    - ``sdpa``: returns ``None``. ``_call_sdpa`` then dispatches to flash with
+      ``is_causal=True``, which is faster than building a dense triangular
+      mask tensor.
+    """
+    if attn_implementation == "sdpa":
+        return None
+    if attn_implementation == "flex_attention":
+        # arange-style positions → adj=0 → mask_mod collapses to (q_idx >= kv_idx).
+        causal_pos = torch.arange(S, device=device).unsqueeze(0).expand(B, S)
+        return _build_attention_mask_for_flex_attn(causal_pos, device)
+    raise ValueError(
+        f"unknown attn_implementation: {attn_implementation!r}; "
+        "expected one of {'flex_attention', 'sdpa'}"
+    )
+
+
+def _build_attention_mask_for_sdpa(
     position_ids: torch.Tensor,
     device: torch.device,
     dtype: torch.dtype,
@@ -112,7 +126,7 @@ def build_attention_mask_for_sdpa(
 _create_block_mask_compiled = torch.compile(create_block_mask)
 
 
-def build_attention_mask_for_flex_attn(position_ids: torch.Tensor, device: torch.device):
+def _build_attention_mask_for_flex_attn(position_ids: torch.Tensor, device: torch.device):
     # ``adj`` captured below is constant per document, so the JIT'd kernel
     # tests "same document" with a single int comparison.
     B, S = position_ids.shape

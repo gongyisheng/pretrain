@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.utils.masking_utils import build_attention_mask, build_position_ids
+from src.utils.masking_utils import build_intra_doc_attention_mask, build_position_ids
 
 
 EOT = 0  # token ID used as end-of-text in these tests
@@ -102,13 +102,13 @@ def test_build_position_ids_unpacked_all_real():
     assert pos.tolist() == [[0, 1, 2, 3, 4]]
 
 
-# ==================== build_attention_mask: sdpa (dense additive) ====================
+# ==================== build_intra_doc_attention_mask: sdpa (dense additive) ====================
 # These pin down the dense additive-mask representation produced for the SDPA
 # backend. Same semantics as the flex_attention path; that parity is checked
 # separately via flex_attention output equivalence.
 
 def _sdpa_mask(pos, dtype=torch.float32):
-    return build_attention_mask(pos, pos.device, dtype, attn_implementation="sdpa")
+    return build_intra_doc_attention_mask(pos, pos.device, dtype, attn_implementation="sdpa")
 
 
 def test_build_attention_mask_sdpa_shape():
@@ -182,11 +182,11 @@ def test_build_attention_mask_sdpa_batch_independent():
 def test_build_attention_mask_sdpa_dtype_preserved():
     pos = torch.tensor([[0, 1, 2]])
     for dtype in (torch.float32, torch.float16, torch.bfloat16):
-        mask = build_attention_mask(pos, pos.device, dtype, attn_implementation="sdpa")
+        mask = build_intra_doc_attention_mask(pos, pos.device, dtype, attn_implementation="sdpa")
         assert mask.dtype == dtype
 
 
-# ==================== build_attention_mask: flex_attention (BlockMask) ====================
+# ==================== build_intra_doc_attention_mask: flex_attention (BlockMask) ====================
 # FlexAttention requires CUDA. Verify the BlockMask drives flex_attention to
 # produce numerically the same output as SDPA with the dense mask, on the
 # same Q/K/V — that's the operational guarantee we care about.
@@ -204,10 +204,10 @@ def test_build_attention_mask_flex_matches_sdpa():
     k = torch.randn(B, H, S, D, device="cuda", dtype=torch.float32)
     v = torch.randn(B, H, S, D, device="cuda", dtype=torch.float32)
 
-    dense_mask = build_attention_mask(pos, pos.device, q.dtype, attn_implementation="sdpa")
+    dense_mask = build_intra_doc_attention_mask(pos, pos.device, q.dtype, attn_implementation="sdpa")
     out_sdpa = F.scaled_dot_product_attention(q, k, v, attn_mask=dense_mask, is_causal=False)
 
-    block_mask = build_attention_mask(pos, pos.device, q.dtype, attn_implementation="flex_attention")
+    block_mask = build_intra_doc_attention_mask(pos, pos.device, q.dtype, attn_implementation="flex_attention")
     out_flex = flex_attention(q, k, v, block_mask=block_mask)
 
     assert torch.allclose(out_sdpa, out_flex, atol=1e-5)
@@ -226,9 +226,9 @@ def test_build_attention_mask_flex_three_docs_matches_sdpa():
     k = torch.randn(B, H, S, D, device="cuda", dtype=torch.float32)
     v = torch.randn(B, H, S, D, device="cuda", dtype=torch.float32)
 
-    dense = build_attention_mask(pos, pos.device, q.dtype, attn_implementation="sdpa")
+    dense = build_intra_doc_attention_mask(pos, pos.device, q.dtype, attn_implementation="sdpa")
     out_sdpa = F.scaled_dot_product_attention(q, k, v, attn_mask=dense, is_causal=False)
-    flex_mask = build_attention_mask(pos, pos.device, q.dtype, attn_implementation="flex_attention")
+    flex_mask = build_intra_doc_attention_mask(pos, pos.device, q.dtype, attn_implementation="flex_attention")
     out_flex = flex_attention(q, k, v, block_mask=flex_mask)
 
     assert torch.allclose(out_sdpa, out_flex, atol=1e-5)
@@ -239,4 +239,4 @@ def test_build_attention_mask_flex_three_docs_matches_sdpa():
 def test_build_attention_mask_rejects_unknown_impl():
     pos = torch.tensor([[0, 1, 2]])
     with pytest.raises(ValueError, match="unknown attn_implementation"):
-        build_attention_mask(pos, pos.device, torch.float32, attn_implementation="nope")
+        build_intra_doc_attention_mask(pos, pos.device, torch.float32, attn_implementation="nope")

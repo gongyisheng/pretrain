@@ -17,7 +17,7 @@ from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
 from src.training.loss import next_token_targets, compute_loss
-from src.utils.masking_utils import build_attention_mask
+from src.utils.masking_utils import build_causal_attention_mask, build_intra_doc_attention_mask
 
 
 @torch.compile
@@ -192,6 +192,7 @@ class Trainer:
             train_iter = iter(self.train_loader)
             return next(train_iter), train_iter
 
+
     def train(self):
         cfg = self.config.training
         self.model.train()
@@ -268,12 +269,16 @@ class Trainer:
                     loss_mask = None if self.config.data.packing else (position_ids >= 0)
                     if self.config.training.intra_doc_masking:
                         mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                        attn_mask = build_attention_mask(
+                        attn_mask = build_intra_doc_attention_mask(
                             position_ids, self.device, mask_dtype,
                             attn_implementation=self.config.model.attn_implementation,
                         )
                     else:
-                        attn_mask = None
+                        B, S = position_ids.shape
+                        attn_mask = build_causal_attention_mask(
+                            B, S, self.device,
+                            attn_implementation=self.config.model.attn_implementation,
+                        )
                     logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
                     loss = compute_loss(logits, y, loss_mask, self._loss_fn)
                     if aux_loss is not None:
@@ -370,12 +375,16 @@ class Trainer:
                 loss_mask = None if self.config.data.packing else (position_ids >= 0)
                 if self.config.training.intra_doc_masking:
                     mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                    attn_mask = build_attention_mask(
+                    attn_mask = build_intra_doc_attention_mask(
                         position_ids, self.device, mask_dtype,
                         attn_implementation=self.config.model.attn_implementation,
                     )
                 else:
-                    attn_mask = None
+                    B, S = position_ids.shape
+                    attn_mask = build_causal_attention_mask(
+                        B, S, self.device,
+                        attn_implementation=self.config.model.attn_implementation,
+                    )
                 logits, aux_loss = self.model(x, position_ids=position_ids, attn_mask=attn_mask)
                 loss = compute_loss(logits, y, loss_mask, self._loss_fn)
             total_loss += loss.item()
@@ -408,7 +417,11 @@ class Trainer:
             idx_cond = idx[:, -self.config.max_seq_len:]
             B, S = idx_cond.shape
             pos_ids = torch.arange(S, device=self.device).unsqueeze(0).expand(B, S)
-            logits, _ = self.model(idx_cond, position_ids=pos_ids)
+            attn_mask = build_causal_attention_mask(
+                B, S, self.device,
+                attn_implementation=self.config.model.attn_implementation,
+            )
+            logits, _ = self.model(idx_cond, position_ids=pos_ids, attn_mask=attn_mask)
             logits = logits[:, -1, :]  # take last token's logits
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # sample from distribution

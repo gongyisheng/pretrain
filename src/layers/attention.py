@@ -31,11 +31,7 @@ def _call_sdpa(q, k, v, attn_mask):
 
 
 def _call_flex(q, k, v, attn_mask):
-    """FlexAttention path: ``attn_mask`` is a ``BlockMask``. ``None`` falls
-    back to SDPA's flash + ``is_causal`` so single-token generation works
-    without an explicit mask."""
-    if attn_mask is None:
-        return _sdpa(q, k, v, is_causal=True)
+    """FlexAttention path: ``attn_mask`` must be a ``BlockMask``."""
     return _flex_attn(q, k, v, block_mask=attn_mask)
 
 
@@ -52,7 +48,7 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         dropout_attn: float = 0.0,
         qk_norm: bool = False,
-        bias: bool = True,
+        bias: bool = False,
         attn_implementation: str = "flex_attention",
     ):
         super().__init__()
