@@ -53,11 +53,6 @@ class MultiHeadAttention(nn.Module):
     ):
         super().__init__()
         assert d_model % n_heads == 0
-        if attn_implementation not in _ATTN_IMPL:
-            raise ValueError(
-                f"unknown attn_implementation: {attn_implementation!r}; "
-                f"expected one of {sorted(_ATTN_IMPL)}"
-            )
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.qk_norm = qk_norm
@@ -108,11 +103,6 @@ class GroupedQueryAttention(nn.Module):
         super().__init__()
         assert d_model % n_heads == 0
         assert n_heads % n_kv_heads == 0
-        if attn_implementation not in _ATTN_IMPL:
-            raise ValueError(
-                f"unknown attn_implementation: {attn_implementation!r}; "
-                f"expected one of {sorted(_ATTN_IMPL)}"
-            )
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.n_groups = n_heads // n_kv_heads

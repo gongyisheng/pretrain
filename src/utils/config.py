@@ -33,6 +33,8 @@ class ModelConfig:
     attn_implementation: str = "flex_attention"  # "flex_attention" | "sdpa"
 
 
+    _ATTN_IMPLEMENTATIONS = ("flex_attention", "sdpa")
+
     def __post_init__(self):
         if self.intermediate_size == 0:
             self.intermediate_size = 4 * self.d_model
@@ -40,6 +42,11 @@ class ModelConfig:
             self.n_kv_heads = self.n_heads
         if self.moe_intermediate_size == 0:
             self.moe_intermediate_size = self.intermediate_size
+        if self.attn_implementation not in self._ATTN_IMPLEMENTATIONS:
+            raise ValueError(
+                f"unknown attn_implementation: {self.attn_implementation!r}; "
+                f"expected one of {self._ATTN_IMPLEMENTATIONS}"
+            )
 
 
 @dataclass
