@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from tokenizers import pre_tokenizers
+from tokenizers import Tokenizer, pre_tokenizers
 
 from src.data.tokenizer import (
     _build_tokenizer_from_prefix,
@@ -199,3 +199,37 @@ def test_prefix_smaller_k_has_smaller_vocab(tmp_path, text_iter):
     )
     assert half.get_vocab_size() < len(vocab)
     assert half.get_vocab_size() == len(vocab) - (len(merges) - half_k)
+
+
+# ---- SuperBPE stage 1 (Task 5) ----
+
+
+def test_superbpe_stage1_saves_intermediate(tmp_path, text_iter):
+    save = tmp_path / "sbpe"
+    # Stage 2 is still NotImplementedError in this task, so wrap the call.
+    with pytest.raises(NotImplementedError):
+        train_tokenizer(
+            dataset_iter=text_iter(),
+            vocab_size=400,
+            save_path=str(save),
+            method="superbpe",
+            transition_size=399,
+        )
+    assert (save / "stage1.json").exists()
+
+
+def test_superbpe_stage1_vocab_size(tmp_path, text_iter):
+    save = tmp_path / "sbpe"
+    with pytest.raises(NotImplementedError):
+        train_tokenizer(
+            dataset_iter=text_iter(),
+            vocab_size=400,
+            save_path=str(save),
+            method="superbpe",
+            transition_size=399,
+        )
+    stage1 = Tokenizer.from_file(str(save / "stage1.json"))
+    # Stage 1 trains to transition_size (~400, may be slightly below due to
+    # corpus size; HF stops when no more merges available).
+    assert stage1.get_vocab_size() <= 400
+    assert stage1.get_vocab_size() >= 256  # at least byte alphabet

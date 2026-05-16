@@ -171,6 +171,28 @@ def _train_superbpe_tokenizer(
     max_superword_words: int,
     special_tokens: Sequence[str],
 ) -> Tokenizer:
-    raise NotImplementedError(
-        "SuperBPE trainer: stage 1 lands in Task 5, stage 2 in Task 6"
+    os.makedirs(save_path, exist_ok=True)
+    # We must materialize the iterator into a list — stage 1 and stage 2 each
+    # consume it once, and the held-out / re-encoding paths in later tasks need
+    # multiple passes. For 100 MB at ~3B/char × N docs this is fine on the
+    # workstation. The caller is responsible for sizing the input.
+    texts = list(dataset_iter)
+    if not texts:
+        raise ValueError("dataset_iter produced no text")
+
+    # ---- Stage 1: HF BPE with whitespace + ByteLevel pretokenizer ----
+    stage1 = Tokenizer(models.BPE())
+    stage1.pre_tokenizer = _stage1_pretokenizer()
+    stage1.decoder = decoders.ByteLevel()
+    stage1_trainer = trainers.BpeTrainer(
+        vocab_size=transition_size,
+        special_tokens=list(special_tokens),
+        show_progress=True,
+        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
     )
+    stage1.train_from_iterator(iter(texts), trainer=stage1_trainer)
+    stage1.save(os.path.join(save_path, "stage1.json"))
+    print(f"SuperBPE stage 1 done: vocab_size={stage1.get_vocab_size()}")
+
+    # ---- Stage 2 lands in Task 6 ----
+    raise NotImplementedError("SuperBPE stage 2 lands in Task 6")
