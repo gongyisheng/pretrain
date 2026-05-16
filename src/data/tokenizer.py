@@ -24,6 +24,10 @@ def train_tokenizer(
     transition_size: Optional[int] = None,
     max_superword_words: int = 4,
     special_tokens: Sequence[str] = ("<|endoftext|>",),
+    wandb_enabled: bool = False,
+    wandb_project: str = "superbpe",
+    wandb_eval_every: int = 5000,
+    eval_num_docs: int = 1000,
 ) -> Tokenizer:
     """Train a tokenizer and save it under save_path/tokenizer.json.
 
@@ -38,6 +42,12 @@ def train_tokenizer(
         max_superword_words: when method="superbpe", cap on superword length
             measured in stage-1 word units. Ignored when method="bpe".
         special_tokens: tokens to add with reserved IDs at the start of the vocab.
+        wandb_enabled: if True, log an efficiency curve (vocab_size vs bytes/token)
+            to W&B. Only used when method="superbpe".
+        wandb_project: W&B project name for efficiency curve logging.
+        wandb_eval_every: interval (in number of merges) at which to log curve
+            points. Stage-1 uses merge-prefix count; stage-2 uses accepted merges.
+        eval_num_docs: number of documents to hold out for efficiency evaluation.
 
     Returns:
         The trained `tokenizers.Tokenizer` instance.
@@ -57,6 +67,10 @@ def train_tokenizer(
             save_path,
             max_superword_words,
             special_tokens,
+            wandb_enabled=wandb_enabled,
+            wandb_project=wandb_project,
+            wandb_eval_every=wandb_eval_every,
+            eval_num_docs=eval_num_docs,
         )
     raise ValueError(f"unknown method: {method!r}; expected 'bpe' or 'superbpe'")
 
@@ -221,6 +235,11 @@ def _train_superbpe_tokenizer(
     save_path: str,
     max_superword_words: int,
     special_tokens: Sequence[str],
+    *,
+    wandb_enabled: bool = False,
+    wandb_project: str = "superbpe",
+    wandb_eval_every: int = 5000,
+    eval_num_docs: int = 1000,
 ) -> Tokenizer:
     os.makedirs(save_path, exist_ok=True)
     # We must materialize the iterator into a list — stage 1 and stage 2 each
@@ -231,6 +250,41 @@ def _train_superbpe_tokenizer(
     if not texts:
         raise ValueError("dataset_iter produced no text")
     n_docs = len(texts)
+
+    # ---- Held-out split for W&B efficiency evaluation ----
+    if eval_num_docs > 0 and eval_num_docs < len(texts):
+        held_out = texts[:eval_num_docs]
+        texts = texts[eval_num_docs:]
+    else:
+        held_out = texts[: max(1, min(eval_num_docs, len(texts)))]
+
+    # ---- W&B init ----
+    if wandb_enabled:
+        import wandb
+
+        wandb.init(
+            project=wandb_project,
+            name=f"superbpe_T{vocab_size}_t{transition_size}",
+            config={
+                "T": vocab_size,
+                "t": transition_size,
+                "method": "superbpe",
+                "max_superword_words": max_superword_words,
+                "eval_num_docs": len(held_out),
+            },
+        )
+        wandb.define_metric("vocab_size")
+        wandb.define_metric("bytes_per_token", step_metric="vocab_size")
+
+    # ---- Curve logging helper (closes over wandb_enabled and held_out) ----
+    def _log_point(tok: "Tokenizer", v: int) -> None:
+        if not wandb_enabled:
+            return
+        import wandb
+        from src.eval.tokenizer import _bytes_per_token
+
+        bpt = _bytes_per_token(tok, held_out)
+        wandb.log({"vocab_size": v, "bytes_per_token": bpt})
 
     # ---- Stage 1: HF BPE with whitespace + ByteLevel pretokenizer ----
     t0 = time.perf_counter()
@@ -251,6 +305,7 @@ def _train_superbpe_tokenizer(
     )
 
     # ---- Stage 2 setup ----
+    # (stage1.json is read here; post-hoc stage-1 curve points logged below)
     t0 = time.perf_counter()
     with open(os.path.join(save_path, "stage1.json")) as f:
         stage1_data = json.loads(f.read())
@@ -265,6 +320,20 @@ def _train_superbpe_tokenizer(
         i: tok.count("Ġ") + (0 if tok.startswith("Ġ") else 1)
         for i, tok in inv_vocab.items()
     }
+
+    # ---- Post-hoc stage-1 curve points ----
+    if wandb_enabled:
+        base_count = len(s1_vocab) - len(s1_merges)  # alphabet + specials
+        for k in range(wandb_eval_every, len(s1_merges) + 1, wandb_eval_every):
+            partial = _build_tokenizer_from_prefix(
+                s1_vocab,
+                s1_merges,
+                k,
+                pretok_factory=_stage1_pretokenizer,
+            )
+            _log_point(partial, base_count + k)
+        # Forced point at exactly stage-1 final vocab.
+        _log_point(stage1, stage1.get_vocab_size())
 
     # Re-encode the entire corpus with stage 1.
     docs: list[list[int]] = [
@@ -312,6 +381,19 @@ def _train_superbpe_tokenizer(
         _apply_merge_inplace(docs, pair_counts, a, b, new_id)
         n_accepted += 1
 
+        # ---- In-loop stage-2 curve point ----
+        cur_size = len(vocab)
+        if wandb_enabled and (
+            (cur_size - stage1.get_vocab_size()) % wandb_eval_every == 0
+            or cur_size == vocab_size
+        ):
+            tmp = Tokenizer(models.BPE(vocab=vocab, merges=merges))
+            tmp.pre_tokenizer = pre_tokenizers.ByteLevel(
+                add_prefix_space=False, use_regex=False
+            )
+            tmp.decoder = decoders.ByteLevel()
+            _log_point(tmp, cur_size)
+
     stage2_seconds = time.perf_counter() - t0
     print(
         f"SuperBPE stage 2 done: vocab_size={len(vocab)} "
@@ -344,4 +426,17 @@ def _train_superbpe_tokenizer(
     with open(os.path.join(save_path, "training_meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
     print(f"SuperBPE tokenizer saved to {save_path}/")
+
+    # ---- W&B finalize ----
+    if wandb_enabled:
+        # Final point in case the loop terminated early before hitting an interval.
+        if (
+            len(vocab) != vocab_size
+            or (len(vocab) - stage1.get_vocab_size()) % wandb_eval_every != 0
+        ):
+            _log_point(final, len(vocab))
+        import wandb
+
+        wandb.finish()
+
     return final

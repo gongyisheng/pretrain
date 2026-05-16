@@ -376,3 +376,63 @@ def test_superbpe_writes_training_meta(tmp_path, text_iter):
     assert meta["method"] == "superbpe"
     assert meta["max_superword_words"] == 4
     assert meta["n_docs"] == len(SAMPLE_TEXTS)
+
+
+# ---- W&B curve logging (Task 9) ----
+
+
+def test_superbpe_logs_curve_points(tmp_path, text_iter, monkeypatch):
+    """Curve logging emits expected points without contacting W&B servers."""
+    monkeypatch.setenv("WANDB_MODE", "disabled")
+
+    logged: list[dict] = []
+    import wandb
+
+    real_init = wandb.init
+
+    # real_log is set after init so we get the run's actual (no-op) log.
+    real_log_holder: list = []
+
+    def capture(d, *args, **kwargs):
+        logged.append(dict(d))
+        if real_log_holder:
+            return real_log_holder[0](d, *args, **kwargs)
+
+    def capture_init(*args, **kwargs):
+        run = real_init(*args, **kwargs)
+        # wandb.init() replaces wandb.log — capture it, then restore our wrapper.
+        real_log_holder.append(wandb.log)
+        wandb.log = capture
+        return run
+
+    monkeypatch.setattr(wandb, "log", capture)
+    monkeypatch.setattr(wandb, "init", capture_init)
+
+    save = tmp_path / "sbpe_wandb"
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=400,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=300,
+        max_superword_words=99,
+        wandb_enabled=True,
+        wandb_project="test",
+        wandb_eval_every=20,
+        eval_num_docs=10,
+    )
+    # Expect at least one point in stage 1 region and one in stage 2 region.
+    vocabs = [d["vocab_size"] for d in logged if "vocab_size" in d]
+    assert any(v < 300 for v in vocabs), f"no stage-1 curve points: {vocabs}"
+    assert any(v > 300 for v in vocabs), f"no stage-2 curve points: {vocabs}"
+    # Forced point at transition_size present (within a few units due to
+    # corpus-driven actual stage-1 vocab size).
+    assert any(abs(v - 300) <= 5 for v in vocabs), (
+        f"no transition point near 300: {vocabs}"
+    )
+    # Final point present.
+    assert any(v == 400 for v in vocabs), f"no final point at 400: {vocabs}"
+    # Every logged point has bytes_per_token.
+    for d in logged:
+        if "vocab_size" in d:
+            assert "bytes_per_token" in d, f"missing bytes_per_token in {d}"
