@@ -261,6 +261,8 @@ def test_superbpe_final_vocab_size(tmp_path, text_iter):
         max_superword_words=99,
     )
     tok = load_tokenizer(str(save))
+    # Small corpus has enough unique pairs to reach exactly T=400.
+    # If SAMPLE_TEXTS is reduced in diversity, this may need to become <= 400.
     assert tok.get_vocab_size() == 400
 
 

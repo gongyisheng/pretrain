@@ -7,7 +7,9 @@ Two methods are supported:
 All trainers emit a HuggingFace-compatible tokenizer.json under save_path/.
 """
 
+import json
 import os
+from collections import Counter
 from typing import Iterable, Optional, Sequence
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
@@ -243,9 +245,8 @@ def _train_superbpe_tokenizer(
     print(f"SuperBPE stage 1 done: vocab_size={stage1.get_vocab_size()}")
 
     # ---- Stage 2 setup ----
-    import json
-
-    stage1_data = json.loads(open(os.path.join(save_path, "stage1.json")).read())
+    with open(os.path.join(save_path, "stage1.json")) as f:
+        stage1_data = json.loads(f.read())
     s1_vocab: dict = dict(stage1_data["model"]["vocab"])  # str -> int
     s1_merges: list = [
         tuple(m.split(" ", 1)) if isinstance(m, str) else tuple(m)
@@ -259,8 +260,6 @@ def _train_superbpe_tokenizer(
     ]
 
     # Pair counts across each document, no whitespace boundary.
-    from collections import Counter
-
     pair_counts: Counter = Counter()
     for ids in docs:
         for a, b in zip(ids[:-1], ids[1:]):
