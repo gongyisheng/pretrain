@@ -207,7 +207,9 @@ def test_prefix_smaller_k_has_smaller_vocab(tmp_path, text_iter):
 def test_superbpe_stage1_saves_intermediate(tmp_path, text_iter):
     save = tmp_path / "sbpe"
     # Stage 2 is still NotImplementedError in this task, so wrap the call.
+    # transition_size=399 keeps stage 2's role minimal — we only verify stage 1 here.
     with pytest.raises(NotImplementedError):
+        # TODO(task-6): remove this pytest.raises wrapper when stage 2 is implemented
         train_tokenizer(
             dataset_iter=text_iter(),
             vocab_size=400,
@@ -220,7 +222,9 @@ def test_superbpe_stage1_saves_intermediate(tmp_path, text_iter):
 
 def test_superbpe_stage1_vocab_size(tmp_path, text_iter):
     save = tmp_path / "sbpe"
+    # transition_size=399 keeps stage 2's role minimal — we only verify stage 1 here.
     with pytest.raises(NotImplementedError):
+        # TODO(task-6): remove this pytest.raises wrapper when stage 2 is implemented
         train_tokenizer(
             dataset_iter=text_iter(),
             vocab_size=400,
