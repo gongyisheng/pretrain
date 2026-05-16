@@ -85,7 +85,22 @@ def test_unknown_method_raises(tmp_path, text_iter):
         )
 
 
-@pytest.mark.parametrize("ts", [None, 0, -1, 500, 600])
+def test_bpe_vocab_size_respected(tmp_path, text_iter):
+    save = tmp_path / "bpe_500"
+    tok = train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=500,
+        save_path=str(save),
+        method="bpe",
+    )
+    # Trained vocab may equal the target (when corpus has enough merges) or
+    # fall slightly below (when corpus is small). Asserting <= 500 catches an
+    # overshoot regression while tolerating natural undershoots.
+    assert tok.get_vocab_size() <= 500
+    assert tok.get_vocab_size() >= 1  # sanity: non-empty vocab
+
+
+@pytest.mark.parametrize("ts", [None, 0, -1, 600])
 def test_superbpe_invalid_transition_size_raises(tmp_path, text_iter, ts):
     with pytest.raises(ValueError):
         train_tokenizer(
@@ -297,6 +312,23 @@ def test_superbpe_decode_roundtrip(tmp_path, text_iter):
     for s in ["the quick brown fox", "she sells seashells", "by the way it works"]:
         ids = tok.encode(s).ids
         assert tok.decode(ids) == s, f"roundtrip failed for: {s!r}"
+
+
+def test_superbpe_load_roundtrip(tmp_path, text_iter):
+    save = tmp_path / "sbpe_400_t200"
+    tok_train = train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=400,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=200,
+        max_superword_words=99,
+    )
+    tok_load = load_tokenizer(str(save))
+    for s in ["the quick brown fox", "she sells seashells", "by the way"]:
+        assert tok_load.encode(s).ids == tok_train.encode(s).ids, (
+            f"load roundtrip mismatch for: {s!r}"
+        )
 
 
 # ---- SuperBPE guards (Task 7) ----

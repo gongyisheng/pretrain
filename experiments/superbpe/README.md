@@ -8,7 +8,7 @@ A two-stage BPE curriculum — subwords until vocab=t, then superwords (no white
 
 ## Tokenizer Training
 
-All tokenizers are trained on the same 100k-sample slice of OpenWebText. The `bpe_200k` baseline uses the existing BPE trainer (ByteLevel-only pretokenizer, no regex Split), which makes it directly comparable to the existing `tokenizers/custom_bpe_*` artifacts. Note that this means the BPE baseline vs. SuperBPE comparison confounds two changes (regex Split pretokenizer + two-stage curriculum) — see docs/superpowers/specs/2026-05-16-superbpe-design.md Risk #6.
+All tokenizers are trained on the same 100k-sample slice of OpenWebText. The `bpe_200k` baseline uses the SuperBPE trainer with `t == T` so stage 2 is a no-op — this gives a BPE baseline whose stage-1 pretokenizer (regex Split + ByteLevel) matches SuperBPE, eliminating the confound between pretokenizer choice and the two-stage curriculum.
 
 ```bash
 # Step 1: train all 4 tokenizers (sequential; each takes minutes to hours)
@@ -24,7 +24,7 @@ W&B logs the efficiency curve (vocab_size on x-axis, bytes_per_token on y-axis) 
 
 | Config | T | t | method | max_superword_words | Notes |
 |---|---|---|---|---|---|
-| `bpe_200k` | 200000 | — | bpe | — | Baseline using the existing BPE trainer. |
+| `bpe_200k` | 200000 | 200000 | superbpe | 4 | Baseline; stage 2 is a no-op (t==T). Stage-1 pretokenizer matches SuperBPE for a fair head-to-head. |
 | `superbpe_200k_t80k` | 200000 | 80000 | superbpe | 4 | Paper's "best encoding efficiency" config. |
 | `superbpe_200k_t160k` | 200000 | 160000 | superbpe | 4 | Mid transition. |
 | `superbpe_200k_t180k` | 200000 | 180000 | superbpe | 4 | Paper's "best downstream LM" config. |

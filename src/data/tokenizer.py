@@ -55,9 +55,9 @@ def train_tokenizer(
     if method == "bpe":
         return _train_bpe_tokenizer(dataset_iter, vocab_size, save_path, special_tokens)
     if method == "superbpe":
-        if transition_size is None or not (0 < transition_size < vocab_size):
+        if transition_size is None or not (0 < transition_size <= vocab_size):
             raise ValueError(
-                f"method='superbpe' requires 0 < transition_size < vocab_size; "
+                f"method='superbpe' requires 0 < transition_size <= vocab_size; "
                 f"got transition_size={transition_size}, vocab_size={vocab_size}"
             )
         return _train_superbpe_tokenizer(

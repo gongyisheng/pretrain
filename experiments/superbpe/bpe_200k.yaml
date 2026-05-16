@@ -3,4 +3,11 @@ model:
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/experiments/bpe_200k
-  tokenizer_method: bpe
+  # Use the SuperBPE trainer with t == T so stage 2 is a no-op. This routes
+  # through _train_superbpe_tokenizer's stage 1 (regex + ByteLevel pretok),
+  # giving us a BPE baseline whose stage-1 pretokenizer matches SuperBPE —
+  # so the head-to-head comparison isolates the curriculum from pretokenizer
+  # differences (spec Risk #6).
+  tokenizer_method: superbpe
+  tokenizer_transition_size: 200000
+  tokenizer_max_superword_words: 4
