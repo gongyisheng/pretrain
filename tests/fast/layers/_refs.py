@@ -1,6 +1,7 @@
 """
 Eager reference implementations for layer-level numerical parity tests.
 """
+
 import math
 
 import torch
@@ -26,11 +27,7 @@ COMPOUND_DTYPES = [
 ]
 
 
-def rmsnorm_ref(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float
-) -> torch.Tensor:
+def rmsnorm_ref(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """y = weight * x / sqrt(mean(x^2) + eps), reduction in fp32."""
     dtype = x.dtype
     xf = x.float()
@@ -60,6 +57,7 @@ def layernorm_ref(
 
 # --- Ungated (unary): x → act(x) ---
 
+
 def relu_ref(x: torch.Tensor) -> torch.Tensor:
     """relu(x) = max(x, 0)."""
     return torch.where(x > 0, x, torch.zeros_like(x))
@@ -77,6 +75,7 @@ def silu_ref(x: torch.Tensor) -> torch.Tensor:
 
 # --- Gated (GLU family): (gate, up) → act(gate) * up ---
 
+
 def relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return relu_ref(gate) * up
 
@@ -90,12 +89,19 @@ def silu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 
 UNGATED_ACTIVATIONS_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref}
-GATED_ACTIVATIONS_REFS = {"relu": relu_glu_ref, "gelu": gelu_glu_ref, "silu": silu_glu_ref}
+GATED_ACTIVATIONS_REFS = {
+    "relu": relu_glu_ref,
+    "gelu": gelu_glu_ref,
+    "silu": silu_glu_ref,
+}
 
 
 # ---------------------------- Position Embedding ----------------------------
 
-def learned_pos_emb_ref(x: torch.Tensor, embedding_weight: torch.Tensor) -> torch.Tensor:
+
+def learned_pos_emb_ref(
+    x: torch.Tensor, embedding_weight: torch.Tensor
+) -> torch.Tensor:
     """Eager absolute positional embedding: x + W[:S] (broadcast over batch).
 
     x: (B, S, D); embedding_weight: (max_seq_len, D).
@@ -116,7 +122,9 @@ def rope_cos_sin_ref(
     rotate_half pairs the right components.
     Returns (cos, sin), each shape (max_seq_len, d_head), fp32.
     """
-    inv_freq = 1.0 / (theta ** (torch.arange(0, d_head, 2, dtype=torch.float32) / d_head))
+    inv_freq = 1.0 / (
+        theta ** (torch.arange(0, d_head, 2, dtype=torch.float32) / d_head)
+    )
     positions = torch.arange(max_seq_len, dtype=torch.float32)
     angles = positions[:, None] * inv_freq[None, :]
     angles = torch.cat([angles, angles], dim=-1)
@@ -141,6 +149,7 @@ def rope_ref(
 
 # ---------------------------- Attention ----------------------------
 
+
 def sdpa_ref(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -159,14 +168,18 @@ def sdpa_ref(
     dtype = q.dtype
     if scale is None:
         scale = 1.0 / math.sqrt(q.shape[-1])
-    logits = (q.float() @ k.float().mT) * scale     # fp32 GEMM, no input-dtype logit quantization
+    logits = (
+        q.float() @ k.float().mT
+    ) * scale  # fp32 GEMM, no input-dtype logit quantization
     if is_causal:
         Sq, Sk = q.shape[-2], k.shape[-2]
         causal = torch.ones(Sq, Sk, dtype=torch.bool, device=q.device).tril()
         logits = logits.masked_fill(~causal, float("-inf"))
     if attn_mask is not None:
         logits = logits + attn_mask.float()
-    attn = logits.softmax(dim=-1).to(dtype)         # softmax in fp32, cast back before second GEMM
+    attn = logits.softmax(dim=-1).to(
+        dtype
+    )  # softmax in fp32, cast back before second GEMM
     return attn @ v
 
 
@@ -234,6 +247,7 @@ def gqa_ref(
 
 # ---------------------------- FFN ----------------------------
 
+
 def ffn_ref(
     x: torch.Tensor,
     down_proj: nn.Linear,
@@ -248,7 +262,9 @@ def ffn_ref(
     `activation` is a key in {UN,}GATED_ACTIVATIONS_REFS ("relu"/"gelu"/"silu").
     """
     if (up_proj is None) == (gate_up_proj is None):
-        raise ValueError("Exactly one of up_proj (ungated) or gate_up_proj (gated) must be given")
+        raise ValueError(
+            "Exactly one of up_proj (ungated) or gate_up_proj (gated) must be given"
+        )
     if gate_up_proj is not None:
         gate, up = gate_up_proj(x).chunk(2, dim=-1)
         hidden = GATED_ACTIVATIONS_REFS[activation](gate, up)
@@ -258,6 +274,7 @@ def ffn_ref(
 
 
 # ---------------------------- MoE ----------------------------
+
 
 def moe_router_ref(
     x: torch.Tensor,
@@ -297,7 +314,9 @@ def sparse_moe_block_ref(
     Returns (output (B,S,D), aux_loss scalar) — Switch Transformer load-balancing loss.
     """
     if (expert_gate_up is None) == (expert_up is None):
-        raise ValueError("Exactly one of expert_gate_up (gated) or expert_up (ungated) must be given")
+        raise ValueError(
+            "Exactly one of expert_gate_up (gated) or expert_up (ungated) must be given"
+        )
     B, S, D = x.shape
     T = B * S
     E = gate_weight.shape[0]
@@ -313,13 +332,13 @@ def sparse_moe_block_ref(
             e = top_indices[t, slot].item()
             w = top_weights[t, slot]
             if expert_gate_up is not None:
-                gate_up = x_flat[t] @ expert_gate_up[e].T              # (2*I,)
+                gate_up = x_flat[t] @ expert_gate_up[e].T  # (2*I,)
                 g, u = gate_up.chunk(2, dim=-1)
-                hidden = GATED_ACTIVATIONS_REFS[activation](g, u)       # (I,)
+                hidden = GATED_ACTIVATIONS_REFS[activation](g, u)  # (I,)
             else:
-                up = x_flat[t] @ expert_up[e].T                         # (I,)
+                up = x_flat[t] @ expert_up[e].T  # (I,)
                 hidden = UNGATED_ACTIVATIONS_REFS[activation](up)
-            out_t = hidden @ expert_down[e].T                            # (D,)
+            out_t = hidden @ expert_down[e].T  # (D,)
             output[t] = output[t] + w * out_t
 
     # Switch Transformer aux loss: E * sum_i (f_i * P_i), f_i = #tokens routed to i / T.

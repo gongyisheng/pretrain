@@ -1,4 +1,5 @@
 """Dry-run training tests for GPT-2 and Qwen3 using real configs and data."""
+
 import sys
 
 sys.path.insert(0, ".")

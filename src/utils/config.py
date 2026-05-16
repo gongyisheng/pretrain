@@ -14,24 +14,35 @@ class ModelConfig:
     dropout_embd: float = 0.0
     dropout_attn: float = 0.0
     dropout_ffn: float = 0.0
-    n_kv_heads: int = 0           # 0 means same as n_heads (MHA); set >0 for GQA
-    rope_theta: float = 10000.0   # RoPE base frequency; only used by qwen3, L_max ~62800
-    qk_norm: bool = False         # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
+    n_kv_heads: int = 0  # 0 means same as n_heads (MHA); set >0 for GQA
+    rope_theta: float = 10000.0  # RoPE base frequency; only used by qwen3, L_max ~62800
+    qk_norm: bool = False  # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
     tie_word_embeddings: bool = True  # tie lm_head.weight to token_emb.weight
-    attn_bias: bool = False           # bias in attention Q/K/V/O projections
-    mlp_bias: bool = False            # bias in MLP layers (up_proj/down_proj/gate_proj)
-    mlp_activation: str = "silu"      # "relu" | "gelu" | "silu" (modern default; GPT-2 sets "gelu")
-    mlp_gated: bool = True            # True = GLU-family FFN. silu+gated=SwiGLU; GPT-2 sets False
-    lm_head_bias: bool = False        # bias in lm_head output projection
-    moe_n_experts: int = 0              # 0 = dense; N > 0 = MoE with N total experts
-    moe_n_experts_per_token: int = 2    # top-k experts activated per token
-    moe_intermediate_size: int = 0               # per-expert FFN hidden dim; 0 = same as intermediate_size
-    moe_aux_loss_coef: float = 0.01 # Switch Transformer load-balancing loss coefficient
-    moe_expert_capacity_factor: Optional[float] = None  # None = dynamic (no dropping); float = fixed capacity, enables torch.compile
-    residual_cls: str = "standard"  # residual strategy name; see src.layers.residual.RESIDUAL_REGISTRY
-    residual_kwargs: dict = field(default_factory=dict)  # kwargs passed to the residual class constructor
+    attn_bias: bool = False  # bias in attention Q/K/V/O projections
+    mlp_bias: bool = False  # bias in MLP layers (up_proj/down_proj/gate_proj)
+    mlp_activation: str = (
+        "silu"  # "relu" | "gelu" | "silu" (modern default; GPT-2 sets "gelu")
+    )
+    mlp_gated: bool = True  # True = GLU-family FFN. silu+gated=SwiGLU; GPT-2 sets False
+    lm_head_bias: bool = False  # bias in lm_head output projection
+    moe_n_experts: int = 0  # 0 = dense; N > 0 = MoE with N total experts
+    moe_n_experts_per_token: int = 2  # top-k experts activated per token
+    moe_intermediate_size: int = (
+        0  # per-expert FFN hidden dim; 0 = same as intermediate_size
+    )
+    moe_aux_loss_coef: float = (
+        0.01  # Switch Transformer load-balancing loss coefficient
+    )
+    moe_expert_capacity_factor: Optional[float] = (
+        None  # None = dynamic (no dropping); float = fixed capacity, enables torch.compile
+    )
+    residual_cls: str = (
+        "standard"  # residual strategy name; see src.layers.residual.RESIDUAL_REGISTRY
+    )
+    residual_kwargs: dict = field(
+        default_factory=dict
+    )  # kwargs passed to the residual class constructor
     attn_implementation: str = "flex_attention"  # "flex_attention" | "sdpa"
-
 
     _ATTN_IMPLEMENTATIONS = ("flex_attention", "sdpa")
 
@@ -80,7 +91,9 @@ class TrainingConfig:
 class OptimizerConfig:
     name: str = "adamw"
     lr: float = 6e-4
-    lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})  # per-pattern LR multipliers. Keys are regexes matched against parameter names via re.search; first key (in insertion order) to match wins. Effective LR for a matched param = lr * lr_mult[key]. In tied mode `lm_head.weight is token_emb.weight`, so the param is enumerated only under `token_emb.weight` and an `lm_head` entry is a no-op.
+    lr_mult: Dict[str, float] = field(
+        default_factory=lambda: {"lm_head": 1.0}
+    )  # per-pattern LR multipliers. Keys are regexes matched against parameter names via re.search; first key (in insertion order) to match wins. Effective LR for a matched param = lr * lr_mult[key]. In tied mode `lm_head.weight is token_emb.weight`, so the param is enumerated only under `token_emb.weight` and an `lm_head` entry is a no-op.
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
@@ -105,8 +118,10 @@ class LoggingConfig:
 @dataclass
 class SpikeConfig:
     enabled: bool = False
-    grad_norm_threshold: float = 0.0    # save a full checkpoint when grad_norm exceeds this
-    max_checkpoints: int = 10           # keep only top-N spikes by grad norm
+    grad_norm_threshold: float = (
+        0.0  # save a full checkpoint when grad_norm exceeds this
+    )
+    max_checkpoints: int = 10  # keep only top-N spikes by grad norm
 
 
 @dataclass
@@ -138,7 +153,9 @@ def _apply_overrides(config: TrainConfig, overrides: List[str]):
         for part in parts[:-1]:
             obj = obj[part] if isinstance(obj, dict) else getattr(obj, part)
         field_name = parts[-1]
-        current = obj.get(field_name) if isinstance(obj, dict) else getattr(obj, field_name)
+        current = (
+            obj.get(field_name) if isinstance(obj, dict) else getattr(obj, field_name)
+        )
         if isinstance(current, bool):
             value = value.lower() in ("true", "1", "yes")
         elif isinstance(current, int):
@@ -167,17 +184,18 @@ def _coerce_types(dc_class, raw_dict: dict) -> dict:
     This converts them to the correct type based on the dataclass annotation.
     """
     import dataclasses
+
     field_types = {f.name: f.type for f in dataclasses.fields(dc_class)}
     coerced = {}
     for k, v in raw_dict.items():
         if k not in field_types:
             continue  # silently ignore unknown/deprecated YAML fields
         expected = field_types.get(k)
-        if expected == float and isinstance(v, str):
+        if expected is float and isinstance(v, str):
             v = float(v)
-        elif expected == int and isinstance(v, str):
+        elif expected is int and isinstance(v, str):
             v = int(v)
-        elif expected == bool and isinstance(v, str):
+        elif expected is bool and isinstance(v, str):
             v = v.lower() in ("true", "1", "yes")
         coerced[k] = v
     return coerced
@@ -191,12 +209,20 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         max_seq_len=raw.get("max_seq_len", 1024),
         model=ModelConfig(**_coerce_types(ModelConfig, raw.get("model", {}))),
         data=DataConfig(**_coerce_types(DataConfig, raw.get("data", {}))),
-        training=TrainingConfig(**_coerce_types(TrainingConfig, raw.get("training", {}))),
-        optimizer=OptimizerConfig(**_coerce_types(OptimizerConfig, raw.get("optimizer", {}))),
-        scheduler=SchedulerConfig(**_coerce_types(SchedulerConfig, raw.get("scheduler", {}))),
+        training=TrainingConfig(
+            **_coerce_types(TrainingConfig, raw.get("training", {}))
+        ),
+        optimizer=OptimizerConfig(
+            **_coerce_types(OptimizerConfig, raw.get("optimizer", {}))
+        ),
+        scheduler=SchedulerConfig(
+            **_coerce_types(SchedulerConfig, raw.get("scheduler", {}))
+        ),
         logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
         debug=DebugConfig(
-            spike=SpikeConfig(**_coerce_types(SpikeConfig, raw.get("debug", {}).get("spike", {}))),
+            spike=SpikeConfig(
+                **_coerce_types(SpikeConfig, raw.get("debug", {}).get("spike", {}))
+            ),
             max_steps=raw.get("debug", {}).get("max_steps", 0),
         ),
     )

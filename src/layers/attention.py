@@ -69,18 +69,32 @@ class MultiHeadAttention(nn.Module):
 
         self._attn_fn = _ATTN_IMPL[attn_implementation]
 
-    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask=None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope: "RoPE" = None,
+        position_ids: torch.Tensor = None,
+        attn_mask=None,
+    ) -> torch.Tensor:
         B, S, H = x.shape
-        q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_heads, S, d_head)
+        q = (
+            self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
+        )  # (B, n_heads, S, d_head)
         k = self.k_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
         v = self.v_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
 
         if self.qk_norm:
-            q = self.q_norm(q.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
-            k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
+            q = self.q_norm(q.reshape(-1, S, self.d_head)).view(
+                B, self.n_heads, S, self.d_head
+            )
+            k = self.k_norm(k.reshape(-1, S, self.d_head)).view(
+                B, self.n_heads, S, self.d_head
+            )
 
         if rope is not None:
-            assert position_ids is not None, "position_ids cannot be None when using RoPE"
+            assert position_ids is not None, (
+                "position_ids cannot be None when using RoPE"
+            )
             q = rope(q, position_ids=position_ids)
             k = rope(k, position_ids=position_ids)
 
@@ -121,25 +135,51 @@ class GroupedQueryAttention(nn.Module):
 
         self._attn_fn = _ATTN_IMPL[attn_implementation]
 
-    def forward(self, x: torch.Tensor, rope: "RoPE" = None, position_ids: torch.Tensor = None, attn_mask=None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope: "RoPE" = None,
+        position_ids: torch.Tensor = None,
+        attn_mask=None,
+    ) -> torch.Tensor:
         B, S, H = x.shape
 
-        q = self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)    # (B, n_heads, S, d_head)
-        k = self.k_proj(x).reshape(B, S, self.n_kv_heads, self.d_head).transpose(1, 2) # (B, n_kv_heads, S, d_head)
-        v = self.v_proj(x).reshape(B, S, self.n_kv_heads, self.d_head).transpose(1, 2) # (B, n_kv_heads, S, d_head)
+        q = (
+            self.q_proj(x).reshape(B, S, self.n_heads, self.d_head).transpose(1, 2)
+        )  # (B, n_heads, S, d_head)
+        k = (
+            self.k_proj(x).reshape(B, S, self.n_kv_heads, self.d_head).transpose(1, 2)
+        )  # (B, n_kv_heads, S, d_head)
+        v = (
+            self.v_proj(x).reshape(B, S, self.n_kv_heads, self.d_head).transpose(1, 2)
+        )  # (B, n_kv_heads, S, d_head)
 
         if self.qk_norm:
-            q = self.q_norm(q.reshape(-1, S, self.d_head)).view(B, self.n_heads, S, self.d_head)
-            k = self.k_norm(k.reshape(-1, S, self.d_head)).view(B, self.n_kv_heads, S, self.d_head)
+            q = self.q_norm(q.reshape(-1, S, self.d_head)).view(
+                B, self.n_heads, S, self.d_head
+            )
+            k = self.k_norm(k.reshape(-1, S, self.d_head)).view(
+                B, self.n_kv_heads, S, self.d_head
+            )
 
         if rope is not None:
-            assert position_ids is not None, "position_ids cannot be None when using RoPE"
+            assert position_ids is not None, (
+                "position_ids cannot be None when using RoPE"
+            )
             q = rope(q, position_ids)
             k = rope(k, position_ids)
 
         # Expand KV heads for GQA (expand+reshape avoids memory allocation vs repeat_interleave)
-        k = k[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
-        v = v[:, :, None, :, :].expand(B, self.n_kv_heads, self.n_groups, S, self.d_head).reshape(B, self.n_heads, S, self.d_head)
+        k = (
+            k[:, :, None, :, :]
+            .expand(B, self.n_kv_heads, self.n_groups, S, self.d_head)
+            .reshape(B, self.n_heads, S, self.d_head)
+        )
+        v = (
+            v[:, :, None, :, :]
+            .expand(B, self.n_kv_heads, self.n_groups, S, self.d_head)
+            .reshape(B, self.n_heads, S, self.d_head)
+        )
 
         out = self._attn_fn(q, k, v, attn_mask)
         out = out.transpose(1, 2).reshape(B, S, H)

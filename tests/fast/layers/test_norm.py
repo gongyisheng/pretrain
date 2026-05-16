@@ -1,4 +1,5 @@
 """Numerical parity tests: RMSNorm/LayerNorm vs eager fp32-accumulated reference."""
+
 import pytest
 import torch
 
@@ -10,6 +11,7 @@ NORM_DTYPES = SIMPLE_DTYPES
 
 
 # ---------------------------- LayerNorm ----------------------------
+
 
 @pytest.mark.parametrize("shape", [(2, 16, 64), (8, 64), (64,)])
 def test_layernorm_matches_ref_default(shape):
@@ -57,6 +59,7 @@ def test_layernorm_dtype_parity(dtype, atol):
 
 # ---------------------------- RMSNorm ----------------------------
 
+
 @pytest.mark.parametrize("shape", [(2, 16, 64), (8, 64), (64,)])
 def test_rmsnorm_matches_ref_default_weight(shape):
     d_model = shape[-1]
@@ -87,7 +90,10 @@ def test_rmsnorm_dtype_parity(dtype, atol):
 
 # ---------------------------- Numeric edge cases ----------------------------
 
-@pytest.mark.parametrize("dtype,atol", [(d, a) for d, a in NORM_DTYPES if d != torch.float32])
+
+@pytest.mark.parametrize(
+    "dtype,atol", [(d, a) for d, a in NORM_DTYPES if d != torch.float32]
+)
 def test_rmsnorm_large_input_no_overflow(dtype, atol):
     """fp16: x^2 would overflow (>65504) without fp32 accumulation."""
     d_model = 64
@@ -110,7 +116,9 @@ def test_rmsnorm_zero_input(dtype):
     assert (out == 0).all()
 
 
-@pytest.mark.parametrize("dtype,atol", [(d, a) for d, a in NORM_DTYPES if d != torch.float32])
+@pytest.mark.parametrize(
+    "dtype,atol", [(d, a) for d, a in NORM_DTYPES if d != torch.float32]
+)
 def test_layernorm_large_input_no_overflow(dtype, atol):
     """fp16: (x-mean)^2 with large magnitudes would overflow without fp32 reduction."""
     d_model = 64
@@ -135,4 +143,3 @@ def test_layernorm_zero_input(dtype):
     out = layer(x)
     assert torch.isfinite(out).all()
     assert torch.allclose(out, layer.bias.expand_as(out), atol=1e-5)
-

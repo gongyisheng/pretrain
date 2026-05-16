@@ -10,7 +10,6 @@ from src.layers.residual import RESIDUAL_REGISTRY
 from src.utils.config import ModelConfig
 
 
-
 class Qwen3MoETransformerBlock(BaseTransformerBlock):
     """Qwen3 MoE block: GQA attention + SparseMoE FFN, both wrapped by the
     block's residual strategy. Forward returns (x, ctx, aux_loss) — the
@@ -36,9 +35,25 @@ class Qwen3MoETransformerBlock(BaseTransformerBlock):
     ):
         super().__init__(d_model, **kwargs)
         self.ln1 = RMSNorm(d_model)
-        self.attn = GroupedQueryAttention(d_model, n_heads, n_kv_heads, dropout_attn, qk_norm, bias=attn_bias, attn_implementation=attn_implementation)
+        self.attn = GroupedQueryAttention(
+            d_model,
+            n_heads,
+            n_kv_heads,
+            dropout_attn,
+            qk_norm,
+            bias=attn_bias,
+            attn_implementation=attn_implementation,
+        )
         self.ln2 = RMSNorm(d_model)
-        self.ffn = SparseMoEBlock(d_model, intermediate_size, n_experts, n_experts_per_token, dropout_ffn, capacity_factor, bias=mlp_bias)
+        self.ffn = SparseMoEBlock(
+            d_model,
+            intermediate_size,
+            n_experts,
+            n_experts_per_token,
+            dropout_ffn,
+            capacity_factor,
+            bias=mlp_bias,
+        )
 
     def attn_sublayer(
         self,
@@ -47,7 +62,9 @@ class Qwen3MoETransformerBlock(BaseTransformerBlock):
         position_ids: torch.Tensor = None,
         attn_mask=None,
     ) -> torch.Tensor:
-        return self.attn(self.ln1(x), rope, position_ids=position_ids, attn_mask=attn_mask)
+        return self.attn(
+            self.ln1(x), rope, position_ids=position_ids, attn_mask=attn_mask
+        )
 
     def forward(
         self,
@@ -75,35 +92,41 @@ class Qwen3MoEModel(nn.Module):
 
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
         self.dropout_emb = nn.Dropout(config.dropout_embd)
-        self.rope = RoPE(config.d_model // config.n_heads, max_seq_len, config.rope_theta)
+        self.rope = RoPE(
+            config.d_model // config.n_heads, max_seq_len, config.rope_theta
+        )
 
         residual_cls = RESIDUAL_REGISTRY[config.residual_cls]
         residual_kwargs = config.residual_kwargs
 
-        self.blocks = nn.ModuleList([
-            Qwen3MoETransformerBlock(
-                d_model=config.d_model,
-                n_heads=config.n_heads,
-                n_kv_heads=config.n_kv_heads,
-                intermediate_size=config.moe_intermediate_size,
-                n_experts=config.moe_n_experts,
-                n_experts_per_token=config.moe_n_experts_per_token,
-                dropout_attn=config.dropout_attn,
-                dropout_ffn=config.dropout_ffn,
-                qk_norm=config.qk_norm,
-                capacity_factor=config.moe_expert_capacity_factor,
-                attn_bias=config.attn_bias,
-                mlp_bias=config.mlp_bias,
-                attn_implementation=config.attn_implementation,
-                layer_idx=i,
-                residual_cls=residual_cls,
-                residual_kwargs=residual_kwargs,
-            )
-            for i in range(config.n_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                Qwen3MoETransformerBlock(
+                    d_model=config.d_model,
+                    n_heads=config.n_heads,
+                    n_kv_heads=config.n_kv_heads,
+                    intermediate_size=config.moe_intermediate_size,
+                    n_experts=config.moe_n_experts,
+                    n_experts_per_token=config.moe_n_experts_per_token,
+                    dropout_attn=config.dropout_attn,
+                    dropout_ffn=config.dropout_ffn,
+                    qk_norm=config.qk_norm,
+                    capacity_factor=config.moe_expert_capacity_factor,
+                    attn_bias=config.attn_bias,
+                    mlp_bias=config.mlp_bias,
+                    attn_implementation=config.attn_implementation,
+                    layer_idx=i,
+                    residual_cls=residual_cls,
+                    residual_kwargs=residual_kwargs,
+                )
+                for i in range(config.n_layers)
+            ]
+        )
 
         self.ln_f = RMSNorm(config.d_model)
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=config.lm_head_bias)
+        self.lm_head = nn.Linear(
+            config.d_model, config.vocab_size, bias=config.lm_head_bias
+        )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.token_emb.weight  # weight tying
 
@@ -121,7 +144,9 @@ class Qwen3MoEModel(nn.Module):
             torch.nn.init.normal_(w1, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask=None) -> tuple:
+    def forward(
+        self, idx: torch.Tensor, position_ids: torch.Tensor, attn_mask=None
+    ) -> tuple:
         """Returns (logits, aux_loss).
 
         aux_loss is the raw accumulated load-balancing loss across all MoE blocks.
@@ -133,7 +158,11 @@ class Qwen3MoEModel(nn.Module):
         ctx = []
         for block in self.blocks:
             x, ctx, block_aux = block(
-                x, ctx, rope=self.rope, position_ids=position_ids, attn_mask=attn_mask,
+                x,
+                ctx,
+                rope=self.rope,
+                position_ids=position_ids,
+                attn_mask=attn_mask,
             )
             aux_loss = aux_loss + block_aux
         x = self.ln_f(x)

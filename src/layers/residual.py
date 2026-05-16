@@ -5,6 +5,7 @@ Block constructs any residual subclass via the same factory call, so adding
 a new variant (gated residual, learned scalar, etc.) requires no changes
 in block.py.
 """
+
 import torch
 import torch.nn as nn
 
@@ -20,8 +21,8 @@ def _aggregate(V: torch.Tensor, K: torch.Tensor, w_proj: torch.Tensor) -> torch.
     post-norm attention math. dynamic=True because N (number of stacked
     prior blocks) grows across layers.
     """
-    logits = (K * w_proj).sum(-1)          # (N, B, S)
-    weights = logits.softmax(0)             # (N, B, S)
+    logits = (K * w_proj).sum(-1)  # (N, B, S)
+    weights = logits.softmax(0)  # (N, B, S)
     return (weights.unsqueeze(-1) * V).sum(0)  # (B, S, D)
 
 

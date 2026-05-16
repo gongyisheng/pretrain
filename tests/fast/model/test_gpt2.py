@@ -7,7 +7,18 @@ from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsu
 
 
 def _small_config(attn_implementation: str = "sdpa"):
-    return ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=True, mlp_bias=True, mlp_activation="gelu", mlp_gated=False, attn_implementation=attn_implementation)
+    return ModelConfig(
+        arch="gpt2",
+        n_layers=2,
+        n_heads=2,
+        d_model=64,
+        vocab_size=256,
+        attn_bias=True,
+        mlp_bias=True,
+        mlp_activation="gelu",
+        mlp_gated=False,
+        attn_implementation=attn_implementation,
+    )
 
 
 def _pos(B, S):
@@ -51,7 +62,16 @@ def test_gpt2_param_count():
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_no_bias(impl, device):
     skip_if_unsupported(impl, device)
-    config = ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=False, mlp_bias=False, attn_implementation=impl)
+    config = ModelConfig(
+        arch="gpt2",
+        n_layers=2,
+        n_heads=2,
+        d_model=64,
+        vocab_size=256,
+        attn_bias=False,
+        mlp_bias=False,
+        attn_implementation=impl,
+    )
     model = GPT2Model(config, max_seq_len=128)
     x = torch.randint(0, 256, (2, 32))
     pos = _pos(2, 32)
@@ -67,7 +87,16 @@ def test_gpt2_no_bias(impl, device):
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_gpt2_attn_bias_only(impl, device):
     skip_if_unsupported(impl, device)
-    config = ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256, attn_bias=True, mlp_bias=False, attn_implementation=impl)
+    config = ModelConfig(
+        arch="gpt2",
+        n_layers=2,
+        n_heads=2,
+        d_model=64,
+        vocab_size=256,
+        attn_bias=True,
+        mlp_bias=False,
+        attn_implementation=impl,
+    )
     model = GPT2Model(config, max_seq_len=128)
     x = torch.randint(0, 256, (2, 32))
     pos = _pos(2, 32)
@@ -122,12 +151,13 @@ def test_gpt2_position_ids_blocks_cross_doc(impl, device):
     logits_base, _ = model(x, position_ids=position_ids, attn_mask=attn_mask)
 
     x2 = x.clone()
-    x2[0, :4] = torch.randint(1, 256, (4,))   # change doc0 tokens (not the EOT)
+    x2[0, :4] = torch.randint(1, 256, (4,))  # change doc0 tokens (not the EOT)
     logits_modified, _ = model(x2, position_ids=position_ids, attn_mask=attn_mask)
 
     # doc1 positions (5..15) must be unaffected
-    assert torch.allclose(logits_base[0, 5:], logits_modified[0, 5:], atol=1e-4), \
+    assert torch.allclose(logits_base[0, 5:], logits_modified[0, 5:], atol=1e-4), (
         "doc1 logits changed when doc0 input tokens were modified"
+    )
 
 
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
@@ -147,5 +177,6 @@ def test_gpt2_causal_mask_blocks_future(impl, device):
     x2[0, 15] = (x[0, 15] + 1) % 256
     logits_modified, _ = model(x2, position_ids=position_ids, attn_mask=attn_mask)
 
-    assert torch.allclose(logits_base[0, :15], logits_modified[0, :15], atol=1e-4), \
+    assert torch.allclose(logits_base[0, :15], logits_modified[0, :15], atol=1e-4), (
         "earlier-position logits changed when only the last input token changed"
+    )

@@ -5,6 +5,7 @@ Selection order:
   1. `--device=<cpu|cuda>` pytest CLI flag
   2. cuda if torch.cuda.is_available() else cpu
 """
+
 import pytest
 import torch
 
@@ -23,7 +24,10 @@ def _select_device(config) -> str:
     chosen = config.getoption("--device")
     if chosen is not None:
         if chosen == "cuda" and not torch.cuda.is_available():
-            pytest.exit("--device=cuda requested but torch.cuda.is_available() is False", returncode=1)
+            pytest.exit(
+                "--device=cuda requested but torch.cuda.is_available() is False",
+                returncode=1,
+            )
         return chosen
     return "cuda" if torch.cuda.is_available() else "cpu"
 

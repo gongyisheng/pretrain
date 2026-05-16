@@ -15,7 +15,9 @@ class MetricsTracker:
         self.device = device
         self.is_moe = config.model.arch == "qwen3_moe"
         if self.is_moe:
-            self._aux_floor = config.model.n_layers * config.model.moe_n_experts_per_token
+            self._aux_floor = (
+                config.model.n_layers * config.model.moe_n_experts_per_token
+            )
 
         self._grad_clip_steps = 0
         self._steps_since_log = 0
@@ -74,7 +76,8 @@ class MetricsTracker:
             "train/total_tokens": total_tokens,
             # optim
             "optim/lr": lr,
-            "optim/grad_clip_ratio": self._grad_clip_steps / max(self._steps_since_log, 1),
+            "optim/grad_clip_ratio": self._grad_clip_steps
+            / max(self._steps_since_log, 1),
             "optim/loss_scale": scaler.get_scale() if scaler.is_enabled() else 1.0,
             "optim/skipped_steps": self._skipped_steps,
             # perf
@@ -157,19 +160,19 @@ class MetricsTracker:
         name = torch.cuda.get_device_properties(0).name.lower()
         # bf16/fp16 tensor-core peak TFLOPS for common GPUs
         gpu_tflops = [
-            ("h100-sxm", 990), 
+            ("h100-sxm", 990),
             ("h100", 756),
-            ("a100-sxm", 312), 
-            ("a100-pcie", 250), 
+            ("a100-sxm", 312),
+            ("a100-pcie", 250),
             ("a100", 312),
-            ("l40s", 362), 
+            ("l40s", 362),
             ("l40", 181),
             ("5090", 104.8),
             ("5080", 56.28),
             ("5060 ti", 23.7),
-            ("4090", 165), 
+            ("4090", 165),
             ("4080", 97),
-            ("3090", 71), 
+            ("3090", 71),
             ("3080", 47),
         ]
         for key, tflops in gpu_tflops:

@@ -8,6 +8,7 @@ from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsu
 
 # --- Numerical parity vs HuggingFace Qwen3ForCausalLM ---
 
+
 def test_qwen3_matches_hf_qwen3_with_copied_weights():
     """Our Qwen3Model produces logits within tolerance of HF Qwen3ForCausalLM.
 
@@ -69,7 +70,9 @@ def test_qwen3_matches_hf_qwen3_with_copied_weights():
             # HF stores gate and up as separate projections; ours fuses them into gate_up_proj.
             # Concat along output dim so chunk(2, dim=-1) recovers (gate, up).
             our_block.ffn.gate_up_proj.weight.copy_(
-                torch.cat([hf_layer.mlp.gate_proj.weight, hf_layer.mlp.up_proj.weight], dim=0)
+                torch.cat(
+                    [hf_layer.mlp.gate_proj.weight, hf_layer.mlp.up_proj.weight], dim=0
+                )
             )
             our_block.ffn.down_proj.weight.copy_(hf_layer.mlp.down_proj.weight)
         ours.ln_f.weight.copy_(hf.model.norm.weight)
@@ -130,10 +133,12 @@ def test_qwen3_position_ids_blocks_cross_doc(impl, device):
     x2[0, :3] = torch.randint(1, 256, (3,))
     logits_modified, _ = model(x2, position_ids=position_ids, attn_mask=attn_mask)
 
-    assert torch.allclose(logits_base[0, 4:], logits_modified[0, 4:], atol=1e-4), \
+    assert torch.allclose(logits_base[0, 4:], logits_modified[0, 4:], atol=1e-4), (
         "doc1 logits changed when doc0 tokens were modified"
-    assert not torch.allclose(logits_base[0, :3], logits_modified[0, :3], atol=1e-4), \
+    )
+    assert not torch.allclose(logits_base[0, :3], logits_modified[0, :3], atol=1e-4), (
         "doc0 logits did NOT change when doc0 tokens were modified (model not propagating inputs?)"
+    )
 
 
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
@@ -153,5 +158,6 @@ def test_qwen3_causal_mask_blocks_future(impl, device):
     x2[0, 7] = (x[0, 7] + 1) % 256
     logits_modified, _ = model(x2, position_ids=position_ids, attn_mask=attn_mask)
 
-    assert torch.allclose(logits_base[0, :7], logits_modified[0, :7], atol=1e-4), \
+    assert torch.allclose(logits_base[0, :7], logits_modified[0, :7], atol=1e-4), (
         "earlier-position logits changed when only the last input token changed"
+    )

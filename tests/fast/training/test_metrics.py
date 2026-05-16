@@ -13,40 +13,71 @@ from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsu
 # constants so they can pick up the parametrized attn_implementation.
 # ---------------------------------------------------------------------------
 
+
 def _gpt2_cfg(impl):
     return ModelConfig(
-        arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256,
+        arch="gpt2",
+        n_layers=2,
+        n_heads=2,
+        d_model=64,
+        vocab_size=256,
         attn_implementation=impl,
     )
 
 
 def _qwen3_cfg(impl):
     return ModelConfig(
-        arch="qwen3", n_layers=2, n_heads=2, n_kv_heads=1, d_model=64, vocab_size=256, qk_norm=True,
+        arch="qwen3",
+        n_layers=2,
+        n_heads=2,
+        n_kv_heads=1,
+        d_model=64,
+        vocab_size=256,
+        qk_norm=True,
         attn_implementation=impl,
     )
 
 
 def _qwen3_moe_cfg(impl):
     return ModelConfig(
-        arch="qwen3_moe", n_layers=2, n_heads=2, n_kv_heads=1, d_model=64, vocab_size=256,
-        qk_norm=True, moe_n_experts=4, moe_n_experts_per_token=2, moe_intermediate_size=128,
+        arch="qwen3_moe",
+        n_layers=2,
+        n_heads=2,
+        n_kv_heads=1,
+        d_model=64,
+        vocab_size=256,
+        qk_norm=True,
+        moe_n_experts=4,
+        moe_n_experts_per_token=2,
+        moe_intermediate_size=128,
         attn_implementation=impl,
     )
 
 
 def _gpt2_attn_res_cfg(impl):
     return ModelConfig(
-        arch="gpt2", n_layers=4, n_heads=2, d_model=64, vocab_size=256,
-        residual_cls="attn_res", residual_kwargs={"seal_block_size": 2},
+        arch="gpt2",
+        n_layers=4,
+        n_heads=2,
+        d_model=64,
+        vocab_size=256,
+        residual_cls="attn_res",
+        residual_kwargs={"seal_block_size": 2},
         attn_implementation=impl,
     )
 
 
 def _qwen3_attn_res_cfg(impl):
     return ModelConfig(
-        arch="qwen3", n_layers=4, n_heads=2, n_kv_heads=1, d_model=64, vocab_size=256,
-        qk_norm=True, residual_cls="attn_res", residual_kwargs={"seal_block_size": 2},
+        arch="qwen3",
+        n_layers=4,
+        n_heads=2,
+        n_kv_heads=1,
+        d_model=64,
+        vocab_size=256,
+        qk_norm=True,
+        residual_cls="attn_res",
+        residual_kwargs={"seal_block_size": 2},
         attn_implementation=impl,
     )
 

@@ -1,7 +1,6 @@
 """Tests for build_optimizer, focused on lr_mult regex-based param grouping."""
+
 import math
-import pytest
-import torch
 
 from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, SchedulerConfig
 from src.model.registry import build_model
@@ -92,7 +91,9 @@ def test_regex_pattern_matches_multiple_params():
     assert len(bias_groups) >= 1
     bias_params = [p for pg in bias_groups for p in pg["params"]]
 
-    expected = [p for n, p in model.named_parameters() if "bias" in n and p.requires_grad]
+    expected = [
+        p for n, p in model.named_parameters() if "bias" in n and p.requires_grad
+    ]
     assert len(bias_params) == len(expected)
     assert {id(p) for p in bias_params} == {id(p) for p in expected}
 
@@ -154,8 +155,9 @@ def test_scheduler_scales_each_group_by_lr_mult():
     base = sched.get_lr()
     for pg in opt.param_groups:
         expected = base * pg["lr_mult"]
-        assert math.isclose(pg["lr"], expected, rel_tol=1e-6), \
+        assert math.isclose(pg["lr"], expected, rel_tol=1e-6), (
             f"group with lr_mult={pg['lr_mult']}: got lr={pg['lr']}, expected {expected}"
+        )
 
     # Cosine phase: base lr decayed, ratio preserved.
     for _ in range(50):

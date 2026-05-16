@@ -12,6 +12,7 @@ from tests.fast.layers._refs import (
 
 # ==================== LearnedPositionalEmbedding ====================
 
+
 def test_learned_pos_emb_output_shape():
     pe = LearnedPositionalEmbedding(max_seq_len=32, d_model=16)
     x = torch.randn(2, 8, 16)
@@ -54,9 +55,10 @@ def test_learned_pos_emb_matches_ref(dtype, atol):
 
 # ==================== RoPE behavior ====================
 
+
 def test_rope_forward_with_position_ids_shape():
     rope = RoPE(d_head=16, max_seq_len=32)
-    x = torch.randn(2, 4, 8, 16)   # (B, n_heads, S, d_head)
+    x = torch.randn(2, 4, 8, 16)  # (B, n_heads, S, d_head)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)  # (B, S)
     out = rope(x, position_ids=pos)
     assert out.shape == (2, 4, 8, 16)
@@ -75,6 +77,7 @@ def test_rope_forward_reset_position_ids_differ():
 
 
 # ==================== RoPE numerical parity ====================
+
 
 @pytest.mark.parametrize("theta", [10000.0, 1000000.0])
 def test_rope_cos_sin_buffers_match_ref(theta):

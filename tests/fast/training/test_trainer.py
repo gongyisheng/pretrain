@@ -4,6 +4,7 @@ I/O is mocked: np.memmap is patched so PretrainDataset reads from in-memory
 arrays instead of real .bin files, and tokenizer_path is empty so no BPE
 training happens. Checkpoint writes are kept real (that's what we're testing).
 """
+
 import os
 import tempfile
 
@@ -45,15 +46,31 @@ def _tiny_config(tmp_dir):
     """Tiny GPT-2 trainer config; tokenizer_path empty so no tokenizer is loaded."""
     return TrainConfig(
         max_seq_len=64,
-        model=ModelConfig(arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=4096),
-        data=DataConfig(dataset="test", tokenizer_path="", data_dir=tmp_dir, val_split=0.01, num_workers=0),
-        training=TrainingConfig(
-            batch_size=4, gradient_accumulation_steps=1, max_steps=5,
-            mixed_precision="no", activation_checkpointing=False,
-            grad_clip=1.0, checkpoint_dir=os.path.join(tmp_dir, "ckpt"),
-            checkpoint_every=3, eval_every=3, eval_steps=2,
+        model=ModelConfig(
+            arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=4096
         ),
-        optimizer=OptimizerConfig(name="adamw", lr=1e-3, weight_decay=0.0, betas=[0.9, 0.95]),
+        data=DataConfig(
+            dataset="test",
+            tokenizer_path="",
+            data_dir=tmp_dir,
+            val_split=0.01,
+            num_workers=0,
+        ),
+        training=TrainingConfig(
+            batch_size=4,
+            gradient_accumulation_steps=1,
+            max_steps=5,
+            mixed_precision="no",
+            activation_checkpointing=False,
+            grad_clip=1.0,
+            checkpoint_dir=os.path.join(tmp_dir, "ckpt"),
+            checkpoint_every=3,
+            eval_every=3,
+            eval_steps=2,
+        ),
+        optimizer=OptimizerConfig(
+            name="adamw", lr=1e-3, weight_decay=0.0, betas=[0.9, 0.95]
+        ),
         scheduler=SchedulerConfig(name="cosine", warmup_steps=1, min_lr=1e-4),
         logging=LoggingConfig(wandb_project="test", wandb_run_name="test", log_every=1),
     )
@@ -64,18 +81,39 @@ def _tiny_moe_config(tmp_dir):
     return TrainConfig(
         max_seq_len=64,
         model=ModelConfig(
-            arch="qwen3_moe", n_layers=2, n_heads=2, n_kv_heads=2, d_model=64,
-            intermediate_size=32, vocab_size=4096,
-            moe_n_experts=4, moe_n_experts_per_token=2, moe_aux_loss_coef=0.01,
+            arch="qwen3_moe",
+            n_layers=2,
+            n_heads=2,
+            n_kv_heads=2,
+            d_model=64,
+            intermediate_size=32,
+            vocab_size=4096,
+            moe_n_experts=4,
+            moe_n_experts_per_token=2,
+            moe_aux_loss_coef=0.01,
         ),
-        data=DataConfig(dataset="test", tokenizer_path="", data_dir=tmp_dir, val_split=0.01, num_workers=0),
+        data=DataConfig(
+            dataset="test",
+            tokenizer_path="",
+            data_dir=tmp_dir,
+            val_split=0.01,
+            num_workers=0,
+        ),
         training=TrainingConfig(
-            batch_size=4, gradient_accumulation_steps=1, max_steps=5,
-            mixed_precision="no", activation_checkpointing=False,
-            grad_clip=1.0, checkpoint_dir=os.path.join(tmp_dir, "ckpt"),
-            checkpoint_every=3, eval_every=3, eval_steps=2,
+            batch_size=4,
+            gradient_accumulation_steps=1,
+            max_steps=5,
+            mixed_precision="no",
+            activation_checkpointing=False,
+            grad_clip=1.0,
+            checkpoint_dir=os.path.join(tmp_dir, "ckpt"),
+            checkpoint_every=3,
+            eval_every=3,
+            eval_steps=2,
         ),
-        optimizer=OptimizerConfig(name="adamw", lr=1e-3, weight_decay=0.0, betas=[0.9, 0.95]),
+        optimizer=OptimizerConfig(
+            name="adamw", lr=1e-3, weight_decay=0.0, betas=[0.9, 0.95]
+        ),
         scheduler=SchedulerConfig(name="cosine", warmup_steps=1, min_lr=1e-4),
         logging=LoggingConfig(wandb_project="test", wandb_run_name="test", log_every=1),
     )
