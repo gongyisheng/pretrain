@@ -13,11 +13,13 @@ Literature names map onto our gated functions as:
     gelu_glu = GeGLU
     relu_glu = ReGLU
 """
+
 import torch
 import torch.nn.functional as F
 
 
 # --- Unary activations: x → act(x) ---
+
 
 def relu(x: torch.Tensor) -> torch.Tensor:
     return F.relu(x)
@@ -32,6 +34,7 @@ def silu(x: torch.Tensor) -> torch.Tensor:
 
 
 # --- Gated (GLU) activations: (gate, up) → act(gate) * up, fused ---
+
 
 @torch.compile
 def relu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:

@@ -2,7 +2,7 @@ import pytest
 import tempfile
 import os
 import yaml
-from src.utils.config import TrainConfig, load_config, TrainingConfig, DataConfig
+from src.utils.config import ModelConfig, load_config, TrainingConfig, DataConfig
 
 
 def _write_yaml(tmp_dir, data):
@@ -14,15 +14,41 @@ def _write_yaml(tmp_dir, data):
 
 MINIMAL_CONFIG = {
     "max_seq_len": 128,
-    "model": {"arch": "gpt2", "n_layers": 2, "n_heads": 2, "d_model": 64, "vocab_size": 256, "dropout_embd": 0.0, "dropout_attn": 0.0, "dropout_ffn": 0.0},
-    "data": {"dataset": "test", "tokenizer_path": "tok", "data_dir": "data/", "val_split": 0.01, "num_workers": 0},
-    "training": {
-        "batch_size": 2, "gradient_accumulation_steps": 1, "max_steps": 10,
-        "mixed_precision": "no", "activation_checkpointing": False,
-        "grad_clip": 1.0, "checkpoint_dir": "ckpt/", "checkpoint_every": 5,
-        "eval_every": 5, "eval_steps": 2,
+    "model": {
+        "arch": "gpt2",
+        "n_layers": 2,
+        "n_heads": 2,
+        "d_model": 64,
+        "vocab_size": 256,
+        "dropout_embd": 0.0,
+        "dropout_attn": 0.0,
+        "dropout_ffn": 0.0,
     },
-    "optimizer": {"name": "adamw", "lr": 1e-3, "weight_decay": 0.1, "betas": [0.9, 0.95]},
+    "data": {
+        "dataset": "test",
+        "tokenizer_path": "tok",
+        "data_dir": "data/",
+        "val_split": 0.01,
+        "num_workers": 0,
+    },
+    "training": {
+        "batch_size": 2,
+        "gradient_accumulation_steps": 1,
+        "max_steps": 10,
+        "mixed_precision": "no",
+        "activation_checkpointing": False,
+        "grad_clip": 1.0,
+        "checkpoint_dir": "ckpt/",
+        "checkpoint_every": 5,
+        "eval_every": 5,
+        "eval_steps": 2,
+    },
+    "optimizer": {
+        "name": "adamw",
+        "lr": 1e-3,
+        "weight_decay": 0.1,
+        "betas": [0.9, 0.95],
+    },
     "scheduler": {"name": "cosine", "warmup_steps": 2, "min_lr": 1e-4},
     "logging": {"wandb_project": "test", "wandb_run_name": "test", "log_every": 1},
 }
@@ -46,7 +72,10 @@ def test_config_d_ff_default():
 
 
 def test_config_d_ff_explicit():
-    data = {**MINIMAL_CONFIG, "model": {**MINIMAL_CONFIG["model"], "intermediate_size": 128}}
+    data = {
+        **MINIMAL_CONFIG,
+        "model": {**MINIMAL_CONFIG["model"], "intermediate_size": 128},
+    }
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, data)
         config = load_config(path)
@@ -56,7 +85,9 @@ def test_config_d_ff_explicit():
 def test_config_cli_overrides():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
-        config = load_config(path, overrides=["optimizer.lr=3e-4", "training.batch_size=8"])
+        config = load_config(
+            path, overrides=["optimizer.lr=3e-4", "training.batch_size=8"]
+        )
         assert config.optimizer.lr == 3e-4
         assert config.training.batch_size == 8
 
@@ -133,3 +164,35 @@ data:
     p.write_text(yaml_content)
     cfg = load_config(str(p))
     assert cfg.max_seq_len == 128
+
+
+# ==================== attn_implementation validation ====================
+
+
+def test_model_config_attn_implementation_default():
+    assert ModelConfig().attn_implementation == "flex_attention"
+
+
+@pytest.mark.parametrize("value", ["flex_attention", "sdpa"])
+def test_model_config_attn_implementation_accepts_valid(value):
+    cfg = ModelConfig(attn_implementation=value)
+    assert cfg.attn_implementation == value
+
+
+@pytest.mark.parametrize("value", ["flash", "FlexAttention", "", "sdpa "])
+def test_model_config_attn_implementation_rejects_invalid(value):
+    with pytest.raises(ValueError, match="unknown attn_implementation"):
+        ModelConfig(attn_implementation=value)
+
+
+def test_load_config_rejects_invalid_attn_implementation(tmp_path):
+    yaml_content = """
+max_seq_len: 128
+model:
+  arch: gpt2
+  attn_implementation: nope
+"""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(yaml_content)
+    with pytest.raises(ValueError, match="unknown attn_implementation"):
+        load_config(str(p))

@@ -11,10 +11,15 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/**'
+  push:
+    branches-ignore: [main]
+    paths:
+      - '.github/**'
+      - 'tests/**'
   workflow_dispatch:
 
 concurrency:
-  group: pr-test-${{ github.event.pull_request.number || github.run_id }}
+  group: pr-test-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -34,7 +39,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            if (context.eventName === 'workflow_dispatch') {
+            if (context.eventName === 'workflow_dispatch' || context.eventName === 'push') {
               core.setOutput('has_model', 'true');
               core.setOutput('has_data', 'true');
               core.setOutput('has_training', 'true');
@@ -71,14 +76,17 @@ jobs:
 
   lint:
     runs-on: [self-hosted]
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --extra dev
+      - run: uv sync --extra dev --frozen
 
       - run: uv run ruff check src/ tests/
 
@@ -89,14 +97,17 @@ jobs:
     if: needs.prepare.outputs.has_data == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 30
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --extra dev
+      - run: uv sync --extra dev --frozen
 
       - name: Run data tests (CPU only)
         env:
@@ -108,14 +119,17 @@ jobs:
     if: needs.prepare.outputs.has_model == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 240
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --extra dev
+      - run: uv sync --extra dev --frozen
 
       - name: Pick free GPU
         id: pick
@@ -139,14 +153,17 @@ jobs:
     if: needs.prepare.outputs.has_training == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 240
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --extra dev
+      - run: uv sync --extra dev --frozen
 
       - name: Pick free GPU
         id: pick
@@ -154,6 +171,19 @@ jobs:
           idx=$(uv run python tests/ci/gpu_lock_exec.py)
           echo "index=$idx" >> "$GITHUB_OUTPUT"
           echo "Picked GPU $idx"
+
+      - name: Cache tokenizer + dataset
+        id: cache-hf-data
+        uses: actions/cache@v4
+        with:
+          path: |
+            tokenizers
+            data
+          key: hf-openwebtext-exp-v1
+
+      - name: Download tokenizer + dataset for e2e smoke tests
+        if: steps.cache-hf-data.outputs.cache-hit != 'true'
+        run: uv run hf download gongyisheng/openwebtext-exp --repo-type dataset --local-dir .
 
       - name: Run training tests
         env:

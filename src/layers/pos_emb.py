@@ -8,6 +8,7 @@
   rotation to Q/K based on position_ids; injects position info inside
   attention. Used by Qwen3 family.
 """
+
 import torch
 import torch.nn as nn
 
@@ -45,8 +46,8 @@ class RoPE(nn.Module):
     def _build_buffers(self):
         freqs = 1.0 / (self.theta ** (torch.arange(0, self.d_head, 2) / self.d_head))
         positions = torch.arange(self.max_seq_len)
-        angles = positions[:, None] * freqs[None, :]          # (max_seq_len, d_head//2)
-        angles = torch.cat([angles, angles], dim=-1)           # (max_seq_len, d_head)
+        angles = positions[:, None] * freqs[None, :]  # (max_seq_len, d_head//2)
+        angles = torch.cat([angles, angles], dim=-1)  # (max_seq_len, d_head)
         self.register_buffer("cos", torch.cos(angles))
         self.register_buffer("sin", torch.sin(angles))
 

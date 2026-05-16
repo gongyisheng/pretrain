@@ -1,6 +1,7 @@
 """MoE tests: behavior (shapes, routing properties, aux_loss) + numerical
 parity vs eager refs and HF Qwen3MoeSparseMoeBlock.
 """
+
 import pytest
 import torch
 
@@ -14,6 +15,7 @@ from tests.fast.layers._refs import (
 
 
 # --- Router behavior ---
+
 
 def test_moe_router_output_shapes():
     router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
@@ -50,6 +52,7 @@ def test_moe_router_weights_unnormalized():
 
 
 # --- Router fp32-storage robustness ---
+
 
 def test_moe_router_gate_weight_stays_fp32_across_dtype_casts():
     """_apply override keeps gate_weight fp32 across every dtype-changing call."""
@@ -106,15 +109,20 @@ def test_moe_router_runs_in_fp32_under_autocast(amp_dtype):
 
 # --- SparseMoEBlock behavior ---
 
+
 def test_sparse_moe_block_output_shape():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+    )
     x = torch.randn(2, 8, 64)
     out, _ = block(x)
     assert out.shape == (2, 8, 64)
 
 
 def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+    )
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
     assert aux_loss.ndim == 0
@@ -122,7 +130,9 @@ def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
 
 
 def test_sparse_moe_block_aux_loss_has_grad():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+    )
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
     aux_loss.backward()
@@ -130,6 +140,7 @@ def test_sparse_moe_block_aux_loss_has_grad():
 
 
 # --- Numerical parity ---
+
 
 @pytest.mark.parametrize("normalize", [True, False])
 @pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
@@ -173,20 +184,27 @@ def test_moe_router_matches_ref_under_saturation(dtype, atol):
     assert torch.allclose(probs, probs_ref, atol=atol)
 
 
-@pytest.mark.parametrize("gated,activation", [
-    (True, "silu"),   # SwiGLU experts (default; matches HF Qwen3MoE)
-    (False, "gelu"),  # ungated GELU experts (GPT-style)
-    (False, "relu"),  # ungated ReLU experts
-])
+@pytest.mark.parametrize(
+    "gated,activation",
+    [
+        (True, "silu"),  # SwiGLU experts (default; matches HF Qwen3MoE)
+        (False, "gelu"),  # ungated GELU experts (GPT-style)
+        (False, "relu"),  # ungated ReLU experts
+    ],
+)
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
 def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
     """SparseMoEBlock output + aux_loss match the eager per-token-loop reference."""
     torch.manual_seed(0)
     d_model, inter, n_experts, k = 64, 32, 4, 2
     block = SparseMoEBlock(
-        d_model=d_model, intermediate_size=inter,
-        n_experts=n_experts, n_experts_per_token=k,
-        dropout_ffn=0.0, gated=gated, activation=activation,
+        d_model=d_model,
+        intermediate_size=inter,
+        n_experts=n_experts,
+        n_experts_per_token=k,
+        dropout_ffn=0.0,
+        gated=gated,
+        activation=activation,
     )
     with torch.no_grad():
         w1 = block.expert_gate_up if gated else block.expert_up
@@ -198,8 +216,12 @@ def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
     x = torch.randn(2, 8, d_model, dtype=dtype)
     out, aux = block(x)
     out_ref, aux_ref = sparse_moe_block_ref(
-        x, block.router.gate.weight, block.expert_down,
-        n_experts_per_token=k, activation=activation, normalize=True,
+        x,
+        block.router.gate.weight,
+        block.expert_down,
+        n_experts_per_token=k,
+        activation=activation,
+        normalize=True,
         expert_gate_up=block.expert_gate_up if gated else None,
         expert_up=None if gated else block.expert_up,
     )
@@ -226,8 +248,11 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
     d_model, inter, n_experts, top_k = 64, 32, 4, 2
 
     ours = SparseMoEBlock(
-        d_model=d_model, intermediate_size=inter,
-        n_experts=n_experts, n_experts_per_token=top_k, dropout_ffn=0.0,
+        d_model=d_model,
+        intermediate_size=inter,
+        n_experts=n_experts,
+        n_experts_per_token=top_k,
+        dropout_ffn=0.0,
     )
     with torch.no_grad():
         torch.nn.init.normal_(ours.expert_gate_up, std=0.02)

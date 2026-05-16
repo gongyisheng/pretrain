@@ -40,6 +40,6 @@ def compute_loss(logits, y, loss_mask=None, loss_fn=None):
     if loss_mask is None:
         return loss_fn(flat_logits, flat_y)
 
-    per_token_loss = loss_fn(flat_logits, flat_y, reduction='none')
+    per_token_loss = loss_fn(flat_logits, flat_y, reduction="none")
     mask = loss_mask.reshape(-1).float()
     return (per_token_loss * mask).sum() / mask.sum().clamp(min=1)

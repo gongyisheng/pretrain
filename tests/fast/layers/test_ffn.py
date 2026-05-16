@@ -1,4 +1,5 @@
 """FFN tests: behavior (shape, bias, error cases) + numerical parity vs ffn_ref."""
+
 import pytest
 import torch
 
@@ -12,9 +13,12 @@ ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
 
 # --- Behavior ---
 
+
 @pytest.mark.parametrize("gated", [False, True])
 def test_ffn_output_shape(gated):
-    ffn = FFN(d_model=64, intermediate_size=128, activation="silu", gated=gated, dropout=0.0)
+    ffn = FFN(
+        d_model=64, intermediate_size=128, activation="silu", gated=gated, dropout=0.0
+    )
     x = torch.randn(2, 16, 64)
     assert ffn(x).shape == (2, 16, 64)
 
@@ -31,7 +35,9 @@ def test_ffn_default_bias_is_false(gated):
 @pytest.mark.parametrize("gated", [False, True])
 def test_ffn_bias_true_adds_biases(gated):
     """Explicit bias=True adds biases to all projections."""
-    ffn = FFN(d_model=64, intermediate_size=128, activation="silu", gated=gated, bias=True)
+    ffn = FFN(
+        d_model=64, intermediate_size=128, activation="silu", gated=gated, bias=True
+    )
     w1 = ffn.gate_up_proj if gated else ffn.up_proj
     assert w1.bias is not None
     assert ffn.down_proj.bias is not None
@@ -49,13 +55,18 @@ def test_ffn_unknown_activation_in_gated_raises():
 
 # --- Numerical parity ---
 
+
 @pytest.mark.parametrize("activation", ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
 def test_ffn_ungated_matches_ref(activation, dtype, atol):
     """FFN(gated=False, activation=A) = down_proj(A(up_proj(x)))."""
     torch.manual_seed(0)
     ffn = FFN(
-        d_model=64, intermediate_size=256, activation=activation, gated=False, dropout=0.0
+        d_model=64,
+        intermediate_size=256,
+        activation=activation,
+        gated=False,
+        dropout=0.0,
     ).to(dtype)
     ffn.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)
@@ -71,7 +82,11 @@ def test_ffn_gated_matches_ref(activation, dtype, atol):
     """FFN(gated=True, activation=A) = down_proj(A(gate, up)) with fused gate_up_proj."""
     torch.manual_seed(0)
     ffn = FFN(
-        d_model=64, intermediate_size=128, activation=activation, gated=True, dropout=0.0
+        d_model=64,
+        intermediate_size=128,
+        activation=activation,
+        gated=True,
+        dropout=0.0,
     ).to(dtype)
     ffn.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)

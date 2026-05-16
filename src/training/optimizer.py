@@ -4,7 +4,9 @@ import torch
 from src.utils.config import TrainConfig
 
 
-def build_optimizer(model: torch.nn.Module, config: TrainConfig) -> torch.optim.Optimizer:
+def build_optimizer(
+    model: torch.nn.Module, config: TrainConfig
+) -> torch.optim.Optimizer:
     """Build optimizer with weight decay applied only to non-bias, non-layernorm params.
 
     Each key in `config.optimizer.lr_mult` is a regular expression. A parameter
@@ -36,11 +38,13 @@ def build_optimizer(model: torch.nn.Module, config: TrainConfig) -> torch.optim.
     param_groups = []
     for (matched, is_no_decay), params in groups.items():
         mult = config.optimizer.lr_mult.get(matched, 1.0) if matched else 1.0
-        param_groups.append({
-            "params": params,
-            "weight_decay": 0.0 if is_no_decay else wd,
-            "lr_mult": mult,
-        })
+        param_groups.append(
+            {
+                "params": params,
+                "weight_decay": 0.0 if is_no_decay else wd,
+                "lr_mult": mult,
+            }
+        )
 
     optimizer = torch.optim.AdamW(
         param_groups,
@@ -55,7 +59,9 @@ def build_optimizer(model: torch.nn.Module, config: TrainConfig) -> torch.optim.
 class CosineWarmupScheduler:
     """Linear warmup followed by cosine decay to min_lr."""
 
-    def __init__(self, optimizer, warmup_steps: int, max_steps: int, min_lr: float, max_lr: float):
+    def __init__(
+        self, optimizer, warmup_steps: int, max_steps: int, min_lr: float, max_lr: float
+    ):
         self.optimizer = optimizer
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
@@ -74,8 +80,12 @@ class CosineWarmupScheduler:
             return self.max_lr * self.current_step / self.warmup_steps
         if self.current_step >= self.max_steps:
             return self.min_lr
-        progress = (self.current_step - self.warmup_steps) / (self.max_steps - self.warmup_steps)
-        return self.min_lr + 0.5 * (self.max_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
+        progress = (self.current_step - self.warmup_steps) / (
+            self.max_steps - self.warmup_steps
+        )
+        return self.min_lr + 0.5 * (self.max_lr - self.min_lr) * (
+            1 + math.cos(math.pi * progress)
+        )
 
     def state_dict(self):
         return {

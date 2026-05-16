@@ -12,7 +12,9 @@ class SpikeDebugger:
         self.checkpoint_dir = checkpoint_dir
         self._spike_checkpoints = []  # list of (grad_norm, ckpt_path)
 
-    def on_step(self, grad_norm, step: int, model, save_checkpoint_fn, clip_value: float = 1.0) -> bool:
+    def on_step(
+        self, grad_norm, step: int, model, save_checkpoint_fn, clip_value: float = 1.0
+    ) -> bool:
         """Call after gradient clipping.
 
         Args:
@@ -25,7 +27,9 @@ class SpikeDebugger:
         Returns:
             True if a spike was detected and saved.
         """
-        grad_norm_val = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+        grad_norm_val = (
+            grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+        )
         threshold = self.config.grad_norm_threshold
 
         if grad_norm_val <= threshold:
@@ -34,8 +38,9 @@ class SpikeDebugger:
         max_n = self.config.max_checkpoints
 
         # Skip if we're full and this spike doesn't beat the current minimum
-        if len(self._spike_checkpoints) >= max_n and \
-                grad_norm_val <= min(s[0] for s in self._spike_checkpoints):
+        if len(self._spike_checkpoints) >= max_n and grad_norm_val <= min(
+            s[0] for s in self._spike_checkpoints
+        ):
             return False
 
         scale = grad_norm_val / clip_value if grad_norm_val > clip_value else 1.0
@@ -46,7 +51,9 @@ class SpikeDebugger:
         }
         ckpt_path = save_checkpoint_fn(extra={"raw_grads": raw_grads})
 
-        print(f"[debug] grad norm spike {grad_norm_val:.4f} > {threshold} at step {step}")
+        print(
+            f"[debug] grad norm spike {grad_norm_val:.4f} > {threshold} at step {step}"
+        )
 
         self._spike_checkpoints.append((grad_norm_val, ckpt_path))
 

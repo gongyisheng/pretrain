@@ -22,7 +22,9 @@ def gated_ffn(
     """
     gate_up = x @ w_gate_up.mT
     if b_gate_up is not None:
-        gate_up = gate_up + (b_gate_up if b_gate_up.ndim == 1 else b_gate_up.unsqueeze(-2))
+        gate_up = gate_up + (
+            b_gate_up if b_gate_up.ndim == 1 else b_gate_up.unsqueeze(-2)
+        )
     gate, up = gate_up.chunk(2, dim=-1)
     hidden = act_fn(gate, up)
     out = hidden @ w_down.mT
@@ -90,7 +92,9 @@ class FFN(nn.Module):
         super().__init__()
         registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
         if activation not in registry:
-            raise ValueError(f"Unknown activation: {activation!r}; expected one of {sorted(registry)}")
+            raise ValueError(
+                f"Unknown activation: {activation!r}; expected one of {sorted(registry)}"
+            )
         self.gated = gated
         self.act_fn = registry[activation]
         if gated:
@@ -104,15 +108,19 @@ class FFN(nn.Module):
         if self.gated:
             out = gated_ffn(
                 x,
-                self.gate_up_proj.weight, self.down_proj.weight,
+                self.gate_up_proj.weight,
+                self.down_proj.weight,
                 self.act_fn,
-                self.gate_up_proj.bias, self.down_proj.bias,
+                self.gate_up_proj.bias,
+                self.down_proj.bias,
             )
         else:
             out = ungated_ffn(
                 x,
-                self.up_proj.weight, self.down_proj.weight,
+                self.up_proj.weight,
+                self.down_proj.weight,
                 self.act_fn,
-                self.up_proj.bias, self.down_proj.bias,
+                self.up_proj.bias,
+                self.down_proj.bias,
             )
         return self.dropout(out)

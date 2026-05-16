@@ -1,4 +1,5 @@
 """Numerical parity tests for activation functions vs eager mathematical refs."""
+
 import pytest
 import torch
 
@@ -15,6 +16,7 @@ ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
 
 
 # ---------------------------- Ungated ----------------------------
+
 
 @pytest.mark.parametrize("name", ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", DTYPES)
@@ -65,6 +67,7 @@ def test_ungated_large_negative_saturates(name, dtype):
 
 # ---------------------------- Gated (GLU family) ----------------------------
 
+
 @pytest.mark.parametrize("name", ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", DTYPES)
 def test_gated_matches_ref(name, dtype, atol):
@@ -75,8 +78,12 @@ def test_gated_matches_ref(name, dtype, atol):
     out = act(gate, up)
     assert out.dtype == dtype
     # rtol scales tolerance with magnitude (output ~ act(gate)*up, can be O(10))
-    rtol = 0.0 if dtype == torch.float32 else (1e-2 if dtype == torch.bfloat16 else 2e-3)
-    assert torch.allclose(out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=atol, rtol=rtol)
+    rtol = (
+        0.0 if dtype == torch.float32 else (1e-2 if dtype == torch.bfloat16 else 2e-3)
+    )
+    assert torch.allclose(
+        out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=atol, rtol=rtol
+    )
 
 
 @pytest.mark.parametrize("name", ACT_NAMES)

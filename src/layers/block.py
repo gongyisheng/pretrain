@@ -25,7 +25,9 @@ class BaseTransformerBlock(nn.Module):
         residual_kwargs: dict = {},
     ):
         super().__init__()
-        self.attn_res_layer = residual_cls(d_model, layer_idx, "attn", **residual_kwargs)
+        self.attn_res_layer = residual_cls(
+            d_model, layer_idx, "attn", **residual_kwargs
+        )
         self.mlp_res_layer = residual_cls(d_model, layer_idx, "mlp", **residual_kwargs)
 
     def attn_sublayer(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
