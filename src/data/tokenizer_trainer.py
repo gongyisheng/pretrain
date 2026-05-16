@@ -83,7 +83,7 @@ class TokenizerMetricsTracker:
 class TokenizerTrainer:
     """Train a tokenizer from a text iterable. Dispatches by `config.data.tokenizer_train_method`.
 
-    Method-specific kwargs live in `config.data.tokenizer_train_kwargs` and are
+    Method-specific kwargs live in `config.data.tokenizer_train_method_kwargs` and are
     consumed by the matching `_train_*` method (e.g. `transition_size`,
     `max_superword_words`, `eval_num_docs` for "superbpe"). W&B identity comes
     from `config.logging`; the `wandb_enabled` flag is constructor-controlled
@@ -102,9 +102,9 @@ class TokenizerTrainer:
         self.vocab_size = config.model.vocab_size
         self.save_path = config.data.tokenizer_path
         self.train_method = config.data.tokenizer_train_method
-        self.train_kwargs = dict(config.data.tokenizer_train_kwargs)
+        self.train_method_kwargs = dict(config.data.tokenizer_train_method_kwargs)
         self.eval_every = config.data.tokenizer_train_eval_every
-        self.eval_num_docs = self.train_kwargs.get("eval_num_docs", 1000)
+        self.eval_num_docs = self.train_method_kwargs.get("eval_num_docs", 1000)
 
         if self.train_method not in ("bpe", "superbpe"):
             raise ValueError(
@@ -116,14 +116,16 @@ class TokenizerTrainer:
         self.transition_size: int | None = None
         self.max_superword_words: int = 4
         if self.train_method == "superbpe":
-            ts = self.train_kwargs.get("transition_size")
+            ts = self.train_method_kwargs.get("transition_size")
             if ts is None or not (0 < ts <= self.vocab_size):
                 raise ValueError(
                     f"method='superbpe' requires 0 < transition_size <= vocab_size; "
                     f"got transition_size={ts}, vocab_size={self.vocab_size}"
                 )
             self.transition_size = ts
-            self.max_superword_words = self.train_kwargs.get("max_superword_words", 4)
+            self.max_superword_words = self.train_method_kwargs.get(
+                "max_superword_words", 4
+            )
 
         os.makedirs(self.save_path, exist_ok=True)
         self.logger = TokenizerWandbLogger(config, enabled=wandb_enabled)

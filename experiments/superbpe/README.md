@@ -25,7 +25,13 @@ W&B logs the efficiency curve (vocab_size on x-axis, bytes_per_token on y-axis) 
 | Config | T | t | method | max_superword_words | Notes |
 |---|---|---|---|---|---|
 | `bpe_200k` | 200000 | 200000 | superbpe | 4 | Baseline; stage 2 is a no-op (t==T). Stage-1 pretokenizer matches SuperBPE for a fair head-to-head. |
+| `superbpe_200k_t20k` | 200000 | 20000 | superbpe | 4 | Sweep point. |
+| `superbpe_200k_t40k` | 200000 | 40000 | superbpe | 4 | Sweep point. |
+| `superbpe_200k_t60k` | 200000 | 60000 | superbpe | 4 | Sweep point. |
 | `superbpe_200k_t80k` | 200000 | 80000 | superbpe | 4 | Paper's "best encoding efficiency" config. |
+| `superbpe_200k_t100k` | 200000 | 100000 | superbpe | 4 | Sweep point. |
+| `superbpe_200k_t120k` | 200000 | 120000 | superbpe | 4 | Sweep point. |
+| `superbpe_200k_t140k` | 200000 | 140000 | superbpe | 4 | Sweep point. |
 | `superbpe_200k_t160k` | 200000 | 160000 | superbpe | 4 | Mid transition. |
 | `superbpe_200k_t180k` | 200000 | 180000 | superbpe | 4 | Paper's "best downstream LM" config. |
 
@@ -38,7 +44,13 @@ Fill in after running. `bytes_per_token` is higher = better.
 | Tokenizer | bytes/token (OpenWebText, 10k docs) | Ratio vs bpe_200k | Stage-2 merges accepted | Wall time |
 |---|---|---|---|---|
 | bpe_200k | | 1.000 | — | |
+| superbpe_200k_t20k | | | | |
+| superbpe_200k_t40k | | | | |
+| superbpe_200k_t60k | | | | |
 | superbpe_200k_t80k | | | | |
+| superbpe_200k_t100k | | | | |
+| superbpe_200k_t120k | | | | |
+| superbpe_200k_t140k | | | | |
 | superbpe_200k_t160k | | | | |
 | superbpe_200k_t180k | | | | |
 

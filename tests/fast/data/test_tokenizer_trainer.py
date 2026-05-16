@@ -52,7 +52,7 @@ def _trainer(
         data=DataConfig(
             tokenizer_path=str(save_path),
             tokenizer_train_method=method,
-            tokenizer_train_kwargs=method_kwargs,
+            tokenizer_train_method_kwargs=method_kwargs,
             tokenizer_train_eval_every=eval_every,
         ),
         logging=LoggingConfig(**(logging_kwargs or {})),

@@ -204,7 +204,7 @@ model:
 def test_dataconfig_tokenizer_train_defaults():
     dc = DataConfig()
     assert dc.tokenizer_train_method == "bpe"
-    assert dc.tokenizer_train_kwargs == {}
+    assert dc.tokenizer_train_method_kwargs == {}
 
 
 def test_dataconfig_loads_superbpe_yaml(tmp_path):
@@ -215,7 +215,7 @@ data:
   dataset: openwebtext
   tokenizer_path: tokenizers/superbpe_200k_t80k
   tokenizer_train_method: superbpe
-  tokenizer_train_kwargs:
+  tokenizer_train_method_kwargs:
     transition_size: 80000
     max_superword_words: 4
 """
@@ -223,7 +223,7 @@ data:
     p.write_text(yaml_content)
     cfg = load_config(str(p))
     assert cfg.data.tokenizer_train_method == "superbpe"
-    assert cfg.data.tokenizer_train_kwargs == {
+    assert cfg.data.tokenizer_train_method_kwargs == {
         "transition_size": 80000,
         "max_superword_words": 4,
     }
