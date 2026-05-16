@@ -253,11 +253,25 @@ def _train_superbpe_tokenizer(
         for m in stage1_data["model"]["merges"]
     ]
     inv_vocab: dict = {i: tok for tok, i in s1_vocab.items()}
+    # Per-stage-1-token word count: |Ġ| + 1 if no leading Ġ, else |Ġ|.
+    word_count_of: dict = {
+        i: tok.count("Ġ") + (0 if tok.startswith("Ġ") else 1)
+        for i, tok in inv_vocab.items()
+    }
 
     # Re-encode the entire corpus with stage 1.
     docs: list[list[int]] = [
         stage1.encode(t, add_special_tokens=False).ids for t in texts
     ]
+
+    # 99th-percentile truncation: cap document length to mitigate duplication
+    # artifacts from very long outliers (paper section 3).
+    if len(docs) >= 100:
+        import numpy as np
+
+        lengths = np.array([len(d) for d in docs])
+        p99 = int(np.percentile(lengths, 99))
+        docs = [d[:p99] for d in docs]
 
     # Pair counts across each document, no whitespace boundary.
     pair_counts: Counter = Counter()
@@ -267,22 +281,33 @@ def _train_superbpe_tokenizer(
 
     vocab = dict(s1_vocab)
     merges = list(s1_merges)
+    forbidden_substr = ":Ġ"
+    n_accepted = 0
+    n_blacklisted = 0
 
-    # Stage 2 merge loop — no constraints (Task 7 will add them).
     while len(vocab) < vocab_size and pair_counts:
+        # Explicit tiebreaker — see spec Reproducibility section.
         (a, b), best_count = max(pair_counts.items(), key=lambda kv: (kv[1], kv[0]))
         if best_count <= 0:
             break
         new_str = inv_vocab[a] + inv_vocab[b]
+        new_word_count = word_count_of[a] + word_count_of[b]
+        # Guards.
+        if new_word_count > max_superword_words or forbidden_substr in new_str:
+            del pair_counts[(a, b)]
+            n_blacklisted += 1
+            continue
         new_id = len(vocab)
         vocab[new_str] = new_id
         inv_vocab[new_id] = new_str
+        word_count_of[new_id] = new_word_count
         merges.append((inv_vocab[a], inv_vocab[b]))
         _apply_merge_inplace(docs, pair_counts, a, b, new_id)
+        n_accepted += 1
 
     print(
         f"SuperBPE stage 2 done: vocab_size={len(vocab)} "
-        f"(stage-2 merges: {len(merges) - len(s1_merges)})"
+        f"(stage-2 merges accepted: {n_accepted}, blacklisted: {n_blacklisted})"
     )
 
     # ---- Final assembly ----

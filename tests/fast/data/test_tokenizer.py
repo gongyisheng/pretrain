@@ -297,3 +297,43 @@ def test_superbpe_decode_roundtrip(tmp_path, text_iter):
     for s in ["the quick brown fox", "she sells seashells", "by the way it works"]:
         ids = tok.encode(s).ids
         assert tok.decode(ids) == s, f"roundtrip failed for: {s!r}"
+
+
+# ---- SuperBPE guards (Task 7) ----
+
+
+def _ġ_count(tok: str) -> int:
+    """Stage-1 'word count' of a token (Ġ characters + 1 if no leading Ġ)."""
+    return tok.count("Ġ") + (0 if tok.startswith("Ġ") else 1)
+
+
+def test_superbpe_max_superword_words_cap(tmp_path, text_iter):
+    save = tmp_path / "sbpe_capped"
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=600,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=300,
+        max_superword_words=2,
+    )
+    tok = load_tokenizer(str(save))
+    for t in tok.get_vocab():
+        assert _ġ_count(t) <= 2, f"token {t!r} exceeds 2-word cap"
+
+
+def test_superbpe_no_colon_space_tokens(tmp_path, text_iter):
+    # Inject some "X: Y" patterns so the algorithm is tempted to learn ":Ġ" merges.
+    texts = ["foo: bar baz quux", "name: alice", "topic: animals plants"] * 50
+    save = tmp_path / "sbpe_colon"
+    train_tokenizer(
+        dataset_iter=iter(texts),
+        vocab_size=500,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=250,
+        max_superword_words=99,
+    )
+    tok = load_tokenizer(str(save))
+    for t in tok.get_vocab():
+        assert ":Ġ" not in t, f"forbidden ':Ġ' substring in token {t!r}"
