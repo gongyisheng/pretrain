@@ -234,12 +234,15 @@ def test_gqa_causal_mask_blocks_future(impl, device):
     assert torch.allclose(out_base[0, :7], out_modified[0, :7], atol=1e-5)
 
 
-def test_gqa_with_rope_output_shape():
+@pytest.mark.parametrize("impl", IMPL)
+def test_gqa_with_rope_output_shape(impl, device):
+    _skip_if_unsupported(impl, device)
     rope = RoPE(d_head=16, max_seq_len=32)
-    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation="sdpa")
+    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl)
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
-    assert gqa(x, rope, position_ids=pos).shape == (2, 8, 64)
+    attn_mask, _ = _make_attn_mask("causal", impl, pos, x.dtype)
+    assert gqa(x, rope, position_ids=pos, attn_mask=attn_mask).shape == (2, 8, 64)
 
 
 # ============================= MHA / GQA numerical parity vs eager ref =============================
@@ -266,18 +269,6 @@ MODULE_DTYPES = COMPOUND_DTYPES
 
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
-def test_mha_matches_ref_causal(dtype, atol):
-    torch.manual_seed(0)
-    mha = MultiHeadAttention(d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation="sdpa").to(dtype)
-    mha.eval()
-    x = torch.randn(2, 8, 64, dtype=dtype)
-    out = mha(x)
-    out_ref = _mha_ref_call(mha, x)
-    assert out.dtype == dtype
-    assert torch.allclose(out, out_ref, atol=atol)
-
-
-@pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("impl", IMPL)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_mha_matches_ref_attn_mask(kind, impl, device, dtype, atol):
@@ -290,18 +281,6 @@ def test_mha_matches_ref_attn_mask(kind, impl, device, dtype, atol):
     attn_mask, ref_mask = _make_attn_mask(kind, impl, pos, x.dtype)
     out = mha(x, attn_mask=attn_mask)
     out_ref = _mha_ref_call(mha, x, attn_mask=ref_mask)
-    assert out.dtype == dtype
-    assert torch.allclose(out, out_ref, atol=atol)
-
-
-@pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
-def test_gqa_matches_ref_causal(dtype, atol):
-    torch.manual_seed(0)
-    gqa = GroupedQueryAttention(d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation="sdpa").to(dtype)
-    gqa.eval()
-    x = torch.randn(2, 8, 64, dtype=dtype)
-    out = gqa(x)
-    out_ref = _gqa_ref_call(gqa, x)
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
