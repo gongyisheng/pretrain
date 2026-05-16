@@ -321,6 +321,10 @@ def _train_superbpe_tokenizer(
         for i, tok in inv_vocab.items()
     }
 
+    # Cache stage-1 vocab size — used in curve points, in-loop logging,
+    # the meta file, and the safety final-point guard.
+    stage1_size = stage1.get_vocab_size()
+
     # ---- Post-hoc stage-1 curve points ----
     if wandb_enabled:
         base_count = len(s1_vocab) - len(s1_merges)  # alphabet + specials
@@ -333,7 +337,7 @@ def _train_superbpe_tokenizer(
             )
             _log_point(partial, base_count + k)
         # Forced point at exactly stage-1 final vocab.
-        _log_point(stage1, stage1.get_vocab_size())
+        _log_point(stage1, stage1_size)
 
     # Re-encode the entire corpus with stage 1.
     docs: list[list[int]] = [
@@ -384,8 +388,7 @@ def _train_superbpe_tokenizer(
         # ---- In-loop stage-2 curve point ----
         cur_size = len(vocab)
         if wandb_enabled and (
-            (cur_size - stage1.get_vocab_size()) % wandb_eval_every == 0
-            or cur_size == vocab_size
+            (cur_size - stage1_size) % wandb_eval_every == 0 or cur_size == vocab_size
         ):
             tmp = Tokenizer(models.BPE(vocab=vocab, merges=merges))
             tmp.pre_tokenizer = pre_tokenizers.ByteLevel(
@@ -418,7 +421,7 @@ def _train_superbpe_tokenizer(
         "n_docs": n_docs,
         "stage1_seconds": stage1_seconds,
         "stage2_seconds": stage2_seconds,
-        "stage1_vocab_size": stage1.get_vocab_size(),
+        "stage1_vocab_size": stage1_size,
         "final_vocab_size": len(vocab),
         "n_stage2_merges_accepted": n_accepted,
         "n_stage2_merges_blacklisted": n_blacklisted,
@@ -429,11 +432,10 @@ def _train_superbpe_tokenizer(
 
     # ---- W&B finalize ----
     if wandb_enabled:
-        # Final point in case the loop terminated early before hitting an interval.
-        if (
-            len(vocab) != vocab_size
-            or (len(vocab) - stage1.get_vocab_size()) % wandb_eval_every != 0
-        ):
+        # Final point only if the loop exited early (pair_counts exhausted).
+        # When the loop runs to completion (len(vocab) == vocab_size), the
+        # in-loop `or cur_size == vocab_size` branch already logged that point.
+        if len(vocab) != vocab_size:
             _log_point(final, len(vocab))
         import wandb
 
