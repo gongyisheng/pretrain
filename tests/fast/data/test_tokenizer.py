@@ -337,3 +337,42 @@ def test_superbpe_no_colon_space_tokens(tmp_path, text_iter):
     tok = load_tokenizer(str(save))
     for t in tok.get_vocab():
         assert ":Ġ" not in t, f"forbidden ':Ġ' substring in token {t!r}"
+
+
+# ---- training_meta.json (Task 8) ----
+
+
+def test_superbpe_writes_training_meta(tmp_path, text_iter):
+    save = tmp_path / "sbpe_meta"
+    train_tokenizer(
+        dataset_iter=text_iter(),
+        vocab_size=400,
+        save_path=str(save),
+        method="superbpe",
+        transition_size=200,
+        max_superword_words=4,
+    )
+    meta_path = save / "training_meta.json"
+    assert meta_path.exists()
+    import json
+
+    meta = json.loads(meta_path.read_text())
+    expected_keys = {
+        "T",
+        "t",
+        "method",
+        "max_superword_words",
+        "n_stage2_merges_accepted",
+        "n_stage2_merges_blacklisted",
+        "n_docs",
+        "stage1_seconds",
+        "stage2_seconds",
+    }
+    assert expected_keys <= set(meta.keys()), (
+        f"missing keys: {expected_keys - set(meta.keys())}"
+    )
+    assert meta["T"] == 400
+    assert meta["t"] == 200
+    assert meta["method"] == "superbpe"
+    assert meta["max_superword_words"] == 4
+    assert meta["n_docs"] == len(SAMPLE_TEXTS)

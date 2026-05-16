@@ -9,6 +9,7 @@ All trainers emit a HuggingFace-compatible tokenizer.json under save_path/.
 
 import json
 import os
+import time
 from collections import Counter
 from typing import Iterable, Optional, Sequence
 
@@ -229,8 +230,10 @@ def _train_superbpe_tokenizer(
     texts = list(dataset_iter)
     if not texts:
         raise ValueError("dataset_iter produced no text")
+    n_docs = len(texts)
 
     # ---- Stage 1: HF BPE with whitespace + ByteLevel pretokenizer ----
+    t0 = time.perf_counter()
     stage1 = Tokenizer(models.BPE())
     stage1.pre_tokenizer = _stage1_pretokenizer()
     stage1.decoder = decoders.ByteLevel()
@@ -242,9 +245,13 @@ def _train_superbpe_tokenizer(
     )
     stage1.train_from_iterator(iter(texts), trainer=stage1_trainer)
     stage1.save(os.path.join(save_path, "stage1.json"))
-    print(f"SuperBPE stage 1 done: vocab_size={stage1.get_vocab_size()}")
+    stage1_seconds = time.perf_counter() - t0
+    print(
+        f"SuperBPE stage 1 done: vocab_size={stage1.get_vocab_size()} ({stage1_seconds:.2f}s)"
+    )
 
     # ---- Stage 2 setup ----
+    t0 = time.perf_counter()
     with open(os.path.join(save_path, "stage1.json")) as f:
         stage1_data = json.loads(f.read())
     s1_vocab: dict = dict(stage1_data["model"]["vocab"])  # str -> int
@@ -305,9 +312,11 @@ def _train_superbpe_tokenizer(
         _apply_merge_inplace(docs, pair_counts, a, b, new_id)
         n_accepted += 1
 
+    stage2_seconds = time.perf_counter() - t0
     print(
         f"SuperBPE stage 2 done: vocab_size={len(vocab)} "
-        f"(stage-2 merges accepted: {n_accepted}, blacklisted: {n_blacklisted})"
+        f"(stage-2 merges accepted: {n_accepted}, blacklisted: {n_blacklisted}, "
+        f"{stage2_seconds:.2f}s)"
     )
 
     # ---- Final assembly ----
@@ -317,5 +326,22 @@ def _train_superbpe_tokenizer(
     )
     final.decoder = decoders.ByteLevel()
     final.save(os.path.join(save_path, "tokenizer.json"))
+
+    # ---- training_meta.json ----
+    meta = {
+        "T": vocab_size,
+        "t": transition_size,
+        "method": "superbpe",
+        "max_superword_words": max_superword_words,
+        "n_docs": n_docs,
+        "stage1_seconds": stage1_seconds,
+        "stage2_seconds": stage2_seconds,
+        "stage1_vocab_size": stage1.get_vocab_size(),
+        "final_vocab_size": len(vocab),
+        "n_stage2_merges_accepted": n_accepted,
+        "n_stage2_merges_blacklisted": n_blacklisted,
+    }
+    with open(os.path.join(save_path, "training_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
     print(f"SuperBPE tokenizer saved to {save_path}/")
     return final
