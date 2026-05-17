@@ -405,3 +405,45 @@ def test_bpe_parity_with_hf_unicode():
     hf_vocab, hf_merges = _train_hf(lambda: iter(UNICODE_TEXTS), vocab_size=400)
     assert py_merges == hf_merges
     assert set(py_vocab) == set(hf_vocab)
+
+
+def test_merge_filter_vetoes_specific_pair():
+    # Reject any merge whose result contains "e".
+    def no_e(a, b, merged):
+        return "e" not in merged
+
+    trainer = BpeTrainer(vocab_size=300, n_workers=1, merge_filter=no_e)
+    vocab, _ = trainer.train(_corpus)
+    special = set(trainer.special_tokens)
+    for tok in vocab:
+        if len(tok) > 1 and tok not in special:  # multi-char tokens are merge results
+            assert "e" not in tok, f"vetoed letter leaked into {tok!r}"
+
+
+def test_merge_filter_early_exit_when_all_vetoed():
+    """Filter rejecting everything → trainer exits with seed-only vocab."""
+
+    def reject_all(a, b, merged):
+        return False
+
+    vocab, merges = BpeTrainer(
+        vocab_size=300, n_workers=1, merge_filter=reject_all
+    ).train(_corpus)
+    # 256 byte alphabet + 1 special token. No merges accepted.
+    assert len(vocab) == 257
+    assert merges == []
+
+
+def test_merge_filter_called_with_string_args():
+    """Filter receives (a, b, a+b) as byte-level unicode strings."""
+    calls = []
+
+    def record(a, b, merged):
+        calls.append((a, b, merged))
+        return True
+
+    BpeTrainer(vocab_size=270, n_workers=1, merge_filter=record).train(_corpus)
+    assert len(calls) > 0
+    for a, b, merged in calls:
+        assert isinstance(a, str) and isinstance(b, str) and isinstance(merged, str)
+        assert a + b == merged
