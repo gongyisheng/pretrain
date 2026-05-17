@@ -9,6 +9,7 @@ from src.data.bpe import (
     BpeTrainer,
     _BYTE_TO_UNICODE,
     _UNICODE_TO_BYTE,
+    _apply_merge,
     _build_chunks,
     _byte_encode,
     _init_pair_state,
@@ -227,3 +228,48 @@ def test_select_best_pair_returns_none_when_heap_empty():
     heap: list = []
     pair_counts: Counter = Counter()
     assert _select_best_pair(heap, pair_counts) == (None, 0)
+
+
+def test_apply_merge_rewrites_symbols():
+    chunks = {("a", "b", "c"): 1, ("a", "b"): 1}
+    syms, weights, pair_counts, where = _init_pair_state(chunks, [])
+    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heapq.heapify(heap)
+    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab")
+    # All ("a","b") occurrences collapsed.
+    # _init_pair_state sorts chunks: ("a","b") < ("a","b","c"), so chunk 0 = ["a","b"].
+    assert syms == [["ab"], ["ab", "c"]]
+
+
+def test_apply_merge_updates_pair_counts():
+    chunks = {("a", "b", "c"): 1}
+    syms, weights, pair_counts, where = _init_pair_state(chunks, [])
+    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heapq.heapify(heap)
+    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab")
+    # (a,b) gone, (b,c) gone, (ab,c) new.
+    assert ("a", "b") not in pair_counts
+    assert ("b", "c") not in pair_counts
+    assert pair_counts[("ab", "c")] == 1
+
+
+def test_apply_merge_respects_chunk_weight():
+    chunks = {("a", "b"): 5}
+    syms, weights, pair_counts, where = _init_pair_state(chunks, [])
+    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heapq.heapify(heap)
+    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab")
+    # (a,b) had count 5; after merge it disappears, no new pairs from a 1-symbol chunk.
+    assert ("a", "b") not in pair_counts
+    assert syms == [["ab"]]
+
+
+def test_apply_merge_overlapping_pairs_left_to_right():
+    # "a a a" → merge (a,a): consume left pair first, leaving "aa a", not "a aa".
+    chunks = {("a", "a", "a"): 1}
+    syms, weights, pair_counts, where = _init_pair_state(chunks, [])
+    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heapq.heapify(heap)
+    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "a"), "aa")
+    assert syms == [["aa", "a"]]
+    assert pair_counts[("aa", "a")] == 1

@@ -240,6 +240,68 @@ def _select_best_pair(
     return None, 0
 
 
+def _apply_merge(
+    symbols_per_chunk: list[list[str]],
+    chunk_counts: list[int],
+    pair_counts: Counter,
+    where_to_update: dict[tuple[str, str], set[int]],
+    heap: list,
+    pair: tuple[str, str],
+    merged: str,
+) -> None:
+    """Apply merge `pair → merged` everywhere, updating state incrementally.
+
+    Visits only chunks in `where_to_update[pair]`. For each, scans the symbol
+    list left-to-right and collapses adjacent (a, b) pairs. Adjusts
+    `pair_counts` for the neighbors that change (decrement old, increment new)
+    and pushes new heap entries.
+    """
+    a, b = pair
+    affected = where_to_update.pop(pair, set())
+    pair_counts.pop(pair, None)
+    for cid in affected:
+        syms = symbols_per_chunk[cid]
+        w = chunk_counts[cid]
+        i = 0
+        while i < len(syms) - 1:
+            if syms[i] != a or syms[i + 1] != b:
+                i += 1
+                continue
+            # Left neighbor: (prev, a) → (prev, merged).
+            if i > 0:
+                prev = syms[i - 1]
+                pair_counts[(prev, a)] -= w
+                if pair_counts[(prev, a)] <= 0:
+                    pair_counts.pop((prev, a), None)
+                else:
+                    heapq.heappush(
+                        heap, _make_heap_entry((prev, a), pair_counts[(prev, a)])
+                    )
+                pair_counts[(prev, merged)] += w
+                where_to_update.setdefault((prev, merged), set()).add(cid)
+                heapq.heappush(
+                    heap, _make_heap_entry((prev, merged), pair_counts[(prev, merged)])
+                )
+            # Right neighbor: (b, next) → (merged, next).
+            if i + 2 < len(syms):
+                nxt = syms[i + 2]
+                pair_counts[(b, nxt)] -= w
+                if pair_counts[(b, nxt)] <= 0:
+                    pair_counts.pop((b, nxt), None)
+                else:
+                    heapq.heappush(
+                        heap, _make_heap_entry((b, nxt), pair_counts[(b, nxt)])
+                    )
+                pair_counts[(merged, nxt)] += w
+                where_to_update.setdefault((merged, nxt), set()).add(cid)
+                heapq.heappush(
+                    heap, _make_heap_entry((merged, nxt), pair_counts[(merged, nxt)])
+                )
+            syms[i] = merged
+            del syms[i + 1]
+            i += 1
+
+
 class BpeTrainer:
     """Train a BPE tokenizer in pure Python. Not yet implemented."""
 
