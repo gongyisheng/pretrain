@@ -20,6 +20,7 @@ from typing import Callable, Iterable
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 import wandb
 
+from src.data.bpe import BpeTrainer
 from src.eval.tokenizer import _bytes_per_token
 from src.utils.config import TrainConfig
 
@@ -130,6 +131,7 @@ class TokenizerTrainer:
             )
 
         os.makedirs(self.save_path, exist_ok=True)
+
         self.logger = TokenizerWandbLogger(config, enabled=wandb_enabled)
         self.metrics = TokenizerMetricsTracker()
 
@@ -175,7 +177,6 @@ class TokenizerTrainer:
     # ---- BPE ----
 
     def _train_bpe(self, make_train_iter: Callable[[], Iterable[str]]) -> Tokenizer:
-        from src.data.bpe import BpeTrainer
 
         def curve_cb(vocab_size, vocab, merges):
             if not self.logger.enabled:
@@ -191,6 +192,8 @@ class TokenizerTrainer:
             pretokenizer="bpe",
             progress_callback=curve_cb if self.logger.enabled else None,
             progress_every=self.eval_every,
+            show_progress=True,
+            progress_desc="[bpe]",
         )
         vocab, merges = bpe.train(make_train_iter)
 
@@ -204,7 +207,6 @@ class TokenizerTrainer:
     def _train_superbpe(
         self, make_train_iter: Callable[[], Iterable[str]]
     ) -> Tokenizer:
-        from src.data.bpe import BpeTrainer
 
         def curve_cb(vocab_size, vocab, merges):
             if not self.logger.enabled:
@@ -224,6 +226,8 @@ class TokenizerTrainer:
             pretokenizer="bpe",
             progress_callback=curve_cb if self.logger.enabled else None,
             progress_every=self.eval_every,
+            show_progress=True,
+            progress_desc="[superbpe stage 1]",
         )
         stage1_vocab, stage1_merges = stage1.train(make_train_iter)
 
@@ -256,6 +260,8 @@ class TokenizerTrainer:
             merge_filter=superbpe_filter,
             progress_callback=curve_cb if self.logger.enabled else None,
             progress_every=self.eval_every,
+            show_progress=True,
+            progress_desc="[superbpe stage 2]",
         )
         vocab, merges = stage2.train(make_train_iter)
         print(

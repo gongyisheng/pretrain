@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterable
 from multiprocessing import get_context
 
 import regex as _re
+from tqdm import tqdm
 
 
 def _build_byte_to_unicode() -> dict[int, str]:
@@ -349,6 +350,8 @@ class BpeTrainer:
         progress_every: int = 1000,
         n_workers: int | None = None,
         batch_size: int = 1000,
+        show_progress: bool = False,
+        progress_desc: str = "Merging",
     ) -> None:
         if pretokenizer not in self._VALID_PRETOK_MODES:
             raise ValueError(
@@ -398,6 +401,8 @@ class BpeTrainer:
             else max(1, n_workers)
         )
         self.batch_size = batch_size
+        self.show_progress = show_progress
+        self.progress_desc = progress_desc
 
     def train(
         self,
@@ -442,32 +447,46 @@ class BpeTrainer:
         heapq.heapify(heap)
 
         # 5. Merge loop.
-        while len(vocab) < self.vocab_size:
-            pair, _cnt = _select_best_pair(heap, pair_counts)
-            if pair is None:
-                break  # heap drained, no more pairs.
-            a, b = pair
-            merged = a + b
-            if self.merge_filter is not None and not self.merge_filter(a, b, merged):
-                # Veto: drop the pair from the live state. A later merge of
-                # some neighbor of (a, b) will still decrement pair_counts[pair]
-                # in _apply_merge (because the chunk physically contains
-                # ...a b...), so this entry can transiently go negative. The
-                # `cur > 0` guard in _select_best_pair excludes it from
-                # selection — correctness is preserved, but the counter is no
-                # longer a faithful reflection of the symbol-sequence state.
-                pair_counts.pop(pair, None)
-                where.pop(pair, None)
-                continue
-            vocab[merged] = len(vocab)
-            merges.append(pair)
-            _apply_merge(
-                symbols, weights, pair_counts, where, heap, pair, merged, vocab
-            )
-            if (
-                self.progress_callback is not None
-                and len(vocab) % self.progress_every == 0
-            ):
-                self.progress_callback(len(vocab), vocab, merges)
+        n_vetoed = 0
+        with tqdm(
+            total=self.vocab_size,
+            initial=len(vocab),
+            desc=self.progress_desc,
+            disable=not self.show_progress,
+            dynamic_ncols=True,
+        ) as bar:
+            while len(vocab) < self.vocab_size:
+                pair, _cnt = _select_best_pair(heap, pair_counts)
+                if pair is None:
+                    break  # heap drained, no more pairs.
+                a, b = pair
+                merged = a + b
+                if self.merge_filter is not None and not self.merge_filter(
+                    a, b, merged
+                ):
+                    # Veto: drop the pair from the live state. A later merge of
+                    # some neighbor of (a, b) will still decrement pair_counts[pair]
+                    # in _apply_merge (because the chunk physically contains
+                    # ...a b...), so this entry can transiently go negative. The
+                    # `cur > 0` guard in _select_best_pair excludes it from
+                    # selection — correctness is preserved, but the counter is no
+                    # longer a faithful reflection of the symbol-sequence state.
+                    pair_counts.pop(pair, None)
+                    where.pop(pair, None)
+                    n_vetoed += 1
+                    if self.show_progress:
+                        bar.set_postfix(vetoed=n_vetoed, refresh=False)
+                    continue
+                vocab[merged] = len(vocab)
+                merges.append(pair)
+                _apply_merge(
+                    symbols, weights, pair_counts, where, heap, pair, merged, vocab
+                )
+                bar.update(1)
+                if (
+                    self.progress_callback is not None
+                    and len(vocab) % self.progress_every == 0
+                ):
+                    self.progress_callback(len(vocab), vocab, merges)
 
         return vocab, merges
