@@ -130,27 +130,27 @@ def test_evaluate_returns_expected_keys(tmp_path, text_iter):
     assert abs(result["bytes_per_token"] * result["tokens_per_byte"] - 1.0) < 1e-9
 
 
-# ---- SuperBPE stage 1 ----
+# ---- SuperBPE subword pass ----
 
 
-def test_superbpe_stage1_saves_intermediate(tmp_path, text_iter):
+def test_superbpe_subword_pass_saves_intermediate(tmp_path, text_iter):
     save = tmp_path / "sbpe"
-    # transition_size=399 keeps stage 2's role minimal — we only verify stage 1 here.
+    # transition_size=399 keeps the superword pass role minimal — we only verify the subword pass here.
     _trainer(save, 400, "superbpe", transition_size=399).train(text_iter)
-    assert (save / "bpe_tokenizer.json").exists()
+    assert (save / "subword_tokenizer.json").exists()
 
 
-def test_superbpe_stage1_vocab_size(tmp_path, text_iter):
+def test_superbpe_subword_pass_vocab_size(tmp_path, text_iter):
     save = tmp_path / "sbpe"
     _trainer(save, 400, "superbpe", transition_size=399).train(text_iter)
-    stage1 = Tokenizer.from_file(str(save / "bpe_tokenizer.json"))
-    # Stage 1 trains to transition_size (~400, may be slightly below due to
-    # corpus size; HF stops when no more merges available).
-    assert stage1.get_vocab_size() <= 400
-    assert stage1.get_vocab_size() >= 256  # at least byte alphabet
+    subword = Tokenizer.from_file(str(save / "subword_tokenizer.json"))
+    # Subword pass trains to transition_size (~400, may be slightly below due
+    # to corpus size; trainer stops when no more merges are available).
+    assert subword.get_vocab_size() <= 400
+    assert subword.get_vocab_size() >= 256  # at least byte alphabet
 
 
-# ---- SuperBPE stage 2 ----
+# ---- SuperBPE superword pass ----
 
 
 def test_superbpe_full_train_succeeds(tmp_path, text_iter):

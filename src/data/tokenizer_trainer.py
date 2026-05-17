@@ -2,11 +2,12 @@
 
 Both methods drive the pure-Python `BpeTrainer` in `src/data/bpe.py`:
 - "bpe":      one BpeTrainer call with whitespace + digit pretokenization.
-- "superbpe": two BpeTrainer calls — stage 1 same as "bpe", stage 2 with
-              pretokenizer="bytelevel", the stage-1 vocab/merges as the
-              starting state, and a merge_filter enforcing the
-              `max_superword_words` cap and the ":Ġ" exclusion
-              (arXiv:2503.13423).
+- "superbpe": two BpeTrainer calls — a "subword pass" (same config as "bpe",
+              merges stay within word boundaries) followed by a "superword
+              pass" (pretokenizer="bytelevel", continues from the subword
+              vocab/merges, merges may cross word boundaries; filtered by
+              the `max_superword_words` cap and the ":Ġ" exclusion).
+              Equivalent to stage 1 / stage 2 in arXiv:2503.13423.
 
 All trainers emit a HuggingFace-compatible tokenizer.json under save_path/.
 Runtime encode/decode loading lives in src/data/tokenizer.py.
@@ -135,36 +136,6 @@ class TokenizerTrainer:
         self.logger = TokenizerWandbLogger(config, enabled=wandb_enabled)
         self.metrics = TokenizerMetricsTracker()
 
-    def train(self, dataset_iter: Callable[[], Iterable[str]]) -> Tokenizer:
-        """Train and save a tokenizer.
-
-        `dataset_iter` is a zero-arg callable that returns a fresh text
-        iterable each time it's called. SuperBPE needs the corpus twice
-        (stage 1 training + stage 2 re-encoding) and we refuse to materialize
-        the whole stream in memory — so the caller must provide something
-        replayable (a generator function, an iterable, etc.).
-        """
-        # Pull eval_texts from the front of a fresh stream.
-        eval_texts = list(itertools.islice(dataset_iter(), self.eval_num_docs))
-        if not eval_texts:
-            raise ValueError("dataset_iter produced no text")
-        self.metrics.eval_texts = eval_texts
-
-        make_train_iter = self._make_train_iter(dataset_iter, eval_texts)
-
-        if self.train_method == "bpe":
-            tokenizer = self._train_bpe(make_train_iter)
-        else:
-            tokenizer = self._train_superbpe(make_train_iter)
-
-        tokenizer.save(os.path.join(self.save_path, "tokenizer.json"))
-        print(
-            f"{self.train_method.upper()} tokenizer saved to {self.save_path}/ "
-            f"(vocab_size={tokenizer.get_vocab_size()})"
-        )
-        self.logger.finish()
-        return tokenizer
-
     # ---- Shared helpers ----
 
     def _make_train_iter(
@@ -210,6 +181,36 @@ class TokenizerTrainer:
 
         return _cb
 
+    def train(self, dataset_iter: Callable[[], Iterable[str]]) -> Tokenizer:
+        """Train and save a tokenizer.
+
+        `dataset_iter` is a zero-arg callable that returns a fresh text
+        iterable each time it's called. SuperBPE needs the corpus twice
+        (stage 1 training + stage 2 re-encoding) and we refuse to materialize
+        the whole stream in memory — so the caller must provide something
+        replayable (a generator function, an iterable, etc.).
+        """
+        # Pull eval_texts from the front of a fresh stream.
+        eval_texts = list(itertools.islice(dataset_iter(), self.eval_num_docs))
+        if not eval_texts:
+            raise ValueError("dataset_iter produced no text")
+        self.metrics.eval_texts = eval_texts
+
+        make_train_iter = self._make_train_iter(dataset_iter, eval_texts)
+
+        if self.train_method == "bpe":
+            tokenizer = self._train_bpe(make_train_iter)
+        else:
+            tokenizer = self._train_superbpe(make_train_iter)
+
+        tokenizer.save(os.path.join(self.save_path, "tokenizer.json"))
+        print(
+            f"{self.train_method.upper()} tokenizer saved to {self.save_path}/ "
+            f"(vocab_size={tokenizer.get_vocab_size()})"
+        )
+        self.logger.finish()
+        return tokenizer
+
     # ---- BPE ----
 
     def _train_bpe(self, make_train_iter: Callable[[], Iterable[str]]) -> Tokenizer:
@@ -236,9 +237,9 @@ class TokenizerTrainer:
     def _train_superbpe(
         self, make_train_iter: Callable[[], Iterable[str]]
     ) -> Tokenizer:
-        # ---- Stage 1: standard BPE with paper-default whitespace pretokenization ----
+        # ---- Subword pass: standard BPE with paper-default whitespace pretokenization ----
         t0 = time.perf_counter()
-        stage1 = BpeTrainer(
+        subword_bpe = BpeTrainer(
             vocab_size=self.transition_size,
             special_tokens=self._SPECIAL_TOKENS,
             pretokenizer="bpe",
@@ -247,22 +248,22 @@ class TokenizerTrainer:
             else None,
             progress_every=self.eval_every,
             show_progress=True,
-            progress_desc="[superbpe stage 1]",
+            progress_desc="[superbpe][subword pass]",
         )
-        stage1_vocab, stage1_merges = stage1.train(make_train_iter)
+        subword_vocab, subword_merges = subword_bpe.train(make_train_iter)
 
-        stage1_tok = Tokenizer(models.BPE(vocab=stage1_vocab, merges=stage1_merges))
-        stage1_tok.pre_tokenizer = pre_tokenizers.ByteLevel(
+        subword_tok = Tokenizer(models.BPE(vocab=subword_vocab, merges=subword_merges))
+        subword_tok.pre_tokenizer = pre_tokenizers.ByteLevel(
             add_prefix_space=False, use_regex=False
         )
-        stage1_tok.decoder = decoders.ByteLevel()
-        stage1_tok.save(os.path.join(self.save_path, "bpe_tokenizer.json"))
+        subword_tok.decoder = decoders.ByteLevel()
+        subword_tok.save(os.path.join(self.save_path, "subword_tokenizer.json"))
         print(
-            f"SuperBPE stage 1 done: vocab_size={len(stage1_vocab)} "
+            f"SuperBPE subword pass done: vocab_size={len(subword_vocab)} "
             f"({time.perf_counter() - t0:.2f}s)"
         )
 
-        # ---- Stage 2: byte-level chunking + SuperBPE filters ----
+        # ---- Superword pass: byte-level chunking + SuperBPE filters ----
         t0 = time.perf_counter()
 
         def superbpe_filter(a: str, b: str, merged: str) -> bool:
@@ -271,23 +272,23 @@ class TokenizerTrainer:
             word_count = merged.count("Ġ") + (0 if merged.startswith("Ġ") else 1)
             return word_count <= self.max_superword_words
 
-        stage2 = BpeTrainer(
+        superword_bpe = BpeTrainer(
             vocab_size=self.vocab_size,
             special_tokens=self._SPECIAL_TOKENS,
             pretokenizer="bytelevel",
-            initial_vocab=stage1_vocab,
-            initial_merges=stage1_merges,
+            initial_vocab=subword_vocab,
+            initial_merges=subword_merges,
             merge_filter=superbpe_filter,
             progress_callback=self._wandb_curve_cb(use_regex=False)
             if self.logger.enabled
             else None,
             progress_every=self.eval_every,
             show_progress=True,
-            progress_desc="[superbpe stage 2]",
+            progress_desc="[superbpe][superword pass]",
         )
-        vocab, merges = stage2.train(make_train_iter)
+        vocab, merges = superword_bpe.train(make_train_iter)
         print(
-            f"SuperBPE stage 2 done: vocab_size={len(vocab)} "
+            f"SuperBPE superword pass done: vocab_size={len(vocab)} "
             f"({time.perf_counter() - t0:.2f}s)"
         )
 
