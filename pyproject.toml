@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "torch>=2.10",
     "tokenizers>=0.22",
+    "regex>=2024.0",
     "datasets>=4.5",
     "wandb>=0.26.0",
     "pyyaml>=6.0",
