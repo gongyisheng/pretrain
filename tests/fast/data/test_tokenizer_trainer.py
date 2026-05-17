@@ -6,6 +6,7 @@ from tokenizers import Tokenizer
 from src.data.tokenizer import load_tokenizer
 from src.data.tokenizer_trainer import (
     TokenizerTrainer,
+    encode_corpus_to_chunks,
 )
 from src.eval.tokenizer import _bytes_per_token, evaluate
 from src.utils.config import DataConfig, LoggingConfig, ModelConfig, TrainConfig
@@ -298,3 +299,48 @@ def test_superbpe_logs_curve_points(tmp_path, text_iter, monkeypatch):
     for d in logged:
         if "vocab_size" in d:
             assert "bytes_per_token" in d, f"missing bytes_per_token in {d}"
+
+
+# ---- encode_corpus_to_chunks ----
+
+
+def test_encode_corpus_to_chunks_aggregates_by_token_tuple(tmp_path, text_iter):
+    """Helper produces a dict mapping post-encode token-tuples to frequencies."""
+    # Train a small tokenizer to encode with.
+    save = tmp_path / "small_bpe"
+    tok_train = _trainer(save, 300, "bpe").train(text_iter)
+
+    # Drive the helper.
+    chunks = encode_corpus_to_chunks(tok_train, text_iter, batch_size=10)
+
+    # Shape: dict[tuple[str,...], int], non-empty, all counts positive.
+    assert isinstance(chunks, dict)
+    assert len(chunks) > 0
+    for k, v in chunks.items():
+        assert isinstance(k, tuple)
+        assert all(isinstance(s, str) for s in k)
+        assert v > 0
+
+    # Aggregation correctness: total token-occurrences = sum of all docs'
+    # token counts after encoding.
+    expected_total = sum(
+        len(tok_train.encode(doc, add_special_tokens=False).tokens)
+        for doc in text_iter()
+    )
+    counted_total = sum(len(k) * v for k, v in chunks.items())
+    assert counted_total == expected_total
+
+
+def test_encode_corpus_to_chunks_dedups_identical_docs(tmp_path, text_iter):
+    """Identical input docs collapse to one chunk with count = num occurrences."""
+    # Train a small tokenizer (any working one — we just need it to encode).
+    save = tmp_path / "small_bpe"
+    tok = _trainer(save, 300, "bpe").train(text_iter)
+
+    docs = ["hello world", "hello world", "hello world", "different"]
+    chunks = encode_corpus_to_chunks(tok, lambda: iter(docs))
+
+    # "hello world" → one chunk with count 3; "different" → one chunk with count 1.
+    assert len(chunks) == 2
+    assert max(chunks.values()) == 3
+    assert min(chunks.values()) == 1

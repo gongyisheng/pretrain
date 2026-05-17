@@ -27,6 +27,33 @@ from src.eval.tokenizer import _bytes_per_token
 from src.utils.config import TrainConfig
 
 
+def encode_corpus_to_chunks(
+    tokenizer: Tokenizer,
+    corpus_iter: Callable[[], Iterable[str]],
+    batch_size: int = 1000,
+) -> dict[tuple[str, ...], int]:
+    """Pre-encode a corpus with an HF tokenizer; return chunk-counts ready
+    for ``BpeTrainer.train(chunks=...)``.
+
+    Aggregates each document's encoded tokens into a tuple and counts unique
+    occurrences. Used by the SuperBPE superword pass to skip the Python
+    merge-replay step inside ``_init_pair_state`` — HF's Rust ``encode_batch``
+    produces identical post-merge symbol sequences much faster.
+
+    ``corpus_iter`` is a zero-arg factory matching ``BpeTrainer.train``'s
+    contract.
+    """
+    chunks: Counter = Counter()
+    stream = iter(corpus_iter())
+    while True:
+        batch = list(itertools.islice(stream, batch_size))
+        if not batch:
+            break
+        for enc in tokenizer.encode_batch(batch, add_special_tokens=False):
+            chunks[tuple(enc.tokens)] += 1
+    return dict(chunks)
+
+
 class TokenizerWandbLogger:
     """Thin wandb wrapper. Handles init/log/finish only — no metric computation."""
 
@@ -273,19 +300,10 @@ class TokenizerTrainer:
             word_count = merged.count("Ġ") + (0 if merged.startswith("Ġ") else 1)
             return word_count <= self.max_superword_words
 
-        # Pre-encode the corpus with the subword tokenizer. This skips the
-        # Python merge-replay inside BpeTrainer — HF's Rust encode_batch
-        # produces identical post-merge symbol sequences ~10-100× faster.
-        # Equivalence verified by `test_bpe_chunks_param_equivalent_with_resume`.
-        encoded_chunks: Counter = Counter()
-        encode_batch_size = 1000
-        stream = iter(make_train_iter())
-        while True:
-            batch = list(itertools.islice(stream, encode_batch_size))
-            if not batch:
-                break
-            for enc in subword_tok.encode_batch(batch, add_special_tokens=False):
-                encoded_chunks[tuple(enc.tokens)] += 1
+        # Pre-encode the corpus with the subword tokenizer so the superword
+        # BpeTrainer skips the Python merge-replay. Equivalence verified by
+        # `test_bpe_chunks_param_equivalent_with_resume`.
+        encoded_chunks = encode_corpus_to_chunks(subword_tok, make_train_iter)
 
         superword_bpe = BpeTrainer(
             vocab_size=self.vocab_size,
@@ -301,7 +319,7 @@ class TokenizerTrainer:
             show_progress=True,
             progress_desc="[superbpe][superword pass]",
         )
-        vocab, merges = superword_bpe.train(chunks=dict(encoded_chunks))
+        vocab, merges = superword_bpe.train(chunks=encoded_chunks)
         print(
             f"SuperBPE superword pass done: vocab_size={len(vocab)} "
             f"({time.perf_counter() - t0:.2f}s)"
