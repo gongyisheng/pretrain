@@ -172,9 +172,33 @@ def _build_chunks(
     return dict(total)
 
 
+def _count_pairs_worker(
+    args: tuple[list[list[str]], list[int], int],
+) -> tuple[Counter, dict[tuple[str, str], set[int]]]:
+    """Count adjacent-pair occurrences in a slice of chunks.
+
+    Module-level (not nested) for `mp.Pool` pickling. The slice's chunks are
+    indexed starting at `cid_offset` so the returned `where_to_update`
+    references global chunk_ids.
+    """
+    symbols_slice, weights_slice, cid_offset = args
+    pair_counts: Counter = Counter()
+    where_to_update: dict[tuple[str, str], set[int]] = {}
+    for i, syms in enumerate(symbols_slice):
+        cid = cid_offset + i
+        w = weights_slice[i]
+        for x, y in zip(syms[:-1], syms[1:]):
+            p = (x, y)
+            pair_counts[p] += w
+            where_to_update.setdefault(p, set()).add(cid)
+    return pair_counts, where_to_update
+
+
 def _init_pair_state(
     chunks: dict[tuple[str, ...], int],
     merges_to_replay: list[tuple[str, str]],
+    n_workers: int = 1,
+    chunks_per_task: int = 1000,
 ) -> tuple[list[list[str]], list[int], Counter, dict[tuple[str, str], set[int]]]:
     """Initialize merge-loop state from chunked corpus.
 
@@ -191,6 +215,10 @@ def _init_pair_state(
     If `merges_to_replay` is non-empty, those merges are applied in order to
     each chunk's symbol list before pair counts are built — this is the
     resume/extend code path.
+
+    Pair counting parallelizes across chunk slices when ``n_workers > 1``.
+    Counter and set merges are commutative so the output is byte-identical to
+    the serial path.
     """
     # Sort for deterministic chunk_id assignment.
     sorted_items = sorted(chunks.items(), key=lambda kv: kv[0])
@@ -212,11 +240,35 @@ def _init_pair_state(
 
     pair_counts: Counter = Counter()
     where_to_update: dict[tuple[str, str], set[int]] = {}
-    for cid, syms in enumerate(symbols_per_chunk):
-        w = chunk_counts[cid]
-        for x, y in zip(syms[:-1], syms[1:]):
-            pair_counts[(x, y)] += w
-            where_to_update.setdefault((x, y), set()).add(cid)
+
+    if n_workers <= 1:
+        # Serial path.
+        for cid, syms in enumerate(symbols_per_chunk):
+            w = chunk_counts[cid]
+            for x, y in zip(syms[:-1], syms[1:]):
+                p = (x, y)
+                pair_counts[p] += w
+                where_to_update.setdefault(p, set()).add(cid)
+        return symbols_per_chunk, chunk_counts, pair_counts, where_to_update
+
+    # Parallel path: fan-out over chunk slices, union locals on the main process.
+    n = len(symbols_per_chunk)
+    tasks = [
+        (
+            symbols_per_chunk[start : start + chunks_per_task],
+            chunk_counts[start : start + chunks_per_task],
+            start,
+        )
+        for start in range(0, n, chunks_per_task)
+    ]
+    ctx = get_context("spawn")
+    with ctx.Pool(n_workers) as pool:
+        for local_pc, local_wtu in pool.imap_unordered(
+            _count_pairs_worker, tasks, chunksize=1
+        ):
+            pair_counts.update(local_pc)
+            for p, cids in local_wtu.items():
+                where_to_update.setdefault(p, set()).update(cids)
 
     return symbols_per_chunk, chunk_counts, pair_counts, where_to_update
 
@@ -407,7 +459,6 @@ class BpeTrainer:
     def train(
         self,
         corpus_iter: Callable[[], Iterable[str]] | None = None,
-        *,
         chunks: dict[tuple[str, ...], int] | None = None,
     ) -> tuple[dict[str, int], list[tuple[str, str]]]:
         """Train the tokenizer and return ``(vocab, merges)``.
@@ -461,7 +512,10 @@ class BpeTrainer:
         # catch up to the post-resume state.
         merges_to_replay: list[tuple[str, str]] = [] if pre_encoded else list(merges)
         symbols, weights, pair_counts, where = _init_pair_state(
-            chunks, merges_to_replay=merges_to_replay
+            chunks,
+            merges_to_replay=merges_to_replay,
+            n_workers=self.n_workers,
+            chunks_per_task=self.batch_size,
         )
 
         # 4. Heapify.

@@ -191,6 +191,26 @@ def test_init_pair_state_replay_multiple_merges_in_order():
     assert symbols == [["abc"]]
 
 
+def test_init_pair_state_parallel_matches_serial():
+    """Parallel pair-counting must produce byte-identical state to serial."""
+    # Build a moderate corpus of byte-encoded chunks so each worker sees real work.
+    chunks: dict[tuple[str, ...], int] = {}
+    for i in range(200):
+        text = f"sample document number {i} with some repeated content"
+        toks = tuple(_byte_encode(text))
+        chunks[toks] = chunks.get(toks, 0) + 1
+
+    s_s, w_s, pc_s, wtu_s = _init_pair_state(chunks, merges_to_replay=[], n_workers=1)
+    s_p, w_p, pc_p, wtu_p = _init_pair_state(
+        chunks, merges_to_replay=[], n_workers=4, chunks_per_task=20
+    )
+
+    assert s_s == s_p
+    assert w_s == w_p
+    assert pc_s == pc_p
+    assert wtu_s == wtu_p
+
+
 def test_select_best_pair_picks_max_count():
     vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
     pair_counts = Counter({("a", "b"): 5, ("c", "d"): 3})
