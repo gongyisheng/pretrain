@@ -12,6 +12,7 @@ Encode/decode at inference stays on HF: emit a HF-compatible (vocab, merges)
 pair, caller wraps in `tokenizers.Tokenizer(models.BPE(...))` and saves.
 """
 
+from collections import Counter
 from collections.abc import Callable, Iterable
 
 import regex as _re
@@ -98,6 +99,44 @@ def _pretokenize(doc: str, mode: str) -> list[str]:
         for sub in _split_digit_groups(seg):
             pieces.append(_byte_encode(sub))
     return pieces
+
+
+def _pretokenize_batch(batch: list[str], mode: str) -> Counter:
+    """Pretokenize a batch of documents, return Counter of symbol-tuples.
+
+    Module-level (not nested) for `mp.Pool` pickling. Used by `_build_chunks`
+    in both serial (n_workers=1) and parallel paths.
+    """
+    counts: Counter = Counter()
+    for doc in batch:
+        for piece in _pretokenize(doc, mode):
+            counts[tuple(piece)] += 1
+    return counts
+
+
+def _build_chunks(
+    corpus_iter: Callable[[], Iterable[str]],
+    mode: str,
+    n_workers: int = 1,
+    batch_size: int = 1000,
+) -> dict[tuple[str, ...], int]:
+    """Pretokenize the corpus and aggregate by symbol-tuple.
+
+    Returns dict {symbol_tuple: count}. Serial path used when n_workers<=1;
+    parallel path added in a later task.
+    """
+    if n_workers > 1:
+        raise NotImplementedError("parallel path added in Task 13")
+    total: Counter = Counter()
+    batch: list[str] = []
+    for doc in corpus_iter():
+        batch.append(doc)
+        if len(batch) >= batch_size:
+            total.update(_pretokenize_batch(batch, mode))
+            batch = []
+    if batch:
+        total.update(_pretokenize_batch(batch, mode))
+    return dict(total)
 
 
 class BpeTrainer:

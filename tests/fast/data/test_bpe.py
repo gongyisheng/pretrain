@@ -6,6 +6,7 @@ from src.data.bpe import (
     BpeTrainer,
     _BYTE_TO_UNICODE,
     _UNICODE_TO_BYTE,
+    _build_chunks,
     _byte_encode,
     _pretokenize,
 )
@@ -106,3 +107,25 @@ def test_pretokenize_matches_hf_byte_for_byte():
 def test_pretokenize_unknown_mode_raises():
     with pytest.raises(ValueError, match="pretokenizer"):
         _pretokenize("hello", mode="not_a_mode")
+
+
+def test_build_chunks_dedups_by_symbol_tuple():
+    docs = ["the the", "the"]
+    chunks = _build_chunks(lambda: iter(docs), mode="bpe", n_workers=1)
+    # "the" appears 3 times: once at start, once after Ġ, then standalone again.
+    # _pretokenize("the the") = ["the", "Ġthe"]. _pretokenize("the") = ["the"].
+    # So chunks = {("t","h","e"): 2, ("Ġ","t","h","e"): 1}.
+    assert chunks[tuple("the")] == 2
+    assert chunks[tuple("Ġthe")] == 1
+
+
+def test_build_chunks_bytelevel_one_chunk_per_doc():
+    docs = ["abc", "abc", "xyz"]
+    chunks = _build_chunks(lambda: iter(docs), mode="bytelevel", n_workers=1)
+    assert chunks[("a", "b", "c")] == 2
+    assert chunks[("x", "y", "z")] == 1
+
+
+def test_build_chunks_empty_corpus_returns_empty_dict():
+    chunks = _build_chunks(lambda: iter([]), mode="bpe", n_workers=1)
+    assert chunks == {}
