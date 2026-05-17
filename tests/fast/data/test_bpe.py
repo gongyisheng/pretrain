@@ -192,30 +192,35 @@ def test_init_pair_state_replay_multiple_merges_in_order():
 
 
 def test_select_best_pair_picks_max_count():
+    vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
     pair_counts = Counter({("a", "b"): 5, ("c", "d"): 3})
-    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
     heapq.heapify(heap)
     pair, cnt = _select_best_pair(heap, pair_counts)
     assert pair == ("a", "b")
     assert cnt == 5
 
 
-def test_select_best_pair_tie_break_lex_larger_wins():
-    # Equal count → pick the lex-LARGER pair (matches HF BinaryHeap max-heap on pair tuple).
+def test_select_best_pair_tie_break_smaller_id_wins():
+    # Equal count → pick the pair with smaller token IDs (matches HF's tie-break:
+    # ascending on (id_a, id_b)). With lex-sorted alphabet IDs, 'a'<'b'<'c'<'d',
+    # so ('a','b') has the smallest ID pair.
+    vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
     pair_counts = Counter({("a", "b"): 3, ("a", "c"): 3, ("a", "d"): 3})
-    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
     heapq.heapify(heap)
     pair, _ = _select_best_pair(heap, pair_counts)
-    assert pair == ("a", "d")
+    assert pair == ("a", "b")
 
 
 def test_select_best_pair_skips_stale():
     # Heap has stale entry for ("a","b") at count=10; current count is 2.
+    vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
     pair_counts = Counter({("a", "b"): 2, ("c", "d"): 5})
     heap = [
-        _make_heap_entry(("a", "b"), 10),  # stale (count too high)
-        _make_heap_entry(("a", "b"), 2),  # current
-        _make_heap_entry(("c", "d"), 5),
+        _make_heap_entry(("a", "b"), 10, vocab),  # stale (count too high)
+        _make_heap_entry(("a", "b"), 2, vocab),  # current
+        _make_heap_entry(("c", "d"), 5, vocab),
     ]
     heapq.heapify(heap)
     pair, cnt = _select_best_pair(heap, pair_counts)
@@ -231,22 +236,24 @@ def test_select_best_pair_returns_none_when_heap_empty():
 
 
 def test_apply_merge_rewrites_symbols():
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
     chunks = {("a", "b", "c"): 1, ("a", "b"): 1}
     syms, weights, pair_counts, where = _init_pair_state(chunks, [])
-    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
     heapq.heapify(heap)
-    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab")
+    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab", vocab)
     # All ("a","b") occurrences collapsed.
     # _init_pair_state sorts chunks: ("a","b") < ("a","b","c"), so chunk 0 = ["a","b"].
     assert syms == [["ab"], ["ab", "c"]]
 
 
 def test_apply_merge_updates_pair_counts():
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
     chunks = {("a", "b", "c"): 1}
     syms, weights, pair_counts, where = _init_pair_state(chunks, [])
-    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
     heapq.heapify(heap)
-    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab")
+    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab", vocab)
     # (a,b) gone, (b,c) gone, (ab,c) new.
     assert ("a", "b") not in pair_counts
     assert ("b", "c") not in pair_counts
@@ -254,11 +261,12 @@ def test_apply_merge_updates_pair_counts():
 
 
 def test_apply_merge_respects_chunk_weight():
+    vocab = {"a": 0, "b": 1, "ab": 2}
     chunks = {("a", "b"): 5}
     syms, weights, pair_counts, where = _init_pair_state(chunks, [])
-    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
     heapq.heapify(heap)
-    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab")
+    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab", vocab)
     # (a,b) had count 5; after merge it disappears, no new pairs from a 1-symbol chunk.
     assert ("a", "b") not in pair_counts
     assert syms == [["ab"]]
@@ -266,11 +274,12 @@ def test_apply_merge_respects_chunk_weight():
 
 def test_apply_merge_overlapping_pairs_left_to_right():
     # "a a a" → merge (a,a): consume left pair first, leaving "aa a", not "a aa".
+    vocab = {"a": 0, "aa": 1}
     chunks = {("a", "a", "a"): 1}
     syms, weights, pair_counts, where = _init_pair_state(chunks, [])
-    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
     heapq.heapify(heap)
-    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "a"), "aa")
+    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "a"), "aa", vocab)
     assert syms == [["aa", "a"]]
     assert pair_counts[("aa", "a")] == 1
 
@@ -335,3 +344,64 @@ def test_bpe_output_loads_into_hf():
     ids = tok.encode(s).ids
     assert len(ids) > 0
     assert tok.decode(ids) == s
+
+
+def _train_hf(corpus_iter, vocab_size):
+    """Train HF BpeTrainer for the same vocab_size on the same corpus.
+
+    Uses ByteLevel(use_regex=False) to disable HF's built-in whitespace split,
+    matching our ``pretokenizer="bytelevel"`` mode (whole-document chunks).
+    """
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    tok = Tokenizer(models.BPE())
+    tok.pre_tokenizer = pre_tokenizers.ByteLevel(
+        add_prefix_space=False, use_regex=False
+    )
+    tok.decoder = decoders.ByteLevel()
+    trainer = trainers.BpeTrainer(
+        vocab_size=vocab_size,
+        special_tokens=["<|endoftext|>"],
+        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        show_progress=False,
+    )
+    tok.train_from_iterator(corpus_iter(), trainer=trainer)
+    import json
+
+    data = json.loads(tok.to_str())
+    vocab = data["model"]["vocab"]
+    merges = [
+        tuple(m.split(" ", 1)) if isinstance(m, str) else tuple(m)
+        for m in data["model"]["merges"]
+    ]
+    return vocab, merges
+
+
+def test_bpe_parity_with_hf_ascii():
+    py_vocab, py_merges = BpeTrainer(
+        vocab_size=400, pretokenizer="bytelevel", n_workers=1
+    ).train(_corpus)
+    hf_vocab, hf_merges = _train_hf(_corpus, vocab_size=400)
+    assert py_merges == hf_merges, (
+        f"first divergence at index "
+        f"{next((i for i, (a, b) in enumerate(zip(py_merges, hf_merges)) if a != b), '?')}"
+    )
+    # Vocab keys should match exactly; ID assignment may differ, but the
+    # set of tokens must be identical.
+    assert set(py_vocab) == set(hf_vocab)
+
+
+UNICODE_TEXTS = [
+    "über naïve cafés au lait sont délicieux",
+    "naïve über alles résumé façade",
+    "日本語のテスト 漢字 ひらがな",
+] * 30
+
+
+def test_bpe_parity_with_hf_unicode():
+    py_vocab, py_merges = BpeTrainer(
+        vocab_size=400, pretokenizer="bytelevel", n_workers=1
+    ).train(lambda: iter(UNICODE_TEXTS))
+    hf_vocab, hf_merges = _train_hf(lambda: iter(UNICODE_TEXTS), vocab_size=400)
+    assert py_merges == hf_merges
+    assert set(py_vocab) == set(hf_vocab)

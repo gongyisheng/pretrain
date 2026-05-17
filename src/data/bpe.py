@@ -189,34 +189,23 @@ def _init_pair_state(
     return symbols_per_chunk, chunk_counts, pair_counts, where_to_update
 
 
-class _LexInverter:
-    """Wrap a tuple of strings to invert lex comparison (lex-larger sorts first)."""
-
-    __slots__ = ("v",)
-
-    def __init__(self, v: tuple[str, str]) -> None:
-        self.v = v
-
-    def __lt__(self, other: "_LexInverter") -> bool:
-        return self.v > other.v
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, _LexInverter) and self.v == other.v
-
-
 def _make_heap_entry(
     pair: tuple[str, str],
     count: int,
+    vocab: dict[str, int],
 ) -> tuple:
     """Build a heap entry whose ordering matches HF tie-break:
       1. count desc
-      2. pair lex desc (lex-larger pair wins on tie)
+      2. (vocab_id_a, vocab_id_b) asc — i.e., the pair with the smaller token
+         IDs wins on a count tie, matching HF's Rust `Ord` impl which compares
+         `other.pair.cmp(&self.pair)` (ascending on IDs) in a max-heap.
 
-    `heapq` is a min-heap, so we negate count and wrap the pair in
-    `_LexInverter` to flip lex comparison. The trailing `pair` tuple is the
-    actual value the consumer reads back.
+    `heapq` is a min-heap, so we negate count. The ID tuple sorts naturally in
+    ascending order, so the smallest-ID pair bubbles to the top on ties.
+    The trailing `pair` tuple is the actual value the consumer reads back.
     """
-    return (-count, _LexInverter(pair), pair)
+    id_key = (vocab[pair[0]], vocab[pair[1]])
+    return (-count, id_key, pair)
 
 
 def _select_best_pair(
@@ -230,7 +219,7 @@ def _select_best_pair(
     `pair_counts[pair]`.
     """
     while heap:
-        neg_count, _inverter, pair = heap[0]
+        neg_count, _id_key, pair = heap[0]
         count = -neg_count
         cur = pair_counts.get(pair, 0)
         if cur == count and cur > 0:
@@ -248,13 +237,15 @@ def _apply_merge(
     heap: list,
     pair: tuple[str, str],
     merged: str,
+    vocab: dict[str, int],
 ) -> None:
     """Apply merge `pair → merged` everywhere, updating state incrementally.
 
     Visits only chunks in `where_to_update[pair]`. For each, scans the symbol
     list left-to-right and collapses adjacent (a, b) pairs. Adjusts
     `pair_counts` for the neighbors that change (decrement old, increment new)
-    and pushes new heap entries.
+    and pushes new heap entries. `vocab` is needed by `_make_heap_entry` for
+    the ID-based tie-break.
     """
     a, b = pair
     affected = where_to_update.pop(pair, set())
@@ -275,12 +266,16 @@ def _apply_merge(
                     pair_counts.pop((prev, a), None)
                 else:
                     heapq.heappush(
-                        heap, _make_heap_entry((prev, a), pair_counts[(prev, a)])
+                        heap,
+                        _make_heap_entry((prev, a), pair_counts[(prev, a)], vocab),
                     )
                 pair_counts[(prev, merged)] += w
                 where_to_update.setdefault((prev, merged), set()).add(cid)
                 heapq.heappush(
-                    heap, _make_heap_entry((prev, merged), pair_counts[(prev, merged)])
+                    heap,
+                    _make_heap_entry(
+                        (prev, merged), pair_counts[(prev, merged)], vocab
+                    ),
                 )
             # Right neighbor: (b, next) → (merged, next).
             if i + 2 < len(syms):
@@ -290,12 +285,14 @@ def _apply_merge(
                     pair_counts.pop((b, nxt), None)
                 else:
                     heapq.heappush(
-                        heap, _make_heap_entry((b, nxt), pair_counts[(b, nxt)])
+                        heap,
+                        _make_heap_entry((b, nxt), pair_counts[(b, nxt)], vocab),
                     )
                 pair_counts[(merged, nxt)] += w
                 where_to_update.setdefault((merged, nxt), set()).add(cid)
                 heapq.heappush(
-                    heap, _make_heap_entry((merged, nxt), pair_counts[(merged, nxt)])
+                    heap,
+                    _make_heap_entry((merged, nxt), pair_counts[(merged, nxt)], vocab),
                 )
             syms[i] = merged
             del syms[i + 1]
@@ -383,8 +380,10 @@ class BpeTrainer:
             vocab: dict[str, int] = {}
             for sp in self.special_tokens:
                 vocab[sp] = len(vocab)
-            for b in sorted(_BYTE_TO_UNICODE):  # IDs assigned in byte order
-                vocab[_BYTE_TO_UNICODE[b]] = len(vocab)
+            for c in sorted(
+                _BYTE_TO_UNICODE.values()
+            ):  # IDs in lex-sorted unicode order
+                vocab[c] = len(vocab)
             merges: list[tuple[str, str]] = []
         else:
             vocab = dict(self.initial_vocab)
@@ -396,7 +395,7 @@ class BpeTrainer:
         )
 
         # 4. Heapify.
-        heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+        heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
         heapq.heapify(heap)
 
         # 5. Merge loop.
@@ -412,7 +411,9 @@ class BpeTrainer:
                 continue
             vocab[merged] = len(vocab)
             merges.append(pair)
-            _apply_merge(symbols, weights, pair_counts, where, heap, pair, merged)
+            _apply_merge(
+                symbols, weights, pair_counts, where, heap, pair, merged, vocab
+            )
             if (
                 self.progress_callback is not None
                 and len(vocab) % self.progress_every == 0
