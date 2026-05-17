@@ -9,7 +9,6 @@ from src.data.tokenizer import load_tokenizer
 from src.data.tokenizer_trainer import (
     TokenizerTrainer,
     _build_tokenizer_from_prefix,
-    _stage1_pretokenizer,
 )
 from src.eval.tokenizer import _bytes_per_token, evaluate
 from src.utils.config import DataConfig, LoggingConfig, ModelConfig, TrainConfig
@@ -158,19 +157,6 @@ def test_prefix_at_full_merges_matches_original(tmp_path, text_iter):
     assert rebuilt.encode(s).ids == tok.encode(s).ids
 
 
-def test_stage1_pretokenizer_pretokenizes_without_error():
-    pt = _stage1_pretokenizer()
-    # Smoke test: pretokenizes a mixed string without raising
-    result = pt.pre_tokenize_str("hello world 123456 foo bar")
-    assert len(result) > 0
-    # Digit grouping should split runs of digits into groups of 3 from the right.
-    # "123456" should produce at least one split (i.e., not a single span).
-    pieces = [p[0] for p in result]
-    assert any("123" in p or "456" in p for p in pieces), (
-        f"expected digit-grouping to fire; got pieces={pieces}"
-    )
-
-
 def test_prefix_smaller_k_has_smaller_vocab(tmp_path, text_iter):
     save = tmp_path / "bpe_500"
     _trainer(save, 500, "bpe").train(text_iter)
@@ -198,13 +184,13 @@ def test_superbpe_stage1_saves_intermediate(tmp_path, text_iter):
     save = tmp_path / "sbpe"
     # transition_size=399 keeps stage 2's role minimal — we only verify stage 1 here.
     _trainer(save, 400, "superbpe", transition_size=399).train(text_iter)
-    assert (save / "stage1.json").exists()
+    assert (save / "bpe_tokenizer.json").exists()
 
 
 def test_superbpe_stage1_vocab_size(tmp_path, text_iter):
     save = tmp_path / "sbpe"
     _trainer(save, 400, "superbpe", transition_size=399).train(text_iter)
-    stage1 = Tokenizer.from_file(str(save / "stage1.json"))
+    stage1 = Tokenizer.from_file(str(save / "bpe_tokenizer.json"))
     # Stage 1 trains to transition_size (~400, may be slightly below due to
     # corpus size; HF stops when no more merges available).
     assert stage1.get_vocab_size() <= 400

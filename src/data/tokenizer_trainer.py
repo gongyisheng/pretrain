@@ -8,6 +8,7 @@ All trainers emit a HuggingFace-compatible tokenizer.json under save_path/.
 Runtime loading lives in src/data/tokenizer.py.
 """
 
+import heapq
 import itertools
 import json
 import os
@@ -15,8 +16,10 @@ import time
 from collections import Counter
 from typing import Callable, Iterable
 
+import numpy as np
+from tokenizers import Tokenizer, Regex, decoders, models, pre_tokenizers, trainers
+from tqdm import tqdm
 import wandb
-from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from src.eval.tokenizer import _bytes_per_token
 from src.utils.config import TrainConfig
@@ -185,10 +188,14 @@ class TokenizerTrainer:
         tokenizer.train_from_iterator(make_train_iter(), trainer=trainer)
 
         if self.logger.enabled:
-            for partial, vocab_size in _iter_partial_tokenizers(
-                tokenizer,
-                lambda: pre_tokenizers.ByteLevel(add_prefix_space=False),
-                self.eval_every,
+            for partial, vocab_size in tqdm(
+                _iter_partial_tokenizers(
+                    tokenizer,
+                    lambda: pre_tokenizers.ByteLevel(add_prefix_space=False),
+                    self.eval_every,
+                ),
+                desc="[bpe-eval]",
+                dynamic_ncols=True,
             ):
                 self.logger.log(self.metrics.build_eval_log_dict(partial, vocab_size))
         return tokenizer
@@ -198,99 +205,155 @@ class TokenizerTrainer:
     def _train_superbpe(
         self, make_train_iter: Callable[[], Iterable[str]]
     ) -> Tokenizer:
+
+        # Paper-default whitespace pretokenization regex (from HF tokenizers / GPT-2,
+        # without the GPT-2 contraction-split rule). Used in stage 1 only.
+        _WHITESPACE_REGEX = r" ?\p{L}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+        # Digit-grouping pretok: split runs of digits into groups of 3 from the right.
+        _DIGIT_REGEX = r"(?=(\d{3})+(?!\d))"
+
+        def bpe_pretokenizer_factory():
+            return pre_tokenizers.Sequence(
+                [
+                    pre_tokenizers.Split(Regex(_WHITESPACE_REGEX), behavior="isolated"),
+                    pre_tokenizers.Split(Regex(_DIGIT_REGEX), behavior="isolated"),
+                    pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
+                ]
+            )
+
         # ---- Stage 1: HF BPE with whitespace + ByteLevel pretokenizer ----
         t0 = time.perf_counter()
-        stage1 = Tokenizer(models.BPE())
-        stage1.pre_tokenizer = _stage1_pretokenizer()
-        stage1.decoder = decoders.ByteLevel()
-        stage1_trainer = trainers.BpeTrainer(
+        bpe_tokenizer = Tokenizer(models.BPE())
+        bpe_tokenizer.pre_tokenizer = bpe_pretokenizer_factory()
+        bpe_tokenizer.decoder = decoders.ByteLevel()
+        bpe_trainer = trainers.BpeTrainer(
             vocab_size=self.transition_size,
             special_tokens=list(self._SPECIAL_TOKENS),
             show_progress=True,
             initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
         )
-        stage1.train_from_iterator(make_train_iter(), trainer=stage1_trainer)
-        stage1.save(os.path.join(self.save_path, "stage1.json"))
-        stage1_size = stage1.get_vocab_size()
+        bpe_tokenizer.train_from_iterator(make_train_iter(), trainer=bpe_trainer)
+        bpe_tokenizer.save(os.path.join(self.save_path, "bpe_tokenizer.json"))
+        bpe_tokenizer_vocab_size = bpe_tokenizer.get_vocab_size()
+
+        if self.logger.enabled:
+            for partial, vocab_size in _iter_partial_tokenizers(
+                bpe_tokenizer, bpe_pretokenizer_factory, self.eval_every
+            ):
+                self.logger.log(self.metrics.build_eval_log_dict(partial, vocab_size))
+
         print(
-            f"SuperBPE stage 1 done: vocab_size={stage1_size} "
+            f"SuperBPE stage 1 done: vocab_size={bpe_tokenizer_vocab_size} "
             f"({time.perf_counter() - t0:.2f}s)"
         )
 
         # ---- Stage 2 setup ----
         t0 = time.perf_counter()
-        with open(os.path.join(self.save_path, "stage1.json")) as f:
-            stage1_data = json.loads(f.read())
-        s1_vocab: dict = dict(stage1_data["model"]["vocab"])  # str -> int
-        s1_merges: list = [
+        with open(os.path.join(self.save_path, "bpe_tokenizer.json")) as f:
+            bpe_data = json.loads(f.read())
+        bpe_vocab: dict = dict(bpe_data["model"]["vocab"])  # str -> int
+        bpe_merges: list = [
             tuple(m.split(" ", 1)) if isinstance(m, str) else tuple(m)
-            for m in stage1_data["model"]["merges"]
+            for m in bpe_data["model"]["merges"]
         ]
-        inv_vocab: dict = {i: tok for tok, i in s1_vocab.items()}
-        # Per-stage-1-token word count: |Ġ| + 1 if no leading Ġ, else |Ġ|.
+
+        # count num of whole words
+        inverse_vocab_map: dict = {i: tok for tok, i in bpe_vocab.items()}
         word_count_of: dict = {
             i: tok.count("Ġ") + (0 if tok.startswith("Ġ") else 1)
-            for i, tok in inv_vocab.items()
+            for i, tok in inverse_vocab_map.items()
         }
 
-        # ---- Post-hoc stage-1 curve points ----
-        if self.logger.enabled:
-            for partial, vocab_size in _iter_partial_tokenizers(
-                stage1, _stage1_pretokenizer, self.eval_every
-            ):
-                self.logger.log(self.metrics.build_eval_log_dict(partial, vocab_size))
-
-        # Re-encode the corpus with stage 1 (fresh stream — no raw-text materialization).
-        docs: list[list[int]] = [
-            stage1.encode(t, add_special_tokens=False).ids for t in make_train_iter()
-        ]
+        # re-encode the corpus with stage 1
+        n_docs = sum(1 for _ in make_train_iter())
+        encode_batch_size = 1000
+        docs: list[list[int]] = []
+        stream = iter(make_train_iter())
+        with tqdm(total=n_docs, desc="Tokenize words", dynamic_ncols=True) as pbar:
+            while True:
+                batch = list(itertools.islice(stream, encode_batch_size))
+                if not batch:
+                    break
+                for enc in bpe_tokenizer.encode_batch(batch, add_special_tokens=False):
+                    docs.append(enc.ids)
+                pbar.update(len(batch))
 
         # 99th-percentile truncation: cap document length to mitigate duplication
-        # artifacts from very long outliers (paper section 3).
         if len(docs) >= 100:
-            import numpy as np
-
             lengths = np.array([len(d) for d in docs])
             p99 = int(np.percentile(lengths, 99))
             docs = [d[:p99] for d in docs]
 
-        # Pair counts across each document, no whitespace boundary.
+        # Inverted-index state. Each doc is a token list with -1 marking
+        # tombstoned slots. `positions[t]` tracks where token id t currently
+        # lives so we can jump straight to those slots instead of scanning
+        # every doc. Prev/next neighbors are recovered by scanning past
+        # tombstones at lookup time (no extra storage).
+        docs_tokens: list[list[int]] = [list(ids) for ids in docs]
+        positions: dict[int, set[tuple[int, int]]] = {}
         pair_counts: Counter = Counter()
-        for ids in docs:
+        for d, ids in enumerate(docs_tokens):
+            for i, t in enumerate(ids):
+                positions.setdefault(t, set()).add((d, i))
             for a, b in zip(ids[:-1], ids[1:]):
                 pair_counts[(a, b)] += 1
+        # Free the original `docs` list — docs_tokens owns the data now.
+        docs = None  # type: ignore[assignment]
 
-        vocab = dict(s1_vocab)
-        merges = list(s1_merges)
+        # Lazy max-heap on (-count, -a, -b). Stale entries are skipped at pop
+        # time by checking against pair_counts. Tuple ordering preserves the
+        # original tiebreaker: largest count first, then lex-largest pair.
+        heap: list = [(-cnt, -a, -b) for (a, b), cnt in pair_counts.items()]
+        heapq.heapify(heap)
+
+        vocab = dict(bpe_vocab)
+        merges = list(bpe_merges)
         forbidden_substr = ":Ġ"
         n_accepted = 0
         n_blacklisted = 0
 
-        while len(vocab) < self.vocab_size and pair_counts:
-            # Explicit tiebreaker — see spec Reproducibility section.
-            (a, b), best_count = max(pair_counts.items(), key=lambda kv: (kv[1], kv[0]))
-            if best_count <= 0:
+        pbar = tqdm(
+            total=self.vocab_size,
+            initial=len(vocab),
+            desc="Compute merges",
+            dynamic_ncols=True,
+        )
+        while len(vocab) < self.vocab_size:
+            # Pop until a heap entry matches pair_counts (non-stale).
+            a = b = None
+            while heap:
+                neg_cnt, neg_a, neg_b = heap[0]
+                cand_a, cand_b = -neg_a, -neg_b
+                cnt = -neg_cnt
+                if cnt > 0 and pair_counts.get((cand_a, cand_b), 0) == cnt:
+                    heapq.heappop(heap)
+                    a, b = cand_a, cand_b
+                    break
+                heapq.heappop(heap)
+            if a is None:
                 break
-            new_str = inv_vocab[a] + inv_vocab[b]
+
+            new_str = inverse_vocab_map[a] + inverse_vocab_map[b]
             new_word_count = word_count_of[a] + word_count_of[b]
-            # Guards.
             if new_word_count > self.max_superword_words or forbidden_substr in new_str:
                 del pair_counts[(a, b)]
                 n_blacklisted += 1
                 continue
             new_id = len(vocab)
             vocab[new_str] = new_id
-            inv_vocab[new_id] = new_str
+            inverse_vocab_map[new_id] = new_str
             word_count_of[new_id] = new_word_count
-            merges.append((inv_vocab[a], inv_vocab[b]))
-            _apply_merge_inplace(docs, pair_counts, a, b, new_id)
+            merges.append((inverse_vocab_map[a], inverse_vocab_map[b]))
+            _apply_merge_indexed(
+                docs_tokens, positions, pair_counts, heap, a, b, new_id
+            )
             n_accepted += 1
+            pbar.update(1)
 
             # ---- In-loop stage-2 curve point ----
             cur_size = len(vocab)
             if self.logger.enabled and (
-                (cur_size - stage1_size) % self.eval_every == 0
-                or cur_size == self.vocab_size
+                cur_size % self.eval_every == 0 or cur_size == self.vocab_size
             ):
                 tmp = Tokenizer(models.BPE(vocab=vocab, merges=merges))
                 tmp.pre_tokenizer = pre_tokenizers.ByteLevel(
@@ -298,6 +361,7 @@ class TokenizerTrainer:
                 )
                 tmp.decoder = decoders.ByteLevel()
                 self.logger.log(self.metrics.build_train_log_dict(tmp, cur_size))
+        pbar.close()
 
         print(
             f"SuperBPE stage 2 done: vocab_size={len(vocab)} "
@@ -342,72 +406,96 @@ def _iter_partial_tokenizers(tokenizer: Tokenizer, pretok_factory, eval_every: i
 
 # ---- Helpers shared by superbpe + curve reconstruction ----
 
-# Paper-default whitespace pretokenization regex (from HF tokenizers / GPT-2,
-# without the GPT-2 contraction-split rule). Used in stage 1 only.
-_WHITESPACE_REGEX = r" ?\p{L}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
-# Digit-grouping pretok: split runs of digits into groups of 3 from the right.
-_DIGIT_REGEX = r"(?=(\d{3})+(?!\d))"
 
-
-def _stage1_pretokenizer():
-    """Build the stage-1 pretokenizer: regex Split + digit Split + ByteLevel."""
-    from tokenizers import Regex
-
-    return pre_tokenizers.Sequence(
-        [
-            pre_tokenizers.Split(Regex(_WHITESPACE_REGEX), behavior="isolated"),
-            pre_tokenizers.Split(Regex(_DIGIT_REGEX), behavior="isolated"),
-            pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
-        ]
-    )
-
-
-def _apply_merge_inplace(
-    docs: list,
+def _apply_merge_indexed(
+    docs_tokens: list,
+    positions: dict,
     pair_counts,  # Counter
+    heap: list,
     a: int,
     b: int,
     new_id: int,
 ) -> None:
-    """Replace every (a, b) adjacency in docs with new_id; update pair_counts.
+    """Apply merge (a, b) -> new_id using the inverted index.
 
-    Standard incremental BPE update. We rebuild each doc with a left-to-right
-    scan, and for every replaced position we decrement the broken-up neighbor
-    pairs and increment the newly-formed ones.
+    Visits only the slots where `a` lives (via `positions[a]`), not every doc.
+    Neighbors (the b slot, the slots either side) are recovered by scanning
+    past tombstones (-1) in `docs_tokens[d]`. pair_counts and the lazy heap
+    are updated to reflect the broken/new neighbor pairs.
+
+    Positions are processed in (doc, slot) order so overlapping cases like
+    `a a a` consume left-to-right, matching the legacy algorithm.
     """
-    # Drop the merged pair itself from pair_counts; it's about to be consumed.
-    del pair_counts[(a, b)]
-    for doc_idx, ids in enumerate(docs):
-        if a not in ids:
+    # Snapshot in deterministic order; positions[a] mutates during the loop.
+    targets = sorted(positions.get(a, ()))
+    pos_a = positions[a]
+    pos_b = positions.get(b)
+    pos_new = positions.setdefault(new_id, set())
+
+    for d, p in targets:
+        # Stale entry — `a` was already consumed by an earlier merge in this pass.
+        if (d, p) not in pos_a or docs_tokens[d][p] != a:
             continue
-        new_ids: list[int] = []
-        i = 0
-        n = len(ids)
-        while i < n:
-            if i + 1 < n and ids[i] == a and ids[i + 1] == b:
-                # Decrement broken-up neighbor pairs.
-                if new_ids:
-                    prev = new_ids[-1]
-                    pair_counts[(prev, a)] -= 1
-                    if pair_counts[(prev, a)] <= 0:
-                        del pair_counts[(prev, a)]
-                if i + 2 < n:
-                    nxt = ids[i + 2]
-                    pair_counts[(b, nxt)] -= 1
-                    if pair_counts[(b, nxt)] <= 0:
-                        del pair_counts[(b, nxt)]
-                # Append the merged token.
-                new_ids.append(new_id)
-                # Increment newly-formed neighbor pairs.
-                if len(new_ids) >= 2:
-                    pair_counts[(new_ids[-2], new_id)] += 1
-                if i + 2 < n:
-                    pair_counts[(new_id, ids[i + 2])] += 1
-                i += 2
+        tok_arr = docs_tokens[d]
+        n = len(tok_arr)
+
+        # Scan rightward past tombstones to find b.
+        q = p + 1
+        while q < n and tok_arr[q] == -1:
+            q += 1
+        if q >= n or tok_arr[q] != b:
+            continue
+
+        # Scan leftward past tombstones for the previous live token.
+        r = p - 1
+        while r >= 0 and tok_arr[r] == -1:
+            r -= 1
+
+        # Scan rightward past q for the next live token after b.
+        s = q + 1
+        while s < n and tok_arr[s] == -1:
+            s += 1
+        if s >= n:
+            s = -1
+
+        # Tombstone q (the b slot).
+        tok_arr[q] = -1
+        pos_b.discard((d, q))
+
+        # Rewrite p (was a) to new_id.
+        tok_arr[p] = new_id
+        pos_a.discard((d, p))
+        pos_new.add((d, p))
+
+        # Decrement (a, b) once per occurrence consumed.
+        pair_counts[(a, b)] -= 1
+
+        # Left neighbor: (prev_tok, a) -> (prev_tok, new_id).
+        if r >= 0:
+            prev_tok = tok_arr[r]
+            pair_counts[(prev_tok, a)] -= 1
+            if pair_counts[(prev_tok, a)] <= 0:
+                del pair_counts[(prev_tok, a)]
             else:
-                new_ids.append(ids[i])
-                i += 1
-        docs[doc_idx] = new_ids
+                heapq.heappush(heap, (-pair_counts[(prev_tok, a)], -prev_tok, -a))
+            pair_counts[(prev_tok, new_id)] += 1
+            heapq.heappush(heap, (-pair_counts[(prev_tok, new_id)], -prev_tok, -new_id))
+
+        # Right neighbor: (b, next_tok) -> (new_id, next_tok).
+        if s != -1:
+            next_tok = tok_arr[s]
+            pair_counts[(b, next_tok)] -= 1
+            if pair_counts[(b, next_tok)] <= 0:
+                del pair_counts[(b, next_tok)]
+            else:
+                heapq.heappush(heap, (-pair_counts[(b, next_tok)], -b, -next_tok))
+            pair_counts[(new_id, next_tok)] += 1
+            heapq.heappush(heap, (-pair_counts[(new_id, next_tok)], -new_id, -next_tok))
+
+    # The merged pair is exhausted (count reached 0 along the way, or no
+    # adjacencies were ever present); drop the entry if it's still around.
+    if (a, b) in pair_counts and pair_counts[(a, b)] <= 0:
+        del pair_counts[(a, b)]
 
 
 def _build_tokenizer_from_prefix(
