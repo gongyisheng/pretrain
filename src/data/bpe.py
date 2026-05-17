@@ -15,6 +15,34 @@ pair, caller wraps in `tokenizers.Tokenizer(models.BPE(...))` and saves.
 from collections.abc import Callable, Iterable
 
 
+def _build_byte_to_unicode() -> dict[int, str]:
+    """GPT-2 byte→unicode mapping. Byte-for-byte identical to
+    `tokenizers.pre_tokenizers.ByteLevel`'s mapping.
+    """
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return {b: chr(c) for b, c in zip(bs, cs)}
+
+
+_BYTE_TO_UNICODE: dict[int, str] = _build_byte_to_unicode()
+_UNICODE_TO_BYTE: dict[str, int] = {c: b for b, c in _BYTE_TO_UNICODE.items()}
+
+
+def _byte_encode(text: str) -> str:
+    """Encode `text` as a byte-level unicode string. Each output char = one input byte."""
+    return "".join(_BYTE_TO_UNICODE[b] for b in text.encode("utf-8"))
+
+
 class BpeTrainer:
     """Train a BPE tokenizer in pure Python. Not yet implemented."""
 
