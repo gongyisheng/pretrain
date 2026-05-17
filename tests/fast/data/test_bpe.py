@@ -273,3 +273,65 @@ def test_apply_merge_overlapping_pairs_left_to_right():
     _apply_merge(syms, weights, pair_counts, where, heap, ("a", "a"), "aa")
     assert syms == [["aa", "a"]]
     assert pair_counts[("aa", "a")] == 1
+
+
+SAMPLE_TEXTS = [
+    "the quick brown fox jumps over the lazy dog",
+    "she sells seashells by the seashore",
+    "how much wood would a woodchuck chuck",
+    "to be or not to be that is the question",
+] * 20
+
+
+def _corpus():
+    return iter(SAMPLE_TEXTS)
+
+
+def test_bpe_train_returns_vocab_and_merges():
+    vocab, merges = BpeTrainer(vocab_size=300, n_workers=1).train(_corpus)
+    assert isinstance(vocab, dict)
+    assert isinstance(merges, list)
+    # All merge symbols must be in vocab.
+    for a, b in merges:
+        assert a in vocab and b in vocab
+        assert a + b in vocab
+
+
+def test_bpe_vocab_size_respected():
+    vocab, _ = BpeTrainer(vocab_size=300, n_workers=1).train(_corpus)
+    assert len(vocab) <= 300
+
+
+def test_bpe_vocab_ids_contiguous_from_zero():
+    vocab, _ = BpeTrainer(vocab_size=300, n_workers=1).train(_corpus)
+    assert sorted(vocab.values()) == list(range(len(vocab)))
+
+
+def test_bpe_vocab_size_too_small_raises():
+    # 256 byte alphabet + 1 special = 257 minimum.
+    with pytest.raises(ValueError, match="vocab_size"):
+        BpeTrainer(vocab_size=100, n_workers=1)
+
+
+def test_bpe_unknown_pretokenizer_raises():
+    with pytest.raises(ValueError, match="pretokenizer"):
+        BpeTrainer(vocab_size=300, pretokenizer="not_a_mode", n_workers=1)
+
+
+def test_bpe_empty_corpus_raises():
+    with pytest.raises(ValueError, match="no trainable chunks"):
+        BpeTrainer(vocab_size=300, n_workers=1).train(lambda: iter([]))
+
+
+def test_bpe_output_loads_into_hf():
+    """Generated (vocab, merges) must build a working HF Tokenizer."""
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+
+    vocab, merges = BpeTrainer(vocab_size=300, n_workers=1).train(_corpus)
+    tok = Tokenizer(models.BPE(vocab=vocab, merges=merges))
+    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tok.decoder = decoders.ByteLevel()
+    s = "the quick brown fox"
+    ids = tok.encode(s).ids
+    assert len(ids) > 0
+    assert tok.decode(ids) == s

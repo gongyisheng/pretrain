@@ -303,7 +303,11 @@ def _apply_merge(
 
 
 class BpeTrainer:
-    """Train a BPE tokenizer in pure Python. Not yet implemented."""
+    """Train a BPE tokenizer in pure Python. Produces (vocab, merges)
+    byte-identical to HF's `tokenizers.BpeTrainer`.
+    """
+
+    _VALID_PRETOK_MODES = ("bpe", "bytelevel")
 
     def __init__(
         self,
@@ -318,10 +322,101 @@ class BpeTrainer:
         n_workers: int | None = None,
         batch_size: int = 1000,
     ) -> None:
-        raise NotImplementedError
+        if pretokenizer not in self._VALID_PRETOK_MODES:
+            raise ValueError(
+                f"unknown pretokenizer mode: {pretokenizer!r}; "
+                f"expected one of {self._VALID_PRETOK_MODES}"
+            )
+        # Minimum vocab = alphabet (256) + |specials|.
+        min_vocab = 256 + len(special_tokens)
+        if vocab_size < min_vocab:
+            raise ValueError(
+                f"vocab_size={vocab_size} too small; need at least "
+                f"{min_vocab} (256 alphabet + {len(special_tokens)} specials)"
+            )
+        # initial_vocab and initial_merges are paired.
+        if (initial_vocab is None) != (initial_merges is None):
+            raise ValueError(
+                "initial_vocab and initial_merges must both be provided or both None"
+            )
+        if initial_vocab is not None:
+            if len(initial_vocab) > vocab_size:
+                raise ValueError(
+                    f"initial_vocab size {len(initial_vocab)} > vocab_size {vocab_size}"
+                )
+            if sorted(initial_vocab.values()) != list(range(len(initial_vocab))):
+                raise ValueError("initial_vocab IDs must be contiguous from 0")
+            for a, b in initial_merges:  # type: ignore[union-attr]
+                if a not in initial_vocab:
+                    raise ValueError(f"initial_merges references unknown symbol: {a!r}")
+                if b not in initial_vocab:
+                    raise ValueError(f"initial_merges references unknown symbol: {b!r}")
+                if (a + b) not in initial_vocab:
+                    raise ValueError(
+                        f"initial_merges produces {a + b!r} but it is not in initial_vocab"
+                    )
+
+        self.vocab_size = vocab_size
+        self.special_tokens = tuple(special_tokens)
+        self.pretokenizer = pretokenizer
+        self.initial_vocab = initial_vocab
+        self.initial_merges = initial_merges
+        self.merge_filter = merge_filter
+        self.progress_callback = progress_callback
+        self.progress_every = progress_every
+        self.n_workers = 1 if n_workers is None else max(1, n_workers)
+        self.batch_size = batch_size
 
     def train(
         self,
         corpus_iter: Callable[[], Iterable[str]],
     ) -> tuple[dict[str, int], list[tuple[str, str]]]:
-        raise NotImplementedError
+        # 1. Pretokenize + dedup.
+        chunks = _build_chunks(
+            corpus_iter, self.pretokenizer, self.n_workers, self.batch_size
+        )
+        if not chunks:
+            raise ValueError("corpus produced no trainable chunks")
+
+        # 2. Seed vocab: specials + byte alphabet (or initial_vocab if resuming).
+        if self.initial_vocab is None:
+            vocab: dict[str, int] = {}
+            for sp in self.special_tokens:
+                vocab[sp] = len(vocab)
+            for b in sorted(_BYTE_TO_UNICODE):  # IDs assigned in byte order
+                vocab[_BYTE_TO_UNICODE[b]] = len(vocab)
+            merges: list[tuple[str, str]] = []
+        else:
+            vocab = dict(self.initial_vocab)
+            merges = list(self.initial_merges)  # type: ignore[arg-type]
+
+        # 3. Build pair state (replays initial_merges if any).
+        symbols, weights, pair_counts, where = _init_pair_state(
+            chunks, merges_to_replay=merges
+        )
+
+        # 4. Heapify.
+        heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+        heapq.heapify(heap)
+
+        # 5. Merge loop.
+        while len(vocab) < self.vocab_size:
+            pair, _cnt = _select_best_pair(heap, pair_counts)
+            if pair is None:
+                break  # heap drained, no more pairs.
+            a, b = pair
+            merged = a + b
+            if self.merge_filter is not None and not self.merge_filter(a, b, merged):
+                pair_counts.pop(pair, None)
+                where.pop(pair, None)
+                continue
+            vocab[merged] = len(vocab)
+            merges.append(pair)
+            _apply_merge(symbols, weights, pair_counts, where, heap, pair, merged)
+            if (
+                self.progress_callback is not None
+                and len(vocab) % self.progress_every == 0
+            ):
+                self.progress_callback(len(vocab), vocab, merges)
+
+        return vocab, merges
