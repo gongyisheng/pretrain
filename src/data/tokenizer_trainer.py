@@ -20,7 +20,6 @@ from collections import Counter
 from typing import Callable, Iterable
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
-from tqdm import tqdm
 import wandb
 
 from src.data.bpe import BpeTrainer
@@ -281,18 +280,12 @@ class TokenizerTrainer:
         encoded_chunks: Counter = Counter()
         encode_batch_size = 1000
         stream = iter(make_train_iter())
-        with tqdm(
-            desc="[superbpe][encoding for superword pass]",
-            unit="docs",
-            dynamic_ncols=True,
-        ) as bar:
-            while True:
-                batch = list(itertools.islice(stream, encode_batch_size))
-                if not batch:
-                    break
-                for enc in subword_tok.encode_batch(batch, add_special_tokens=False):
-                    encoded_chunks[tuple(enc.tokens)] += 1
-                bar.update(len(batch))
+        while True:
+            batch = list(itertools.islice(stream, encode_batch_size))
+            if not batch:
+                break
+            for enc in subword_tok.encode_batch(batch, add_special_tokens=False):
+                encoded_chunks[tuple(enc.tokens)] += 1
 
         superword_bpe = BpeTrainer(
             vocab_size=self.vocab_size,
