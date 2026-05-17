@@ -150,16 +150,7 @@ class TokenizerTrainer:
             raise ValueError("dataset_iter produced no text")
         self.metrics.eval_texts = eval_texts
 
-        # Build a factory that yields fresh training streams (skipping the
-        # eval slice). Tiny-dataset fallback: if the underlying source is
-        # exhausted by the eval slice, train on eval_texts itself.
-        def make_train_iter() -> Iterable[str]:
-            it = itertools.islice(dataset_iter(), self.eval_num_docs, None)
-            try:
-                first = next(it)
-                return itertools.chain([first], it)
-            except StopIteration:
-                return iter(eval_texts)
+        make_train_iter = self._make_train_iter(dataset_iter, eval_texts)
 
         if self.train_method == "bpe":
             tokenizer = self._train_bpe(make_train_iter)
@@ -174,23 +165,61 @@ class TokenizerTrainer:
         self.logger.finish()
         return tokenizer
 
-    # ---- BPE ----
+    # ---- Shared helpers ----
 
-    def _train_bpe(self, make_train_iter: Callable[[], Iterable[str]]) -> Tokenizer:
+    def _make_train_iter(
+        self,
+        dataset_iter: Callable[[], Iterable[str]],
+        eval_texts: list[str],
+    ) -> Callable[[], Iterable[str]]:
+        """Factory: returns a zero-arg callable that yields a fresh training
+        stream skipping the eval slice. Tiny-dataset fallback: if the source
+        is exhausted by the eval slice, train on `eval_texts` itself.
+        """
 
-        def curve_cb(vocab_size, vocab, merges):
-            if not self.logger.enabled:
-                return
+        def _factory() -> Iterable[str]:
+            it = itertools.islice(dataset_iter(), self.eval_num_docs, None)
+            try:
+                first = next(it)
+                return itertools.chain([first], it)
+            except StopIteration:
+                return iter(eval_texts)
+
+        return _factory
+
+    def _wandb_curve_cb(self, use_regex: bool) -> Callable[[int, dict, list], None]:
+        """Factory: returns a `BpeTrainer.progress_callback` that logs
+        (vocab_size, bytes_per_token) to W&B.
+
+        `use_regex` controls the eval-time pretokenizer:
+        - True  for "bpe" mode (HF byte-level + default regex word splitting)
+        - False for "superbpe" stage 1 and stage 2 (pure byte-level, no
+                splitting — matches the saved tokenizer.json config)
+
+        Caller is responsible for only invoking this when `logger.enabled`
+        is True; the returned callback assumes it.
+        """
+
+        def _cb(vocab_size: int, vocab: dict, merges: list) -> None:
             tmp = Tokenizer(models.BPE(vocab=vocab, merges=merges))
-            tmp.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+            tmp.pre_tokenizer = pre_tokenizers.ByteLevel(
+                add_prefix_space=False, use_regex=use_regex
+            )
             tmp.decoder = decoders.ByteLevel()
             self.logger.log(self.metrics.build_train_log_dict(tmp, vocab_size))
 
+        return _cb
+
+    # ---- BPE ----
+
+    def _train_bpe(self, make_train_iter: Callable[[], Iterable[str]]) -> Tokenizer:
         bpe = BpeTrainer(
             vocab_size=self.vocab_size,
             special_tokens=self._SPECIAL_TOKENS,
             pretokenizer="bpe",
-            progress_callback=curve_cb if self.logger.enabled else None,
+            progress_callback=self._wandb_curve_cb(use_regex=True)
+            if self.logger.enabled
+            else None,
             progress_every=self.eval_every,
             show_progress=True,
             progress_desc="[bpe]",
@@ -207,24 +236,15 @@ class TokenizerTrainer:
     def _train_superbpe(
         self, make_train_iter: Callable[[], Iterable[str]]
     ) -> Tokenizer:
-
-        def curve_cb(vocab_size, vocab, merges):
-            if not self.logger.enabled:
-                return
-            tmp = Tokenizer(models.BPE(vocab=vocab, merges=merges))
-            tmp.pre_tokenizer = pre_tokenizers.ByteLevel(
-                add_prefix_space=False, use_regex=False
-            )
-            tmp.decoder = decoders.ByteLevel()
-            self.logger.log(self.metrics.build_train_log_dict(tmp, vocab_size))
-
         # ---- Stage 1: standard BPE with paper-default whitespace pretokenization ----
         t0 = time.perf_counter()
         stage1 = BpeTrainer(
             vocab_size=self.transition_size,
             special_tokens=self._SPECIAL_TOKENS,
             pretokenizer="bpe",
-            progress_callback=curve_cb if self.logger.enabled else None,
+            progress_callback=self._wandb_curve_cb(use_regex=False)
+            if self.logger.enabled
+            else None,
             progress_every=self.eval_every,
             show_progress=True,
             progress_desc="[superbpe stage 1]",
@@ -258,7 +278,9 @@ class TokenizerTrainer:
             initial_vocab=stage1_vocab,
             initial_merges=stage1_merges,
             merge_filter=superbpe_filter,
-            progress_callback=curve_cb if self.logger.enabled else None,
+            progress_callback=self._wandb_curve_cb(use_regex=False)
+            if self.logger.enabled
+            else None,
             progress_every=self.eval_every,
             show_progress=True,
             progress_desc="[superbpe stage 2]",
