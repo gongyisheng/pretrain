@@ -403,6 +403,14 @@ class BpeTrainer:
         self,
         corpus_iter: Callable[[], Iterable[str]],
     ) -> tuple[dict[str, int], list[tuple[str, str]]]:
+        """Train the tokenizer and return ``(vocab, merges)``.
+
+        ``corpus_iter`` is a zero-arg callable that yields a fresh iterable of
+        documents each time it is called. The factory pattern (rather than a
+        plain iterable) lets the trainer re-stream the corpus internally —
+        currently used by the multi-pass dataset wrappers in
+        ``src.data.tokenizer_trainer`` and required by SuperBPE stage 2.
+        """
         # 1. Pretokenize + dedup.
         chunks = _build_chunks(
             corpus_iter, self.pretokenizer, self.n_workers, self.batch_size
@@ -441,6 +449,13 @@ class BpeTrainer:
             a, b = pair
             merged = a + b
             if self.merge_filter is not None and not self.merge_filter(a, b, merged):
+                # Veto: drop the pair from the live state. A later merge of
+                # some neighbor of (a, b) will still decrement pair_counts[pair]
+                # in _apply_merge (because the chunk physically contains
+                # ...a b...), so this entry can transiently go negative. The
+                # `cur > 0` guard in _select_best_pair excludes it from
+                # selection — correctness is preserved, but the counter is no
+                # longer a faithful reflection of the symbol-sequence state.
                 pair_counts.pop(pair, None)
                 where.pop(pair, None)
                 continue
