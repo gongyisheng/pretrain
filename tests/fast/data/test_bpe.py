@@ -447,3 +447,38 @@ def test_merge_filter_called_with_string_args():
     for a, b, merged in calls:
         assert isinstance(a, str) and isinstance(b, str) and isinstance(merged, str)
         assert a + b == merged
+
+
+def test_progress_callback_fires_every_n():
+    calls = []
+
+    def cb(vocab_size, vocab, merges):
+        calls.append(vocab_size)
+
+    BpeTrainer(
+        vocab_size=400,
+        n_workers=1,
+        progress_callback=cb,
+        progress_every=50,
+    ).train(_corpus)
+    # Vocab grows from ~257 (specials+alphabet) to 400.
+    # progress_every=50 means callback fires when vocab_size hits a multiple of 50.
+    assert all(v % 50 == 0 for v in calls), f"non-multiple firing: {calls}"
+    assert len(calls) >= 1
+
+
+def test_progress_callback_receives_current_state():
+    captured = []
+
+    def cb(vs, vocab, merges):
+        captured.append((vs, len(vocab), len(merges)))
+
+    BpeTrainer(
+        vocab_size=400,
+        n_workers=1,
+        progress_callback=cb,
+        progress_every=50,
+    ).train(_corpus)
+    # vocab_size arg always equals len(vocab) at callback time.
+    for vs, n_vocab, _ in captured:
+        assert vs == n_vocab
