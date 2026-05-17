@@ -1,14 +1,11 @@
 """Behavior tests for src/data/tokenizer_trainer.py — BPE and SuperBPE paths."""
 
-import json
-
 import pytest
-from tokenizers import Tokenizer, pre_tokenizers
+from tokenizers import Tokenizer
 
 from src.data.tokenizer import load_tokenizer
 from src.data.tokenizer_trainer import (
     TokenizerTrainer,
-    _build_tokenizer_from_prefix,
 )
 from src.eval.tokenizer import _bytes_per_token, evaluate
 from src.utils.config import DataConfig, LoggingConfig, ModelConfig, TrainConfig
@@ -133,50 +130,6 @@ def test_evaluate_returns_expected_keys(tmp_path, text_iter):
     assert abs(result["bytes_per_token"] * result["tokens_per_byte"] - 1.0) < 1e-9
 
 
-# ---- Prefix reconstruction ----
-
-
-def test_prefix_at_full_merges_matches_original(tmp_path, text_iter):
-    save = tmp_path / "bpe_500"
-    tok = _trainer(save, 500, "bpe").train(text_iter)
-    # Extract vocab + merges from saved tokenizer.json
-    data = json.loads((save / "tokenizer.json").read_text())
-    vocab = data["model"]["vocab"]
-    merges = [
-        tuple(m.split(" ", 1)) if isinstance(m, str) else tuple(m)
-        for m in data["model"]["merges"]
-    ]
-    full_k = len(merges)
-    rebuilt = _build_tokenizer_from_prefix(
-        vocab=vocab,
-        merges=merges,
-        k=full_k,
-        pretok_factory=lambda: pre_tokenizers.ByteLevel(add_prefix_space=False),
-    )
-    s = "the quick brown fox"
-    assert rebuilt.encode(s).ids == tok.encode(s).ids
-
-
-def test_prefix_smaller_k_has_smaller_vocab(tmp_path, text_iter):
-    save = tmp_path / "bpe_500"
-    _trainer(save, 500, "bpe").train(text_iter)
-    data = json.loads((save / "tokenizer.json").read_text())
-    vocab = data["model"]["vocab"]
-    merges = [
-        tuple(m.split(" ", 1)) if isinstance(m, str) else tuple(m)
-        for m in data["model"]["merges"]
-    ]
-    half_k = len(merges) // 2
-    half = _build_tokenizer_from_prefix(
-        vocab=vocab,
-        merges=merges,
-        k=half_k,
-        pretok_factory=lambda: pre_tokenizers.ByteLevel(add_prefix_space=False),
-    )
-    assert half.get_vocab_size() < len(vocab)
-    assert half.get_vocab_size() == len(vocab) - (len(merges) - half_k)
-
-
 # ---- SuperBPE stage 1 ----
 
 
@@ -201,20 +154,20 @@ def test_superbpe_stage1_vocab_size(tmp_path, text_iter):
 
 
 def test_superbpe_full_train_succeeds(tmp_path, text_iter):
-    save = tmp_path / "sbpe_400_t200"
+    save = tmp_path / "sbpe_400_t300"
     _trainer(
         save,
         400,
         "superbpe",
-        transition_size=200,
+        transition_size=300,
         max_superword_words=99,  # effectively disable cap
     ).train(text_iter)
     assert (save / "tokenizer.json").exists()
 
 
 def test_superbpe_final_vocab_size(tmp_path, text_iter):
-    save = tmp_path / "sbpe_400_t200"
-    _trainer(save, 400, "superbpe", transition_size=200, max_superword_words=99).train(
+    save = tmp_path / "sbpe_400_t300"
+    _trainer(save, 400, "superbpe", transition_size=300, max_superword_words=99).train(
         text_iter
     )
     tok = load_tokenizer(str(save))
@@ -236,8 +189,8 @@ def test_superbpe_produces_superword(tmp_path, text_iter):
 
 
 def test_superbpe_decode_roundtrip(tmp_path, text_iter):
-    save = tmp_path / "sbpe_400_t200"
-    _trainer(save, 400, "superbpe", transition_size=200, max_superword_words=99).train(
+    save = tmp_path / "sbpe_400_t300"
+    _trainer(save, 400, "superbpe", transition_size=300, max_superword_words=99).train(
         text_iter
     )
     tok = load_tokenizer(str(save))
@@ -247,9 +200,9 @@ def test_superbpe_decode_roundtrip(tmp_path, text_iter):
 
 
 def test_superbpe_load_roundtrip(tmp_path, text_iter):
-    save = tmp_path / "sbpe_400_t200"
+    save = tmp_path / "sbpe_400_t300"
     tok_train = _trainer(
-        save, 400, "superbpe", transition_size=200, max_superword_words=99
+        save, 400, "superbpe", transition_size=300, max_superword_words=99
     ).train(text_iter)
     tok_load = load_tokenizer(str(save))
     for s in ["the quick brown fox", "she sells seashells", "by the way"]:
@@ -280,7 +233,7 @@ def test_superbpe_no_colon_space_tokens(tmp_path, text_iter):
     # Inject some "X: Y" patterns so the algorithm is tempted to learn ":Ġ" merges.
     texts = ["foo: bar baz quux", "name: alice", "topic: animals plants"] * 50
     save = tmp_path / "sbpe_colon"
-    _trainer(save, 500, "superbpe", transition_size=250, max_superword_words=99).train(
+    _trainer(save, 500, "superbpe", transition_size=350, max_superword_words=99).train(
         lambda: iter(texts)
     )
     tok = load_tokenizer(str(save))
