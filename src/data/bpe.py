@@ -139,6 +139,55 @@ def _build_chunks(
     return dict(total)
 
 
+def _init_pair_state(
+    chunks: dict[tuple[str, ...], int],
+    merges_to_replay: list[tuple[str, str]],
+) -> tuple[list[list[str]], list[int], Counter, dict[tuple[str, str], set[int]]]:
+    """Initialize merge-loop state from chunked corpus.
+
+    Returns:
+      symbols_per_chunk: list[list[str]] — mutable symbol seq per chunk
+      chunk_counts:      list[int]       — per-chunk frequency weight
+      pair_counts:       Counter[(a, b)] — weighted count across all chunks
+      where_to_update:   dict[(a, b), set[chunk_id]] — reverse index
+
+    chunk_id is the position in `symbols_per_chunk`. Chunks are sorted by their
+    initial symbol tuple before id assignment so output is deterministic
+    regardless of `chunks` dict insertion order.
+
+    If `merges_to_replay` is non-empty, those merges are applied in order to
+    each chunk's symbol list before pair counts are built — this is the
+    resume/extend code path.
+    """
+    # Sort for deterministic chunk_id assignment.
+    sorted_items = sorted(chunks.items(), key=lambda kv: kv[0])
+    symbols_per_chunk: list[list[str]] = [list(t) for t, _ in sorted_items]
+    chunk_counts: list[int] = [c for _, c in sorted_items]
+
+    # Apply replay merges in order. Each merge collapses adjacent (a, b) → a+b
+    # in every chunk, left-to-right.
+    for a, b in merges_to_replay:
+        merged = a + b
+        for syms in symbols_per_chunk:
+            i = 0
+            while i < len(syms) - 1:
+                if syms[i] == a and syms[i + 1] == b:
+                    syms[i] = merged
+                    del syms[i + 1]
+                else:
+                    i += 1
+
+    pair_counts: Counter = Counter()
+    where_to_update: dict[tuple[str, str], set[int]] = {}
+    for cid, syms in enumerate(symbols_per_chunk):
+        w = chunk_counts[cid]
+        for x, y in zip(syms[:-1], syms[1:]):
+            pair_counts[(x, y)] += w
+            where_to_update.setdefault((x, y), set()).add(cid)
+
+    return symbols_per_chunk, chunk_counts, pair_counts, where_to_update
+
+
 class BpeTrainer:
     """Train a BPE tokenizer in pure Python. Not yet implemented."""
 
