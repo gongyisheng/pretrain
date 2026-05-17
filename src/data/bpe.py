@@ -14,6 +14,8 @@ pair, caller wraps in `tokenizers.Tokenizer(models.BPE(...))` and saves.
 
 from collections.abc import Callable, Iterable
 
+import regex as _re
+
 
 def _build_byte_to_unicode() -> dict[int, str]:
     """GPT-2 byte→unicode mapping. Byte-for-byte identical to
@@ -41,6 +43,61 @@ _UNICODE_TO_BYTE: dict[str, int] = {c: b for b, c in _BYTE_TO_UNICODE.items()}
 def _byte_encode(text: str) -> str:
     """Encode `text` as a byte-level unicode string. Each output char = one input byte."""
     return "".join(_BYTE_TO_UNICODE[b] for b in text.encode("utf-8"))
+
+
+# Paper-default whitespace pretokenization (HF / GPT-2, no contraction rule).
+_PRETOK_BPE_REGEX = _re.compile(r" ?\p{L}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")
+# Digit lookahead: split runs of digits into groups of 3 from the right.
+_PRETOK_DIGIT_REGEX = _re.compile(r"(?=(\d{3})+(?!\d))")
+
+
+def _split_digit_groups(piece: str) -> list[str]:
+    """Apply the (?=(\\d{3})+(?!\\d)) split. Equivalent to HF's Split(behavior='isolated')."""
+    if not any(c.isdigit() for c in piece):
+        return [piece]
+    splits = [m.start() for m in _PRETOK_DIGIT_REGEX.finditer(piece)]
+    if not splits:
+        return [piece]
+    pieces: list[str] = []
+    prev = 0
+    for s in splits:
+        if s > prev:
+            pieces.append(piece[prev:s])
+        prev = s
+    pieces.append(piece[prev:])
+    return [p for p in pieces if p]
+
+
+def _pretokenize(doc: str, mode: str) -> list[str]:
+    """Return a list of byte-encoded pieces ready for BPE.
+
+    mode="bpe":       regex split (whitespace + digits) → byte-encode each piece.
+    mode="bytelevel": no word splitting; whole doc as one byte-encoded chunk.
+    """
+    if mode == "bytelevel":
+        return [_byte_encode(doc)]
+    if mode != "bpe":
+        raise ValueError(
+            f"unknown pretokenizer mode: {mode!r}; expected 'bpe' or 'bytelevel'"
+        )
+    # Simulate HF Split(behavior="isolated"): cover the full string, including
+    # segments between matches (e.g., pure-digit runs not captured by the letter/
+    # punctuation alternatives).
+    segments: list[str] = []
+    prev = 0
+    for m in _PRETOK_BPE_REGEX.finditer(doc):
+        start, end = m.start(), m.end()
+        if start > prev:
+            segments.append(doc[prev:start])  # unmatched segment (e.g., digits)
+        segments.append(doc[start:end])
+        prev = end
+    if prev < len(doc):
+        segments.append(doc[prev:])  # trailing unmatched
+    pieces: list[str] = []
+    for seg in segments:
+        for sub in _split_digit_groups(seg):
+            pieces.append(_byte_encode(sub))
+    return pieces
 
 
 class BpeTrainer:
