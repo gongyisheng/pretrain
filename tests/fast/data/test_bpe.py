@@ -482,3 +482,74 @@ def test_progress_callback_receives_current_state():
     # vocab_size arg always equals len(vocab) at callback time.
     for vs, n_vocab, _ in captured:
         assert vs == n_vocab
+
+
+def test_resume_extends_to_larger_vocab():
+    # Train to 300.
+    v1, m1 = BpeTrainer(vocab_size=300, n_workers=1).train(_corpus)
+    # Resume to 400 with the same corpus.
+    v2, m2 = BpeTrainer(
+        vocab_size=400,
+        n_workers=1,
+        initial_vocab=v1,
+        initial_merges=m1,
+    ).train(_corpus)
+    # All of v1 must persist with the same IDs.
+    for tok, tid in v1.items():
+        assert v2[tok] == tid
+    # First |m1| merges must be unchanged.
+    assert m2[: len(m1)] == m1
+
+
+def test_resume_equals_fresh_train():
+    """Fresh train to 400 == train-to-300 then resume to 400."""
+    fresh_v, fresh_m = BpeTrainer(vocab_size=400, n_workers=1).train(_corpus)
+    v1, m1 = BpeTrainer(vocab_size=300, n_workers=1).train(_corpus)
+    resumed_v, resumed_m = BpeTrainer(
+        vocab_size=400,
+        n_workers=1,
+        initial_vocab=v1,
+        initial_merges=m1,
+    ).train(_corpus)
+    assert resumed_m == fresh_m
+    assert set(resumed_v) == set(fresh_v)
+
+
+def test_resume_inconsistent_initial_raises():
+    # initial_merges references a token not in initial_vocab.
+    with pytest.raises(ValueError, match="initial_merges references unknown"):
+        BpeTrainer(
+            vocab_size=400,
+            n_workers=1,
+            initial_vocab={"<|endoftext|>": 0, "a": 1, "b": 2},
+            initial_merges=[("a", "z")],  # "z" not in vocab
+        )
+
+
+def test_resume_one_without_other_raises():
+    with pytest.raises(ValueError, match="both be provided or both None"):
+        BpeTrainer(vocab_size=400, n_workers=1, initial_vocab={"a": 0})
+    with pytest.raises(ValueError, match="both be provided or both None"):
+        BpeTrainer(vocab_size=400, n_workers=1, initial_merges=[("a", "b")])
+
+
+def test_resume_initial_too_large_raises():
+    big_vocab = {f"t{i}": i for i in range(500)}
+    with pytest.raises(ValueError, match="initial_vocab size .* > vocab_size"):
+        BpeTrainer(
+            vocab_size=400,
+            n_workers=1,
+            initial_vocab=big_vocab,
+            initial_merges=[],
+        )
+
+
+def test_resume_initial_vocab_non_contiguous_raises():
+    # IDs must be 0..N-1.
+    with pytest.raises(ValueError, match="contiguous from 0"):
+        BpeTrainer(
+            vocab_size=400,
+            n_workers=1,
+            initial_vocab={"a": 0, "b": 2, "c": 3},  # gap at 1
+            initial_merges=[],
+        )
