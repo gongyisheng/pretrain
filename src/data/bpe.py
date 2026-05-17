@@ -406,20 +406,39 @@ class BpeTrainer:
 
     def train(
         self,
-        corpus_iter: Callable[[], Iterable[str]],
+        corpus_iter: Callable[[], Iterable[str]] | None = None,
+        *,
+        chunks: dict[tuple[str, ...], int] | None = None,
     ) -> tuple[dict[str, int], list[tuple[str, str]]]:
         """Train the tokenizer and return ``(vocab, merges)``.
 
-        ``corpus_iter`` is a zero-arg callable that yields a fresh iterable of
-        documents each time it is called. The factory pattern (rather than a
-        plain iterable) lets the trainer re-stream the corpus internally —
-        currently used by the multi-pass dataset wrappers in
-        ``src.data.tokenizer_trainer`` and required by SuperBPE stage 2.
+        Provide exactly one of:
+          - ``corpus_iter``: zero-arg callable yielding a fresh iterable of
+            raw text docs. The trainer pretokenizes via ``self.pretokenizer``
+            and, if ``initial_merges`` is set, replays them on each chunk to
+            recover the post-resume state.
+          - ``chunks``: pre-computed ``{symbol-tuple: count}`` dict whose
+            entries already reflect any ``initial_merges`` (e.g., produced by
+            HF's encoder using the saved subword tokenizer). The replay step
+            is skipped — feeding raw byte-level chunks here when
+            ``initial_merges`` is non-empty would double-apply the merges.
+
+        The chunks path is the fast route for the SuperBPE superword pass:
+        replaying ~100k subword merges in Python is the dominant cost; HF's
+        Rust encoder produces the same result in a fraction of the time.
         """
-        # 1. Pretokenize + dedup.
-        chunks = _build_chunks(
-            corpus_iter, self.pretokenizer, self.n_workers, self.batch_size
-        )
+        if (corpus_iter is None) == (chunks is None):
+            raise ValueError(
+                "provide exactly one of corpus_iter (raw text) or chunks "
+                "(pre-encoded symbol tuples with counts)"
+            )
+
+        # 1. Pretokenize + dedup (or use the caller's chunks directly).
+        pre_encoded = chunks is not None
+        if chunks is None:
+            chunks = _build_chunks(
+                corpus_iter, self.pretokenizer, self.n_workers, self.batch_size
+            )
         if not chunks:
             raise ValueError("corpus produced no trainable chunks")
 
@@ -437,9 +456,12 @@ class BpeTrainer:
             vocab = dict(self.initial_vocab)
             merges = list(self.initial_merges)  # type: ignore[arg-type]
 
-        # 3. Build pair state (replays initial_merges if any).
+        # 3. Build pair state. If chunks were pre-encoded, they already reflect
+        # initial_merges — skip replay. Otherwise replay so byte-level chunks
+        # catch up to the post-resume state.
+        merges_to_replay: list[tuple[str, str]] = [] if pre_encoded else list(merges)
         symbols, weights, pair_counts, where = _init_pair_state(
-            chunks, merges_to_replay=merges
+            chunks, merges_to_replay=merges_to_replay
         )
 
         # 4. Heapify.

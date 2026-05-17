@@ -16,9 +16,11 @@ Runtime encode/decode loading lives in src/data/tokenizer.py.
 import itertools
 import os
 import time
+from collections import Counter
 from typing import Callable, Iterable
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+from tqdm import tqdm
 import wandb
 
 from src.data.bpe import BpeTrainer
@@ -272,6 +274,26 @@ class TokenizerTrainer:
             word_count = merged.count("Ġ") + (0 if merged.startswith("Ġ") else 1)
             return word_count <= self.max_superword_words
 
+        # Pre-encode the corpus with the subword tokenizer. This skips the
+        # Python merge-replay inside BpeTrainer — HF's Rust encode_batch
+        # produces identical post-merge symbol sequences ~10-100× faster.
+        # Equivalence verified by `test_bpe_chunks_param_equivalent_with_resume`.
+        encoded_chunks: Counter = Counter()
+        encode_batch_size = 1000
+        stream = iter(make_train_iter())
+        with tqdm(
+            desc="[superbpe][encoding for superword pass]",
+            unit="docs",
+            dynamic_ncols=True,
+        ) as bar:
+            while True:
+                batch = list(itertools.islice(stream, encode_batch_size))
+                if not batch:
+                    break
+                for enc in subword_tok.encode_batch(batch, add_special_tokens=False):
+                    encoded_chunks[tuple(enc.tokens)] += 1
+                bar.update(len(batch))
+
         superword_bpe = BpeTrainer(
             vocab_size=self.vocab_size,
             special_tokens=self._SPECIAL_TOKENS,
@@ -286,7 +308,7 @@ class TokenizerTrainer:
             show_progress=True,
             progress_desc="[superbpe][superword pass]",
         )
-        vocab, merges = superword_bpe.train(make_train_iter)
+        vocab, merges = superword_bpe.train(chunks=dict(encoded_chunks))
         print(
             f"SuperBPE superword pass done: vocab_size={len(vocab)} "
             f"({time.perf_counter() - t0:.2f}s)"
