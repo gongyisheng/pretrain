@@ -1,11 +1,15 @@
 """Tokenizer training (BPE and SuperBPE).
 
-Two methods are supported:
-- "bpe": standard byte-level BPE (HuggingFace tokenizers).
-- "superbpe": two-stage curriculum from arXiv:2503.13423.
+Both methods drive the pure-Python `BpeTrainer` in `src/data/bpe.py`:
+- "bpe":      one BpeTrainer call with whitespace + digit pretokenization.
+- "superbpe": two BpeTrainer calls — stage 1 same as "bpe", stage 2 with
+              pretokenizer="bytelevel", the stage-1 vocab/merges as the
+              starting state, and a merge_filter enforcing the
+              `max_superword_words` cap and the ":Ġ" exclusion
+              (arXiv:2503.13423).
 
 All trainers emit a HuggingFace-compatible tokenizer.json under save_path/.
-Runtime loading lives in src/data/tokenizer.py.
+Runtime encode/decode loading lives in src/data/tokenizer.py.
 """
 
 import itertools
