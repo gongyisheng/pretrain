@@ -1,5 +1,6 @@
 """Tests for src/data/bpe.py — pure-Python BPE trainer."""
 
+import heapq
 from collections import Counter
 
 import pytest
@@ -11,7 +12,9 @@ from src.data.bpe import (
     _build_chunks,
     _byte_encode,
     _init_pair_state,
+    _make_heap_entry,
     _pretokenize,
+    _select_best_pair,
 )
 
 
@@ -185,3 +188,42 @@ def test_init_pair_state_replay_multiple_merges_in_order():
         chunks, merges_to_replay=[("a", "b"), ("ab", "c")]
     )
     assert symbols == [["abc"]]
+
+
+def test_select_best_pair_picks_max_count():
+    pair_counts = Counter({("a", "b"): 5, ("c", "d"): 3})
+    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heapq.heapify(heap)
+    pair, cnt = _select_best_pair(heap, pair_counts)
+    assert pair == ("a", "b")
+    assert cnt == 5
+
+
+def test_select_best_pair_tie_break_lex_larger_wins():
+    # Equal count → pick the lex-LARGER pair (matches HF BinaryHeap max-heap on pair tuple).
+    pair_counts = Counter({("a", "b"): 3, ("a", "c"): 3, ("a", "d"): 3})
+    heap = [_make_heap_entry(p, c) for p, c in pair_counts.items()]
+    heapq.heapify(heap)
+    pair, _ = _select_best_pair(heap, pair_counts)
+    assert pair == ("a", "d")
+
+
+def test_select_best_pair_skips_stale():
+    # Heap has stale entry for ("a","b") at count=10; current count is 2.
+    pair_counts = Counter({("a", "b"): 2, ("c", "d"): 5})
+    heap = [
+        _make_heap_entry(("a", "b"), 10),  # stale (count too high)
+        _make_heap_entry(("a", "b"), 2),  # current
+        _make_heap_entry(("c", "d"), 5),
+    ]
+    heapq.heapify(heap)
+    pair, cnt = _select_best_pair(heap, pair_counts)
+    # Stale entry popped first → ignored; then (c,d):5 is chosen over (a,b):2.
+    assert pair == ("c", "d")
+    assert cnt == 5
+
+
+def test_select_best_pair_returns_none_when_heap_empty():
+    heap: list = []
+    pair_counts: Counter = Counter()
+    assert _select_best_pair(heap, pair_counts) == (None, 0)

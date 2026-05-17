@@ -12,6 +12,7 @@ Encode/decode at inference stays on HF: emit a HF-compatible (vocab, merges)
 pair, caller wraps in `tokenizers.Tokenizer(models.BPE(...))` and saves.
 """
 
+import heapq
 from collections import Counter
 from collections.abc import Callable, Iterable
 
@@ -186,6 +187,57 @@ def _init_pair_state(
             where_to_update.setdefault((x, y), set()).add(cid)
 
     return symbols_per_chunk, chunk_counts, pair_counts, where_to_update
+
+
+class _LexInverter:
+    """Wrap a tuple of strings to invert lex comparison (lex-larger sorts first)."""
+
+    __slots__ = ("v",)
+
+    def __init__(self, v: tuple[str, str]) -> None:
+        self.v = v
+
+    def __lt__(self, other: "_LexInverter") -> bool:
+        return self.v > other.v
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _LexInverter) and self.v == other.v
+
+
+def _make_heap_entry(
+    pair: tuple[str, str],
+    count: int,
+) -> tuple:
+    """Build a heap entry whose ordering matches HF tie-break:
+      1. count desc
+      2. pair lex desc (lex-larger pair wins on tie)
+
+    `heapq` is a min-heap, so we negate count and wrap the pair in
+    `_LexInverter` to flip lex comparison. The trailing `pair` tuple is the
+    actual value the consumer reads back.
+    """
+    return (-count, _LexInverter(pair), pair)
+
+
+def _select_best_pair(
+    heap: list,
+    pair_counts: Counter,
+) -> tuple[tuple[str, str] | None, int]:
+    """Pop heap until a non-stale entry is found.
+
+    Returns (pair, count) or (None, 0) if heap drained without finding a
+    live entry. Stale = heap entry's count disagrees with current
+    `pair_counts[pair]`.
+    """
+    while heap:
+        neg_count, _inverter, pair = heap[0]
+        count = -neg_count
+        cur = pair_counts.get(pair, 0)
+        if cur == count and cur > 0:
+            heapq.heappop(heap)
+            return pair, cur
+        heapq.heappop(heap)
+    return None, 0
 
 
 class BpeTrainer:
