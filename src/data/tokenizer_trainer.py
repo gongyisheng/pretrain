@@ -27,33 +27,6 @@ from src.eval.tokenizer import _bytes_per_token
 from src.utils.config import TrainConfig
 
 
-def encode_corpus_to_chunks(
-    tokenizer: Tokenizer,
-    corpus_iter: Callable[[], Iterable[str]],
-    batch_size: int = 1000,
-) -> dict[tuple[str, ...], int]:
-    """Pre-encode a corpus with an HF tokenizer; return chunk-counts ready
-    for ``BpeTrainer.train(chunks=...)``.
-
-    Aggregates each document's encoded tokens into a tuple and counts unique
-    occurrences. Used by the SuperBPE superword pass to skip the Python
-    merge-replay step inside ``_init_pair_state`` — HF's Rust ``encode_batch``
-    produces identical post-merge symbol sequences much faster.
-
-    ``corpus_iter`` is a zero-arg factory matching ``BpeTrainer.train``'s
-    contract.
-    """
-    chunks: Counter = Counter()
-    stream = iter(corpus_iter())
-    while True:
-        batch = list(itertools.islice(stream, batch_size))
-        if not batch:
-            break
-        for enc in tokenizer.encode_batch(batch, add_special_tokens=False):
-            chunks[tuple(enc.tokens)] += 1
-    return dict(chunks)
-
-
 class TokenizerWandbLogger:
     """Thin wandb wrapper. Handles init/log/finish only — no metric computation."""
 
@@ -303,6 +276,26 @@ class TokenizerTrainer:
         # Pre-encode the corpus with the subword tokenizer so the superword
         # BpeTrainer skips the Python merge-replay. Equivalence verified by
         # `test_bpe_chunks_param_equivalent_with_resume`.
+        def encode_corpus_to_chunks(
+            tokenizer: Tokenizer,
+            corpus_iter: Callable[[], Iterable[str]],
+            batch_size: int = 1000,
+        ) -> dict[tuple[str, ...], int]:
+            """Pre-encode `corpus_iter` with `tokenizer`; return chunk-counts
+            ready for `BpeTrainer.train(chunks=...)`. HF's Rust encode_batch
+            produces the post-subword-merge symbol sequences much faster than
+            replaying merges in Python inside `_init_pair_state`.
+            """
+            chunks: Counter = Counter()
+            stream = iter(corpus_iter())
+            while True:
+                batch = list(itertools.islice(stream, batch_size))
+                if not batch:
+                    break
+                for enc in tokenizer.encode_batch(batch, add_special_tokens=False):
+                    chunks[tuple(enc.tokens)] += 1
+            return dict(chunks)
+
         encoded_chunks = encode_corpus_to_chunks(subword_tok, make_train_iter)
 
         superword_bpe = BpeTrainer(
