@@ -28,6 +28,7 @@ from src.data.bpe import BpeTrainer
 
 def _corpus_factory(path: str, n_docs: int | None):
     """Build a zero-arg replayable iterable over docs in `path`."""
+
     def _iter():
         with open(path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f):
@@ -36,6 +37,7 @@ def _corpus_factory(path: str, n_docs: int | None):
                 line = line.rstrip("\n")
                 if line:
                     yield line
+
     return _iter
 
 
@@ -51,6 +53,7 @@ def _hash_output(vocab: dict, merges: list) -> str:
 
 def run_hf(corpus, vocab_size: int) -> dict:
     from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+
     t0 = time.perf_counter()
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
@@ -70,12 +73,12 @@ def run_hf(corpus, vocab_size: int) -> dict:
     }
 
 
-def run_python(
-    corpus, vocab_size: int, n_workers: int, batch_size: int = 1000
-) -> dict:
+def run_python(corpus, vocab_size: int, n_workers: int, batch_size: int = 1000) -> dict:
     t0 = time.perf_counter()
     vocab, merges = BpeTrainer(
-        vocab_size=vocab_size, n_workers=n_workers, batch_size=batch_size,
+        vocab_size=vocab_size,
+        n_workers=n_workers,
+        batch_size=batch_size,
     ).train(corpus)
     return {
         "config": "python",
@@ -92,7 +95,9 @@ def main():
     ap.add_argument("--n_docs", type=int, default=None)
     ap.add_argument("--vocab_size", type=int, default=50_000)
     ap.add_argument(
-        "--workers", type=int, nargs="+",
+        "--workers",
+        type=int,
+        nargs="+",
         default=[1, 2, 4, max(1, (os.cpu_count() or 2) // 2)],
     )
     ap.add_argument("--skip_hf", action="store_true")
@@ -112,7 +117,9 @@ def main():
     # Determinism check across Python runs.
     py_hashes = {r["hash"] for r in results if r["config"] == "python"}
     if len(py_hashes) > 1:
-        print(f"\n!! NON-DETERMINISM: Python runs produced different outputs: {py_hashes}")
+        print(
+            f"\n!! NON-DETERMINISM: Python runs produced different outputs: {py_hashes}"
+        )
         sys.exit(1)
 
     print("\nResults:")
