@@ -13,8 +13,10 @@ pair, caller wraps in `tokenizers.Tokenizer(models.BPE(...))` and saves.
 """
 
 import heapq
+import os
 from collections import Counter
 from collections.abc import Callable, Iterable
+from multiprocessing import get_context
 
 import regex as _re
 
@@ -115,6 +117,24 @@ def _pretokenize_batch(batch: list[str], mode: str) -> Counter:
     return counts
 
 
+def _iter_batches(stream, batch_size, mode):
+    """Yield (batch, mode) tuples from a stream of documents."""
+    batch: list[str] = []
+    for doc in stream:
+        batch.append(doc)
+        if len(batch) >= batch_size:
+            yield (batch, mode)
+            batch = []
+    if batch:
+        yield (batch, mode)
+
+
+def _pretokenize_batch_starargs(args):
+    """Pickle-friendly wrapper that unpacks (batch, mode) for imap_unordered."""
+    batch, mode = args
+    return _pretokenize_batch(batch, mode)
+
+
 def _build_chunks(
     corpus_iter: Callable[[], Iterable[str]],
     mode: str,
@@ -123,20 +143,31 @@ def _build_chunks(
 ) -> dict[tuple[str, ...], int]:
     """Pretokenize the corpus and aggregate by symbol-tuple.
 
-    Returns dict {symbol_tuple: count}. Serial path used when n_workers<=1;
-    parallel path added in a later task.
+    n_workers <= 1: serial.
+    n_workers > 1: mp.Pool fan-out over doc batches; merge Counters on main.
     """
-    if n_workers > 1:
-        raise NotImplementedError("parallel path added in Task 13")
     total: Counter = Counter()
-    batch: list[str] = []
-    for doc in corpus_iter():
-        batch.append(doc)
-        if len(batch) >= batch_size:
+    if n_workers <= 1:
+        batch: list[str] = []
+        for doc in corpus_iter():
+            batch.append(doc)
+            if len(batch) >= batch_size:
+                total.update(_pretokenize_batch(batch, mode))
+                batch = []
+        if batch:
             total.update(_pretokenize_batch(batch, mode))
-            batch = []
-    if batch:
-        total.update(_pretokenize_batch(batch, mode))
+        return dict(total)
+
+    # Parallel: feed batches into a Pool. Use spawn context for clean state.
+    ctx = get_context("spawn")
+    with ctx.Pool(n_workers) as pool:
+        results = pool.imap_unordered(
+            _pretokenize_batch_starargs,
+            _iter_batches(corpus_iter(), batch_size, mode),
+            chunksize=1,
+        )
+        for partial in results:
+            total.update(partial)
     return dict(total)
 
 
@@ -361,7 +392,11 @@ class BpeTrainer:
         self.merge_filter = merge_filter
         self.progress_callback = progress_callback
         self.progress_every = progress_every
-        self.n_workers = 1 if n_workers is None else max(1, n_workers)
+        self.n_workers = (
+            max(1, (os.cpu_count() or 2) // 2)
+            if n_workers is None
+            else max(1, n_workers)
+        )
         self.batch_size = batch_size
 
     def train(

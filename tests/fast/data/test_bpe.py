@@ -553,3 +553,26 @@ def test_resume_initial_vocab_non_contiguous_raises():
             initial_vocab={"a": 0, "b": 2, "c": 3},  # gap at 1
             initial_merges=[],
         )
+
+
+def test_build_chunks_parallel_matches_serial():
+    serial = _build_chunks(_corpus, mode="bpe", n_workers=1)
+    parallel = _build_chunks(_corpus, mode="bpe", n_workers=4, batch_size=10)
+    assert serial == parallel
+
+
+def test_bpe_parity_serial_vs_parallel():
+    """Same corpus + vocab_size → identical (vocab, merges) regardless of worker count."""
+    v_serial, m_serial = BpeTrainer(vocab_size=400, n_workers=1).train(_corpus)
+    v_parallel, m_parallel = BpeTrainer(
+        vocab_size=400,
+        n_workers=4,
+        batch_size=10,
+    ).train(_corpus)
+    assert m_serial == m_parallel
+    assert v_serial == v_parallel
+
+
+def test_bpe_n_workers_default_is_safe():
+    """n_workers=None defaults to a sane positive integer; train succeeds."""
+    BpeTrainer(vocab_size=300, n_workers=None).train(_corpus)
