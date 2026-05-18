@@ -3,10 +3,38 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
+#include <omp.h>
+
 namespace py = pybind11;
+
+namespace {
+
+// Single-chunk left-to-right merge. Matches the Python `_replay_merges`
+// inner loop byte-for-byte: collapse adjacent (a,b) → merged from left,
+// `i` stays put after a collapse (so overlapping pairs like a b a b a b
+// chain correctly).
+inline void replay_one_chunk(std::vector<int32_t>& syms,
+                             const std::vector<std::tuple<int32_t, int32_t, int32_t>>& merges) {
+    for (const auto& [a, b, merged] : merges) {
+        if (syms.size() < 2) continue;
+        size_t i = 0;
+        while (i + 1 < syms.size()) {
+            if (syms[i] == a && syms[i + 1] == b) {
+                syms[i] = merged;
+                syms.erase(syms.begin() + static_cast<long>(i) + 1);
+                // i stays put so we can keep collapsing overlaps to the right.
+            } else {
+                ++i;
+            }
+        }
+    }
+}
+
+}  // namespace
 
 void BpeState::seed(py::dict chunks, py::dict symbol_table) {
     // 1. Resolve each chunk-tuple of str into a vector<int32_t> via symbol_table.
@@ -101,4 +129,33 @@ std::vector<int32_t> BpeState::pair_chunks(int32_t a, int32_t b) const {
     auto it = where_.find(pack_pair(a, b));
     if (it == where_.end()) return {};
     return it->second;
+}
+
+void BpeState::set_num_threads(int n) {
+    num_threads_ = n;
+}
+
+void BpeState::replay_merges(py::list merges) {
+    // Convert merges to a flat C++ vector once, before releasing the GIL.
+    std::vector<std::tuple<int32_t, int32_t, int32_t>> ms;
+    ms.reserve(merges.size());
+    for (auto item : merges) {
+        py::tuple t = py::reinterpret_borrow<py::tuple>(item);
+        ms.emplace_back(py::cast<int32_t>(t[0]),
+                        py::cast<int32_t>(t[1]),
+                        py::cast<int32_t>(t[2]));
+    }
+
+    const int n = static_cast<int>(symbols_per_chunk_.size());
+    if (num_threads_ > 0) {
+        omp_set_num_threads(num_threads_);
+    }
+
+    {
+        py::gil_scoped_release release;
+        #pragma omp parallel for schedule(dynamic, 64)
+        for (int cid = 0; cid < n; ++cid) {
+            replay_one_chunk(symbols_per_chunk_[cid], ms);
+        }
+    }
 }

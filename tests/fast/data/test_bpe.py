@@ -700,3 +700,87 @@ def test_bpe_state_build_initial_pairs_dedupes_pair_within_chunk():
     assert state.pair_count(0, 1) == 6
     # But the chunk_id appears only once in pair_chunks.
     assert state.pair_chunks(0, 1) == [0]
+
+
+def test_bpe_state_replay_single_merge():
+    """Replaying (a,b)→ab on chunk ("a","b","c") gives [ab_id, c_id]."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 1}, symbol_table)
+    state.replay_merges([(0, 1, 3)])  # (a_id, b_id, merged_id)
+
+    assert state.get_chunk_symbols(0) == [3, 2]
+
+
+def test_bpe_state_replay_multi_merge_in_order():
+    """Replaying (a,b)→ab then (ab,c)→abc collapses to a single token."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3, "abc": 4}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 1}, symbol_table)
+    state.replay_merges([(0, 1, 3), (3, 2, 4)])
+
+    assert state.get_chunk_symbols(0) == [4]
+
+
+def test_bpe_state_replay_left_to_right_overlap():
+    """Replaying (a,a)→aa on ("a","a","a") gives [aa, a], not [a, aa]."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "aa": 1}
+    state = BpeState()
+    state.seed({("a", "a", "a"): 1}, symbol_table)
+    state.replay_merges([(0, 0, 1)])
+
+    assert state.get_chunk_symbols(0) == [1, 0]
+
+
+def test_bpe_state_replay_parallel_matches_serial(monkeypatch):
+    """OMP_NUM_THREADS=1 vs default must produce identical final state."""
+    from src.data.bpe_native import BpeState
+    from src.data.bpe import _byte_encode
+
+    symbol_table = {
+        c: i
+        for i, c in enumerate(
+            sorted(
+                set(_byte_encode("sample document number 0 with some repeated content"))
+            )
+        )
+    }
+    # Build a moderate corpus that exercises multi-chunk parallelism.
+    chunks: dict[tuple[str, ...], int] = {}
+    for i in range(200):
+        toks = tuple(
+            _byte_encode(f"sample document number {i} with some repeated content")
+        )
+        for ch in toks:
+            symbol_table.setdefault(ch, len(symbol_table))
+        chunks[toks] = chunks.get(toks, 0) + 1
+
+    # Pick a merge that will fire frequently: (' ', 's') if both present.
+    space_id = symbol_table.get("Ġ")
+    s_id = symbol_table.get("s")
+    if space_id is None or s_id is None:
+        pytest.skip("expected byte-encoded space and 's' in symbol_table")
+    merged_str = "Ġs"
+    merged_id = len(symbol_table)
+    symbol_table[merged_str] = merged_id
+
+    s1 = BpeState()
+    s1.seed(chunks, symbol_table)
+    s1.set_num_threads(1)
+    s1.replay_merges([(space_id, s_id, merged_id)])
+
+    s2 = BpeState()
+    s2.seed(chunks, symbol_table)
+    s2.set_num_threads(4)
+    s2.replay_merges([(space_id, s_id, merged_id)])
+
+    n = s1.num_chunks()
+    assert n == s2.num_chunks()
+    for i in range(n):
+        assert s1.get_chunk_symbols(i) == s2.get_chunk_symbols(i)

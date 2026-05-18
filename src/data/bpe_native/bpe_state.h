@@ -39,6 +39,15 @@ public:
     // Returns list[(a_id, b_id, count)] for the Python heap.
     py::list build_initial_pairs();
 
+    // Apply a list of merges in order to every chunk, mutating in place.
+    // merges: list[(a_id, b_id, merged_id)]. Parallel across chunks; each
+    // thread runs the full merge list per chunk. Must NOT be called after
+    // build_initial_pairs (replay happens before pair-counting).
+    void replay_merges(py::list merges);
+
+    // Configure OpenMP thread count. -1 means use omp_get_max_threads().
+    void set_num_threads(int n);
+
     // Test/debug accessors.
     std::vector<int32_t> get_chunk_symbols(int32_t chunk_id) const;
     int64_t get_chunk_weight(int32_t chunk_id) const;
@@ -52,4 +61,5 @@ private:
     // (pair, count) and (pair → chunk_ids). uint64 key = pack_pair(a, b).
     std::unordered_map<uint64_t, int64_t> pair_counts_;
     std::unordered_map<uint64_t, std::vector<int32_t>> where_;
+    int num_threads_ = -1;  // -1 = use omp default
 };

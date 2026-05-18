@@ -21,5 +21,7 @@ PYBIND11_MODULE(_bpe_native, m) {
         .def("num_chunks", &BpeState::num_chunks)
         .def("build_initial_pairs", &BpeState::build_initial_pairs)
         .def("pair_count", &BpeState::pair_count, py::arg("a"), py::arg("b"))
-        .def("pair_chunks", &BpeState::pair_chunks, py::arg("a"), py::arg("b"));
+        .def("pair_chunks", &BpeState::pair_chunks, py::arg("a"), py::arg("b"))
+        .def("replay_merges", &BpeState::replay_merges, py::arg("merges"))
+        .def("set_num_threads", &BpeState::set_num_threads, py::arg("n"));
 }
