@@ -73,6 +73,25 @@ public:
     int get_max_superword_words() const { return max_superword_words_; }
     bool get_forbid_colon_g() const { return forbid_colon_g_; }
 
+    // Run the merge loop from current state (call sequence: seed →
+    // optional replay_merges → build_initial_pairs → THIS). Initializes
+    // the native heap from pair_counts_ on entry. Returns the number of
+    // accepted merges. The final (vocab, merges) is fetched via
+    // get_vocab() / get_merges() after the loop returns.
+    //
+    // progress_cb (may be None) is called every progress_every accepted
+    // merges with (current_vocab_size, vocab_snapshot, merges_snapshot).
+    // show_progress toggles a tqdm-style progress bar to stderr.
+    int run_merge_loop(int32_t target_vocab_size,
+                       py::object progress_cb,
+                       int32_t progress_every,
+                       bool show_progress,
+                       const std::string& progress_desc);
+
+    // Marshal the final native state back to Python.
+    py::dict get_vocab() const;          // dict[str, int]
+    py::list get_merges() const;          // list[tuple[str, str]]
+
     // Test/debug accessors.
     std::vector<int32_t> get_chunk_symbols(int32_t chunk_id) const;
     int64_t get_chunk_weight(int32_t chunk_id) const;
@@ -109,4 +128,23 @@ private:
     // Populated by seed() (and grown by run_merge_loop in v2 Task 4).
     std::vector<std::string> id2sym_native_;
     std::unordered_map<std::string, int32_t> vocab_native_;
+
+    // Accepted merges in order; (a_id, b_id). The merged token string is
+    // id2sym_native_[a_id] + id2sym_native_[b_id], registered in
+    // vocab_native_ on accept.
+    std::vector<std::pair<int32_t, int32_t>> merges_native_;
+
+    // Native heap of packed (neg_count, pair_key) entries; built lazily
+    // by run_merge_loop from pair_counts_. The std::greater operator>
+    // sorts smaller neg_count (= larger positive count) first; ties
+    // break ascending on pair_key, matching HF's (id_a, id_b) tie-break.
+    struct HeapEntry {
+        int64_t neg_count;
+        uint64_t pair_key;
+        bool operator>(const HeapEntry& other) const {
+            if (neg_count != other.neg_count) return neg_count > other.neg_count;
+            return pair_key > other.pair_key;
+        }
+    };
+    std::vector<HeapEntry> heap_;
 };

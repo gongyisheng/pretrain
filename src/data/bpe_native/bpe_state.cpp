@@ -101,6 +101,43 @@ inline bool apply_merge_one_chunk(std::vector<int32_t>& syms,
     return changed;
 }
 
+// True iff `s` starts with the byte-encoded space character "Ġ" (UTF-8
+// bytes 0xC4 0xA0). We compare bytes directly to avoid pulling in a Unicode
+// library — the byte-level pretokenizer never produces "Ġ" anywhere except
+// as a one-character prefix on word starts.
+inline bool starts_with_g(const std::string& s) {
+    return s.size() >= 2
+        && static_cast<unsigned char>(s[0]) == 0xC4
+        && static_cast<unsigned char>(s[1]) == 0xA0;
+}
+
+// Count occurrences of "Ġ" (0xC4 0xA0) in `s`. Each "Ġ" marks a word
+// boundary in the byte-level pretokenizer.
+inline int count_g_chars(const std::string& s) {
+    int count = 0;
+    for (size_t i = 0; i + 1 < s.size(); ++i) {
+        if (static_cast<unsigned char>(s[i]) == 0xC4
+         && static_cast<unsigned char>(s[i + 1]) == 0xA0) {
+            ++count;
+            ++i;  // skip the second byte of the pair
+        }
+    }
+    return count;
+}
+
+// True iff `s` contains the substring ":Ġ" (the ASCII colon followed by
+// the byte-encoded space). Used by the SuperBPE forbid_colon_g rule.
+inline bool contains_colon_g(const std::string& s) {
+    for (size_t i = 0; i + 2 < s.size(); ++i) {
+        if (s[i] == ':'
+         && static_cast<unsigned char>(s[i + 1]) == 0xC4
+         && static_cast<unsigned char>(s[i + 2]) == 0xA0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 void BpeState::seed(py::dict chunks, py::dict symbol_table) {
@@ -352,4 +389,111 @@ void BpeState::set_max_superword_words(int n) {
 
 void BpeState::set_forbid_colon_g(bool flag) {
     forbid_colon_g_ = flag;
+}
+
+int BpeState::run_merge_loop(int32_t target_vocab_size,
+                             py::object progress_cb,
+                             int32_t progress_every,
+                             bool show_progress,
+                             const std::string& progress_desc) {
+    (void)show_progress;  // tqdm wiring deferred; see plan's "out of scope" note
+    (void)progress_desc;  // unused unless show_progress is implemented
+
+    // Seed the heap from current pair_counts_.
+    heap_.clear();
+    heap_.reserve(pair_counts_.size());
+    for (const auto& [key, count] : pair_counts_) {
+        heap_.push_back({-count, key});
+    }
+    std::make_heap(heap_.begin(), heap_.end(), std::greater<HeapEntry>{});
+
+    int n_accepted = 0;
+    int n_vetoed = 0;
+    (void)n_vetoed;  // tracked internally; not returned in v2 Task 4
+
+    while (static_cast<int32_t>(id2sym_native_.size()) < target_vocab_size) {
+        // Pop until live entry.
+        HeapEntry top{};
+        bool found_live = false;
+        while (!heap_.empty()) {
+            top = heap_.front();
+            std::pop_heap(heap_.begin(), heap_.end(), std::greater<HeapEntry>{});
+            heap_.pop_back();
+            int64_t count = -top.neg_count;
+            auto it = pair_counts_.find(top.pair_key);
+            int64_t cur = (it == pair_counts_.end()) ? 0 : it->second;
+            if (cur == count && cur > 0) { found_live = true; break; }
+        }
+        if (!found_live) break;
+
+        int32_t a = unpack_a(top.pair_key);
+        int32_t b = unpack_b(top.pair_key);
+        std::string merged_s = id2sym_native_[a] + id2sym_native_[b];
+
+        // Hardcoded SuperBPE filter rules — both default-off.
+        bool vetoed = false;
+        if (forbid_colon_g_ && contains_colon_g(merged_s)) {
+            vetoed = true;
+        }
+        if (!vetoed && max_superword_words_ > 0) {
+            int word_count = count_g_chars(merged_s) + (starts_with_g(merged_s) ? 0 : 1);
+            if (word_count > max_superword_words_) {
+                vetoed = true;
+            }
+        }
+        if (vetoed) {
+            // Drop the pair so it's never reconsidered.
+            uint64_t key = pack_pair(a, b);
+            pair_counts_.erase(key);
+            where_.erase(key);
+            ++n_vetoed;
+            continue;
+        }
+
+        // Accept the merge.
+        int32_t merged_id = static_cast<int32_t>(id2sym_native_.size());
+        id2sym_native_.push_back(merged_s);
+        vocab_native_[merged_s] = merged_id;
+        merges_native_.emplace_back(a, b);
+
+        // Apply the merge to symbols_per_chunk_, fold deltas into
+        // pair_counts_ + where_, push new heap entries for each changed pair.
+        auto deltas = apply_merge_internal(a, b, merged_id);
+        for (const auto& [key, _dv] : deltas) {
+            auto it = pair_counts_.find(key);
+            if (it == pair_counts_.end()) continue;  // pair is gone
+            heap_.push_back({-it->second, key});
+            std::push_heap(heap_.begin(), heap_.end(), std::greater<HeapEntry>{});
+        }
+
+        ++n_accepted;
+
+        // Progress callback every progress_every accepted merges.
+        if (!progress_cb.is_none()
+         && progress_every > 0
+         && n_accepted % progress_every == 0) {
+            py::dict snapshot_vocab = get_vocab();
+            py::list snapshot_merges = get_merges();
+            progress_cb(static_cast<int>(id2sym_native_.size()),
+                        snapshot_vocab, snapshot_merges);
+        }
+    }
+
+    return n_accepted;
+}
+
+py::dict BpeState::get_vocab() const {
+    py::dict out;
+    for (size_t i = 0; i < id2sym_native_.size(); ++i) {
+        out[py::str(id2sym_native_[i])] = static_cast<int32_t>(i);
+    }
+    return out;
+}
+
+py::list BpeState::get_merges() const {
+    py::list out;
+    for (const auto& [a, b] : merges_native_) {
+        out.append(py::make_tuple(id2sym_native_[a], id2sym_native_[b]));
+    }
+    return out;
 }

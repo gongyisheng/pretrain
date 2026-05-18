@@ -33,5 +33,13 @@ PYBIND11_MODULE(_bpe_native, m) {
         .def("get_forbid_colon_g", &BpeState::get_forbid_colon_g)
         .def("id2sym", &BpeState::id2sym, py::arg("id"))
         .def("vocab_id", &BpeState::vocab_id, py::arg("sym"))
-        .def("native_vocab_size", &BpeState::native_vocab_size);
+        .def("native_vocab_size", &BpeState::native_vocab_size)
+        .def("run_merge_loop", &BpeState::run_merge_loop,
+             py::arg("target_vocab_size"),
+             py::arg("progress_cb"),
+             py::arg("progress_every"),
+             py::arg("show_progress"),
+             py::arg("progress_desc"))
+        .def("get_vocab", &BpeState::get_vocab)
+        .def("get_merges", &BpeState::get_merges);
 }

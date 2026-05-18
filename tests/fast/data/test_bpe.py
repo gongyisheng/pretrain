@@ -882,3 +882,152 @@ def test_bpe_state_filter_config_defaults_and_setters():
     state.set_forbid_colon_g(True)
     assert state.get_max_superword_words() == 4
     assert state.get_forbid_colon_g() is True
+
+
+def test_bpe_state_run_merge_loop_basic_grows_vocab():
+    """run_merge_loop grows the native vocab from seed-size to the target."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 5, ("a", "b"): 3}, symbol_table)
+    state.build_initial_pairs()
+
+    n_accepted = state.run_merge_loop(
+        target_vocab_size=5,
+        progress_cb=None,
+        progress_every=1,
+        show_progress=False,
+        progress_desc="",
+    )
+
+    # Started at 3, target 5 → up to 2 accepted merges (assuming they all
+    # find positive-count pairs).
+    assert state.native_vocab_size() == 5
+    assert n_accepted == 2
+    # First accepted merge must be (a, b) — it has the highest count (8).
+    merges = state.get_merges()
+    assert merges[0] == ("a", "b")
+
+
+def test_bpe_state_run_merge_loop_tie_break_smaller_id_wins():
+    """On equal pair counts, the smaller (id_a, id_b) wins (HF parity)."""
+    from src.data.bpe_native import BpeState
+
+    # Three pairs at equal count. (a,b)=(0,1), (a,c)=(0,2), (a,d)=(0,3).
+    # Tie-break picks (a,b) first → merge "ab" gets ID 4.
+    symbol_table = {"a": 0, "b": 1, "c": 2, "d": 3}
+    state = BpeState()
+    state.seed(
+        {("a", "b"): 3, ("a", "c"): 3, ("a", "d"): 3},
+        symbol_table,
+    )
+    state.build_initial_pairs()
+    state.run_merge_loop(
+        target_vocab_size=5,
+        progress_cb=None,
+        progress_every=1,
+        show_progress=False,
+        progress_desc="",
+    )
+
+    merges = state.get_merges()
+    assert merges[0] == ("a", "b")
+
+
+def test_bpe_state_run_merge_loop_filter_max_superword_words():
+    """max_superword_words: a merge whose merged string has too many Ġ
+    word-boundaries is vetoed (dropped from where_ + pair_counts_)."""
+    from src.data.bpe_native import BpeState
+
+    # Three tokens: "Ġfoo" (one word), "Ġbar" (one word), "x" (counts as a
+    # word too since not Ġ-prefixed). The merge ("Ġfoo", "Ġbar") would have
+    # word_count = 2 + 1 (does not start with Ġfoo... wait, it DOES start
+    # with Ġ) = 2. With max=1 the merge should be vetoed.
+    symbol_table = {"Ġfoo": 0, "Ġbar": 1}
+    state = BpeState()
+    state.seed({("Ġfoo", "Ġbar"): 5}, symbol_table)
+    state.build_initial_pairs()
+    state.set_max_superword_words(1)
+    state.run_merge_loop(
+        target_vocab_size=4,
+        progress_cb=None,
+        progress_every=1,
+        show_progress=False,
+        progress_desc="",
+    )
+
+    # The only candidate pair was vetoed → no merges accepted.
+    assert state.get_merges() == []
+    assert state.native_vocab_size() == 2
+
+
+def test_bpe_state_run_merge_loop_filter_forbid_colon_g():
+    """forbid_colon_g: any merge whose merged string contains ':Ġ' is vetoed."""
+    from src.data.bpe_native import BpeState
+
+    # Merge candidates ("foo:", "Ġbar"). Merged = "foo:Ġbar" — contains ":Ġ".
+    symbol_table = {"foo:": 0, "Ġbar": 1}
+    state = BpeState()
+    state.seed({("foo:", "Ġbar"): 5}, symbol_table)
+    state.build_initial_pairs()
+    state.set_forbid_colon_g(True)
+    state.run_merge_loop(
+        target_vocab_size=4,
+        progress_cb=None,
+        progress_every=1,
+        show_progress=False,
+        progress_desc="",
+    )
+
+    # Vetoed by the colon-Ġ rule.
+    assert state.get_merges() == []
+
+
+def test_bpe_state_get_vocab_returns_strings_and_ids():
+    """get_vocab returns dict[str, int] containing all seed + merged tokens."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1}
+    state = BpeState()
+    state.seed({("a", "b"): 2}, symbol_table)
+    state.build_initial_pairs()
+    state.run_merge_loop(
+        target_vocab_size=3,
+        progress_cb=None,
+        progress_every=1,
+        show_progress=False,
+        progress_desc="",
+    )
+
+    vocab = state.get_vocab()
+    assert isinstance(vocab, dict)
+    assert vocab == {"a": 0, "b": 1, "ab": 2}
+
+
+def test_bpe_state_progress_cb_invoked_at_intervals():
+    """progress_cb is called every progress_every merges with
+    (vocab_size, vocab_snapshot, merges_snapshot)."""
+    from src.data.bpe_native import BpeState
+
+    calls = []
+
+    def cb(size, vocab, merges):
+        calls.append((size, dict(vocab), list(merges)))
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 5}, symbol_table)
+    state.build_initial_pairs()
+    state.run_merge_loop(
+        target_vocab_size=5,
+        progress_cb=cb,
+        progress_every=1,  # call after every accepted merge
+        show_progress=False,
+        progress_desc="",
+    )
+
+    # 2 accepted merges → 2 callbacks.
+    assert len(calls) == 2
+    # Second snapshot must include both merges.
+    assert len(calls[-1][2]) == 2
