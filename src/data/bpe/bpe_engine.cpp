@@ -1,4 +1,4 @@
-#include "bpe_state.h"
+#include "bpe_engine.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -13,25 +13,21 @@ namespace py = pybind11;
 
 namespace {
 
-// Single-chunk left-to-right merge. Matches the Python `_replay_merges`
-// inner loop byte-for-byte: collapse adjacent (a,b) → merged from left,
-// `i` stays put after a collapse (so overlapping pairs like a b a b a b
-// chain correctly).
-inline void replay_one_chunk(std::vector<int32_t>& syms,
-                             const std::vector<std::tuple<int32_t, int32_t, int32_t>>& merges) {
-    for (const auto& [a, b, merged] : merges) {
-        if (syms.size() < 2) continue;
-        size_t i = 0;
-        while (i + 1 < syms.size()) {
-            if (syms[i] == a && syms[i + 1] == b) {
-                syms[i] = merged;
-                syms.erase(syms.begin() + static_cast<long>(i) + 1);
-                ++i;  // safe to advance: syms[i] is now `merged` which can't
-                      // equal `a` (merged is a fresh symbol id), so the next
-                      // iteration would not match anyway.
-            } else {
-                ++i;
-            }
+// Single-chunk, single-merge left-to-right collapse. Matches the Python
+// `_replay_merges` inner loop byte-for-byte. After a collapse we advance
+// `i` by 1: safe because `merged` is a fresh symbol id and can't equal
+// `a`, so the next iteration would not match at the same `i` anyway.
+inline void replay_single_merge_one_chunk(std::vector<int32_t>& syms,
+                                          int32_t a, int32_t b, int32_t merged) {
+    if (syms.size() < 2) return;
+    size_t i = 0;
+    while (i + 1 < syms.size()) {
+        if (syms[i] == a && syms[i + 1] == b) {
+            syms[i] = merged;
+            syms.erase(syms.begin() + static_cast<long>(i) + 1);
+            ++i;
+        } else {
+            ++i;
         }
     }
 }
@@ -101,46 +97,9 @@ inline bool apply_merge_one_chunk(std::vector<int32_t>& syms,
     return changed;
 }
 
-// True iff `s` starts with the byte-encoded space character "Ġ" (UTF-8
-// bytes 0xC4 0xA0). We compare bytes directly to avoid pulling in a Unicode
-// library — the byte-level pretokenizer never produces "Ġ" anywhere except
-// as a one-character prefix on word starts.
-inline bool starts_with_g(const std::string& s) {
-    return s.size() >= 2
-        && static_cast<unsigned char>(s[0]) == 0xC4
-        && static_cast<unsigned char>(s[1]) == 0xA0;
-}
-
-// Count occurrences of "Ġ" (0xC4 0xA0) in `s`. Each "Ġ" marks a word
-// boundary in the byte-level pretokenizer.
-inline int count_g_chars(const std::string& s) {
-    int count = 0;
-    for (size_t i = 0; i + 1 < s.size(); ++i) {
-        if (static_cast<unsigned char>(s[i]) == 0xC4
-         && static_cast<unsigned char>(s[i + 1]) == 0xA0) {
-            ++count;
-            ++i;  // skip the second byte of the pair
-        }
-    }
-    return count;
-}
-
-// True iff `s` contains the substring ":Ġ" (the ASCII colon followed by
-// the byte-encoded space). Used by the SuperBPE forbid_colon_g rule.
-inline bool contains_colon_g(const std::string& s) {
-    for (size_t i = 0; i + 2 < s.size(); ++i) {
-        if (s[i] == ':'
-         && static_cast<unsigned char>(s[i + 1]) == 0xC4
-         && static_cast<unsigned char>(s[i + 2]) == 0xA0) {
-            return true;
-        }
-    }
-    return false;
-}
-
 }  // namespace
 
-void BpeState::seed(py::dict chunks, py::dict symbol_table) {
+void BpeEngine::seed(py::dict chunks, py::dict symbol_table) {
     // 1. Resolve each chunk-tuple of str into a vector<int32_t> via symbol_table.
     //    Collect (int32_chunk, weight) pairs so we can sort them deterministically.
     std::vector<std::pair<std::vector<int32_t>, int64_t>> resolved;
@@ -199,21 +158,21 @@ void BpeState::seed(py::dict chunks, py::dict symbol_table) {
     }
 }
 
-std::vector<int32_t> BpeState::get_chunk_symbols(int32_t chunk_id) const {
+std::vector<int32_t> BpeEngine::get_chunk_symbols(int32_t chunk_id) const {
     if (chunk_id < 0 || chunk_id >= static_cast<int32_t>(symbols_per_chunk_.size())) {
         throw std::out_of_range("chunk_id out of range");
     }
     return symbols_per_chunk_[chunk_id];
 }
 
-int64_t BpeState::get_chunk_weight(int32_t chunk_id) const {
+int64_t BpeEngine::get_chunk_weight(int32_t chunk_id) const {
     if (chunk_id < 0 || chunk_id >= static_cast<int32_t>(chunk_weights_.size())) {
         throw std::out_of_range("chunk_id out of range");
     }
     return chunk_weights_[chunk_id];
 }
 
-py::list BpeState::build_initial_pairs() {
+py::list BpeEngine::build_initial_pairs() {
     pair_counts_.clear();
     where_.clear();
 
@@ -242,24 +201,31 @@ py::list BpeState::build_initial_pairs() {
     return out;
 }
 
-int64_t BpeState::pair_count(int32_t a, int32_t b) const {
+int64_t BpeEngine::pair_count(int32_t a, int32_t b) const {
     auto it = pair_counts_.find(pack_pair(a, b));
     if (it == pair_counts_.end()) return 0;
     return it->second;
 }
 
-std::vector<int32_t> BpeState::pair_chunks(int32_t a, int32_t b) const {
+std::vector<int32_t> BpeEngine::pair_chunks(int32_t a, int32_t b) const {
     auto it = where_.find(pack_pair(a, b));
     if (it == where_.end()) return {};
     return it->second;
 }
 
-void BpeState::set_num_threads(int n) {
+void BpeEngine::set_num_threads(int n) {
     num_threads_ = n;
 }
 
-void BpeState::replay_merges(py::list merges) {
-    // Convert merges to a flat C++ vector once, before releasing the GIL.
+void BpeEngine::run_replay_merges(py::list merges,
+                                  py::object progress_callback,
+                                  int32_t progress_every,
+                                  bool show_progress,
+                                  const std::string& progress_desc) {
+    (void)show_progress;  // tqdm wiring deferred
+    (void)progress_desc;
+
+    // Convert merges to a flat C++ vector once.
     std::vector<std::tuple<int32_t, int32_t, int32_t>> ms;
     ms.reserve(merges.size());
     for (auto item : merges) {
@@ -269,21 +235,29 @@ void BpeState::replay_merges(py::list merges) {
                         py::cast<int32_t>(t[2]));
     }
 
-    const int n = static_cast<int>(symbols_per_chunk_.size());
+    const int n_chunks = static_cast<int>(symbols_per_chunk_.size());
+    const int n_merges = static_cast<int>(ms.size());
     if (num_threads_ > 0) {
         omp_set_num_threads(num_threads_);
     }
+    const bool has_progress = !progress_callback.is_none() && progress_every > 0;
 
-    {
-        py::gil_scoped_release release;
-        #pragma omp parallel for schedule(dynamic, 64)
-        for (int cid = 0; cid < n; ++cid) {
-            replay_one_chunk(symbols_per_chunk_[cid], ms);
+    for (int m = 0; m < n_merges; ++m) {
+        const auto& [a, b, merged] = ms[m];
+        {
+            py::gil_scoped_release release;
+            #pragma omp parallel for schedule(dynamic, 64)
+            for (int cid = 0; cid < n_chunks; ++cid) {
+                replay_single_merge_one_chunk(symbols_per_chunk_[cid], a, b, merged);
+            }
+        }
+        if (has_progress && (m + 1) % progress_every == 0) {
+            progress_callback(m + 1, n_merges);
         }
     }
 }
 
-std::unordered_map<uint64_t, int64_t> BpeState::apply_merge_internal(
+std::unordered_map<uint64_t, int64_t> BpeEngine::apply_merge_internal(
     int32_t a, int32_t b, int32_t merged_id) {
     uint64_t pair_key = pack_pair(a, b);
 
@@ -353,7 +327,7 @@ std::unordered_map<uint64_t, int64_t> BpeState::apply_merge_internal(
     return total_deltas;
 }
 
-py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
+py::list BpeEngine::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
     auto total_deltas = apply_merge_internal(a, b, merged_id);
     py::list out;
     for (auto& [key, dv] : total_deltas) {
@@ -362,20 +336,20 @@ py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
     return out;
 }
 
-void BpeState::drop_pair(int32_t a, int32_t b) {
+void BpeEngine::drop_pair(int32_t a, int32_t b) {
     uint64_t key = pack_pair(a, b);
     pair_counts_.erase(key);
     where_.erase(key);
 }
 
-std::string BpeState::id2sym(int32_t id) const {
+std::string BpeEngine::id2sym(int32_t id) const {
     if (id < 0 || id >= static_cast<int32_t>(id2sym_native_.size())) {
         throw std::out_of_range("id out of range");
     }
     return id2sym_native_[id];
 }
 
-int32_t BpeState::vocab_id(const std::string& sym) const {
+int32_t BpeEngine::sym2id(const std::string& sym) const {
     auto it = vocab_native_.find(sym);
     if (it == vocab_native_.end()) {
         throw std::out_of_range("symbol not in native vocab");
@@ -383,16 +357,9 @@ int32_t BpeState::vocab_id(const std::string& sym) const {
     return it->second;
 }
 
-void BpeState::set_max_superword_words(int n) {
-    max_superword_words_ = n;
-}
-
-void BpeState::set_forbid_colon_g(bool flag) {
-    forbid_colon_g_ = flag;
-}
-
-int BpeState::run_merge_loop(int32_t target_vocab_size,
-                             py::object progress_cb,
+int BpeEngine::run_merge_loop(int32_t target_vocab_size,
+                             py::object merge_filter,
+                             py::object progress_callback,
                              int32_t progress_every,
                              bool show_progress,
                              const std::string& progress_desc) {
@@ -407,6 +374,8 @@ int BpeState::run_merge_loop(int32_t target_vocab_size,
     }
     std::make_heap(heap_.begin(), heap_.end(), std::greater<HeapEntry>{});
 
+    const bool has_filter = !merge_filter.is_none();
+    const bool has_progress = !progress_callback.is_none() && progress_every > 0;
     int n_accepted = 0;
 
     while (static_cast<int32_t>(id2sym_native_.size()) < target_vocab_size) {
@@ -428,23 +397,16 @@ int BpeState::run_merge_loop(int32_t target_vocab_size,
         int32_t b = unpack_b(top.pair_key);
         std::string merged_s = id2sym_native_[a] + id2sym_native_[b];
 
-        // Hardcoded SuperBPE filter rules — both default-off.
-        bool vetoed = false;
-        if (forbid_colon_g_ && contains_colon_g(merged_s)) {
-            vetoed = true;
-        }
-        if (!vetoed && max_superword_words_ > 0) {
-            int word_count = count_g_chars(merged_s) + (starts_with_g(merged_s) ? 0 : 1);
-            if (word_count > max_superword_words_) {
-                vetoed = true;
+        // Optional Python merge_filter callback. False → veto.
+        if (has_filter) {
+            bool accept = py::cast<bool>(
+                merge_filter(id2sym_native_[a], id2sym_native_[b], merged_s));
+            if (!accept) {
+                uint64_t key = pack_pair(a, b);
+                pair_counts_.erase(key);
+                where_.erase(key);
+                continue;
             }
-        }
-        if (vetoed) {
-            // Drop the pair so it's never reconsidered.
-            uint64_t key = pack_pair(a, b);
-            pair_counts_.erase(key);
-            where_.erase(key);
-            continue;
         }
 
         // Accept the merge.
@@ -467,20 +429,19 @@ int BpeState::run_merge_loop(int32_t target_vocab_size,
 
         // Progress callback when total vocab size hits a multiple of
         // progress_every — matches Python's `len(vocab) % progress_every == 0`.
-        if (!progress_cb.is_none()
-         && progress_every > 0
+        if (has_progress
          && static_cast<int32_t>(id2sym_native_.size()) % progress_every == 0) {
             py::dict snapshot_vocab = get_vocab();
             py::list snapshot_merges = get_merges();
-            progress_cb(static_cast<int>(id2sym_native_.size()),
-                        snapshot_vocab, snapshot_merges);
+            progress_callback(static_cast<int>(id2sym_native_.size()),
+                              snapshot_vocab, snapshot_merges);
         }
     }
 
     return n_accepted;
 }
 
-py::dict BpeState::get_vocab() const {
+py::dict BpeEngine::get_vocab() const {
     py::dict out;
     for (size_t i = 0; i < id2sym_native_.size(); ++i) {
         out[py::str(id2sym_native_[i])] = static_cast<int32_t>(i);
@@ -488,7 +449,7 @@ py::dict BpeState::get_vocab() const {
     return out;
 }
 
-py::list BpeState::get_merges() const {
+py::list BpeEngine::get_merges() const {
     py::list out;
     for (const auto& [a, b] : merges_native_) {
         out.append(py::make_tuple(id2sym_native_[a], id2sym_native_[b]));

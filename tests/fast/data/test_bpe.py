@@ -1,5 +1,5 @@
 """Tests for src/data/bpe.py — pure-Python BPE trainer (now backed by
-the C++ BpeState extension for hot loops)."""
+the C++ BpeEngine extension for hot loops)."""
 
 import pytest
 
@@ -133,11 +133,11 @@ def test_build_chunks_empty_corpus_returns_empty_dict():
 
 
 def test_init_pair_state_counts_adjacent_pairs():
-    """Pair counts (weighted by chunk freq) via BpeState."""
-    from src.data.bpe_native import BpeState
+    """Pair counts (weighted by chunk freq) via BpeEngine."""
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 2, ("a", "b"): 3}, symbol_table)
     state.build_initial_pairs()
 
@@ -146,10 +146,10 @@ def test_init_pair_state_counts_adjacent_pairs():
 
 
 def test_init_pair_state_where_to_update_indexes_chunks():
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b"): 1, ("a", "c"): 1}, symbol_table)
     state.build_initial_pairs()
 
@@ -161,38 +161,38 @@ def test_init_pair_state_where_to_update_indexes_chunks():
 
 
 def test_init_pair_state_symbols_per_chunk_are_lists():
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 1}, symbol_table)
 
     assert state.get_chunk_symbols(0) == [0, 1, 2]
 
 
 def test_init_pair_state_chunk_counts_track_input_weights():
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a",): 7}, symbol_table)
 
     assert state.get_chunk_weight(0) == 7
 
 
 def test_init_pair_state_chunk_id_assignment_is_deterministic():
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
     chunks = {("b",): 1, ("a",): 1, ("c",): 1}
 
-    s1 = BpeState()
+    s1 = BpeEngine()
     s1.seed(chunks, symbol_table)
-    s2 = BpeState()
+    s2 = BpeEngine()
     s2.seed(chunks, symbol_table)
 
-    syms1 = [s1.get_chunk_symbols(i) for i in range(s1.num_chunks())]
-    syms2 = [s2.get_chunk_symbols(i) for i in range(s2.num_chunks())]
+    syms1 = [s1.get_chunk_symbols(i) for i in range(s1.get_num_chunks())]
+    syms2 = [s2.get_chunk_symbols(i) for i in range(s2.get_num_chunks())]
     assert syms1 == syms2
     # Sorted by tuple: a < b < c.
     assert syms1 == [[0], [1], [2]]
@@ -454,13 +454,13 @@ def test_bpe_state_seed_assigns_chunk_ids_in_tuple_order():
     """Chunks must be sorted by tuple-of-IDs, matching today's
     sorted(chunks.items(), key=lambda kv: kv[0]).
     """
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     # IDs assigned so that lex-of-id order == lex-of-str order on the symbols used.
     symbol_table = {"a": 0, "b": 1, "c": 2}
     chunks = {("b", "c"): 1, ("a", "b"): 2, ("a", "c"): 3}
 
-    state = BpeState()
+    state = BpeEngine()
     state.seed(chunks, symbol_table)
 
     # Sorted tuples: ("a","b"), ("a","c"), ("b","c") → chunk_ids 0,1,2.
@@ -470,28 +470,28 @@ def test_bpe_state_seed_assigns_chunk_ids_in_tuple_order():
     assert state.get_chunk_weight(0) == 2
     assert state.get_chunk_weight(1) == 3
     assert state.get_chunk_weight(2) == 1
-    assert state.num_chunks() == 3
+    assert state.get_num_chunks() == 3
 
 
 def test_bpe_state_seed_unknown_symbol_raises():
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1}
     chunks = {("a", "z"): 1}  # 'z' not in symbol_table
 
-    state = BpeState()
+    state = BpeEngine()
     with pytest.raises((KeyError, RuntimeError, ValueError)):
         state.seed(chunks, symbol_table)
 
 
 def test_bpe_state_build_initial_pairs_counts_adjacent():
     """Counts adjacent-pair occurrences weighted by chunk frequency."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
     chunks = {("a", "b", "c"): 2, ("a", "b"): 3}
 
-    state = BpeState()
+    state = BpeEngine()
     state.seed(chunks, symbol_table)
     pairs = state.build_initial_pairs()
 
@@ -506,12 +506,12 @@ def test_bpe_state_build_initial_pairs_counts_adjacent():
 
 def test_bpe_state_pair_chunks_indexes_membership():
     """pair_chunks returns the chunk_ids where (a,b) appears."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
     chunks = {("a", "b"): 1, ("a", "c"): 1}
 
-    state = BpeState()
+    state = BpeEngine()
     state.seed(chunks, symbol_table)
     state.build_initial_pairs()
 
@@ -524,10 +524,10 @@ def test_bpe_state_pair_chunks_indexes_membership():
 
 def test_bpe_state_pair_count_matches_initial_pairs():
     """pair_count(a,b) reflects what build_initial_pairs returned."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b"): 7}, symbol_table)
     state.build_initial_pairs()
 
@@ -539,12 +539,12 @@ def test_bpe_state_build_initial_pairs_dedupes_pair_within_chunk():
     """If (a,b) appears multiple times in one chunk, the chunk_id is listed
     in where_[(a,b)] exactly once, but pair_count counts every occurrence
     weighted by chunk weight."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1}
     chunks = {("a", "b", "a", "b"): 3}
 
-    state = BpeState()
+    state = BpeEngine()
     state.seed(chunks, symbol_table)
     state.build_initial_pairs()
 
@@ -556,43 +556,43 @@ def test_bpe_state_build_initial_pairs_dedupes_pair_within_chunk():
 
 def test_bpe_state_replay_single_merge():
     """Replaying (a,b)→ab on chunk ("a","b","c") gives [ab_id, c_id]."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 1}, symbol_table)
-    state.replay_merges([(0, 1, 3)])  # (a_id, b_id, merged_id)
+    state.run_replay_merges([(0, 1, 3)])  # (a_id, b_id, merged_id)
 
     assert state.get_chunk_symbols(0) == [3, 2]
 
 
 def test_bpe_state_replay_multi_merge_in_order():
     """Replaying (a,b)→ab then (ab,c)→abc collapses to a single token."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3, "abc": 4}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 1}, symbol_table)
-    state.replay_merges([(0, 1, 3), (3, 2, 4)])
+    state.run_replay_merges([(0, 1, 3), (3, 2, 4)])
 
     assert state.get_chunk_symbols(0) == [4]
 
 
 def test_bpe_state_replay_left_to_right_overlap():
     """Replaying (a,a)→aa on ("a","a","a") gives [aa, a], not [a, aa]."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "aa": 1}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "a", "a"): 1}, symbol_table)
-    state.replay_merges([(0, 0, 1)])
+    state.run_replay_merges([(0, 0, 1)])
 
     assert state.get_chunk_symbols(0) == [1, 0]
 
 
 def test_bpe_state_replay_parallel_matches_serial():
     """OMP_NUM_THREADS=1 vs default must produce identical final state."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
     from src.data.bpe import _byte_encode
 
     symbol_table = {
@@ -622,28 +622,28 @@ def test_bpe_state_replay_parallel_matches_serial():
     merged_id = len(symbol_table)
     symbol_table[merged_str] = merged_id
 
-    s1 = BpeState()
+    s1 = BpeEngine()
     s1.seed(chunks, symbol_table)
     s1.set_num_threads(1)
-    s1.replay_merges([(space_id, s_id, merged_id)])
+    s1.run_replay_merges([(space_id, s_id, merged_id)])
 
-    s2 = BpeState()
+    s2 = BpeEngine()
     s2.seed(chunks, symbol_table)
     s2.set_num_threads(4)
-    s2.replay_merges([(space_id, s_id, merged_id)])
+    s2.run_replay_merges([(space_id, s_id, merged_id)])
 
-    n = s1.num_chunks()
-    assert n == s2.num_chunks()
+    n = s1.get_num_chunks()
+    assert n == s2.get_num_chunks()
     for i in range(n):
         assert s1.get_chunk_symbols(i) == s2.get_chunk_symbols(i)
 
 
 def test_bpe_state_apply_merge_rewrites_symbols():
     """All (a,b) occurrences collapsed to merged_id."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 1, ("a", "b"): 1}, symbol_table)
     state.build_initial_pairs()
     state.apply_merge(0, 1, 3)  # merge (a,b) → ab
@@ -655,10 +655,10 @@ def test_bpe_state_apply_merge_rewrites_symbols():
 
 def test_bpe_state_apply_merge_returns_pair_deltas():
     """Returns list[(a, b, dv)] of pair-count changes for the Python heap."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 1}, symbol_table)
     state.build_initial_pairs()
     deltas = state.apply_merge(0, 1, 3)
@@ -672,10 +672,10 @@ def test_bpe_state_apply_merge_returns_pair_deltas():
 
 def test_bpe_state_apply_merge_overlapping_pairs_left_to_right():
     """'a a a' merging (a,a)→aa yields [aa, a] (left consume first)."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "aa": 1}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "a", "a"): 1}, symbol_table)
     state.build_initial_pairs()
     state.apply_merge(0, 0, 1)
@@ -687,10 +687,10 @@ def test_bpe_state_apply_merge_overlapping_pairs_left_to_right():
 
 def test_bpe_state_apply_merge_respects_chunk_weight():
     """A merge in a weight-5 chunk emits weight-5 deltas."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 5}, symbol_table)
     state.build_initial_pairs()
     deltas = state.apply_merge(0, 1, 3)
@@ -701,10 +701,10 @@ def test_bpe_state_apply_merge_respects_chunk_weight():
 
 def test_bpe_state_apply_merge_removes_pair_from_where():
     """After applying (a,b), pair_chunks(a,b) is empty."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "ab": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b"): 1}, symbol_table)
     state.build_initial_pairs()
     state.apply_merge(0, 1, 2)
@@ -720,12 +720,12 @@ def test_bpe_state_apply_merge_dedupes_where_within_chunk():
     on the next apply_merge for that pair (concurrent mutation of the same
     vector by two OpenMP threads).
     """
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     # Chunk = [c, a, b, c, a, b]: merging (a,b)→ab creates the new pair (c, ab)
     # at TWO positions within this one chunk.
     symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("c", "a", "b", "c", "a", "b"): 1}, symbol_table)
     state.build_initial_pairs()
     state.apply_merge(0, 1, 3)
@@ -738,10 +738,10 @@ def test_bpe_state_apply_merge_dedupes_where_within_chunk():
 
 def test_bpe_state_drop_pair_removes_from_where_and_counts():
     """drop_pair removes the pair from internal state so it's never selected."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 1}, symbol_table)
     state.build_initial_pairs()
     assert state.pair_count(0, 1) == 1
@@ -756,57 +756,36 @@ def test_bpe_state_drop_pair_removes_from_where_and_counts():
 def test_bpe_state_seed_records_id2sym_native():
     """seed() must populate id2sym_native + vocab_native so the C++ side
     can build merged-token strings without bouncing through Python."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 1}, symbol_table)
 
     # New test accessors expose the native vocab to verify population.
     assert state.id2sym(0) == "a"
     assert state.id2sym(1) == "b"
     assert state.id2sym(2) == "c"
-    assert state.vocab_id("a") == 0
-    assert state.vocab_id("b") == 1
-    assert state.vocab_id("c") == 2
-    assert state.native_vocab_size() == 3
-
-
-def test_bpe_state_filter_config_defaults_and_setters():
-    """Filter config defaults to disabled; setters store the configured values."""
-    from src.data.bpe_native import BpeState
-
-    state = BpeState()
-    # Defaults: both filters disabled.
-    assert state.get_max_superword_words() == -1
-    assert state.get_forbid_colon_g() is False
-
-    state.set_max_superword_words(4)
-    state.set_forbid_colon_g(True)
-    assert state.get_max_superword_words() == 4
-    assert state.get_forbid_colon_g() is True
+    assert state.sym2id("a") == 0
+    assert state.sym2id("b") == 1
+    assert state.sym2id("c") == 2
+    assert state.get_vocab_size() == 3
 
 
 def test_bpe_state_run_merge_loop_basic_grows_vocab():
     """run_merge_loop grows the native vocab from seed-size to the target."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 5, ("a", "b"): 3}, symbol_table)
     state.build_initial_pairs()
 
-    n_accepted = state.run_merge_loop(
-        target_vocab_size=5,
-        progress_cb=None,
-        progress_every=1,
-        show_progress=False,
-        progress_desc="",
-    )
+    n_accepted = state.run_merge_loop(target_vocab_size=5)
 
     # Started at 3, target 5 → up to 2 accepted merges (assuming they all
     # find positive-count pairs).
-    assert state.native_vocab_size() == 5
+    assert state.get_vocab_size() == 5
     assert n_accepted == 2
     # First accepted merge must be (a, b) — it has the highest count (8).
     merges = state.get_merges()
@@ -815,103 +794,63 @@ def test_bpe_state_run_merge_loop_basic_grows_vocab():
 
 def test_bpe_state_run_merge_loop_tie_break_smaller_id_wins():
     """On equal pair counts, the smaller (id_a, id_b) wins (HF parity)."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     # Three pairs at equal count. (a,b)=(0,1), (a,c)=(0,2), (a,d)=(0,3).
     # Tie-break picks (a,b) first → merge "ab" gets ID 4.
     symbol_table = {"a": 0, "b": 1, "c": 2, "d": 3}
-    state = BpeState()
+    state = BpeEngine()
     state.seed(
         {("a", "b"): 3, ("a", "c"): 3, ("a", "d"): 3},
         symbol_table,
     )
     state.build_initial_pairs()
-    state.run_merge_loop(
-        target_vocab_size=5,
-        progress_cb=None,
-        progress_every=1,
-        show_progress=False,
-        progress_desc="",
-    )
+    state.run_merge_loop(target_vocab_size=5)
 
     merges = state.get_merges()
     assert merges[0] == ("a", "b")
 
 
-def test_bpe_state_run_merge_loop_filter_max_superword_words():
-    """max_superword_words: a merge whose merged string has too many Ġ
-    word-boundaries is vetoed (dropped from where_ + pair_counts_)."""
-    from src.data.bpe_native import BpeState
+def test_bpe_state_run_merge_loop_merge_filter_vetoes():
+    """A Python merge_filter callable receives (a_sym, b_sym, merged_sym)
+    and can return False to veto a candidate merge."""
+    from src.data.bpe import BpeEngine
 
-    # Three tokens: "Ġfoo" (one word), "Ġbar" (one word), "x" (counts as a
-    # word too since not Ġ-prefixed). The merge ("Ġfoo", "Ġbar") would have
-    # word_count = 2 + 1 (does not start with Ġfoo... wait, it DOES start
-    # with Ġ) = 2. With max=1 the merge should be vetoed.
-    symbol_table = {"Ġfoo": 0, "Ġbar": 1}
-    state = BpeState()
-    state.seed({("Ġfoo", "Ġbar"): 5}, symbol_table)
+    def reject_ab(a: str, b: str, merged: str) -> bool:
+        return merged != "ab"
+
+    # Two competing pairs: (a,b)=count 5 (will be vetoed), (a,c)=count 3.
+    # Without the filter, run_merge_loop would pick (a,b) first.
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeEngine()
+    state.seed({("a", "b"): 5, ("a", "c"): 3}, symbol_table)
     state.build_initial_pairs()
-    state.set_max_superword_words(1)
-    state.run_merge_loop(
-        target_vocab_size=4,
-        progress_cb=None,
-        progress_every=1,
-        show_progress=False,
-        progress_desc="",
-    )
+    state.run_merge_loop(target_vocab_size=4, merge_filter=reject_ab)
 
-    # The only candidate pair was vetoed → no merges accepted.
-    assert state.get_merges() == []
-    assert state.native_vocab_size() == 2
-
-
-def test_bpe_state_run_merge_loop_filter_forbid_colon_g():
-    """forbid_colon_g: any merge whose merged string contains ':Ġ' is vetoed."""
-    from src.data.bpe_native import BpeState
-
-    # Merge candidates ("foo:", "Ġbar"). Merged = "foo:Ġbar" — contains ":Ġ".
-    symbol_table = {"foo:": 0, "Ġbar": 1}
-    state = BpeState()
-    state.seed({("foo:", "Ġbar"): 5}, symbol_table)
-    state.build_initial_pairs()
-    state.set_forbid_colon_g(True)
-    state.run_merge_loop(
-        target_vocab_size=4,
-        progress_cb=None,
-        progress_every=1,
-        show_progress=False,
-        progress_desc="",
-    )
-
-    # Vetoed by the colon-Ġ rule.
-    assert state.get_merges() == []
+    merges = state.get_merges()
+    # Only (a,c) → "ac" was accepted.
+    assert merges == [("a", "c")]
 
 
 def test_bpe_state_get_vocab_returns_strings_and_ids():
     """get_vocab returns dict[str, int] containing all seed + merged tokens."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     symbol_table = {"a": 0, "b": 1}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b"): 2}, symbol_table)
     state.build_initial_pairs()
-    state.run_merge_loop(
-        target_vocab_size=3,
-        progress_cb=None,
-        progress_every=1,
-        show_progress=False,
-        progress_desc="",
-    )
+    state.run_merge_loop(target_vocab_size=3)
 
     vocab = state.get_vocab()
     assert isinstance(vocab, dict)
     assert vocab == {"a": 0, "b": 1, "ab": 2}
 
 
-def test_bpe_state_progress_cb_invoked_at_intervals():
-    """progress_cb is called every progress_every merges with
+def test_bpe_state_progress_callback_invoked_at_intervals():
+    """progress_callback is called every progress_every merges with
     (vocab_size, vocab_snapshot, merges_snapshot)."""
-    from src.data.bpe_native import BpeState
+    from src.data.bpe import BpeEngine
 
     calls = []
 
@@ -919,15 +858,13 @@ def test_bpe_state_progress_cb_invoked_at_intervals():
         calls.append((size, dict(vocab), list(merges)))
 
     symbol_table = {"a": 0, "b": 1, "c": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 5}, symbol_table)
     state.build_initial_pairs()
     state.run_merge_loop(
         target_vocab_size=5,
-        progress_cb=cb,
+        progress_callback=cb,
         progress_every=1,  # call after every accepted merge
-        show_progress=False,
-        progress_desc="",
     )
 
     # 2 accepted merges → 2 callbacks.
@@ -936,10 +873,10 @@ def test_bpe_state_progress_cb_invoked_at_intervals():
     assert len(calls[-1][2]) == 2
 
 
-def test_bpe_state_progress_cb_fires_on_vocab_size_multiples():
-    """progress_cb should be invoked when native_vocab_size() (not n_accepted)
-    hits a multiple of progress_every — matching Python's len(vocab) cadence."""
-    from src.data.bpe_native import BpeState
+def test_bpe_state_progress_callback_fires_on_vocab_size_multiples():
+    """progress_callback fires when get_vocab_size() (not n_accepted)
+    hits a multiple of progress_every — matches Python's len(vocab) cadence."""
+    from src.data.bpe import BpeEngine
 
     calls = []
 
@@ -947,18 +884,16 @@ def test_bpe_state_progress_cb_fires_on_vocab_size_multiples():
         calls.append(size)
 
     # Seed vocab size = 3. progress_every = 4. The first callback should fire
-    # when native_vocab_size() reaches 4 (after 1 accepted merge), NOT when
-    # n_accepted reaches 4.
+    # when get_vocab_size() reaches 4 (after 1 accepted merge), NOT
+    # when n_accepted reaches 4.
     symbol_table = {"a": 0, "b": 1, "c": 2}
-    state = BpeState()
+    state = BpeEngine()
     state.seed({("a", "b", "c"): 5, ("a", "b"): 3}, symbol_table)
     state.build_initial_pairs()
     state.run_merge_loop(
         target_vocab_size=5,
-        progress_cb=cb,
+        progress_callback=cb,
         progress_every=4,
-        show_progress=False,
-        progress_desc="",
     )
 
     # Started at 3, ran to 5 → 2 accepted merges (vocab grew 3 → 4 → 5).

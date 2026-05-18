@@ -1,4 +1,4 @@
-"""Build configuration for the C++ bpe_native extension.
+"""Build configuration for the C++ _bpe_engine extension under src/data/bpe/.
 
 Pure-Python packages are still declared in pyproject.toml; this file exists
 only because pybind11's Pybind11Extension needs a setup.py hook for the C++
@@ -10,12 +10,12 @@ from setuptools import setup
 
 ext_modules = [
     Pybind11Extension(
-        "src.data.bpe_native._bpe_native",
+        "src.data.bpe._bpe_engine",
         sources=[
-            "src/data/bpe_native/_bpe_native.cpp",
-            "src/data/bpe_native/bpe_state.cpp",
+            "src/data/bpe/_bpe_engine.cpp",
+            "src/data/bpe/bpe_engine.cpp",
         ],
-        include_dirs=["src/data/bpe_native"],
+        include_dirs=["src/data/bpe"],
         cxx_std=17,
         extra_compile_args=["-O3", "-fopenmp", "-march=native"],
         extra_link_args=["-fopenmp"],

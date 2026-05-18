@@ -24,9 +24,9 @@ inline int32_t unpack_b(uint64_t key) {
     return static_cast<int32_t>(static_cast<uint32_t>(key & 0xFFFFFFFFu));
 }
 
-class BpeState {
+class BpeEngine {
 public:
-    BpeState() = default;
+    BpeEngine() = default;
 
     // Convert a Python chunks dict (dict[tuple[str], int]) into int32 arrays.
     // Sorts by chunk-tuple of int32 IDs for deterministic chunk_id assignment.
@@ -36,15 +36,24 @@ public:
 
     // Count adjacent-pair occurrences (weighted by chunk weight) and build
     // the pair → chunk_ids reverse index. Must be called once after seed
-    // (and after replay_merges if resuming).
+    // (and after run_replay_merges if resuming).
     // Returns list[(a_id, b_id, count)] for the Python heap.
     py::list build_initial_pairs();
 
     // Apply a list of merges in order to every chunk, mutating in place.
-    // merges: list[(a_id, b_id, merged_id)]. Parallel across chunks; each
-    // thread runs the full merge list per chunk. Must NOT be called after
-    // build_initial_pairs (replay happens before pair-counting).
-    void replay_merges(py::list merges);
+    // merges: list[(a_id, b_id, merged_id)]. Outer loop iterates the
+    // merge list sequentially; inner loop parallelizes across chunks via
+    // OpenMP (so progress is reported on merge count, not chunk count).
+    // Must NOT be called after build_initial_pairs.
+    //
+    // progress_callback (may be None) is invoked every progress_every
+    // replayed merges with (merges_done: int, total_merges: int).
+    // show_progress toggles a native progress bar (currently inert).
+    void run_replay_merges(py::list merges,
+                           py::object progress_callback,
+                           int32_t progress_every,
+                           bool show_progress,
+                           const std::string& progress_desc);
 
     // Apply merge (a, b) → merged_id everywhere it currently appears.
     // Mutates symbols_per_chunk in place, updates pair_counts and where_
@@ -56,24 +65,12 @@ public:
 
     // Veto-path helper: drop pair from pair_counts_ and where_ so it's
     // never considered again. Used internally by run_merge_loop when a
-    // candidate pair is rejected by max_superword_words / forbid_colon_g.
-    // Still exposed via the binding for unit testing.
+    // candidate pair is rejected by the merge_filter callback. Still
+    // exposed via the binding for unit testing.
     void drop_pair(int32_t a, int32_t b);
 
     // Configure OpenMP thread count. -1 means use omp_get_max_threads().
     void set_num_threads(int n);
-
-    // SuperBPE filter configuration. Both default to "disabled."
-    // max_superword_words: reject a merge if the merged token's word-count
-    //   (counted by 'Ġ' chars + 1 if the merged str does not start with 'Ġ')
-    //   exceeds this. -1 disables the check.
-    // forbid_colon_g: when true, reject any merge whose merged string
-    //   contains the substring ":Ġ".
-    // The two filters are independent and BOTH are evaluated when set.
-    void set_max_superword_words(int n);
-    void set_forbid_colon_g(bool flag);
-    int get_max_superword_words() const { return max_superword_words_; }
-    bool get_forbid_colon_g() const { return forbid_colon_g_; }
 
     // Run the merge loop from current state (call sequence: seed →
     // optional replay_merges → build_initial_pairs → THIS). Initializes
@@ -81,11 +78,18 @@ public:
     // accepted merges. The final (vocab, merges) is fetched via
     // get_vocab() / get_merges() after the loop returns.
     //
-    // progress_cb (may be None) is called every progress_every accepted
-    // merges with (current_vocab_size, vocab_snapshot, merges_snapshot).
+    // merge_filter (may be None) is a Python callable invoked once per
+    // candidate pair with (a_sym, b_sym, merged_sym) — returning False
+    // vetoes the merge (pair is dropped from pair_counts_ + where_ so
+    // it's never reconsidered). GIL is re-acquired for each call.
+    //
+    // progress_callback (may be None) is called every progress_every
+    // merges when the total vocab size hits a multiple of progress_every,
+    // with (current_vocab_size, vocab_snapshot, merges_snapshot).
     // show_progress toggles a tqdm-style progress bar to stderr.
     int run_merge_loop(int32_t target_vocab_size,
-                       py::object progress_cb,
+                       py::object merge_filter,
+                       py::object progress_callback,
                        int32_t progress_every,
                        bool show_progress,
                        const std::string& progress_desc);
@@ -97,14 +101,14 @@ public:
     // Test/debug accessors.
     std::vector<int32_t> get_chunk_symbols(int32_t chunk_id) const;
     int64_t get_chunk_weight(int32_t chunk_id) const;
-    int32_t num_chunks() const { return static_cast<int32_t>(symbols_per_chunk_.size()); }
+    int32_t get_num_chunks() const { return static_cast<int32_t>(symbols_per_chunk_.size()); }
     int64_t pair_count(int32_t a, int32_t b) const;
     std::vector<int32_t> pair_chunks(int32_t a, int32_t b) const;
 
     // v2 test/debug accessors: expose the native vocab for verification.
     std::string id2sym(int32_t id) const;
-    int32_t vocab_id(const std::string& sym) const;
-    int32_t native_vocab_size() const { return static_cast<int32_t>(id2sym_native_.size()); }
+    int32_t sym2id(const std::string& sym) const;
+    int32_t get_vocab_size() const { return static_cast<int32_t>(id2sym_native_.size()); }
 
 private:
     std::vector<std::vector<int32_t>> symbols_per_chunk_;
@@ -122,12 +126,10 @@ private:
     // excluding the merged pair itself).
     std::unordered_map<uint64_t, int64_t> apply_merge_internal(
         int32_t a, int32_t b, int32_t merged_id);
-    // SuperBPE filter config — read by run_merge_loop (v2 Task 4).
-    int max_superword_words_ = -1;   // -1 = disabled
-    bool forbid_colon_g_ = false;
-    // String ↔ ID vocab, owned natively so run_merge_loop can build merged
-    // token strings and evaluate the SuperBPE filter without GIL acquires.
-    // Populated by seed() (and grown by run_merge_loop in v2 Task 4).
+    // String ↔ ID vocab, owned natively so run_merge_loop can build
+    // merged-token strings (for the optional merge_filter callback)
+    // and so get_vocab() can marshal the final vocab back to Python.
+    // Populated by seed() and grown by run_merge_loop on each accept.
     std::vector<std::string> id2sym_native_;
     std::unordered_map<std::string, int32_t> vocab_native_;
 

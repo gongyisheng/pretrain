@@ -42,6 +42,6 @@ dev = [
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "setup.py" },
-    { file = "src/data/bpe_native/**/*.cpp" },
-    { file = "src/data/bpe_native/**/*.h" },
+    { file = "src/data/bpe/**/*.cpp" },
+    { file = "src/data/bpe/**/*.h" },
 ]

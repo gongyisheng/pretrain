@@ -5,8 +5,9 @@ HuggingFace `tokenizers.BpeTrainer` on the same corpus + pretokenizer, and
 adds two capabilities HF lacks:
 
   - Resume/extend from a saved tokenizer (via `initial_vocab` + `initial_merges`).
-  - Hardcoded SuperBPE filter rules toggled via `max_superword_words` and
-    `forbid_colon_g` (the C++ side enforces them inside `run_merge_loop`).
+  - Per-merge veto via the `merge_filter` callback (used by SuperBPE for the
+    `max_superword_words` cap and the ":Ġ" exclusion). The C++ `run_merge_loop`
+    invokes the Python callable once per candidate pair via GIL re-acquire.
 
 Encode/decode at inference stays on HF: emit a HF-compatible (vocab, merges)
 pair, caller wraps in `tokenizers.Tokenizer(models.BPE(...))` and saves.
@@ -21,12 +22,12 @@ from multiprocessing import get_context
 import regex as _re
 from tqdm import tqdm
 
-from src.data.bpe_native import BpeState
+from src.data.bpe import BpeEngine
 
 # Module-level shared worker pool. Spawned lazily on first use, resized only
 # if a caller requests a different n_workers, torn down at process exit.
 # Used by `_build_chunks` for pretokenize fan-out (the only mp-parallel
-# step left after the C++ BpeState rewire). Keeping it module-level lets
+# step left after the C++ BpeEngine rewire). Keeping it module-level lets
 # us reuse the same pool across multiple `BpeTrainer.train()` calls in one
 # process (e.g., SuperBPE's subword + superword passes).
 _MP_CTX = get_context("spawn")
@@ -213,7 +214,7 @@ def _build_chunks(
 
 
 class BpeTrainer:
-    """Train a BPE tokenizer. Python control flow drives a C++ `BpeState`
+    """Train a BPE tokenizer. Python control flow drives a C++ `BpeEngine`
     extension for the hot loops (replay merges + per-merge chunk scan).
     Produces (vocab, merges) byte-identical to HF's `tokenizers.BpeTrainer`.
     """
@@ -227,8 +228,7 @@ class BpeTrainer:
         pretokenizer: str = "bpe",
         initial_vocab: dict[str, int] | None = None,
         initial_merges: list[tuple[str, str]] | None = None,
-        max_superword_words: int = -1,
-        forbid_colon_g: bool = False,
+        merge_filter: Callable[[str, str, str], bool] | None = None,
         progress_callback: Callable[[int, dict, list], None] | None = None,
         progress_every: int = 1000,
         n_workers: int | None = None,
@@ -275,8 +275,7 @@ class BpeTrainer:
         self.pretokenizer = pretokenizer
         self.initial_vocab = initial_vocab
         self.initial_merges = initial_merges
-        self.max_superword_words = max_superword_words
-        self.forbid_colon_g = forbid_colon_g
+        self.merge_filter = merge_filter
         self.progress_callback = progress_callback
         self.progress_every = progress_every
         self.n_workers = (
@@ -323,36 +322,38 @@ class BpeTrainer:
             vocab = dict(self.initial_vocab)
             merges = list(self.initial_merges)  # type: ignore[arg-type]
 
-        # 3. Native state: seed + replay (on resume) + initial pair counts.
-        state = BpeState()
-        state.set_num_threads(self.n_workers)
-        state.seed(chunks, vocab)
+        # 3. BPE engine: seed + replay (on resume) + initial pair counts.
+        engine = BpeEngine()
+        engine.set_num_threads(self.n_workers)
+        engine.seed(chunks, vocab)
         del chunks  # release the chunk dict before native build_initial_pairs allocates pair_counts_ + where_
         if merges:
             sym_to_id = vocab  # vocab IS the str→int symbol table after seeding
             merges_int = [
                 (sym_to_id[a], sym_to_id[b], sym_to_id[a + b]) for a, b in merges
             ]
-            state.replay_merges(merges_int)
-        state.build_initial_pairs()
+            engine.run_replay_merges(
+                merges_int,
+                progress_callback=None,
+                progress_every=self.progress_every,
+                show_progress=self.show_progress,
+                progress_desc=f"{self.progress_desc} replay".strip(),
+            )
+        engine.build_initial_pairs()
 
-        # 4. Configure SuperBPE filter (both default off).
-        if self.max_superword_words > 0:
-            state.set_max_superword_words(self.max_superword_words)
-        if self.forbid_colon_g:
-            state.set_forbid_colon_g(True)
-
-        # 5. Run the merge loop natively.
-        state.run_merge_loop(
+        # 4. Run the merge loop natively. `merge_filter` (if any) is invoked
+        #    by the C++ side once per candidate pair via GIL re-acquire.
+        engine.run_merge_loop(
             target_vocab_size=self.vocab_size,
-            progress_cb=self.progress_callback,
+            merge_filter=self.merge_filter,
+            progress_callback=self.progress_callback,
             progress_every=self.progress_every,
             show_progress=self.show_progress,
             progress_desc=self.progress_desc,
         )
 
-        # 6. Marshal final output back to Python. Native `get_merges()` returns
+        # 5. Marshal final output back to Python. Native `get_merges()` returns
         #    only the merges added during `run_merge_loop`; on resume, prepend
         #    the prior `initial_merges` (which were replayed onto chunks but
         #    never recorded in `merges_native_`).
-        return state.get_vocab(), merges + state.get_merges()
+        return engine.get_vocab(), merges + engine.get_merges()
