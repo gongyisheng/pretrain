@@ -738,7 +738,7 @@ def test_bpe_state_replay_left_to_right_overlap():
     assert state.get_chunk_symbols(0) == [1, 0]
 
 
-def test_bpe_state_replay_parallel_matches_serial(monkeypatch):
+def test_bpe_state_replay_parallel_matches_serial():
     """OMP_NUM_THREADS=1 vs default must produce identical final state."""
     from src.data.bpe_native import BpeState
     from src.data.bpe import _byte_encode
