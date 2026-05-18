@@ -1,61 +1,100 @@
-# SuperBPE Reproduction (arXiv:2503.13423)
+# SuperBPE Grid Sweep (arXiv:2503.13423)
 
-Reproduce the paper's encoding-efficiency claim: at fixed vocab size T=200k, a SuperBPE tokenizer with transition point t=80k uses ~33% fewer tokens than vanilla BPE to encode the same text.
+Reproduce the paper's encoding-efficiency claim and probe the joint
+sensitivity to **vocab size (V)**, **transition point (t)**, and **max
+superword words (m)**.
 
 ## Hypothesis
 
-A two-stage BPE curriculum — subwords until vocab=t, then superwords (no whitespace pretokenization) until vocab=T — produces a more efficient encoding than single-stage BPE at the same vocab size. The mechanism is that high-frequency multi-word expressions (`" of the "`, `" by the way"`) become single tokens, absorbing token budget that single-stage BPE wastes on rarely-merged subword fragments.
+At fixed V, a two-stage curriculum — subwords until vocab = t, then
+superwords (no whitespace pretokenization) until vocab = V — produces a
+more efficient encoding than single-stage BPE. The paper reports a kink
+at t ≈ 0.4·V for V = 200k; we test whether that ratio holds across
+V ∈ {50k, 100k, 150k, 200k} and how it interacts with m.
 
-## Tokenizer Training
+## Grid
 
-All tokenizers are trained on the same 100k-sample slice of OpenWebText. The `bpe_200k` baseline uses the SuperBPE trainer with `t == T` so stage 2 is a no-op — this gives a BPE baseline whose stage-1 pretokenizer (regex Split + ByteLevel) matches SuperBPE, eliminating the confound between pretokenizer choice and the two-stage curriculum.
+| Axis | Values |
+|---|---|
+| `vocab_size` (V) | 50k, 100k, 150k, 200k |
+| `transition_size` (t) | every 20k, strictly < V |
+| `max_superword_words` (m) | 2, 3, 4, 5, 6 |
 
-```bash
-# Step 1: train all 4 tokenizers (sequential; each takes minutes to hours)
-nohup bash experiments/superbpe/run_train_tokenizers.sh > logs/superbpe_all.log 2>&1 &
+Total: **110 SuperBPE configs + 4 BPE baselines = 114 configs**, grouped
+by V:
 
-# Step 2: evaluate bytes/token on a held-out OpenWebText slice
-bash experiments/superbpe/run_eval.sh
+```
+v50k/   11 yamls  (1 bpe + 2 t × 5 m)
+v100k/  21 yamls  (1 bpe + 4 t × 5 m)
+v150k/  36 yamls  (1 bpe + 7 t × 5 m)
+v200k/  46 yamls  (1 bpe + 9 t × 5 m)
 ```
 
-W&B logs the efficiency curve (vocab_size on x-axis, bytes_per_token on y-axis) for each SuperBPE run. The transition point appears as a visible kink.
+Names use round-number axes (e.g. `superbpe_v200k_t80k_m4`); YAML values
+carry a +257 offset (256-byte alphabet + 1 special token), so the
+example above lists `vocab_size: 200257`, `transition_size: 80257`.
 
-## Setup
+See `generate_configs.py` for the full enumeration.
 
-| Config | T | t | method | max_superword_words | Notes |
-|---|---|---|---|---|---|
-| `bpe_200k` | 200000 | 200000 | superbpe | 4 | Baseline; stage 2 is a no-op (t==T). Stage-1 pretokenizer matches SuperBPE for a fair head-to-head. |
-| `superbpe_200k_t20k` | 200000 | 20000 | superbpe | 4 | Sweep point. |
-| `superbpe_200k_t40k` | 200000 | 40000 | superbpe | 4 | Sweep point. |
-| `superbpe_200k_t60k` | 200000 | 60000 | superbpe | 4 | Sweep point. |
-| `superbpe_200k_t80k` | 200000 | 80000 | superbpe | 4 | Paper's "best encoding efficiency" config. |
-| `superbpe_200k_t100k` | 200000 | 100000 | superbpe | 4 | Sweep point. |
-| `superbpe_200k_t120k` | 200000 | 120000 | superbpe | 4 | Sweep point. |
-| `superbpe_200k_t140k` | 200000 | 140000 | superbpe | 4 | Sweep point. |
-| `superbpe_200k_t160k` | 200000 | 160000 | superbpe | 4 | Mid transition. |
-| `superbpe_200k_t180k` | 200000 | 180000 | superbpe | 4 | Paper's "best downstream LM" config. |
+## Pipeline
 
-All runs share: `--num_samples 100000` of OpenWebText, special_tokens=`["<|endoftext|>"]`.
+```bash
+# 1. Generate configs (idempotent; re-run after editing the script).
+uv run python experiments/superbpe/generate_configs.py
+
+# 2. Train all 114 tokenizers, smallest V first. Per-run logs land in
+#    logs/superbpe/train/<name>.log.
+nohup bash experiments/superbpe/run_train.sh > logs/superbpe_train.log 2>&1 &
+
+# 3. Evaluate bytes/token on 10k OpenWebText held-out docs. Per-run
+#    JSON output captured to logs/superbpe/eval/<name>.log.
+bash experiments/superbpe/run_eval.sh
+
+# 4. Aggregate eval logs into a single CSV.
+uv run python experiments/superbpe/collect_results.py
+# → experiments/superbpe/results.csv
+```
+
+All runs share `--num_samples 100000` of OpenWebText for training and
+the same `<|endoftext|>` special token.
 
 ## Results
 
-Fill in after running. `bytes_per_token` is higher = better.
+Aggregated row-per-run output lives in `results.csv` with the columns
+below. (Markdown can't hold 114 rows readably; load the CSV in pandas
+or open in a spreadsheet to slice/pivot.)
 
-| Tokenizer | bytes/token (OpenWebText, 10k docs) | Ratio vs bpe_200k | Stage-2 merges accepted | Wall time |
-|---|---|---|---|---|
-| bpe_200k | | 1.000 | — | |
-| superbpe_200k_t20k | | | | |
-| superbpe_200k_t40k | | | | |
-| superbpe_200k_t60k | | | | |
-| superbpe_200k_t80k | | | | |
-| superbpe_200k_t100k | | | | |
-| superbpe_200k_t120k | | | | |
-| superbpe_200k_t140k | | | | |
-| superbpe_200k_t160k | | | | |
-| superbpe_200k_t180k | | | | |
+| Column | Source |
+|---|---|
+| `name` | Filename stem / wandb run name |
+| `V`, `t`, `m` | Parsed from `name` |
+| `method` | `bpe` or `superbpe` |
+| `bytes_per_token` | `scripts/eval_tokenizer.py` JSON output |
+| `stage2_merges_accepted` | (TODO — parsed from train logs) |
+| `wall_seconds` | (TODO — captured from train script timing) |
+
+Example slice (first row per V at m = 4 once runs land):
+
+| name | bytes/token | ratio vs bpe_v200k |
+|---|---|---|
+| bpe_v200k | _TBD_ | 1.000 |
+| superbpe_v200k_t80k_m4 | _TBD_ | _TBD_ |
+| superbpe_v150k_t60k_m4 | _TBD_ | _TBD_ |
+| superbpe_v100k_t40k_m4 | _TBD_ | _TBD_ |
+| superbpe_v50k_t20k_m4 | _TBD_ | _TBD_ |
+
+(Fill in after the sweep; full table in `results.csv`.)
 
 ## Notes
 
-- Paper claims ~33% fewer tokens (i.e., `bytes_per_token` ratio ~1.33) at `t=80k`. We expect a similar number; small deviation is fine since we train on 100k OpenWebText docs vs. the paper's 10 GB of olmo-mix.
-- The W&B efficiency curve for each SuperBPE run shows a kink at `vocab_size = t`. If the kink is in the wrong direction (efficiency drops after the transition), something is wrong with stage 2.
-- See `docs/superpowers/specs/2026-05-16-superbpe-design.md` for the full design + Risk #6 caveat.
+- The paper reports ~33% fewer tokens (`bytes/token` ratio ≈ 1.33) at
+  V = 200k, t = 80k. We expect a similar number for our equivalent
+  config; small deviation is fine since we train on 100k OpenWebText
+  docs vs. the paper's 10 GB of olmo-mix.
+- For each SuperBPE run, the W&B efficiency curve should kink at
+  `vocab_size = transition_size`. A kink in the wrong direction
+  (efficiency drops post-transition) means stage 2 is broken.
+- See `docs/superpowers/specs/2026-05-16-superbpe-design.md` for the
+  original design + Risk #6 caveat, and
+  `docs/superpowers/specs/2026-05-18-superbpe-grid-design.md` for the
+  grid-sweep design.
