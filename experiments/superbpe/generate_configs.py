@@ -19,9 +19,9 @@ from pathlib import Path
 # 256 byte tokens + 1 special token (<|endoftext|>).
 ALPHABET = 257
 
-V_VALUES = [50, 100, 150, 200]      # vocab targets, in thousands of merges
-M_VALUES = [2, 3, 4, 5, 6]           # max_superword_words
-T_STEP = 20                          # transition step, in thousands of merges
+V_VALUES = [50, 100, 150, 200]  # vocab targets, in thousands of merges
+M_VALUES = [2, 3, 4, 5, 6]  # max_superword_words
+T_STEP = 20  # transition step, in thousands of merges
 
 EXPERIMENT_ROOT = Path("experiments/superbpe")
 TOKENIZER_ROOT = "tokenizers/experiments"  # value lives inside the YAML
