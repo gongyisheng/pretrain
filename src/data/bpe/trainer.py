@@ -17,12 +17,51 @@ import atexit
 import os
 from collections import Counter
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from multiprocessing import get_context
 
 import regex as _re
 from tqdm import tqdm
 
 from src.data.bpe import BpeEngine
+
+
+def _make_progress_callback(
+    user_callback: Callable[..., None] | None,
+    total: int,
+    initial: int,
+    progress_desc: str,
+    show_progress: bool,
+):
+    """Return ``(callback, ctx)`` for driving a tqdm bar around a native
+    BpeEngine call that emits per-tick progress through ``progress_callback``.
+
+    The native methods call ``progress_callback(*args)`` where ``args[0]`` is
+    the current cumulative count (vocab size for ``run_merge_loop``, merges
+    done for ``run_replay_merges``). The wrapper updates the bar by the delta
+    since the last tick and then forwards ``*args`` to ``user_callback``.
+
+    When ``show_progress=False``, ``ctx`` is a no-op context manager and
+    ``callback`` is just ``user_callback`` (no wrapping). Use with::
+
+        callback, ctx = _make_progress_callback(...)
+        with ctx:
+            engine.run_merge_loop(..., progress_callback=callback)
+    """
+    if not show_progress:
+        return user_callback, nullcontext()
+    bar = tqdm(total=total, initial=initial, desc=progress_desc, dynamic_ncols=True)
+    state = {"last": initial}
+
+    def wrapped(*args):
+        current = args[0]
+        bar.update(current - state["last"])
+        state["last"] = current
+        if user_callback is not None:
+            user_callback(*args)
+
+    return wrapped, bar
+
 
 # Module-level shared worker pool. Spawned lazily on first use, resized only
 # if a caller requests a different n_workers, torn down at process exit.
@@ -332,25 +371,37 @@ class BpeTrainer:
             merges_int = [
                 (sym_to_id[a], sym_to_id[b], sym_to_id[a + b]) for a, b in merges
             ]
-            engine.run_replay_merges(
-                merges_int,
-                progress_callback=None,
-                progress_every=self.progress_every,
-                show_progress=self.show_progress,
+            replay_callback, replay_ctx = _make_progress_callback(
+                user_callback=None,
+                total=len(merges_int),
+                initial=0,
                 progress_desc=f"{self.progress_desc} replay".strip(),
+                show_progress=self.show_progress,
             )
+            with replay_ctx:
+                engine.run_replay_merges(
+                    merges_int,
+                    progress_callback=replay_callback,
+                    progress_every=self.progress_every,
+                )
         engine.build_initial_pairs()
 
         # 4. Run the merge loop natively. `merge_filter` (if any) is invoked
         #    by the C++ side once per candidate pair via GIL re-acquire.
-        engine.run_merge_loop(
-            target_vocab_size=self.vocab_size,
-            merge_filter=self.merge_filter,
-            progress_callback=self.progress_callback,
-            progress_every=self.progress_every,
+        merge_callback, merge_ctx = _make_progress_callback(
+            user_callback=self.progress_callback,
+            total=self.vocab_size,
+            initial=engine.get_vocab_size(),
+            progress_desc=f"{self.progress_desc} merge".strip(),
             show_progress=self.show_progress,
-            progress_desc=self.progress_desc,
         )
+        with merge_ctx:
+            engine.run_merge_loop(
+                target_vocab_size=self.vocab_size,
+                merge_filter=self.merge_filter,
+                progress_callback=merge_callback,
+                progress_every=self.progress_every,
+            )
 
         # 5. Marshal final output back to Python. Native `get_merges()` returns
         #    only the merges added during `run_merge_loop`; on resume, prepend

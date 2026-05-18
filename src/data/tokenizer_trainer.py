@@ -116,10 +116,8 @@ class TokenizerTrainer:
                 f"unknown method: {self.train_method!r}; expected 'bpe' or 'superbpe'"
             )
 
-        # SuperBPE-specific knobs, validated up front so `_train_superbpe` can
-        # assume they're well-formed.
-        self.transition_size: int | None = None
-        self.max_superword_words: int = 4
+        # Validate SuperBPE-specific knobs up front so `_train_superbpe` can
+        # assume they're well-formed when it reads them from train_method_kwargs.
         if self.train_method == "superbpe":
             ts = self.train_method_kwargs.get("transition_size")
             if ts is None or not (0 < ts <= self.vocab_size):
@@ -127,10 +125,6 @@ class TokenizerTrainer:
                     f"method='superbpe' requires 0 < transition_size <= vocab_size; "
                     f"got transition_size={ts}, vocab_size={self.vocab_size}"
                 )
-            self.transition_size = ts
-            self.max_superword_words = self.train_method_kwargs.get(
-                "max_superword_words", 4
-            )
 
         os.makedirs(self.save_path, exist_ok=True)
 
@@ -159,7 +153,9 @@ class TokenizerTrainer:
 
         return _factory
 
-    def _wandb_curve_cb(self, use_regex: bool) -> Callable[[int, dict, list], None]:
+    def _wandb_logger_callback(
+        self, use_regex: bool
+    ) -> Callable[[int, dict, list], None]:
         """Factory: returns a `BpeTrainer.progress_callback` that logs
         (vocab_size, bytes_per_token) to W&B.
 
@@ -172,7 +168,7 @@ class TokenizerTrainer:
         is True; the returned callback assumes it.
         """
 
-        def _cb(vocab_size: int, vocab: dict, merges: list) -> None:
+        def _callback(vocab_size: int, vocab: dict, merges: list) -> None:
             tmp = Tokenizer(models.BPE(vocab=vocab, merges=merges))
             tmp.pre_tokenizer = pre_tokenizers.ByteLevel(
                 add_prefix_space=False, use_regex=use_regex
@@ -180,7 +176,7 @@ class TokenizerTrainer:
             tmp.decoder = decoders.ByteLevel()
             self.logger.log(self.metrics.build_train_log_dict(tmp, vocab_size))
 
-        return _cb
+        return _callback
 
     def train(self, dataset_iter: Callable[[], Iterable[str]]) -> Tokenizer:
         """Train and save a tokenizer.
@@ -219,7 +215,7 @@ class TokenizerTrainer:
             vocab_size=self.vocab_size,
             special_tokens=self._SPECIAL_TOKENS,
             pretokenizer="bpe",
-            progress_callback=self._wandb_curve_cb(use_regex=True)
+            progress_callback=self._wandb_logger_callback(use_regex=True)
             if self.logger.enabled
             else None,
             progress_every=self.eval_every,
@@ -238,13 +234,16 @@ class TokenizerTrainer:
     def _train_superbpe(
         self, make_train_iter: Callable[[], Iterable[str]]
     ) -> Tokenizer:
+        transition_size = self.train_method_kwargs["transition_size"]
+        max_superword_words = self.train_method_kwargs.get("max_superword_words", 4)
+
         # ---- Subword pass: standard BPE with paper-default whitespace pretokenization ----
         t0 = time.perf_counter()
         subword_bpe = BpeTrainer(
-            vocab_size=self.transition_size,
+            vocab_size=transition_size,
             special_tokens=self._SPECIAL_TOKENS,
             pretokenizer="bpe",
-            progress_callback=self._wandb_curve_cb(use_regex=False)
+            progress_callback=self._wandb_logger_callback(use_regex=False)
             if self.logger.enabled
             else None,
             progress_every=self.eval_every,
@@ -271,7 +270,7 @@ class TokenizerTrainer:
             if ":Ġ" in merged:
                 return False
             word_count = merged.count("Ġ") + (0 if merged.startswith("Ġ") else 1)
-            return word_count <= self.max_superword_words
+            return word_count <= max_superword_words
 
         superword_bpe = BpeTrainer(
             vocab_size=self.vocab_size,
@@ -280,7 +279,7 @@ class TokenizerTrainer:
             initial_vocab=subword_vocab,
             initial_merges=subword_merges,
             merge_filter=superbpe_filter,
-            progress_callback=self._wandb_curve_cb(use_regex=False)
+            progress_callback=self._wandb_logger_callback(use_regex=False)
             if self.logger.enabled
             else None,
             progress_every=self.eval_every,

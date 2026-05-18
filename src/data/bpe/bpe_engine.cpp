@@ -219,12 +219,7 @@ void BpeEngine::set_num_threads(int n) {
 
 void BpeEngine::run_replay_merges(py::list merges,
                                   py::object progress_callback,
-                                  int32_t progress_every,
-                                  bool show_progress,
-                                  const std::string& progress_desc) {
-    (void)show_progress;  // tqdm wiring deferred
-    (void)progress_desc;
-
+                                  int32_t progress_every) {
     // Convert merges to a flat C++ vector once.
     std::vector<std::tuple<int32_t, int32_t, int32_t>> ms;
     ms.reserve(merges.size());
@@ -360,12 +355,7 @@ int32_t BpeEngine::sym2id(const std::string& sym) const {
 int BpeEngine::run_merge_loop(int32_t target_vocab_size,
                              py::object merge_filter,
                              py::object progress_callback,
-                             int32_t progress_every,
-                             bool show_progress,
-                             const std::string& progress_desc) {
-    (void)show_progress;  // tqdm wiring deferred; see plan's "out of scope" note
-    (void)progress_desc;  // unused unless show_progress is implemented
-
+                             int32_t progress_every) {
     // Seed the heap from current pair_counts_.
     heap_.clear();
     heap_.reserve(pair_counts_.size());

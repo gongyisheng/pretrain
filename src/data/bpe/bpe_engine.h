@@ -48,12 +48,10 @@ public:
     //
     // progress_callback (may be None) is invoked every progress_every
     // replayed merges with (merges_done: int, total_merges: int).
-    // show_progress toggles a native progress bar (currently inert).
+    // Progress bar rendering (tqdm etc.) is the caller's responsibility.
     void run_replay_merges(py::list merges,
                            py::object progress_callback,
-                           int32_t progress_every,
-                           bool show_progress,
-                           const std::string& progress_desc);
+                           int32_t progress_every);
 
     // Apply merge (a, b) → merged_id everywhere it currently appears.
     // Mutates symbols_per_chunk in place, updates pair_counts and where_
@@ -86,13 +84,11 @@ public:
     // progress_callback (may be None) is called every progress_every
     // merges when the total vocab size hits a multiple of progress_every,
     // with (current_vocab_size, vocab_snapshot, merges_snapshot).
-    // show_progress toggles a tqdm-style progress bar to stderr.
+    // Progress bar rendering (tqdm etc.) is the caller's responsibility.
     int run_merge_loop(int32_t target_vocab_size,
                        py::object merge_filter,
                        py::object progress_callback,
-                       int32_t progress_every,
-                       bool show_progress,
-                       const std::string& progress_desc);
+                       int32_t progress_every);
 
     // Marshal the final native state back to Python.
     py::dict get_vocab() const;          // dict[str, int]

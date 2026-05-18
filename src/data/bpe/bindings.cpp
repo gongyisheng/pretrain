@@ -31,16 +31,12 @@ PYBIND11_MODULE(_bpe_engine, m) {
         .def("run_replay_merges", &BpeEngine::run_replay_merges,
              py::arg("merges"),
              py::arg("progress_callback") = py::none(),
-             py::arg("progress_every") = 1000,
-             py::arg("show_progress") = false,
-             py::arg("progress_desc") = std::string(""))
+             py::arg("progress_every") = 1000)
         .def("run_merge_loop", &BpeEngine::run_merge_loop,
              py::arg("target_vocab_size"),
              py::arg("merge_filter") = py::none(),
              py::arg("progress_callback") = py::none(),
-             py::arg("progress_every") = 1000,
-             py::arg("show_progress") = false,
-             py::arg("progress_desc") = std::string(""))
+             py::arg("progress_every") = 1000)
         .def("get_vocab", &BpeEngine::get_vocab)
         .def("get_merges", &BpeEngine::get_merges)
         .def("get_vocab_size", &BpeEngine::get_vocab_size);
