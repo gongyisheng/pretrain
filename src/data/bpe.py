@@ -327,9 +327,9 @@ class BpeTrainer:
         state = BpeState()
         state.set_num_threads(self.n_workers)
         state.seed(chunks, vocab)
-        del chunks  # large; release before pair counting allocates more.
+        del chunks  # release the chunk dict before native build_initial_pairs allocates pair_counts_ + where_
         if merges:
-            sym_to_id = vocab  # already keyed by str; dict lookup is O(1)
+            sym_to_id = vocab  # vocab IS the str→int symbol table after seeding
             merges_int = [
                 (sym_to_id[a], sym_to_id[b], sym_to_id[a + b]) for a, b in merges
             ]

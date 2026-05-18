@@ -55,7 +55,9 @@ public:
     py::list apply_merge(int32_t a, int32_t b, int32_t merged_id);
 
     // Veto-path helper: drop pair from pair_counts_ and where_ so it's
-    // never considered again. Used by Python when merge_filter rejects.
+    // never considered again. Used internally by run_merge_loop when a
+    // candidate pair is rejected by max_superword_words / forbid_colon_g.
+    // Still exposed via the binding for unit testing.
     void drop_pair(int32_t a, int32_t b);
 
     // Configure OpenMP thread count. -1 means use omp_get_max_threads().
