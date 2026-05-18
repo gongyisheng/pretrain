@@ -132,8 +132,7 @@ def _iter_batches(stream, batch_size, mode):
 
 def _pretokenize_batch_starargs(args):
     """Pickle-friendly wrapper that unpacks (batch, mode) for imap_unordered."""
-    batch, mode = args
-    return _pretokenize_batch(batch, mode)
+    return _pretokenize_batch(*args)
 
 
 def _build_chunks(
@@ -144,22 +143,13 @@ def _build_chunks(
 ) -> dict[tuple[str, ...], int]:
     """Pretokenize the corpus and aggregate by symbol-tuple.
 
-    n_workers <= 1: serial.
-    n_workers > 1: mp.Pool fan-out over doc batches; merge Counters on main.
+    Fans out over doc batches via mp.Pool (spawn context for clean state);
+    merges per-batch Counters on the main process. ``n_workers=1`` runs a
+    single worker subprocess — still parallel-shaped, just unparallelized.
     """
+    if n_workers < 1:
+        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
     total: Counter = Counter()
-    if n_workers <= 1:
-        batch: list[str] = []
-        for doc in corpus_iter():
-            batch.append(doc)
-            if len(batch) >= batch_size:
-                total.update(_pretokenize_batch(batch, mode))
-                batch = []
-        if batch:
-            total.update(_pretokenize_batch(batch, mode))
-        return dict(total)
-
-    # Parallel: feed batches into a Pool. Use spawn context for clean state.
     ctx = get_context("spawn")
     with ctx.Pool(n_workers) as pool:
         results = pool.imap_unordered(
@@ -172,26 +162,64 @@ def _build_chunks(
     return dict(total)
 
 
-def _count_pairs_worker(
-    args: tuple[list[list[str]], list[int], int],
+def _replay_merges(
+    chunk_slice: list[list[str]],
+    merges: list[tuple[str, str]],
+) -> list[list[str]]:
+    """Apply ``merges`` in order to every chunk in ``chunk_slice``, in place.
+
+    Each merge collapses adjacent (a, b) → a+b left-to-right within every
+    chunk. Chunks are independent given a fixed merge list, so slices can be
+    replayed in parallel — each worker processes the full merge list locally
+    to preserve the cross-merge ordering dependency.
+
+    Returns the mutated slice (same list object as the input).
+    """
+    for a, b in merges:
+        merged = a + b
+        for syms in chunk_slice:
+            i = 0
+            while i < len(syms) - 1:
+                if syms[i] == a and syms[i + 1] == b:
+                    syms[i] = merged
+                    del syms[i + 1]
+                else:
+                    i += 1
+    return chunk_slice
+
+
+def _replay_merges_starargs(args):
+    return _replay_merges(*args)
+
+
+def _count_pairs(
+    symbols_slice: list[list[str]],
+    weights_slice: list[int],
+    chunk_id_offset: int,
 ) -> tuple[Counter, dict[tuple[str, str], set[int]]]:
     """Count adjacent-pair occurrences in a slice of chunks.
 
-    Module-level (not nested) for `mp.Pool` pickling. The slice's chunks are
-    indexed starting at `cid_offset` so the returned `where_to_update`
-    references global chunk_ids.
+    The slice's chunks are indexed starting at `chunk_id_offset` so the returned
+    `where_to_update` references global chunk_ids.
     """
-    symbols_slice, weights_slice, cid_offset = args
     pair_counts: Counter = Counter()
     where_to_update: dict[tuple[str, str], set[int]] = {}
     for i, syms in enumerate(symbols_slice):
-        cid = cid_offset + i
+        global_chunk_id = chunk_id_offset + i
         w = weights_slice[i]
         for x, y in zip(syms[:-1], syms[1:]):
             p = (x, y)
             pair_counts[p] += w
-            where_to_update.setdefault(p, set()).add(cid)
+            where_to_update.setdefault(p, set()).add(global_chunk_id)
     return pair_counts, where_to_update
+
+
+def _count_pairs_starargs(args):
+    """Pickle-friendly wrapper that unpacks (symbols_slice, weights_slice,
+    chunk_id_offset) for imap_unordered. Module-level (not nested) for mp.Pool
+    pickling.
+    """
+    return _count_pairs(*args)
 
 
 def _init_pair_state(
@@ -208,67 +236,55 @@ def _init_pair_state(
       pair_counts:       Counter[(a, b)] — weighted count across all chunks
       where_to_update:   dict[(a, b), set[chunk_id]] — reverse index
 
-    chunk_id is the position in `symbols_per_chunk`. Chunks are sorted by their
-    initial symbol tuple before id assignment so output is deterministic
-    regardless of `chunks` dict insertion order.
+    chunk_id is the position in `symbols_per_chunk`. Chunks are sorted by
+    symbol tuple before id assignment for deterministic output.
 
-    If `merges_to_replay` is non-empty, those merges are applied in order to
-    each chunk's symbol list before pair counts are built — this is the
-    resume/extend code path.
-
-    Pair counting parallelizes across chunk slices when ``n_workers > 1``.
-    Counter and set merges are commutative so the output is byte-identical to
-    the serial path.
+    If `merges_to_replay` is non-empty, those merges are replayed on each
+    chunk before pair counting (resume/extend path). Both phases fan out
+    over chunk slices via a single mp.Pool (spawn).
     """
+    if n_workers < 1:
+        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
+
     # Sort for deterministic chunk_id assignment.
     sorted_items = sorted(chunks.items(), key=lambda kv: kv[0])
     symbols_per_chunk: list[list[str]] = [list(t) for t, _ in sorted_items]
     chunk_counts: list[int] = [c for _, c in sorted_items]
 
-    # Apply replay merges in order. Each merge collapses adjacent (a, b) → a+b
-    # in every chunk, left-to-right.
-    for a, b in merges_to_replay:
-        merged = a + b
-        for syms in symbols_per_chunk:
-            i = 0
-            while i < len(syms) - 1:
-                if syms[i] == a and syms[i + 1] == b:
-                    syms[i] = merged
-                    del syms[i + 1]
-                else:
-                    i += 1
+    n = len(symbols_per_chunk)
+    chunk_starts = list(range(0, n, chunks_per_task))
 
     pair_counts: Counter = Counter()
     where_to_update: dict[tuple[str, str], set[int]] = {}
 
-    if n_workers <= 1:
-        # Serial path.
-        for cid, syms in enumerate(symbols_per_chunk):
-            w = chunk_counts[cid]
-            for x, y in zip(syms[:-1], syms[1:]):
-                p = (x, y)
-                pair_counts[p] += w
-                where_to_update.setdefault(p, set()).add(cid)
-        return symbols_per_chunk, chunk_counts, pair_counts, where_to_update
-
-    # Parallel path: fan-out over chunk slices, union locals on the main process.
-    n = len(symbols_per_chunk)
-    tasks = [
-        (
-            symbols_per_chunk[start : start + chunks_per_task],
-            chunk_counts[start : start + chunks_per_task],
-            start,
-        )
-        for start in range(0, n, chunks_per_task)
-    ]
     ctx = get_context("spawn")
     with ctx.Pool(n_workers) as pool:
-        for local_pc, local_wtu in pool.imap_unordered(
-            _count_pairs_worker, tasks, chunksize=1
+        # Phase 1 (resume only): replay prior merges on each slice.
+        if merges_to_replay:
+            replay_tasks = [
+                (symbols_per_chunk[s : s + chunks_per_task], merges_to_replay)
+                for s in chunk_starts
+            ]
+            new_symbols: list[list[str]] = []
+            for slc in pool.imap(_replay_merges_starargs, replay_tasks, chunksize=1):
+                new_symbols.extend(slc)
+            symbols_per_chunk = new_symbols
+
+        # Phase 2: pair counting. Union local Counter/set returns.
+        count_tasks = [
+            (
+                symbols_per_chunk[s : s + chunks_per_task],
+                chunk_counts[s : s + chunks_per_task],
+                s,
+            )
+            for s in chunk_starts
+        ]
+        for local_pair_counts, local_where_to_update in pool.imap_unordered(
+            _count_pairs_starargs, count_tasks, chunksize=1
         ):
-            pair_counts.update(local_pc)
-            for p, cids in local_wtu.items():
-                where_to_update.setdefault(p, set()).update(cids)
+            pair_counts.update(local_pair_counts)
+            for p, chunk_ids in local_where_to_update.items():
+                where_to_update.setdefault(p, set()).update(chunk_ids)
 
     return symbols_per_chunk, chunk_counts, pair_counts, where_to_update
 
@@ -313,6 +329,56 @@ def _select_best_pair(
     return None, 0
 
 
+def _apply_merge_on_chunks(
+    chunks: list[tuple[int, list[str], int]],
+    a: str,
+    b: str,
+    merged: str,
+) -> tuple[
+    list[tuple[int, list[str]]],
+    Counter,
+    dict[tuple[str, str], set[int]],
+]:
+    """Apply merge (a, b) → merged to a slice of chunks (parallel worker).
+
+    Each input tuple is (chunk_id, syms, weight). Mutates syms in place,
+    accumulates neighbor-pair deltas and where_to_update additions locally,
+    and returns them for the main process to fold in. Only chunks that
+    actually changed are returned (membership in `affected` can be stale).
+    """
+    delta: Counter = Counter()
+    wtu_adds: dict[tuple[str, str], set[int]] = {}
+    mutated: list[tuple[int, list[str]]] = []
+    for chunk_id, syms, w in chunks:
+        changed = False
+        i = 0
+        while i < len(syms) - 1:
+            if syms[i] != a or syms[i + 1] != b:
+                i += 1
+                continue
+            changed = True
+            if i > 0:
+                prev = syms[i - 1]
+                delta[(prev, a)] -= w
+                delta[(prev, merged)] += w
+                wtu_adds.setdefault((prev, merged), set()).add(chunk_id)
+            if i + 2 < len(syms):
+                nxt = syms[i + 2]
+                delta[(b, nxt)] -= w
+                delta[(merged, nxt)] += w
+                wtu_adds.setdefault((merged, nxt), set()).add(chunk_id)
+            syms[i] = merged
+            del syms[i + 1]
+            i += 1
+        if changed:
+            mutated.append((chunk_id, syms))
+    return mutated, delta, wtu_adds
+
+
+def _apply_merge_on_chunks_starargs(args):
+    return _apply_merge_on_chunks(*args)
+
+
 def _apply_merge(
     symbols_per_chunk: list[list[str]],
     chunk_counts: list[int],
@@ -322,65 +388,62 @@ def _apply_merge(
     pair: tuple[str, str],
     merged: str,
     vocab: dict[str, int],
+    n_workers: int = 1,
+    chunks_per_task: int = 1000,
 ) -> None:
     """Apply merge `pair → merged` everywhere, updating state incrementally.
 
-    Visits only chunks in `where_to_update[pair]`. For each, scans the symbol
-    list left-to-right and collapses adjacent (a, b) pairs. Adjusts
-    `pair_counts` for the neighbors that change (decrement old, increment new)
-    and pushes new heap entries. `vocab` is needed by `_make_heap_entry` for
-    the ID-based tie-break.
+    Visits only chunks in `where_to_update[pair]`. Per-chunk work fans out to
+    a fresh worker pool (spawn); deltas are folded on the main process with
+    one heap push per net-changed pair. `vocab` is needed by `_make_heap_entry`
+    for the ID-based tie-break.
     """
+    if n_workers < 1:
+        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
+
     a, b = pair
     affected = where_to_update.pop(pair, set())
     pair_counts.pop(pair, None)
-    for cid in affected:
-        syms = symbols_per_chunk[cid]
-        w = chunk_counts[cid]
-        i = 0
-        while i < len(syms) - 1:
-            if syms[i] != a or syms[i + 1] != b:
-                i += 1
-                continue
-            # Left neighbor: (prev, a) → (prev, merged).
-            if i > 0:
-                prev = syms[i - 1]
-                pair_counts[(prev, a)] -= w
-                if pair_counts[(prev, a)] <= 0:
-                    pair_counts.pop((prev, a), None)
-                else:
-                    heapq.heappush(
-                        heap,
-                        _make_heap_entry((prev, a), pair_counts[(prev, a)], vocab),
-                    )
-                pair_counts[(prev, merged)] += w
-                where_to_update.setdefault((prev, merged), set()).add(cid)
-                heapq.heappush(
-                    heap,
-                    _make_heap_entry(
-                        (prev, merged), pair_counts[(prev, merged)], vocab
-                    ),
-                )
-            # Right neighbor: (b, next) → (merged, next).
-            if i + 2 < len(syms):
-                nxt = syms[i + 2]
-                pair_counts[(b, nxt)] -= w
-                if pair_counts[(b, nxt)] <= 0:
-                    pair_counts.pop((b, nxt), None)
-                else:
-                    heapq.heappush(
-                        heap,
-                        _make_heap_entry((b, nxt), pair_counts[(b, nxt)], vocab),
-                    )
-                pair_counts[(merged, nxt)] += w
-                where_to_update.setdefault((merged, nxt), set()).add(cid)
-                heapq.heappush(
-                    heap,
-                    _make_heap_entry((merged, nxt), pair_counts[(merged, nxt)], vocab),
-                )
-            syms[i] = merged
-            del syms[i + 1]
-            i += 1
+
+    affected_list = list(affected)
+    # Right-size the task slice: cap at chunks_per_task but also shrink to
+    # n_chunks // n_workers so small `affected` sets still keep every worker
+    # busy instead of dumping a single oversized task on one worker.
+    n_chunks = len(affected_list)
+    effective_chunks_per_task = max(1, min(n_chunks // n_workers, chunks_per_task))
+    tasks = [
+        (
+            [
+                (chunk_id, symbols_per_chunk[chunk_id], chunk_counts[chunk_id])
+                for chunk_id in affected_list[s : s + effective_chunks_per_task]
+            ],
+            a,
+            b,
+            merged,
+        )
+        for s in range(0, n_chunks, effective_chunks_per_task)
+    ]
+    total_delta: Counter = Counter()
+    total_wtu_adds: dict[tuple[str, str], set[int]] = {}
+    ctx = get_context("spawn")
+    with ctx.Pool(n_workers) as pool:
+        for mutated, delta, wtu_adds in pool.imap_unordered(
+            _apply_merge_on_chunks_starargs, tasks, chunksize=1
+        ):
+            for chunk_id, new_syms in mutated:
+                symbols_per_chunk[chunk_id] = new_syms
+            total_delta.update(delta)
+            for p, ids in wtu_adds.items():
+                total_wtu_adds.setdefault(p, set()).update(ids)
+    for p, dv in total_delta.items():
+        pair_counts[p] += dv
+        new_count = pair_counts[p]
+        if new_count <= 0:
+            pair_counts.pop(p, None)
+        else:
+            heapq.heappush(heap, _make_heap_entry(p, new_count, vocab))
+    for p, ids in total_wtu_adds.items():
+        where_to_update.setdefault(p, set()).update(ids)
 
 
 class BpeTrainer:
@@ -556,7 +619,16 @@ class BpeTrainer:
                 vocab[merged] = len(vocab)
                 merges.append(pair)
                 _apply_merge(
-                    symbols, weights, pair_counts, where, heap, pair, merged, vocab
+                    symbols,
+                    weights,
+                    pair_counts,
+                    where,
+                    heap,
+                    pair,
+                    merged,
+                    vocab,
+                    n_workers=self.n_workers,
+                    chunks_per_task=self.batch_size,
                 )
                 bar.update(1)
                 if (
