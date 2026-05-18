@@ -1,15 +1,14 @@
 """
 Wall-clock benchmark for BPE training.
 
-Compares three configurations on the same corpus + target vocab_size:
-  1. HF `tokenizers.BpeTrainer`            (Rust baseline)
-  2. Python BpeTrainer, n_workers=1        (serial floor)
-  3. Python BpeTrainer, n_workers=N        (production target)
+Compares:
+  1. HF `tokenizers.BpeTrainer`        (Rust baseline)
+  2. native serial                     (Python control flow + C++ BpeState, 1 thread)
+  3. native parallel                   (Python control flow + C++ BpeState, N threads)
 
 Usage:
     python benchmarks/bench_bpe.py --corpus_path data/sample.txt
-    python benchmarks/bench_bpe.py --corpus_path data/sample.txt --vocab_size 50000
-    python benchmarks/bench_bpe.py --corpus_path data/sample.txt --workers 1 2 4 8
+    python benchmarks/bench_bpe.py --corpus_path data/sample.txt --workers 1 4 8
     python benchmarks/bench_bpe.py --skip_hf --json_out results.json
 """
 
@@ -73,7 +72,7 @@ def run_hf(corpus, vocab_size: int) -> dict:
     }
 
 
-def run_python(corpus, vocab_size: int, n_workers: int, batch_size: int = 1000) -> dict:
+def run_native(corpus, vocab_size: int, n_workers: int, batch_size: int = 1000) -> dict:
     t0 = time.perf_counter()
     vocab, merges = BpeTrainer(
         vocab_size=vocab_size,
@@ -81,7 +80,7 @@ def run_python(corpus, vocab_size: int, n_workers: int, batch_size: int = 1000) 
         batch_size=batch_size,
     ).train(corpus)
     return {
-        "config": "python",
+        "config": "native",
         "workers": n_workers,
         "total_wall_seconds": time.perf_counter() - t0,
         "final_vocab_size": len(vocab),
@@ -111,14 +110,14 @@ def main():
         print(f"Running HF baseline (vocab_size={args.vocab_size})...")
         results.append(run_hf(corpus, args.vocab_size))
     for w in args.workers:
-        print(f"Running Python BpeTrainer (workers={w})...")
-        results.append(run_python(corpus, args.vocab_size, w))
+        print(f"Running native BpeTrainer (workers={w})...")
+        results.append(run_native(corpus, args.vocab_size, w))
 
-    # Determinism check across Python runs.
-    py_hashes = {r["hash"] for r in results if r["config"] == "python"}
-    if len(py_hashes) > 1:
+    # Determinism check across native runs.
+    native_hashes = {r["hash"] for r in results if r["config"] == "native"}
+    if len(native_hashes) > 1:
         print(
-            f"\n!! NON-DETERMINISM: Python runs produced different outputs: {py_hashes}"
+            f"\n!! NON-DETERMINISM: native runs produced different outputs: {native_hashes}"
         )
         sys.exit(1)
 
