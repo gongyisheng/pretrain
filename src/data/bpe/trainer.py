@@ -403,8 +403,7 @@ class BpeTrainer:
                 progress_every=self.progress_every,
             )
 
-        # 5. Marshal final output back to Python. Native `get_merges()` returns
-        #    only the merges added during `run_merge_loop`; on resume, prepend
-        #    the prior `initial_merges` (which were replayed onto chunks but
-        #    never recorded in `merges_native_`).
-        return engine.get_vocab(), merges + engine.get_merges()
+        # 5. Marshal final output back to Python. `engine.get_merges()` returns
+        #    the full merge history (initial_merges replayed at seed time +
+        #    new merges added by run_merge_loop), so no prepend is needed.
+        return engine.get_vocab(), engine.get_merges()

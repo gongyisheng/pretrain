@@ -220,14 +220,22 @@ void BpeEngine::set_num_threads(int n) {
 void BpeEngine::run_replay_merges(py::list merges,
                                   py::object progress_callback,
                                   int32_t progress_every) {
-    // Convert merges to a flat C++ vector once.
+    // Convert merges to a flat C++ vector once. Also record each (a, b)
+    // pair in merges_native_ so that mid-training snapshots (get_merges())
+    // include the full merge history (initial + new), not just the new
+    // ones added by run_merge_loop. Without this, the W&B progress
+    // callback in stage 2 of SuperBPE gets only the stage 2 merges and
+    // HF's BPE encoder can't tokenize past the byte alphabet.
     std::vector<std::tuple<int32_t, int32_t, int32_t>> ms;
     ms.reserve(merges.size());
+    merges_native_.reserve(merges_native_.size() + merges.size());
     for (auto item : merges) {
         py::tuple t = py::reinterpret_borrow<py::tuple>(item);
-        ms.emplace_back(py::cast<int32_t>(t[0]),
-                        py::cast<int32_t>(t[1]),
-                        py::cast<int32_t>(t[2]));
+        int32_t a = py::cast<int32_t>(t[0]);
+        int32_t b = py::cast<int32_t>(t[1]);
+        int32_t merged = py::cast<int32_t>(t[2]);
+        ms.emplace_back(a, b, merged);
+        merges_native_.emplace_back(a, b);
     }
 
     const int n_chunks = static_cast<int>(symbols_per_chunk_.size());
@@ -237,19 +245,27 @@ void BpeEngine::run_replay_merges(py::list merges,
     }
     const bool has_progress = !progress_callback.is_none() && progress_every > 0;
 
-    for (int m = 0; m < n_merges; ++m) {
-        // Honor Python signals (Ctrl+C) between merges. GIL is held here.
+    // Batch merges so each chunk is visited once per batch (cache-friendly)
+    // instead of once per merge. Each chunk's inner loop runs the whole
+    // batch sequentially, keeping the symbol vector hot in L1/L2 across
+    // the batch. Batching also bounds Ctrl+C latency to one batch's work.
+    const int batch_size = progress_every > 0 ? progress_every : n_merges;
+    for (int m_start = 0; m_start < n_merges; m_start += batch_size) {
+        // Honor Python signals (Ctrl+C) between batches. GIL is held here.
         if (PyErr_CheckSignals() != 0) throw py::error_already_set();
-        const auto& [a, b, merged] = ms[m];
+        const int m_end = std::min(m_start + batch_size, n_merges);
         {
             py::gil_scoped_release release;
             #pragma omp parallel for schedule(dynamic, 64)
             for (int cid = 0; cid < n_chunks; ++cid) {
-                replay_single_merge_one_chunk(symbols_per_chunk_[cid], a, b, merged);
+                for (int m = m_start; m < m_end; ++m) {
+                    const auto& [a, b, merged] = ms[m];
+                    replay_single_merge_one_chunk(symbols_per_chunk_[cid], a, b, merged);
+                }
             }
         }
-        if (has_progress && (m + 1) % progress_every == 0) {
-            progress_callback(m + 1, n_merges);
+        if (has_progress) {
+            progress_callback(m_end, n_merges);
         }
     }
 }
