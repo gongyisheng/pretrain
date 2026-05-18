@@ -23,8 +23,9 @@ for V in 50 100 150 200; do
     uv run python scripts/train_tokenizer.py --config "$baseline" \
         2>&1 | tee "logs/superbpe/train/${name}.log"
 
-    # SuperBPE configs in alphabetical order (t100k_m2 before t20k_m2 — see
-    # README; switch to numeric sort here if you want strict t-then-m order).
+    # SuperBPE configs in alphabetical shell-glob order (t100k_m2 runs before
+    # t20k_m2 for V ≥ 150k). Replace the glob with `sort -V` here for strict
+    # t-then-m order.
     for cfg in "${folder}"/superbpe_*.yaml; do
         name="$(basename "$cfg" .yaml)"
         echo "==> Training ${name}"
