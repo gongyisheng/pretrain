@@ -12,6 +12,7 @@ Encode/decode at inference stays on HF: emit a HF-compatible (vocab, merges)
 pair, caller wraps in `tokenizers.Tokenizer(models.BPE(...))` and saves.
 """
 
+import atexit
 import heapq
 import os
 from collections import Counter
@@ -20,6 +21,46 @@ from multiprocessing import get_context
 
 import regex as _re
 from tqdm import tqdm
+
+# Module-level shared worker pool. Spawned lazily on first use, resized only
+# if a caller requests a different n_workers, torn down at process exit.
+# Sharing one pool across `_build_chunks`, `_init_pair_state`, and
+# `_apply_merge` amortizes the spawn cost over the whole training run
+# instead of paying it on every helper call.
+_MP_CTX = get_context("spawn")
+_POOL = None
+_POOL_N_WORKERS: int | None = None
+
+
+def _get_pool(n_workers: int):
+    """Return the module-level worker pool sized to ``n_workers``.
+
+    Creates the pool on first call; if a subsequent call requests a different
+    size, the existing pool is closed and a new one is spawned. Raises if
+    ``n_workers < 1``.
+    """
+    if n_workers < 1:
+        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
+    global _POOL, _POOL_N_WORKERS
+    if _POOL is not None and _POOL_N_WORKERS == n_workers:
+        return _POOL
+    _close_pool()
+    _POOL = _MP_CTX.Pool(n_workers)
+    _POOL_N_WORKERS = n_workers
+    return _POOL
+
+
+def _close_pool() -> None:
+    """Close and join the shared pool if one is alive. Idempotent."""
+    global _POOL, _POOL_N_WORKERS
+    if _POOL is not None:
+        _POOL.close()
+        _POOL.join()
+        _POOL = None
+        _POOL_N_WORKERS = None
+
+
+atexit.register(_close_pool)
 
 
 def _build_byte_to_unicode() -> dict[int, str]:
@@ -143,22 +184,18 @@ def _build_chunks(
 ) -> dict[tuple[str, ...], int]:
     """Pretokenize the corpus and aggregate by symbol-tuple.
 
-    Fans out over doc batches via mp.Pool (spawn context for clean state);
-    merges per-batch Counters on the main process. ``n_workers=1`` runs a
-    single worker subprocess — still parallel-shaped, just unparallelized.
+    Fans out over doc batches via the shared module pool; merges per-batch
+    Counters on the main process.
     """
-    if n_workers < 1:
-        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
+    pool = _get_pool(n_workers)
     total: Counter = Counter()
-    ctx = get_context("spawn")
-    with ctx.Pool(n_workers) as pool:
-        results = pool.imap_unordered(
-            _pretokenize_batch_starargs,
-            _iter_batches(corpus_iter(), batch_size, mode),
-            chunksize=1,
-        )
-        for partial in results:
-            total.update(partial)
+    results = pool.imap_unordered(
+        _pretokenize_batch_starargs,
+        _iter_batches(corpus_iter(), batch_size, mode),
+        chunksize=1,
+    )
+    for partial in results:
+        total.update(partial)
     return dict(total)
 
 
@@ -241,10 +278,9 @@ def _init_pair_state(
 
     If `merges_to_replay` is non-empty, those merges are replayed on each
     chunk before pair counting (resume/extend path). Both phases fan out
-    over chunk slices via a single mp.Pool (spawn).
+    over chunk slices via the shared module pool.
     """
-    if n_workers < 1:
-        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
+    pool = _get_pool(n_workers)
 
     # Sort for deterministic chunk_id assignment.
     sorted_items = sorted(chunks.items(), key=lambda kv: kv[0])
@@ -257,34 +293,32 @@ def _init_pair_state(
     pair_counts: Counter = Counter()
     where_to_update: dict[tuple[str, str], set[int]] = {}
 
-    ctx = get_context("spawn")
-    with ctx.Pool(n_workers) as pool:
-        # Phase 1 (resume only): replay prior merges on each slice.
-        if merges_to_replay:
-            replay_tasks = [
-                (symbols_per_chunk[s : s + chunks_per_task], merges_to_replay)
-                for s in chunk_starts
-            ]
-            new_symbols: list[list[str]] = []
-            for slc in pool.imap(_replay_merges_starargs, replay_tasks, chunksize=1):
-                new_symbols.extend(slc)
-            symbols_per_chunk = new_symbols
-
-        # Phase 2: pair counting. Union local Counter/set returns.
-        count_tasks = [
-            (
-                symbols_per_chunk[s : s + chunks_per_task],
-                chunk_counts[s : s + chunks_per_task],
-                s,
-            )
+    # Phase 1 (resume only): replay prior merges on each slice.
+    if merges_to_replay:
+        replay_tasks = [
+            (symbols_per_chunk[s : s + chunks_per_task], merges_to_replay)
             for s in chunk_starts
         ]
-        for local_pair_counts, local_where_to_update in pool.imap_unordered(
-            _count_pairs_starargs, count_tasks, chunksize=1
-        ):
-            pair_counts.update(local_pair_counts)
-            for p, chunk_ids in local_where_to_update.items():
-                where_to_update.setdefault(p, set()).update(chunk_ids)
+        new_symbols: list[list[str]] = []
+        for slc in pool.imap(_replay_merges_starargs, replay_tasks, chunksize=1):
+            new_symbols.extend(slc)
+        symbols_per_chunk = new_symbols
+
+    # Phase 2: pair counting. Union local Counter/set returns.
+    count_tasks = [
+        (
+            symbols_per_chunk[s : s + chunks_per_task],
+            chunk_counts[s : s + chunks_per_task],
+            s,
+        )
+        for s in chunk_starts
+    ]
+    for local_pair_counts, local_where_to_update in pool.imap_unordered(
+        _count_pairs_starargs, count_tasks, chunksize=1
+    ):
+        pair_counts.update(local_pair_counts)
+        for p, chunk_ids in local_where_to_update.items():
+            where_to_update.setdefault(p, set()).update(chunk_ids)
 
     return symbols_per_chunk, chunk_counts, pair_counts, where_to_update
 
@@ -393,13 +427,12 @@ def _apply_merge(
 ) -> None:
     """Apply merge `pair → merged` everywhere, updating state incrementally.
 
-    Visits only chunks in `where_to_update[pair]`. Per-chunk work fans out to
-    a fresh worker pool (spawn); deltas are folded on the main process with
+    Visits only chunks in `where_to_update[pair]`. Per-chunk work fans out
+    via the shared module pool; deltas are folded on the main process with
     one heap push per net-changed pair. `vocab` is needed by `_make_heap_entry`
     for the ID-based tie-break.
     """
-    if n_workers < 1:
-        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
+    pool = _get_pool(n_workers)
 
     a, b = pair
     affected = where_to_update.pop(pair, set())
@@ -425,16 +458,14 @@ def _apply_merge(
     ]
     total_delta: Counter = Counter()
     total_wtu_adds: dict[tuple[str, str], set[int]] = {}
-    ctx = get_context("spawn")
-    with ctx.Pool(n_workers) as pool:
-        for mutated, delta, wtu_adds in pool.imap_unordered(
-            _apply_merge_on_chunks_starargs, tasks, chunksize=1
-        ):
-            for chunk_id, new_syms in mutated:
-                symbols_per_chunk[chunk_id] = new_syms
-            total_delta.update(delta)
-            for p, ids in wtu_adds.items():
-                total_wtu_adds.setdefault(p, set()).update(ids)
+    for mutated, delta, wtu_adds in pool.imap_unordered(
+        _apply_merge_on_chunks_starargs, tasks, chunksize=1
+    ):
+        for chunk_id, new_syms in mutated:
+            symbols_per_chunk[chunk_id] = new_syms
+        total_delta.update(delta)
+        for p, ids in wtu_adds.items():
+            total_wtu_adds.setdefault(p, set()).update(ids)
     for p, dv in total_delta.items():
         pair_counts[p] += dv
         new_count = pair_counts[p]
