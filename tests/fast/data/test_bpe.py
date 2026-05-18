@@ -882,3 +882,20 @@ def test_bpe_state_apply_merge_dedupes_where_within_chunk():
     assert state.pair_chunks(2, 3) == [0]
     # And the count should still reflect both occurrences (weighted).
     assert state.pair_count(2, 3) == 2
+
+
+def test_bpe_state_drop_pair_removes_from_where_and_counts():
+    """drop_pair removes the pair from internal state so it's never selected."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 1}, symbol_table)
+    state.build_initial_pairs()
+    assert state.pair_count(0, 1) == 1
+    assert state.pair_chunks(0, 1) != []
+
+    state.drop_pair(0, 1)
+
+    assert state.pair_count(0, 1) == 0
+    assert state.pair_chunks(0, 1) == []

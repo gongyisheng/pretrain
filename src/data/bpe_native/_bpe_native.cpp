@@ -25,5 +25,6 @@ PYBIND11_MODULE(_bpe_native, m) {
         .def("replay_merges", &BpeState::replay_merges, py::arg("merges"))
         .def("apply_merge", &BpeState::apply_merge,
              py::arg("a"), py::arg("b"), py::arg("merged_id"))
+        .def("drop_pair", &BpeState::drop_pair, py::arg("a"), py::arg("b"))
         .def("set_num_threads", &BpeState::set_num_threads, py::arg("n"));
 }

@@ -53,6 +53,10 @@ public:
     // during the parallel chunk scan. Returns the deltas list.
     py::list apply_merge(int32_t a, int32_t b, int32_t merged_id);
 
+    // Veto-path helper: drop pair from pair_counts_ and where_ so it's
+    // never considered again. Used by Python when merge_filter rejects.
+    void drop_pair(int32_t a, int32_t b);
+
     // Configure OpenMP thread count. -1 means use omp_get_max_threads().
     void set_num_threads(int n);
 

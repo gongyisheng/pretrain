@@ -294,3 +294,9 @@ py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
     }
     return out;
 }
+
+void BpeState::drop_pair(int32_t a, int32_t b) {
+    uint64_t key = pack_pair(a, b);
+    pair_counts_.erase(key);
+    where_.erase(key);
+}
