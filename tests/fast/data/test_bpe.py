@@ -784,3 +784,78 @@ def test_bpe_state_replay_parallel_matches_serial():
     assert n == s2.num_chunks()
     for i in range(n):
         assert s1.get_chunk_symbols(i) == s2.get_chunk_symbols(i)
+
+
+def test_bpe_state_apply_merge_rewrites_symbols():
+    """All (a,b) occurrences collapsed to merged_id."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 1, ("a", "b"): 1}, symbol_table)
+    state.build_initial_pairs()
+    state.apply_merge(0, 1, 3)  # merge (a,b) → ab
+
+    # Sorted chunks: ("a","b") < ("a","b","c") → chunk 0 = [a,b], chunk 1 = [a,b,c].
+    assert state.get_chunk_symbols(0) == [3]
+    assert state.get_chunk_symbols(1) == [3, 2]
+
+
+def test_bpe_state_apply_merge_returns_pair_deltas():
+    """Returns list[(a, b, dv)] of pair-count changes for the Python heap."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 1}, symbol_table)
+    state.build_initial_pairs()
+    deltas = state.apply_merge(0, 1, 3)
+    by_pair = {(a, b): d for a, b, d in deltas}
+
+    # Before: (a,b):1, (b,c):1.
+    # After  merge ab: (b,c) goes to 0 (delta -1), (ab,c) gains 1 (delta +1).
+    # (a,b) itself is removed from internal state — not reported in deltas.
+    assert by_pair == {(1, 2): -1, (3, 2): 1}
+
+
+def test_bpe_state_apply_merge_overlapping_pairs_left_to_right():
+    """'a a a' merging (a,a)→aa yields [aa, a] (left consume first)."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "aa": 1}
+    state = BpeState()
+    state.seed({("a", "a", "a"): 1}, symbol_table)
+    state.build_initial_pairs()
+    state.apply_merge(0, 0, 1)
+
+    assert state.get_chunk_symbols(0) == [1, 0]
+    # New pair (aa, a) gained 1.
+    assert state.pair_count(1, 0) == 1
+
+
+def test_bpe_state_apply_merge_respects_chunk_weight():
+    """A merge in a weight-5 chunk emits weight-5 deltas."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 5}, symbol_table)
+    state.build_initial_pairs()
+    deltas = state.apply_merge(0, 1, 3)
+    by_pair = {(a, b): d for a, b, d in deltas}
+
+    assert by_pair == {(1, 2): -5, (3, 2): 5}
+
+
+def test_bpe_state_apply_merge_removes_pair_from_where():
+    """After applying (a,b), pair_chunks(a,b) is empty."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "ab": 2}
+    state = BpeState()
+    state.seed({("a", "b"): 1}, symbol_table)
+    state.build_initial_pairs()
+    state.apply_merge(0, 1, 2)
+
+    assert state.pair_chunks(0, 1) == []
+    assert state.pair_count(0, 1) == 0

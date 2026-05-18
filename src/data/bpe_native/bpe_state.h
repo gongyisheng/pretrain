@@ -45,6 +45,14 @@ public:
     // build_initial_pairs (replay happens before pair-counting).
     void replay_merges(py::list merges);
 
+    // Apply merge (a, b) → merged_id everywhere it currently appears.
+    // Mutates symbols_per_chunk in place, updates pair_counts and where_
+    // to reflect neighbor-pair changes, and returns a list of
+    // (pair_a, pair_b, delta_count) for every pair whose count changed
+    // (excluding the merged pair itself, which is removed). GIL released
+    // during the parallel chunk scan. Returns the deltas list.
+    py::list apply_merge(int32_t a, int32_t b, int32_t merged_id);
+
     // Configure OpenMP thread count. -1 means use omp_get_max_threads().
     void set_num_threads(int n);
 

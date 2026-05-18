@@ -34,6 +34,57 @@ inline void replay_one_chunk(std::vector<int32_t>& syms,
     }
 }
 
+// Per-chunk scan for `apply_merge`. Mutates `syms` in place to collapse
+// every (a,b) → merged. Emits delta updates for the four neighbor-pair
+// patterns (prev,a)↓ (prev,merged)↑ (b,nxt)↓ (merged,nxt)↑, each scaled
+// by chunk weight `w`. Records the chunk_id under any NEW pair so the
+// reverse index `where_` stays current.
+//
+// Returns `true` if the chunk was mutated.
+//
+// Mirrors `_apply_merge_on_chunks` in src/data/bpe.py: left-to-right
+// linear scan; after a collapse `i` stays put so overlapping patterns
+// chain correctly (same overlap rule as `replay_one_chunk`).
+struct LocalDeltas {
+    std::vector<std::pair<uint64_t, int64_t>> count_deltas;  // (packed pair, dv)
+    std::vector<std::pair<uint64_t, int32_t>> where_adds;    // (packed pair, chunk_id)
+};
+
+inline bool apply_merge_one_chunk(std::vector<int32_t>& syms,
+                                  int32_t chunk_id,
+                                  int64_t w,
+                                  int32_t a,
+                                  int32_t b,
+                                  int32_t merged,
+                                  LocalDeltas& out) {
+    if (syms.size() < 2) return false;
+    bool changed = false;
+    size_t i = 0;
+    while (i + 1 < syms.size()) {
+        if (syms[i] != a || syms[i + 1] != b) {
+            ++i;
+            continue;
+        }
+        changed = true;
+        if (i > 0) {
+            int32_t prev = syms[i - 1];
+            out.count_deltas.emplace_back(pack_pair(prev, a), -w);
+            out.count_deltas.emplace_back(pack_pair(prev, merged), w);
+            out.where_adds.emplace_back(pack_pair(prev, merged), chunk_id);
+        }
+        if (i + 2 < syms.size()) {
+            int32_t nxt = syms[i + 2];
+            out.count_deltas.emplace_back(pack_pair(b, nxt), -w);
+            out.count_deltas.emplace_back(pack_pair(merged, nxt), w);
+            out.where_adds.emplace_back(pack_pair(merged, nxt), chunk_id);
+        }
+        syms[i] = merged;
+        syms.erase(syms.begin() + static_cast<long>(i) + 1);
+        // i stays — keep collapsing overlaps to the right.
+    }
+    return changed;
+}
+
 }  // namespace
 
 void BpeState::seed(py::dict chunks, py::dict symbol_table) {
@@ -158,4 +209,72 @@ void BpeState::replay_merges(py::list merges) {
             replay_one_chunk(symbols_per_chunk_[cid], ms);
         }
     }
+}
+
+py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
+    uint64_t pair_key = pack_pair(a, b);
+
+    // Snapshot the chunks containing (a,b), then drop the entry —
+    // it's about to be gone.
+    std::vector<int32_t> affected;
+    {
+        auto it = where_.find(pair_key);
+        if (it != where_.end()) {
+            affected = std::move(it->second);
+            where_.erase(it);
+        }
+    }
+    pair_counts_.erase(pair_key);
+
+    const int n = static_cast<int>(affected.size());
+    if (num_threads_ > 0) {
+        omp_set_num_threads(num_threads_);
+    }
+
+    const int actual_threads = num_threads_ > 0 ? num_threads_ : omp_get_max_threads();
+    std::vector<LocalDeltas> per_thread(actual_threads);
+
+    {
+        py::gil_scoped_release release;
+        #pragma omp parallel
+        {
+            const int tid = omp_get_thread_num();
+            LocalDeltas& local = per_thread[tid];
+            #pragma omp for schedule(dynamic, 64)
+            for (int idx = 0; idx < n; ++idx) {
+                int32_t cid = affected[idx];
+                apply_merge_one_chunk(symbols_per_chunk_[cid],
+                                      cid,
+                                      chunk_weights_[cid],
+                                      a, b, merged_id, local);
+            }
+        }
+    }
+
+    // Reduce thread-local deltas into pair_counts_ and where_.
+    // Aggregate count deltas first (per-pair sum) so the returned list has
+    // one entry per pair, matching what Python's heap update expects.
+    std::unordered_map<uint64_t, int64_t> total_deltas;
+    for (auto& local : per_thread) {
+        for (auto& [key, dv] : local.count_deltas) {
+            total_deltas[key] += dv;
+        }
+    }
+    for (auto& local : per_thread) {
+        for (auto& [key, cid] : local.where_adds) {
+            where_[key].push_back(cid);
+        }
+    }
+
+    py::list out;
+    for (auto& [key, dv] : total_deltas) {
+        int64_t new_count = pair_counts_[key] + dv;
+        if (new_count <= 0) {
+            pair_counts_.erase(key);
+        } else {
+            pair_counts_[key] = new_count;
+        }
+        out.append(py::make_tuple(unpack_a(key), unpack_b(key), dv));
+    }
+    return out;
 }
