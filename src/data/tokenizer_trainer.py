@@ -1,6 +1,7 @@
 """Tokenizer training (BPE and SuperBPE).
 
-Both methods drive the pure-Python `BpeTrainer` in `src/data/bpe.py`:
+Both methods drive the `BpeTrainer` in `src/data/bpe.py` (Python control
+flow over a C++ hot-loop extension):
 - "bpe":      one BpeTrainer call with whitespace + digit pretokenization.
 - "superbpe": two BpeTrainer calls — a "subword pass" (same config as "bpe",
               merges stay within word boundaries) followed by a "superword

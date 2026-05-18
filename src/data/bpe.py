@@ -1,4 +1,4 @@
-"""Pure-Python BPE trainer.
+"""BPE trainer with a C++ hot-loop extension.
 
 Single public class `BpeTrainer`. Produces (vocab, merges) byte-identical to
 HuggingFace `tokenizers.BpeTrainer` on the same corpus + pretokenizer, and
@@ -22,11 +22,14 @@ from multiprocessing import get_context
 import regex as _re
 from tqdm import tqdm
 
+from src.data.bpe_native import BpeState
+
 # Module-level shared worker pool. Spawned lazily on first use, resized only
 # if a caller requests a different n_workers, torn down at process exit.
-# Sharing one pool across `_build_chunks`, `_init_pair_state`, and
-# `_apply_merge` amortizes the spawn cost over the whole training run
-# instead of paying it on every helper call.
+# Used by `_build_chunks` for pretokenize fan-out (the only mp-parallel
+# step left after the C++ BpeState rewire). Keeping it module-level lets
+# us reuse the same pool across multiple `BpeTrainer.train()` calls in one
+# process (e.g., SuperBPE's subword + superword passes).
 _MP_CTX = get_context("spawn")
 _POOL = None
 _POOL_N_WORKERS: int | None = None
@@ -251,8 +254,9 @@ def _select_best_pair(
 
 
 class BpeTrainer:
-    """Train a BPE tokenizer in pure Python. Produces (vocab, merges)
-    byte-identical to HF's `tokenizers.BpeTrainer`.
+    """Train a BPE tokenizer. Python control flow drives a C++ `BpeState`
+    extension for the hot loops (replay merges + per-merge chunk scan).
+    Produces (vocab, merges) byte-identical to HF's `tokenizers.BpeTrainer`.
     """
 
     _VALID_PRETOK_MODES = ("bpe", "bytelevel")
@@ -334,7 +338,6 @@ class BpeTrainer:
         and, if ``initial_merges`` is set, replays them on each chunk to
         recover the post-resume state.
         """
-        from src.data.bpe_native import BpeState
 
         # 1. Pretokenize + dedup. Still mp.Pool-parallel (regex bound).
         chunks = _build_chunks(
