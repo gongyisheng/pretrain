@@ -246,7 +246,8 @@ void BpeState::replay_merges(py::list merges) {
     }
 }
 
-py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
+std::unordered_map<uint64_t, int64_t> BpeState::apply_merge_internal(
+    int32_t a, int32_t b, int32_t merged_id) {
     uint64_t pair_key = pack_pair(a, b);
 
     // Snapshot the chunks containing (a,b), then drop the entry —
@@ -286,9 +287,7 @@ py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
         }
     }
 
-    // Reduce thread-local deltas into pair_counts_ and where_.
-    // Aggregate count deltas first (per-pair sum) so the returned list has
-    // one entry per pair, matching what Python's heap update expects.
+    // Reduce thread-local deltas.
     std::unordered_map<uint64_t, int64_t> total_deltas;
     for (auto& local : per_thread) {
         for (auto& [key, dv] : local.count_deltas) {
@@ -301,7 +300,10 @@ py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
         }
     }
 
-    py::list out;
+    // Fold per-pair deltas into pair_counts_; erase pairs whose new count
+    // is <= 0. Caller decides what to do with the returned map (build a
+    // py::list for the public path, or push to the native heap for the
+    // run_merge_loop path).
     for (auto& [key, dv] : total_deltas) {
         int64_t new_count = pair_counts_[key] + dv;
         if (new_count <= 0) {
@@ -309,6 +311,15 @@ py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
         } else {
             pair_counts_[key] = new_count;
         }
+    }
+
+    return total_deltas;
+}
+
+py::list BpeState::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
+    auto total_deltas = apply_merge_internal(a, b, merged_id);
+    py::list out;
+    for (auto& [key, dv] : total_deltas) {
         out.append(py::make_tuple(unpack_a(key), unpack_b(key), dv));
     }
     return out;

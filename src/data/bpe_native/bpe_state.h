@@ -92,6 +92,15 @@ private:
     std::unordered_map<uint64_t, int64_t> pair_counts_;
     std::unordered_map<uint64_t, std::vector<int32_t>> where_;
     int num_threads_ = -1;  // -1 = use omp default
+
+    // Core merge logic, exposed for both the public apply_merge (which
+    // wraps it in a py::list construction) and run_merge_loop (which
+    // consumes the deltas directly to avoid the boundary cost). Updates
+    // symbols_per_chunk_, pair_counts_, and where_ in place; returns the
+    // per-pair delta map (one entry per pair whose count changed,
+    // excluding the merged pair itself).
+    std::unordered_map<uint64_t, int64_t> apply_merge_internal(
+        int32_t a, int32_t b, int32_t merged_id);
     // SuperBPE filter config — read by run_merge_loop (v2 Task 4).
     int max_superword_words_ = -1;   // -1 = disabled
     bool forbid_colon_g_ = false;
