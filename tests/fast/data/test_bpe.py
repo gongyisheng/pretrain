@@ -859,3 +859,26 @@ def test_bpe_state_apply_merge_removes_pair_from_where():
 
     assert state.pair_chunks(0, 1) == []
     assert state.pair_count(0, 1) == 0
+
+
+def test_bpe_state_apply_merge_dedupes_where_within_chunk():
+    """Repeated bigram patterns within a single chunk must not duplicate
+    chunk_id entries in where_ for the new neighbor pairs created by the
+    merge. Without per-chunk dedupe, the duplicate cid causes a data race
+    on the next apply_merge for that pair (concurrent mutation of the same
+    vector by two OpenMP threads).
+    """
+    from src.data.bpe_native import BpeState
+
+    # Chunk = [c, a, b, c, a, b]: merging (a,b)→ab creates the new pair (c, ab)
+    # at TWO positions within this one chunk.
+    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    state = BpeState()
+    state.seed({("c", "a", "b", "c", "a", "b"): 1}, symbol_table)
+    state.build_initial_pairs()
+    state.apply_merge(0, 1, 3)
+
+    # (c, ab) should list chunk 0 EXACTLY ONCE, despite two creation positions.
+    assert state.pair_chunks(2, 3) == [0]
+    # And the count should still reflect both occurrences (weighted).
+    assert state.pair_count(2, 3) == 2

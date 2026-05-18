@@ -26,7 +26,9 @@ inline void replay_one_chunk(std::vector<int32_t>& syms,
             if (syms[i] == a && syms[i + 1] == b) {
                 syms[i] = merged;
                 syms.erase(syms.begin() + static_cast<long>(i) + 1);
-                // i stays put so we can keep collapsing overlaps to the right.
+                ++i;  // safe to advance: syms[i] is now `merged` which can't
+                      // equal `a` (merged is a fresh symbol id), so the next
+                      // iteration would not match anyway.
             } else {
                 ++i;
             }
@@ -58,6 +60,12 @@ inline bool apply_merge_one_chunk(std::vector<int32_t>& syms,
                                   int32_t merged,
                                   LocalDeltas& out) {
     if (syms.size() < 2) return false;
+    // Track new (prev,merged) / (merged,nxt) pair keys this chunk has
+    // already added to where_adds — mirrors the set-based dedupe in
+    // Python's `_apply_merge_on_chunks` (`wtu_adds.setdefault(p, set()).add(chunk_id)`).
+    // Without it, the same chunk_id can land in where_[pair] multiple times,
+    // leading to a data race on the next apply_merge for that pair.
+    std::unordered_set<uint64_t> seen_in_chunk;
     bool changed = false;
     size_t i = 0;
     while (i + 1 < syms.size()) {
@@ -69,18 +77,26 @@ inline bool apply_merge_one_chunk(std::vector<int32_t>& syms,
         if (i > 0) {
             int32_t prev = syms[i - 1];
             out.count_deltas.emplace_back(pack_pair(prev, a), -w);
-            out.count_deltas.emplace_back(pack_pair(prev, merged), w);
-            out.where_adds.emplace_back(pack_pair(prev, merged), chunk_id);
+            uint64_t k_pm = pack_pair(prev, merged);
+            out.count_deltas.emplace_back(k_pm, w);
+            if (seen_in_chunk.insert(k_pm).second) {
+                out.where_adds.emplace_back(k_pm, chunk_id);
+            }
         }
         if (i + 2 < syms.size()) {
             int32_t nxt = syms[i + 2];
             out.count_deltas.emplace_back(pack_pair(b, nxt), -w);
-            out.count_deltas.emplace_back(pack_pair(merged, nxt), w);
-            out.where_adds.emplace_back(pack_pair(merged, nxt), chunk_id);
+            uint64_t k_mn = pack_pair(merged, nxt);
+            out.count_deltas.emplace_back(k_mn, w);
+            if (seen_in_chunk.insert(k_mn).second) {
+                out.where_adds.emplace_back(k_mn, chunk_id);
+            }
         }
         syms[i] = merged;
         syms.erase(syms.begin() + static_cast<long>(i) + 1);
-        // i stays — keep collapsing overlaps to the right.
+        ++i;  // safe to advance: syms[i] is now `merged` which can't equal `a`
+              // (merged is a fresh symbol id), so the next iteration would
+              // not match anyway. Advancing by 1 skips the redundant check.
     }
     return changed;
 }
