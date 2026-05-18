@@ -1,14 +1,7 @@
-"""Tests for src/data/bpe.py — pure-Python BPE trainer."""
-
-# ruff: noqa: F821
-# Several internal-helper tests below reference `_init_pair_state` and
-# `_apply_merge`, which were removed when BpeTrainer was rewired to drive the
-# native BpeState class. Those tests fail at runtime (NameError) and Task 8
-# will migrate or delete them; until then, suppress the file-level F821s so
-# the rest of the test file still collects.
+"""Tests for src/data/bpe.py — pure-Python BPE trainer (now backed by
+the C++ BpeState extension for hot loops)."""
 
 import heapq
-from collections import Counter
 
 import pytest
 
@@ -144,82 +137,78 @@ def test_build_chunks_empty_corpus_returns_empty_dict():
 
 
 def test_init_pair_state_counts_adjacent_pairs():
-    chunks = {("a", "b", "c"): 2, ("a", "b"): 3}
-    symbols, weights, pair_counts, where = _init_pair_state(chunks, merges_to_replay=[])
-    # (a,b) appears in both chunks: count = 2*1 + 3*1 = 5.
-    # (b,c) appears in first chunk: count = 2*1 = 2.
-    assert pair_counts[("a", "b")] == 5
-    assert pair_counts[("b", "c")] == 2
+    """Pair counts (weighted by chunk freq) via BpeState."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 2, ("a", "b"): 3}, symbol_table)
+    state.build_initial_pairs()
+
+    assert state.pair_count(0, 1) == 5
+    assert state.pair_count(1, 2) == 2
 
 
 def test_init_pair_state_where_to_update_indexes_chunks():
-    chunks = {("a", "b"): 1, ("a", "c"): 1}
-    symbols, weights, pair_counts, where = _init_pair_state(chunks, merges_to_replay=[])
-    ab_chunks = where[("a", "b")]
-    ac_chunks = where[("a", "c")]
-    assert len(ab_chunks) == 1
-    assert len(ac_chunks) == 1
-    assert ab_chunks != ac_chunks
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeState()
+    state.seed({("a", "b"): 1, ("a", "c"): 1}, symbol_table)
+    state.build_initial_pairs()
+
+    ab = state.pair_chunks(0, 1)
+    ac = state.pair_chunks(0, 2)
+    assert len(ab) == 1
+    assert len(ac) == 1
+    assert ab != ac
 
 
 def test_init_pair_state_symbols_per_chunk_are_lists():
-    chunks = {("a", "b", "c"): 1}
-    symbols, weights, _, _ = _init_pair_state(chunks, merges_to_replay=[])
-    assert symbols == [["a", "b", "c"]]
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 1}, symbol_table)
+
+    assert state.get_chunk_symbols(0) == [0, 1, 2]
 
 
 def test_init_pair_state_chunk_counts_track_input_weights():
-    chunks = {("a",): 7}
-    _, weights, _, _ = _init_pair_state(chunks, merges_to_replay=[])
-    assert weights == [7]
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0}
+    state = BpeState()
+    state.seed({("a",): 7}, symbol_table)
+
+    assert state.get_chunk_weight(0) == 7
 
 
 def test_init_pair_state_chunk_id_assignment_is_deterministic():
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
     chunks = {("b",): 1, ("a",): 1, ("c",): 1}
-    s1, _, _, _ = _init_pair_state(chunks, merges_to_replay=[])
-    s2, _, _, _ = _init_pair_state(chunks, merges_to_replay=[])
-    assert s1 == s2  # same input → same chunk ordering
 
+    s1 = BpeState()
+    s1.seed(chunks, symbol_table)
+    s2 = BpeState()
+    s2.seed(chunks, symbol_table)
 
-def test_init_pair_state_replays_merges():
-    chunks = {("a", "b", "c"): 1}
-    symbols, _, pair_counts, _ = _init_pair_state(chunks, merges_to_replay=[("a", "b")])
-    assert symbols == [["ab", "c"]]
-    assert pair_counts == Counter({("ab", "c"): 1})
-
-
-def test_init_pair_state_replay_multiple_merges_in_order():
-    chunks = {("a", "b", "c"): 1}
-    symbols, _, _, _ = _init_pair_state(
-        chunks, merges_to_replay=[("a", "b"), ("ab", "c")]
-    )
-    assert symbols == [["abc"]]
-
-
-def test_init_pair_state_parallel_matches_serial():
-    """Parallel pair-counting must produce byte-identical state to serial."""
-    # Build a moderate corpus of byte-encoded chunks so each worker sees real work.
-    chunks: dict[tuple[str, ...], int] = {}
-    for i in range(200):
-        text = f"sample document number {i} with some repeated content"
-        toks = tuple(_byte_encode(text))
-        chunks[toks] = chunks.get(toks, 0) + 1
-
-    s_s, w_s, pc_s, wtu_s = _init_pair_state(chunks, merges_to_replay=[], n_workers=1)
-    s_p, w_p, pc_p, wtu_p = _init_pair_state(
-        chunks, merges_to_replay=[], n_workers=4, chunks_per_task=20
-    )
-
-    assert s_s == s_p
-    assert w_s == w_p
-    assert pc_s == pc_p
-    assert wtu_s == wtu_p
+    syms1 = [s1.get_chunk_symbols(i) for i in range(s1.num_chunks())]
+    syms2 = [s2.get_chunk_symbols(i) for i in range(s2.num_chunks())]
+    assert syms1 == syms2
+    # Sorted by tuple: a < b < c.
+    assert syms1 == [[0], [1], [2]]
 
 
 def test_select_best_pair_picks_max_count():
     vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
-    pair_counts = Counter({("a", "b"): 5, ("c", "d"): 3})
-    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
+    pair_counts = {(0, 1): 5, (2, 3): 3}  # keyed by id-pair
+    heap = [
+        _make_heap_entry(("a", "b"), 5, vocab),
+        _make_heap_entry(("c", "d"), 3, vocab),
+    ]
     heapq.heapify(heap)
     pair, cnt = _select_best_pair(heap, pair_counts)
     assert pair == ("a", "b")
@@ -231,8 +220,12 @@ def test_select_best_pair_tie_break_smaller_id_wins():
     # ascending on (id_a, id_b)). With lex-sorted alphabet IDs, 'a'<'b'<'c'<'d',
     # so ('a','b') has the smallest ID pair.
     vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
-    pair_counts = Counter({("a", "b"): 3, ("a", "c"): 3, ("a", "d"): 3})
-    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
+    pair_counts = {(0, 1): 3, (0, 2): 3, (0, 3): 3}
+    heap = [
+        _make_heap_entry(("a", "b"), 3, vocab),
+        _make_heap_entry(("a", "c"), 3, vocab),
+        _make_heap_entry(("a", "d"), 3, vocab),
+    ]
     heapq.heapify(heap)
     pair, _ = _select_best_pair(heap, pair_counts)
     assert pair == ("a", "b")
@@ -241,7 +234,7 @@ def test_select_best_pair_tie_break_smaller_id_wins():
 def test_select_best_pair_skips_stale():
     # Heap has stale entry for ("a","b") at count=10; current count is 2.
     vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
-    pair_counts = Counter({("a", "b"): 2, ("c", "d"): 5})
+    pair_counts = {(0, 1): 2, (2, 3): 5}
     heap = [
         _make_heap_entry(("a", "b"), 10, vocab),  # stale (count too high)
         _make_heap_entry(("a", "b"), 2, vocab),  # current
@@ -256,57 +249,8 @@ def test_select_best_pair_skips_stale():
 
 def test_select_best_pair_returns_none_when_heap_empty():
     heap: list = []
-    pair_counts: Counter = Counter()
+    pair_counts: dict[tuple[int, int], int] = {}
     assert _select_best_pair(heap, pair_counts) == (None, 0)
-
-
-def test_apply_merge_rewrites_symbols():
-    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
-    chunks = {("a", "b", "c"): 1, ("a", "b"): 1}
-    syms, weights, pair_counts, where = _init_pair_state(chunks, [])
-    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
-    heapq.heapify(heap)
-    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab", vocab)
-    # All ("a","b") occurrences collapsed.
-    # _init_pair_state sorts chunks: ("a","b") < ("a","b","c"), so chunk 0 = ["a","b"].
-    assert syms == [["ab"], ["ab", "c"]]
-
-
-def test_apply_merge_updates_pair_counts():
-    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
-    chunks = {("a", "b", "c"): 1}
-    syms, weights, pair_counts, where = _init_pair_state(chunks, [])
-    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
-    heapq.heapify(heap)
-    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab", vocab)
-    # (a,b) gone, (b,c) gone, (ab,c) new.
-    assert ("a", "b") not in pair_counts
-    assert ("b", "c") not in pair_counts
-    assert pair_counts[("ab", "c")] == 1
-
-
-def test_apply_merge_respects_chunk_weight():
-    vocab = {"a": 0, "b": 1, "ab": 2}
-    chunks = {("a", "b"): 5}
-    syms, weights, pair_counts, where = _init_pair_state(chunks, [])
-    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
-    heapq.heapify(heap)
-    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "b"), "ab", vocab)
-    # (a,b) had count 5; after merge it disappears, no new pairs from a 1-symbol chunk.
-    assert ("a", "b") not in pair_counts
-    assert syms == [["ab"]]
-
-
-def test_apply_merge_overlapping_pairs_left_to_right():
-    # "a a a" → merge (a,a): consume left pair first, leaving "aa a", not "a aa".
-    vocab = {"a": 0, "aa": 1}
-    chunks = {("a", "a", "a"): 1}
-    syms, weights, pair_counts, where = _init_pair_state(chunks, [])
-    heap = [_make_heap_entry(p, c, vocab) for p, c in pair_counts.items()]
-    heapq.heapify(heap)
-    _apply_merge(syms, weights, pair_counts, where, heap, ("a", "a"), "aa", vocab)
-    assert syms == [["aa", "a"]]
-    assert pair_counts[("aa", "a")] == 1
 
 
 SAMPLE_TEXTS = [
