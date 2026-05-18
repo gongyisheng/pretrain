@@ -7,31 +7,27 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-mkdir -p logs/superbpe/train
+
 
 for V in 50 100 150 200; do
     folder="experiments/superbpe/v${V}k"
     if [[ ! -d "$folder" ]]; then
-        echo "error: $folder missing; run generate_configs.py first" >&2
+        echo "error: $folder missing" >&2
         exit 1
     fi
 
-    # BPE baseline first (fast sanity-check signal per V).
+    # BPE baseline
     baseline="${folder}/bpe_v${V}k.yaml"
     name="bpe_v${V}k"
     echo "==> Training ${name}"
-    uv run python scripts/train_tokenizer.py --config "$baseline" \
-        2>&1 | tee "logs/superbpe/train/${name}.log"
+    uv run python scripts/train_tokenizer.py --config "$baseline"
 
-    # SuperBPE configs in alphabetical shell-glob order (t100k_m2 runs before
-    # t20k_m2 for V ≥ 150k). Replace the glob with `sort -V` here for strict
-    # t-then-m order.
+    # SuperBPE configs
     for cfg in "${folder}"/superbpe_*.yaml; do
         name="$(basename "$cfg" .yaml)"
         echo "==> Training ${name}"
-        uv run python scripts/train_tokenizer.py --config "$cfg" \
-            2>&1 | tee "logs/superbpe/train/${name}.log"
+        uv run python scripts/train_tokenizer.py --config "$cfg"
     done
 done
 
-echo "All 114 tokenizers trained. Per-run logs in logs/superbpe/train/."
+echo "All tokenizers trained"
