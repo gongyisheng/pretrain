@@ -867,3 +867,18 @@ def test_bpe_state_seed_records_id2sym_native():
     assert state.vocab_id("b") == 1
     assert state.vocab_id("c") == 2
     assert state.native_vocab_size() == 3
+
+
+def test_bpe_state_filter_config_defaults_and_setters():
+    """Filter config defaults to disabled; setters store the configured values."""
+    from src.data.bpe_native import BpeState
+
+    state = BpeState()
+    # Defaults: both filters disabled.
+    assert state.get_max_superword_words() == -1
+    assert state.get_forbid_colon_g() is False
+
+    state.set_max_superword_words(4)
+    state.set_forbid_colon_g(True)
+    assert state.get_max_superword_words() == 4
+    assert state.get_forbid_colon_g() is True

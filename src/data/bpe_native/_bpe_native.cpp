@@ -27,6 +27,10 @@ PYBIND11_MODULE(_bpe_native, m) {
              py::arg("a"), py::arg("b"), py::arg("merged_id"))
         .def("drop_pair", &BpeState::drop_pair, py::arg("a"), py::arg("b"))
         .def("set_num_threads", &BpeState::set_num_threads, py::arg("n"))
+        .def("set_max_superword_words", &BpeState::set_max_superword_words, py::arg("n"))
+        .def("set_forbid_colon_g", &BpeState::set_forbid_colon_g, py::arg("flag"))
+        .def("get_max_superword_words", &BpeState::get_max_superword_words)
+        .def("get_forbid_colon_g", &BpeState::get_forbid_colon_g)
         .def("id2sym", &BpeState::id2sym, py::arg("id"))
         .def("vocab_id", &BpeState::vocab_id, py::arg("sym"))
         .def("native_vocab_size", &BpeState::native_vocab_size);

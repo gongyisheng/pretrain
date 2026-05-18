@@ -61,6 +61,18 @@ public:
     // Configure OpenMP thread count. -1 means use omp_get_max_threads().
     void set_num_threads(int n);
 
+    // SuperBPE filter configuration. Both default to "disabled."
+    // max_superword_words: reject a merge if the merged token's word-count
+    //   (counted by 'Ġ' chars + 1 if the merged str does not start with 'Ġ')
+    //   exceeds this. -1 disables the check.
+    // forbid_colon_g: when true, reject any merge whose merged string
+    //   contains the substring ":Ġ".
+    // The two filters are independent and BOTH are evaluated when set.
+    void set_max_superword_words(int n);
+    void set_forbid_colon_g(bool flag);
+    int get_max_superword_words() const { return max_superword_words_; }
+    bool get_forbid_colon_g() const { return forbid_colon_g_; }
+
     // Test/debug accessors.
     std::vector<int32_t> get_chunk_symbols(int32_t chunk_id) const;
     int64_t get_chunk_weight(int32_t chunk_id) const;
@@ -80,6 +92,9 @@ private:
     std::unordered_map<uint64_t, int64_t> pair_counts_;
     std::unordered_map<uint64_t, std::vector<int32_t>> where_;
     int num_threads_ = -1;  // -1 = use omp default
+    // SuperBPE filter config — read by run_merge_loop (v2 Task 4).
+    int max_superword_words_ = -1;   // -1 = disabled
+    bool forbid_colon_g_ = false;
     // String ↔ ID vocab, owned natively so run_merge_loop can build merged
     // token strings and evaluate the SuperBPE filter without GIL acquires.
     // Populated by seed() (and grown by run_merge_loop in v2 Task 4).

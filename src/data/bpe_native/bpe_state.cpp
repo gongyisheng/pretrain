@@ -334,3 +334,11 @@ int32_t BpeState::vocab_id(const std::string& sym) const {
     }
     return it->second;
 }
+
+void BpeState::set_max_superword_words(int n) {
+    max_superword_words_ = n;
+}
+
+void BpeState::set_forbid_colon_g(bool flag) {
+    forbid_colon_g_ = flag;
+}
