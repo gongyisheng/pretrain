@@ -17,24 +17,24 @@ V ∈ {50k, 100k, 150k, 200k} and how it interacts with m.
 | Axis | Values |
 |---|---|
 | `vocab_size` (V) | 50k, 100k, 150k, 200k |
-| `transition_size` (t) | every 20k, strictly < V |
+| `transition_size` (t) | 0, then every 20k up to V (strict) |
 | `max_superword_words` (m) | 2, 3, 4, 5, 6 |
 
-Total: **110 SuperBPE configs + 4 BPE baselines = 114 configs**, grouped
+Total: **130 SuperBPE configs + 4 BPE baselines = 134 configs**, grouped
 by V:
 
 ```
-v50k/   11 yamls  (1 bpe + 2 t × 5 m)
-v100k/  21 yamls  (1 bpe + 4 t × 5 m)
-v150k/  36 yamls  (1 bpe + 7 t × 5 m)
-v200k/  46 yamls  (1 bpe + 9 t × 5 m)
+v50k/   16 yamls  (1 bpe + 3 t × 5 m)
+v100k/  26 yamls  (1 bpe + 5 t × 5 m)
+v150k/  41 yamls  (1 bpe + 8 t × 5 m)
+v200k/  51 yamls  (1 bpe + 10 t × 5 m)
 ```
 
 Names use round-number axes (e.g. `superbpe_v200k_t80k_m4`); YAML values
 carry a +257 offset (256-byte alphabet + 1 special token), so the
 example above lists `vocab_size: 200257`, `transition_size: 80257`.
-
-See `generate_configs.py` for the full enumeration.
+The `t0k` configs (`transition_size: 257`) skip stage 1 entirely —
+all merges happen in stage 2 with no whitespace pretokenizer.
 
 ## Pipeline
 

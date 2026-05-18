@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train the SuperBPE grid sweep: 114 configs (4 BPE baselines + 110 SuperBPE).
+# Train the SuperBPE grid sweep: 134 configs (4 BPE baselines + 130 SuperBPE).
 # Smallest V first, BPE baseline before SuperBPE configs in each folder.
 # Each run streams to logs/superbpe/train/<name>.log.
 #
