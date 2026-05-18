@@ -18,5 +18,8 @@ PYBIND11_MODULE(_bpe_native, m) {
         .def("seed", &BpeState::seed, py::arg("chunks"), py::arg("symbol_table"))
         .def("get_chunk_symbols", &BpeState::get_chunk_symbols, py::arg("chunk_id"))
         .def("get_chunk_weight", &BpeState::get_chunk_weight, py::arg("chunk_id"))
-        .def("num_chunks", &BpeState::num_chunks);
+        .def("num_chunks", &BpeState::num_chunks)
+        .def("build_initial_pairs", &BpeState::build_initial_pairs)
+        .def("pair_count", &BpeState::pair_count, py::arg("a"), py::arg("b"))
+        .def("pair_chunks", &BpeState::pair_chunks, py::arg("a"), py::arg("b"));
 }

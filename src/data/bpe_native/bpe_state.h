@@ -33,12 +33,23 @@ public:
     // contain every str symbol that appears in any chunk tuple.
     void seed(py::dict chunks, py::dict symbol_table);
 
+    // Count adjacent-pair occurrences (weighted by chunk weight) and build
+    // the pair → chunk_ids reverse index. Must be called once after seed
+    // (and after replay_merges if resuming).
+    // Returns list[(a_id, b_id, count)] for the Python heap.
+    py::list build_initial_pairs();
+
     // Test/debug accessors.
     std::vector<int32_t> get_chunk_symbols(int32_t chunk_id) const;
     int64_t get_chunk_weight(int32_t chunk_id) const;
     int32_t num_chunks() const { return static_cast<int32_t>(symbols_per_chunk_.size()); }
+    int64_t pair_count(int32_t a, int32_t b) const;
+    std::vector<int32_t> pair_chunks(int32_t a, int32_t b) const;
 
 private:
     std::vector<std::vector<int32_t>> symbols_per_chunk_;
     std::vector<int64_t> chunk_weights_;
+    // (pair, count) and (pair → chunk_ids). uint64 key = pack_pair(a, b).
+    std::unordered_map<uint64_t, int64_t> pair_counts_;
+    std::unordered_map<uint64_t, std::vector<int32_t>> where_;
 };

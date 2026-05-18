@@ -630,3 +630,54 @@ def test_bpe_state_seed_unknown_symbol_raises():
     state = BpeState()
     with pytest.raises((KeyError, RuntimeError, ValueError)):
         state.seed(chunks, symbol_table)
+
+
+def test_bpe_state_build_initial_pairs_counts_adjacent():
+    """Counts adjacent-pair occurrences weighted by chunk frequency."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    chunks = {("a", "b", "c"): 2, ("a", "b"): 3}
+
+    state = BpeState()
+    state.seed(chunks, symbol_table)
+    pairs = state.build_initial_pairs()
+
+    # Convert to dict for assertion. Each entry is (a_id, b_id, count).
+    by_pair = {(a, b): c for a, b, c in pairs}
+    # (a,b) appears in both chunks: count = 2 + 3 = 5.
+    # (b,c) appears in first: count = 2.
+    assert by_pair[(0, 1)] == 5
+    assert by_pair[(1, 2)] == 2
+    assert len(by_pair) == 2
+
+
+def test_bpe_state_pair_chunks_indexes_membership():
+    """pair_chunks returns the chunk_ids where (a,b) appears."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    chunks = {("a", "b"): 1, ("a", "c"): 1}
+
+    state = BpeState()
+    state.seed(chunks, symbol_table)
+    state.build_initial_pairs()
+
+    ab = sorted(state.pair_chunks(0, 1))
+    ac = sorted(state.pair_chunks(0, 2))
+    assert len(ab) == 1
+    assert len(ac) == 1
+    assert ab != ac
+
+
+def test_bpe_state_pair_count_matches_initial_pairs():
+    """pair_count(a,b) reflects what build_initial_pairs returned."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1}
+    state = BpeState()
+    state.seed({("a", "b"): 7}, symbol_table)
+    state.build_initial_pairs()
+
+    assert state.pair_count(0, 1) == 7
+    assert state.pair_count(1, 0) == 0  # never observed

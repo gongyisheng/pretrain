@@ -60,3 +60,46 @@ int64_t BpeState::get_chunk_weight(int32_t chunk_id) const {
     }
     return chunk_weights_[chunk_id];
 }
+
+py::list BpeState::build_initial_pairs() {
+    pair_counts_.clear();
+    where_.clear();
+
+    const int32_t n = static_cast<int32_t>(symbols_per_chunk_.size());
+    for (int32_t cid = 0; cid < n; ++cid) {
+        const auto& syms = symbols_per_chunk_[cid];
+        const int64_t w = chunk_weights_[cid];
+        if (syms.size() < 2) continue;
+        // Track which pairs this chunk contributes to, to avoid duplicate
+        // entries in where_[pair] for chunks where the same pair occurs
+        // multiple times.
+        std::unordered_map<uint64_t, bool> seen_in_chunk;
+        for (size_t i = 0; i + 1 < syms.size(); ++i) {
+            uint64_t key = pack_pair(syms[i], syms[i + 1]);
+            pair_counts_[key] += w;
+            if (!seen_in_chunk[key]) {
+                seen_in_chunk[key] = true;
+                where_[key].push_back(cid);
+            }
+        }
+    }
+
+    py::list out;
+    out.attr("__init__")();  // no-op; py::list ctor already initialized
+    for (const auto& [key, count] : pair_counts_) {
+        out.append(py::make_tuple(unpack_a(key), unpack_b(key), count));
+    }
+    return out;
+}
+
+int64_t BpeState::pair_count(int32_t a, int32_t b) const {
+    auto it = pair_counts_.find(pack_pair(a, b));
+    if (it == pair_counts_.end()) return 0;
+    return it->second;
+}
+
+std::vector<int32_t> BpeState::pair_chunks(int32_t a, int32_t b) const {
+    auto it = where_.find(pack_pair(a, b));
+    if (it == where_.end()) return {};
+    return it->second;
+}
