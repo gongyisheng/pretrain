@@ -1,8 +1,6 @@
 """Tests for src/data/bpe.py — pure-Python BPE trainer (now backed by
 the C++ BpeState extension for hot loops)."""
 
-import heapq
-
 import pytest
 
 from src.data.bpe import (
@@ -11,9 +9,7 @@ from src.data.bpe import (
     _UNICODE_TO_BYTE,
     _build_chunks,
     _byte_encode,
-    _make_heap_entry,
     _pretokenize,
-    _select_best_pair,
 )
 
 
@@ -202,57 +198,6 @@ def test_init_pair_state_chunk_id_assignment_is_deterministic():
     assert syms1 == [[0], [1], [2]]
 
 
-def test_select_best_pair_picks_max_count():
-    vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
-    pair_counts = {(0, 1): 5, (2, 3): 3}  # keyed by id-pair
-    heap = [
-        _make_heap_entry(("a", "b"), 5, vocab),
-        _make_heap_entry(("c", "d"), 3, vocab),
-    ]
-    heapq.heapify(heap)
-    pair, cnt = _select_best_pair(heap, pair_counts)
-    assert pair == ("a", "b")
-    assert cnt == 5
-
-
-def test_select_best_pair_tie_break_smaller_id_wins():
-    # Equal count → pick the pair with smaller token IDs (matches HF's tie-break:
-    # ascending on (id_a, id_b)). With lex-sorted alphabet IDs, 'a'<'b'<'c'<'d',
-    # so ('a','b') has the smallest ID pair.
-    vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
-    pair_counts = {(0, 1): 3, (0, 2): 3, (0, 3): 3}
-    heap = [
-        _make_heap_entry(("a", "b"), 3, vocab),
-        _make_heap_entry(("a", "c"), 3, vocab),
-        _make_heap_entry(("a", "d"), 3, vocab),
-    ]
-    heapq.heapify(heap)
-    pair, _ = _select_best_pair(heap, pair_counts)
-    assert pair == ("a", "b")
-
-
-def test_select_best_pair_skips_stale():
-    # Heap has stale entry for ("a","b") at count=10; current count is 2.
-    vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
-    pair_counts = {(0, 1): 2, (2, 3): 5}
-    heap = [
-        _make_heap_entry(("a", "b"), 10, vocab),  # stale (count too high)
-        _make_heap_entry(("a", "b"), 2, vocab),  # current
-        _make_heap_entry(("c", "d"), 5, vocab),
-    ]
-    heapq.heapify(heap)
-    pair, cnt = _select_best_pair(heap, pair_counts)
-    # Stale entry popped first → ignored; then (c,d):5 is chosen over (a,b):2.
-    assert pair == ("c", "d")
-    assert cnt == 5
-
-
-def test_select_best_pair_returns_none_when_heap_empty():
-    heap: list = []
-    pair_counts: dict[tuple[int, int], int] = {}
-    assert _select_best_pair(heap, pair_counts) == (None, 0)
-
-
 SAMPLE_TEXTS = [
     "the quick brown fox jumps over the lazy dog",
     "she sells seashells by the seashore",
@@ -374,48 +319,6 @@ def test_bpe_parity_with_hf_unicode():
     hf_vocab, hf_merges = _train_hf(lambda: iter(UNICODE_TEXTS), vocab_size=400)
     assert py_merges == hf_merges
     assert set(py_vocab) == set(hf_vocab)
-
-
-def test_merge_filter_vetoes_specific_pair():
-    # Reject any merge whose result contains "e".
-    def no_e(a, b, merged):
-        return "e" not in merged
-
-    trainer = BpeTrainer(vocab_size=300, n_workers=1, merge_filter=no_e)
-    vocab, _ = trainer.train(_corpus)
-    special = set(trainer.special_tokens)
-    for tok in vocab:
-        if len(tok) > 1 and tok not in special:  # multi-char tokens are merge results
-            assert "e" not in tok, f"vetoed letter leaked into {tok!r}"
-
-
-def test_merge_filter_early_exit_when_all_vetoed():
-    """Filter rejecting everything → trainer exits with seed-only vocab."""
-
-    def reject_all(a, b, merged):
-        return False
-
-    vocab, merges = BpeTrainer(
-        vocab_size=300, n_workers=1, merge_filter=reject_all
-    ).train(_corpus)
-    # 256 byte alphabet + 1 special token. No merges accepted.
-    assert len(vocab) == 257
-    assert merges == []
-
-
-def test_merge_filter_called_with_string_args():
-    """Filter receives (a, b, a+b) as byte-level unicode strings."""
-    calls = []
-
-    def record(a, b, merged):
-        calls.append((a, b, merged))
-        return True
-
-    BpeTrainer(vocab_size=270, n_workers=1, merge_filter=record).train(_corpus)
-    assert len(calls) > 0
-    for a, b, merged in calls:
-        assert isinstance(a, str) and isinstance(b, str) and isinstance(merged, str)
-        assert a + b == merged
 
 
 def test_progress_callback_fires_every_n():

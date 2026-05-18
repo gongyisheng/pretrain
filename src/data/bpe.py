@@ -5,15 +5,14 @@ HuggingFace `tokenizers.BpeTrainer` on the same corpus + pretokenizer, and
 adds two capabilities HF lacks:
 
   - Resume/extend from a saved tokenizer (via `initial_vocab` + `initial_merges`).
-  - Per-merge veto via `merge_filter` callback (used by SuperBPE stage 2 for
-    `max_superword_words` and `:Ġ` exclusion).
+  - Hardcoded SuperBPE filter rules toggled via `max_superword_words` and
+    `forbid_colon_g` (the C++ side enforces them inside `run_merge_loop`).
 
 Encode/decode at inference stays on HF: emit a HF-compatible (vocab, merges)
 pair, caller wraps in `tokenizers.Tokenizer(models.BPE(...))` and saves.
 """
 
 import atexit
-import heapq
 import os
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -213,46 +212,6 @@ def _build_chunks(
     return dict(total)
 
 
-def _make_heap_entry(
-    pair: tuple[str, str],
-    count: int,
-    vocab: dict[str, int],
-) -> tuple:
-    """Build a heap entry whose ordering matches HF tie-break:
-      1. count desc
-      2. (vocab_id_a, vocab_id_b) asc — i.e., the pair with the smaller token
-         IDs wins on a count tie, matching HF's Rust `Ord` impl which compares
-         `other.pair.cmp(&self.pair)` (ascending on IDs) in a max-heap.
-
-    `heapq` is a min-heap, so we negate count. The ID tuple sorts naturally in
-    ascending order, so the smallest-ID pair bubbles to the top on ties.
-    The trailing `pair` tuple is the actual value the consumer reads back.
-    """
-    id_key = (vocab[pair[0]], vocab[pair[1]])
-    return (-count, id_key, pair)
-
-
-def _select_best_pair(
-    heap: list,
-    pair_counts: dict[tuple[int, int], int],
-) -> tuple[tuple[str, str] | None, int]:
-    """Pop heap until a non-stale entry is found.
-
-    Returns ((sym_a, sym_b), count) or (None, 0) if heap drained. `pair_counts`
-    is keyed by (int_a, int_b) — same as the heap entry's `id_key` element,
-    which `_make_heap_entry` already constructs.
-    """
-    while heap:
-        neg_count, id_key, pair_syms = heap[0]
-        count = -neg_count
-        cur = pair_counts.get(id_key, 0)
-        if cur == count and cur > 0:
-            heapq.heappop(heap)
-            return pair_syms, cur
-        heapq.heappop(heap)
-    return None, 0
-
-
 class BpeTrainer:
     """Train a BPE tokenizer. Python control flow drives a C++ `BpeState`
     extension for the hot loops (replay merges + per-merge chunk scan).
@@ -268,7 +227,8 @@ class BpeTrainer:
         pretokenizer: str = "bpe",
         initial_vocab: dict[str, int] | None = None,
         initial_merges: list[tuple[str, str]] | None = None,
-        merge_filter: Callable[[str, str, str], bool] | None = None,
+        max_superword_words: int = -1,
+        forbid_colon_g: bool = False,
         progress_callback: Callable[[int, dict, list], None] | None = None,
         progress_every: int = 1000,
         n_workers: int | None = None,
@@ -315,7 +275,8 @@ class BpeTrainer:
         self.pretokenizer = pretokenizer
         self.initial_vocab = initial_vocab
         self.initial_merges = initial_merges
-        self.merge_filter = merge_filter
+        self.max_superword_words = max_superword_words
+        self.forbid_colon_g = forbid_colon_g
         self.progress_callback = progress_callback
         self.progress_every = progress_every
         self.n_workers = (
@@ -338,7 +299,6 @@ class BpeTrainer:
         and, if ``initial_merges`` is set, replays them on each chunk to
         recover the post-resume state.
         """
-
         # 1. Pretokenize + dedup. Still mp.Pool-parallel (regex bound).
         chunks = _build_chunks(
             corpus_iter,
@@ -351,7 +311,7 @@ class BpeTrainer:
         if not chunks:
             raise ValueError("corpus produced no trainable chunks")
 
-        # 2. Seed vocab: specials + byte alphabet (or initial_vocab if resuming).
+        # 2. Seed vocab: specials + byte alphabet (or initial_vocab on resume).
         if self.initial_vocab is None:
             vocab: dict[str, int] = {}
             for sp in self.special_tokens:
@@ -362,75 +322,37 @@ class BpeTrainer:
         else:
             vocab = dict(self.initial_vocab)
             merges = list(self.initial_merges)  # type: ignore[arg-type]
-        id2sym: dict[int, str] = {v: k for k, v in vocab.items()}
 
-        # 3. Native state: seed + replay (on resume) + pair-count build.
+        # 3. Native state: seed + replay (on resume) + initial pair counts.
         state = BpeState()
         state.set_num_threads(self.n_workers)
         state.seed(chunks, vocab)
         del chunks  # large; release before pair counting allocates more.
         if merges:
-            # Replay prior merges so byte-level chunks catch up to post-resume state.
-            merges_int = [(vocab[a], vocab[b], vocab[a + b]) for a, b in merges]
+            sym_to_id = vocab  # already keyed by str; dict lookup is O(1)
+            merges_int = [
+                (sym_to_id[a], sym_to_id[b], sym_to_id[a + b]) for a, b in merges
+            ]
             state.replay_merges(merges_int)
-        initial_pairs = state.build_initial_pairs()
-        pair_counts: dict[tuple[int, int], int] = {
-            (a, b): c for a, b, c in initial_pairs
-        }
+        state.build_initial_pairs()
 
-        # 4. Heap. Entries are (-count, (id_a, id_b), (sym_a, sym_b)) — third
-        #    element is the (str, str) tuple that `_select_best_pair` returns
-        #    and that the merge_filter / vocab lookups consume. Tie-break on
-        #    ascending (id_a, id_b) — same as HF.
-        heap = [(-c, (a, b), (id2sym[a], id2sym[b])) for a, b, c in initial_pairs]
-        heapq.heapify(heap)
+        # 4. Configure SuperBPE filter (both default off).
+        if self.max_superword_words > 0:
+            state.set_max_superword_words(self.max_superword_words)
+        if self.forbid_colon_g:
+            state.set_forbid_colon_g(True)
 
-        # 5. Merge loop.
-        n_vetoed = 0
-        with tqdm(
-            total=self.vocab_size,
-            initial=len(vocab),
-            desc=f"{self.progress_desc} apply_merge".strip(),
-            disable=not self.show_progress,
-            dynamic_ncols=True,
-        ) as bar:
-            while len(vocab) < self.vocab_size:
-                pair_syms, _cnt = _select_best_pair(heap, pair_counts)
-                if pair_syms is None:
-                    break
-                a_s, b_s = pair_syms
-                a_id, b_id = vocab[a_s], vocab[b_s]
-                merged_s = a_s + b_s
-                if self.merge_filter is not None and not self.merge_filter(
-                    a_s, b_s, merged_s
-                ):
-                    state.drop_pair(a_id, b_id)
-                    pair_counts.pop((a_id, b_id), None)
-                    n_vetoed += 1
-                    if self.show_progress:
-                        bar.set_postfix(vetoed=n_vetoed, refresh=False)
-                    continue
-                merged_id = len(vocab)
-                vocab[merged_s] = merged_id
-                id2sym[merged_id] = merged_s
-                merges.append(pair_syms)
-                deltas = state.apply_merge(a_id, b_id, merged_id)
-                pair_counts.pop((a_id, b_id), None)
-                for pa, pb, dv in deltas:
-                    new = pair_counts.get((pa, pb), 0) + dv
-                    if new <= 0:
-                        pair_counts.pop((pa, pb), None)
-                    else:
-                        pair_counts[(pa, pb)] = new
-                        heapq.heappush(
-                            heap,
-                            (-new, (pa, pb), (id2sym[pa], id2sym[pb])),
-                        )
-                bar.update(1)
-                if (
-                    self.progress_callback is not None
-                    and len(vocab) % self.progress_every == 0
-                ):
-                    self.progress_callback(len(vocab), vocab, merges)
+        # 5. Run the merge loop natively.
+        state.run_merge_loop(
+            target_vocab_size=self.vocab_size,
+            progress_cb=self.progress_callback,
+            progress_every=self.progress_every,
+            show_progress=self.show_progress,
+            progress_desc=self.progress_desc,
+        )
 
-        return vocab, merges
+        # 6. Marshal final output back to Python. Native `get_merges()` returns
+        #    only the merges added during `run_merge_loop`; on resume, prepend
+        #    the prior `initial_merges` (which were replayed onto chunks but
+        #    never recorded in `merges_native_`).
+        return state.get_vocab(), merges + state.get_merges()
