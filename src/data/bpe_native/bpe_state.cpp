@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace py = pybind11;
@@ -73,19 +74,17 @@ py::list BpeState::build_initial_pairs() {
         // Track which pairs this chunk contributes to, to avoid duplicate
         // entries in where_[pair] for chunks where the same pair occurs
         // multiple times.
-        std::unordered_map<uint64_t, bool> seen_in_chunk;
+        std::unordered_set<uint64_t> seen_in_chunk;
         for (size_t i = 0; i + 1 < syms.size(); ++i) {
             uint64_t key = pack_pair(syms[i], syms[i + 1]);
             pair_counts_[key] += w;
-            if (!seen_in_chunk[key]) {
-                seen_in_chunk[key] = true;
+            if (seen_in_chunk.insert(key).second) {
                 where_[key].push_back(cid);
             }
         }
     }
 
     py::list out;
-    out.attr("__init__")();  // no-op; py::list ctor already initialized
     for (const auto& [key, count] : pair_counts_) {
         out.append(py::make_tuple(unpack_a(key), unpack_b(key), count));
     }

@@ -681,3 +681,22 @@ def test_bpe_state_pair_count_matches_initial_pairs():
 
     assert state.pair_count(0, 1) == 7
     assert state.pair_count(1, 0) == 0  # never observed
+
+
+def test_bpe_state_build_initial_pairs_dedupes_pair_within_chunk():
+    """If (a,b) appears multiple times in one chunk, the chunk_id is listed
+    in where_[(a,b)] exactly once, but pair_count counts every occurrence
+    weighted by chunk weight."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1}
+    chunks = {("a", "b", "a", "b"): 3}
+
+    state = BpeState()
+    state.seed(chunks, symbol_table)
+    state.build_initial_pairs()
+
+    # Two occurrences of (a,b) in a single chunk with weight 3.
+    assert state.pair_count(0, 1) == 6
+    # But the chunk_id appears only once in pair_chunks.
+    assert state.pair_chunks(0, 1) == [0]
