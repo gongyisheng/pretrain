@@ -22,18 +22,26 @@ dependencies = [
     "torchao>=0.16",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=9.0",
-    "transformers>=4.51",
-]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 
 [dependency-groups]
 dev = [
+    "pytest>=9.0",
+    "transformers>=4.51",
     "ruff>=0.15.6",
     "pre-commit>=4.0",
+]
+
+[tool.uv]
+# Rebuild the editable install (and therefore the C++ `bpe_native` extension)
+# when any of these files change. Default cache-keys only watch pyproject.toml,
+# so without this an edit to a .cpp/.h file would be picked up only after an
+# explicit `uv sync --reinstall-package pretrain`.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "src/data/bpe_native/**/*.cpp" },
+    { file = "src/data/bpe_native/**/*.h" },
 ]
