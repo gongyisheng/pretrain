@@ -267,19 +267,14 @@ class TokenizerTrainer:
         # ---- Superword pass: byte-level chunking + SuperBPE filters ----
         t0 = time.perf_counter()
 
-        def superbpe_filter(a: str, b: str, merged: str) -> bool:
-            if ":Ġ" in merged:
-                return False
-            word_count = merged.count("Ġ") + (0 if merged.startswith("Ġ") else 1)
-            return word_count <= self.max_superword_words
-
         superword_bpe = BpeTrainer(
             vocab_size=self.vocab_size,
             special_tokens=self._SPECIAL_TOKENS,
             pretokenizer="bytelevel",
             initial_vocab=subword_vocab,
             initial_merges=subword_merges,
-            merge_filter=superbpe_filter,
+            max_superword_words=self.max_superword_words,
+            forbid_colon_g=True,
             progress_callback=self._wandb_curve_cb(use_regex=False)
             if self.logger.enabled
             else None,
