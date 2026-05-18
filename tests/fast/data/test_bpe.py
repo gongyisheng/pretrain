@@ -596,3 +596,37 @@ def test_bpe_parity_serial_vs_parallel():
 def test_bpe_n_workers_default_is_safe():
     """n_workers=None defaults to a sane positive integer; train succeeds."""
     BpeTrainer(vocab_size=300, n_workers=None).train(_corpus)
+
+
+def test_bpe_state_seed_assigns_chunk_ids_in_tuple_order():
+    """Chunks must be sorted by tuple-of-IDs, matching today's
+    sorted(chunks.items(), key=lambda kv: kv[0]).
+    """
+    from src.data.bpe_native import BpeState
+
+    # IDs assigned so that lex-of-id order == lex-of-str order on the symbols used.
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    chunks = {("b", "c"): 1, ("a", "b"): 2, ("a", "c"): 3}
+
+    state = BpeState()
+    state.seed(chunks, symbol_table)
+
+    # Sorted tuples: ("a","b"), ("a","c"), ("b","c") → chunk_ids 0,1,2.
+    assert state.get_chunk_symbols(0) == [0, 1]
+    assert state.get_chunk_symbols(1) == [0, 2]
+    assert state.get_chunk_symbols(2) == [1, 2]
+    assert state.get_chunk_weight(0) == 2
+    assert state.get_chunk_weight(1) == 3
+    assert state.get_chunk_weight(2) == 1
+    assert state.num_chunks() == 3
+
+
+def test_bpe_state_seed_unknown_symbol_raises():
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1}
+    chunks = {("a", "z"): 1}  # 'z' not in symbol_table
+
+    state = BpeState()
+    with pytest.raises((KeyError, RuntimeError, ValueError)):
+        state.seed(chunks, symbol_table)

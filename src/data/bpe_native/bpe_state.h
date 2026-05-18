@@ -1,0 +1,44 @@
+#pragma once
+
+#include <cstdint>
+#include <pybind11/pybind11.h>
+#include <unordered_map>
+#include <vector>
+
+namespace py = pybind11;
+
+// Pack two int32 symbol IDs into a single uint64 key for unordered_map.
+// We use this everywhere we'd otherwise need std::pair<int32_t,int32_t>
+// as a map key — uint64 avoids a custom hash and packs into one register.
+inline uint64_t pack_pair(int32_t a, int32_t b) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
+           static_cast<uint64_t>(static_cast<uint32_t>(b));
+}
+
+inline int32_t unpack_a(uint64_t key) {
+    return static_cast<int32_t>(static_cast<uint32_t>(key >> 32));
+}
+
+inline int32_t unpack_b(uint64_t key) {
+    return static_cast<int32_t>(static_cast<uint32_t>(key & 0xFFFFFFFFu));
+}
+
+class BpeState {
+public:
+    BpeState() = default;
+
+    // Convert a Python chunks dict (dict[tuple[str], int]) into int32 arrays.
+    // Sorts by chunk-tuple of int32 IDs for deterministic chunk_id assignment.
+    // symbol_table: Python's vocab at seed time (dict[str, int32]) — must
+    // contain every str symbol that appears in any chunk tuple.
+    void seed(py::dict chunks, py::dict symbol_table);
+
+    // Test/debug accessors.
+    std::vector<int32_t> get_chunk_symbols(int32_t chunk_id) const;
+    int64_t get_chunk_weight(int32_t chunk_id) const;
+    int32_t num_chunks() const { return static_cast<int32_t>(symbols_per_chunk_.size()); }
+
+private:
+    std::vector<std::vector<int32_t>> symbols_per_chunk_;
+    std::vector<int64_t> chunk_weights_;
+};
