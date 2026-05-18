@@ -408,8 +408,6 @@ int BpeState::run_merge_loop(int32_t target_vocab_size,
     std::make_heap(heap_.begin(), heap_.end(), std::greater<HeapEntry>{});
 
     int n_accepted = 0;
-    int n_vetoed = 0;
-    (void)n_vetoed;  // tracked internally; not returned in v2 Task 4
 
     while (static_cast<int32_t>(id2sym_native_.size()) < target_vocab_size) {
         // Pop until live entry.
@@ -446,7 +444,6 @@ int BpeState::run_merge_loop(int32_t target_vocab_size,
             uint64_t key = pack_pair(a, b);
             pair_counts_.erase(key);
             where_.erase(key);
-            ++n_vetoed;
             continue;
         }
 
@@ -468,10 +465,11 @@ int BpeState::run_merge_loop(int32_t target_vocab_size,
 
         ++n_accepted;
 
-        // Progress callback every progress_every accepted merges.
+        // Progress callback when total vocab size hits a multiple of
+        // progress_every — matches Python's `len(vocab) % progress_every == 0`.
         if (!progress_cb.is_none()
          && progress_every > 0
-         && n_accepted % progress_every == 0) {
+         && static_cast<int32_t>(id2sym_native_.size()) % progress_every == 0) {
             py::dict snapshot_vocab = get_vocab();
             py::list snapshot_merges = get_merges();
             progress_cb(static_cast<int>(id2sym_native_.size()),

@@ -1031,3 +1031,34 @@ def test_bpe_state_progress_cb_invoked_at_intervals():
     assert len(calls) == 2
     # Second snapshot must include both merges.
     assert len(calls[-1][2]) == 2
+
+
+def test_bpe_state_progress_cb_fires_on_vocab_size_multiples():
+    """progress_cb should be invoked when native_vocab_size() (not n_accepted)
+    hits a multiple of progress_every — matching Python's len(vocab) cadence."""
+    from src.data.bpe_native import BpeState
+
+    calls = []
+
+    def cb(size, vocab, merges):
+        calls.append(size)
+
+    # Seed vocab size = 3. progress_every = 4. The first callback should fire
+    # when native_vocab_size() reaches 4 (after 1 accepted merge), NOT when
+    # n_accepted reaches 4.
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 5, ("a", "b"): 3}, symbol_table)
+    state.build_initial_pairs()
+    state.run_merge_loop(
+        target_vocab_size=5,
+        progress_cb=cb,
+        progress_every=4,
+        show_progress=False,
+        progress_desc="",
+    )
+
+    # Started at 3, ran to 5 → 2 accepted merges (vocab grew 3 → 4 → 5).
+    # With progress_every=4, the callback fires once (when vocab hits 4),
+    # not at all under n_accepted % 4 == 0 semantics (n_accepted maxes at 2).
+    assert calls == [4]
