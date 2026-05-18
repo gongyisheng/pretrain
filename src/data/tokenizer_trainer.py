@@ -16,7 +16,6 @@ Runtime encode/decode loading lives in src/data/tokenizer.py.
 import itertools
 import os
 import time
-from collections import Counter
 from typing import Callable, Iterable
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
@@ -273,52 +272,6 @@ class TokenizerTrainer:
             word_count = merged.count("Ġ") + (0 if merged.startswith("Ġ") else 1)
             return word_count <= self.max_superword_words
 
-        # Pre-encode the corpus with the subword tokenizer so the superword
-        # BpeTrainer skips the Python merge-replay. Equivalence verified by
-        # `test_bpe_chunks_param_equivalent_with_resume`.
-        # 99th-percentile length truncation caps the long tail of mega-docs
-        # that dominate pair-counting cost — matches the original SuperBPE
-        # paper / fork.
-        def encode_corpus_to_chunks(
-            tokenizer: Tokenizer,
-            corpus_iter: Callable[[], Iterable[str]],
-            batch_size: int = 1000,
-            truncate_percentile: float | None = 99.0,
-        ) -> dict[tuple[str, ...], int]:
-            """Pre-encode `corpus_iter` with `tokenizer`; return chunk-counts
-            ready for `BpeTrainer.train(chunks=...)`. HF's Rust encode_batch
-            produces the post-subword-merge symbol sequences much faster than
-            replaying merges in Python inside `_init_pair_state`.
-
-            If `truncate_percentile` is set and at least 100 docs are present,
-            each doc is truncated to the n-th-percentile token-length before
-            dedup. Drops the long-tail-doc contribution to `total_symbols`
-            while preserving statistics for the typical-length docs.
-            """
-            encoded_docs: list[tuple[str, ...]] = []
-            stream = iter(corpus_iter())
-            while True:
-                batch = list(itertools.islice(stream, batch_size))
-                if not batch:
-                    break
-                for enc in tokenizer.encode_batch(batch, add_special_tokens=False):
-                    encoded_docs.append(tuple(enc.tokens))
-
-            if truncate_percentile is not None and len(encoded_docs) >= 100:
-                lengths = sorted(len(d) for d in encoded_docs)
-                idx = min(
-                    len(lengths) - 1, int(len(lengths) * truncate_percentile / 100.0)
-                )
-                cutoff = lengths[idx]
-                encoded_docs = [d[:cutoff] for d in encoded_docs]
-
-            chunks: Counter = Counter()
-            for d in encoded_docs:
-                chunks[d] += 1
-            return dict(chunks)
-
-        encoded_chunks = encode_corpus_to_chunks(subword_tok, make_train_iter)
-
         superword_bpe = BpeTrainer(
             vocab_size=self.vocab_size,
             special_tokens=self._SPECIAL_TOKENS,
@@ -333,7 +286,7 @@ class TokenizerTrainer:
             show_progress=True,
             progress_desc="[superbpe][superword pass]",
         )
-        vocab, merges = superword_bpe.train(chunks=encoded_chunks)
+        vocab, merges = superword_bpe.train(make_train_iter)
         print(
             f"SuperBPE superword pass done: vocab_size={len(vocab)} "
             f"({time.perf_counter() - t0:.2f}s)"

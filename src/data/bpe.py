@@ -181,6 +181,8 @@ def _build_chunks(
     mode: str,
     n_workers: int = 1,
     batch_size: int = 1000,
+    show_progress: bool = False,
+    progress_desc: str = "",
 ) -> dict[tuple[str, ...], int]:
     """Pretokenize the corpus and aggregate by symbol-tuple.
 
@@ -193,6 +195,15 @@ def _build_chunks(
         _pretokenize_batch_starargs,
         _iter_batches(corpus_iter(), batch_size, mode),
         chunksize=1,
+    )
+    # Total batch count is unknown (corpus is a stream) — tqdm shows running
+    # count and rate without an ETA.
+    results = tqdm(
+        results,
+        desc=f"{progress_desc} pretokenize".strip(),
+        unit="batch",
+        dynamic_ncols=True,
+        disable=not show_progress,
     )
     for partial in results:
         total.update(partial)
@@ -264,6 +275,8 @@ def _init_pair_state(
     merges_to_replay: list[tuple[str, str]],
     n_workers: int = 1,
     chunks_per_task: int = 1000,
+    show_progress: bool = False,
+    progress_desc: str = "",
 ) -> tuple[list[list[str]], list[int], Counter, dict[tuple[str, str], set[int]]]:
     """Initialize merge-loop state from chunked corpus.
 
@@ -300,7 +313,16 @@ def _init_pair_state(
             for s in chunk_starts
         ]
         new_symbols: list[list[str]] = []
-        for slc in pool.imap(_replay_merges_starargs, replay_tasks, chunksize=1):
+        replay_iter = pool.imap(_replay_merges_starargs, replay_tasks, chunksize=1)
+        replay_iter = tqdm(
+            replay_iter,
+            total=len(replay_tasks),
+            desc=f"{progress_desc} replay merges".strip(),
+            unit="task",
+            dynamic_ncols=True,
+            disable=not show_progress,
+        )
+        for slc in replay_iter:
             new_symbols.extend(slc)
         symbols_per_chunk = new_symbols
 
@@ -313,9 +335,16 @@ def _init_pair_state(
         )
         for s in chunk_starts
     ]
-    for local_pair_counts, local_where_to_update in pool.imap_unordered(
-        _count_pairs_starargs, count_tasks, chunksize=1
-    ):
+    count_iter = pool.imap_unordered(_count_pairs_starargs, count_tasks, chunksize=1)
+    count_iter = tqdm(
+        count_iter,
+        total=len(count_tasks),
+        desc=f"{progress_desc} count pairs".strip(),
+        unit="task",
+        dynamic_ncols=True,
+        disable=not show_progress,
+    )
+    for local_pair_counts, local_where_to_update in count_iter:
         pair_counts.update(local_pair_counts)
         for p, chunk_ids in local_where_to_update.items():
             where_to_update.setdefault(p, set()).update(chunk_ids)
@@ -552,38 +581,24 @@ class BpeTrainer:
 
     def train(
         self,
-        corpus_iter: Callable[[], Iterable[str]] | None = None,
-        chunks: dict[tuple[str, ...], int] | None = None,
+        corpus_iter: Callable[[], Iterable[str]],
     ) -> tuple[dict[str, int], list[tuple[str, str]]]:
         """Train the tokenizer and return ``(vocab, merges)``.
 
-        Provide exactly one of:
-          - ``corpus_iter``: zero-arg callable yielding a fresh iterable of
-            raw text docs. The trainer pretokenizes via ``self.pretokenizer``
-            and, if ``initial_merges`` is set, replays them on each chunk to
-            recover the post-resume state.
-          - ``chunks``: pre-computed ``{symbol-tuple: count}`` dict whose
-            entries already reflect any ``initial_merges`` (e.g., produced by
-            HF's encoder using the saved subword tokenizer). The replay step
-            is skipped — feeding raw byte-level chunks here when
-            ``initial_merges`` is non-empty would double-apply the merges.
-
-        The chunks path is the fast route for the SuperBPE superword pass:
-        replaying ~100k subword merges in Python is the dominant cost; HF's
-        Rust encoder produces the same result in a fraction of the time.
+        ``corpus_iter`` is a zero-arg callable yielding a fresh iterable of
+        raw text docs. The trainer pretokenizes via ``self.pretokenizer``
+        and, if ``initial_merges`` is set, replays them on each chunk to
+        recover the post-resume state.
         """
-        if (corpus_iter is None) == (chunks is None):
-            raise ValueError(
-                "provide exactly one of corpus_iter (raw text) or chunks "
-                "(pre-encoded symbol tuples with counts)"
-            )
-
-        # 1. Pretokenize + dedup (or use the caller's chunks directly).
-        pre_encoded = chunks is not None
-        if chunks is None:
-            chunks = _build_chunks(
-                corpus_iter, self.pretokenizer, self.n_workers, self.batch_size
-            )
+        # 1. Pretokenize + dedup.
+        chunks = _build_chunks(
+            corpus_iter,
+            self.pretokenizer,
+            self.n_workers,
+            self.batch_size,
+            show_progress=self.show_progress,
+            progress_desc=self.progress_desc,
+        )
         if not chunks:
             raise ValueError("corpus produced no trainable chunks")
 
@@ -601,15 +616,16 @@ class BpeTrainer:
             vocab = dict(self.initial_vocab)
             merges = list(self.initial_merges)  # type: ignore[arg-type]
 
-        # 3. Build pair state. If chunks were pre-encoded, they already reflect
-        # initial_merges — skip replay. Otherwise replay so byte-level chunks
-        # catch up to the post-resume state.
-        merges_to_replay: list[tuple[str, str]] = [] if pre_encoded else list(merges)
+        # 3. Build pair state. Replay so byte-level chunks catch up to the
+        # post-resume state when initial_merges is set.
+        merges_to_replay: list[tuple[str, str]] = list(merges)
         symbols, weights, pair_counts, where = _init_pair_state(
             chunks,
             merges_to_replay=merges_to_replay,
             n_workers=self.n_workers,
             chunks_per_task=self.batch_size,
+            show_progress=self.show_progress,
+            progress_desc=self.progress_desc,
         )
 
         # 4. Heapify.
@@ -621,7 +637,7 @@ class BpeTrainer:
         with tqdm(
             total=self.vocab_size,
             initial=len(vocab),
-            desc=self.progress_desc,
+            desc=f"{self.progress_desc} apply_merge".strip(),
             disable=not self.show_progress,
             dynamic_ncols=True,
         ) as bar:
