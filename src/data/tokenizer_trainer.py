@@ -157,7 +157,13 @@ class TokenizerTrainer:
         self, use_regex: bool
     ) -> Callable[[int, dict, list], None]:
         """Factory: returns a `BpeTrainer.progress_callback` that logs
-        (vocab_size, bytes_per_token) to W&B.
+        (vocab_size, bytes_per_token) to W&B every `eval_every` merges.
+
+        The native progress_callback fires at `BpeTrainer.progress_every`
+        cadence (default 10, drives the tqdm bar). This factory wraps that
+        in a `vocab_size % eval_every == 0` throttle so W&B logging happens
+        only at the coarser eval cadence. `eval_every` must be a multiple
+        of `progress_every` (otherwise the throttle never fires).
 
         `use_regex` controls the eval-time pretokenizer:
         - True  for "bpe" mode (HF byte-level + default regex word splitting)
@@ -167,8 +173,11 @@ class TokenizerTrainer:
         Caller is responsible for only invoking this when `logger.enabled`
         is True; the returned callback assumes it.
         """
+        eval_every = self.eval_every
 
         def _callback(vocab_size: int, vocab: dict, merges: list) -> None:
+            if vocab_size % eval_every != 0:
+                return  # throttle: only log at eval_every multiples
             tmp = Tokenizer(models.BPE(vocab=vocab, merges=merges))
             tmp.pre_tokenizer = pre_tokenizers.ByteLevel(
                 add_prefix_space=False, use_regex=use_regex
@@ -218,7 +227,6 @@ class TokenizerTrainer:
             progress_callback=self._wandb_logger_callback(use_regex=True)
             if self.logger.enabled
             else None,
-            progress_every=self.eval_every,
             show_progress=True,
             progress_desc="[bpe]",
         )
@@ -246,7 +254,6 @@ class TokenizerTrainer:
             progress_callback=self._wandb_logger_callback(use_regex=False)
             if self.logger.enabled
             else None,
-            progress_every=self.eval_every,
             show_progress=True,
             progress_desc="[superbpe][subword pass]",
         )
@@ -282,7 +289,6 @@ class TokenizerTrainer:
             progress_callback=self._wandb_logger_callback(use_regex=False)
             if self.logger.enabled
             else None,
-            progress_every=self.eval_every,
             show_progress=True,
             progress_desc="[superbpe][superword pass]",
         )

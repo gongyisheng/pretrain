@@ -269,7 +269,7 @@ class BpeTrainer:
         initial_merges: list[tuple[str, str]] | None = None,
         merge_filter: Callable[[str, str, str], bool] | None = None,
         progress_callback: Callable[[int, dict, list], None] | None = None,
-        progress_every: int = 1000,
+        progress_every: int = 10,
         n_workers: int | None = None,
         batch_size: int = 1000,
         show_progress: bool = False,

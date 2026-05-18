@@ -238,6 +238,8 @@ void BpeEngine::run_replay_merges(py::list merges,
     const bool has_progress = !progress_callback.is_none() && progress_every > 0;
 
     for (int m = 0; m < n_merges; ++m) {
+        // Honor Python signals (Ctrl+C) between merges. GIL is held here.
+        if (PyErr_CheckSignals() != 0) throw py::error_already_set();
         const auto& [a, b, merged] = ms[m];
         {
             py::gil_scoped_release release;
@@ -369,6 +371,8 @@ int BpeEngine::run_merge_loop(int32_t target_vocab_size,
     int n_accepted = 0;
 
     while (static_cast<int32_t>(id2sym_native_.size()) < target_vocab_size) {
+        // Honor Python signals (Ctrl+C) between merges. GIL is held here.
+        if (PyErr_CheckSignals() != 0) throw py::error_already_set();
         // Pop until live entry.
         HeapEntry top{};
         bool found_live = false;
