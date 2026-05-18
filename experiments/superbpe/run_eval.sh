@@ -1,18 +1,48 @@
 #!/usr/bin/env bash
-# Evaluate bytes/token for the BPE baseline + every SuperBPE transition point.
+# Evaluate bytes/token for every tokenizer trained by run_train.sh.
+# Per-run JSON output is captured to logs/superbpe/eval/<name>.log
+# (one JSON blob per file). Run collect_results.py afterward to
+# aggregate into experiments/superbpe/results.csv.
+#
 # Usage: bash experiments/superbpe/run_eval.sh
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+mkdir -p logs/superbpe/eval
 
-names=(bpe_200k)
-for t in 20 40 60 80 100 120 140 160 180; do
-    names+=("superbpe_200k_t${t}k")
+EVAL_NUM_SAMPLES="${EVAL_NUM_SAMPLES:-10000}"
+
+for V in 50 100 150 200; do
+    folder="experiments/superbpe/v${V}k"
+
+    # BPE baseline first.
+    name="bpe_v${V}k"
+    tokenizer="tokenizers/experiments/${name}"
+    if [[ -d "$tokenizer" ]]; then
+        echo "==> Evaluating ${name}"
+        uv run python scripts/eval_tokenizer.py \
+            --tokenizer "$tokenizer" \
+            --dataset openwebtext --split train \
+            --num_samples "$EVAL_NUM_SAMPLES" \
+            2>&1 | tee "logs/superbpe/eval/${name}.log"
+    else
+        echo "skip: $tokenizer not trained yet"
+    fi
+
+    for cfg in "${folder}"/superbpe_*.yaml; do
+        name="$(basename "$cfg" .yaml)"
+        tokenizer="tokenizers/experiments/${name}"
+        if [[ ! -d "$tokenizer" ]]; then
+            echo "skip: $tokenizer not trained yet"
+            continue
+        fi
+        echo "==> Evaluating ${name}"
+        uv run python scripts/eval_tokenizer.py \
+            --tokenizer "$tokenizer" \
+            --dataset openwebtext --split train \
+            --num_samples "$EVAL_NUM_SAMPLES" \
+            2>&1 | tee "logs/superbpe/eval/${name}.log"
+    done
 done
 
-for name in "${names[@]}"; do
-    echo "==> Evaluating $name"
-    uv run python scripts/eval_tokenizer.py \
-        --tokenizer "tokenizers/experiments/$name" \
-        --dataset openwebtext --split train --num_samples 10000
-done
+echo "Done. Run: uv run python experiments/superbpe/collect_results.py"
