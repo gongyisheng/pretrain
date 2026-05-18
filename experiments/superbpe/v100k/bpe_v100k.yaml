@@ -1,0 +1,11 @@
+model:
+  vocab_size: 100257
+data:
+  dataset: openwebtext
+  tokenizer_path: tokenizers/experiments/bpe_v100k
+  tokenizer_train_method: bpe
+  tokenizer_train_num_samples: 100000
+  tokenizer_train_eval_every: 5000
+logging:
+  wandb_project: tokenizer-superbpe
+  wandb_run_name: bpe_v100k

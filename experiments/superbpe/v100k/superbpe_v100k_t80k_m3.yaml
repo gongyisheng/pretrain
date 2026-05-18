@@ -1,0 +1,15 @@
+model:
+  vocab_size: 100257
+data:
+  dataset: openwebtext
+  tokenizer_path: tokenizers/experiments/superbpe_v100k_t80k_m3
+  tokenizer_train_method: superbpe
+  tokenizer_train_method_kwargs:
+    transition_size: 80257
+    max_superword_words: 3
+    eval_num_docs: 1000
+  tokenizer_train_num_samples: 100000
+  tokenizer_train_eval_every: 5000
+logging:
+  wandb_project: tokenizer-superbpe
+  wandb_run_name: superbpe_v100k_t80k_m3
