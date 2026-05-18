@@ -12,7 +12,7 @@ ext_modules = [
     Pybind11Extension(
         "src.data.bpe._bpe_engine",
         sources=[
-            "src/data/bpe/_bpe_engine.cpp",
+            "src/data/bpe/bindings.cpp",
             "src/data/bpe/bpe_engine.cpp",
         ],
         include_dirs=["src/data/bpe"],
