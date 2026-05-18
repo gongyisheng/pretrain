@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <pybind11/pybind11.h>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -67,6 +68,11 @@ public:
     int64_t pair_count(int32_t a, int32_t b) const;
     std::vector<int32_t> pair_chunks(int32_t a, int32_t b) const;
 
+    // v2 test/debug accessors: expose the native vocab for verification.
+    std::string id2sym(int32_t id) const;
+    int32_t vocab_id(const std::string& sym) const;
+    int32_t native_vocab_size() const { return static_cast<int32_t>(id2sym_native_.size()); }
+
 private:
     std::vector<std::vector<int32_t>> symbols_per_chunk_;
     std::vector<int64_t> chunk_weights_;
@@ -74,4 +80,9 @@ private:
     std::unordered_map<uint64_t, int64_t> pair_counts_;
     std::unordered_map<uint64_t, std::vector<int32_t>> where_;
     int num_threads_ = -1;  // -1 = use omp default
+    // String ↔ ID vocab, owned natively so run_merge_loop can build merged
+    // token strings and evaluate the SuperBPE filter without GIL acquires.
+    // Populated by seed() (and grown by run_merge_loop in v2 Task 4).
+    std::vector<std::string> id2sym_native_;
+    std::unordered_map<std::string, int32_t> vocab_native_;
 };

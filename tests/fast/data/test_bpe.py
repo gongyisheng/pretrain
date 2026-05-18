@@ -848,3 +848,22 @@ def test_bpe_state_drop_pair_removes_from_where_and_counts():
 
     assert state.pair_count(0, 1) == 0
     assert state.pair_chunks(0, 1) == []
+
+
+def test_bpe_state_seed_records_id2sym_native():
+    """seed() must populate id2sym_native + vocab_native so the C++ side
+    can build merged-token strings without bouncing through Python."""
+    from src.data.bpe_native import BpeState
+
+    symbol_table = {"a": 0, "b": 1, "c": 2}
+    state = BpeState()
+    state.seed({("a", "b", "c"): 1}, symbol_table)
+
+    # New test accessors expose the native vocab to verify population.
+    assert state.id2sym(0) == "a"
+    assert state.id2sym(1) == "b"
+    assert state.id2sym(2) == "c"
+    assert state.vocab_id("a") == 0
+    assert state.vocab_id("b") == 1
+    assert state.vocab_id("c") == 2
+    assert state.native_vocab_size() == 3

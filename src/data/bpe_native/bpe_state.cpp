@@ -141,6 +141,25 @@ void BpeState::seed(py::dict chunks, py::dict symbol_table) {
         symbols_per_chunk_.push_back(std::move(ids));
         chunk_weights_.push_back(weight);
     }
+
+    // Phase 4: record the symbol-table contents natively so run_merge_loop
+    // can build merged-token strings without bouncing through Python.
+    // We use the int32 IDs as indices into id2sym_native_, so resize first
+    // then write each (str, id) into the right slot.
+    id2sym_native_.clear();
+    vocab_native_.clear();
+    int32_t max_id = -1;
+    for (auto item : symbol_table) {
+        int32_t id = py::cast<int32_t>(item.second);
+        if (id > max_id) max_id = id;
+    }
+    id2sym_native_.assign(max_id + 1, std::string{});
+    for (auto item : symbol_table) {
+        std::string sym = py::cast<std::string>(item.first);
+        int32_t id = py::cast<int32_t>(item.second);
+        id2sym_native_[id] = sym;
+        vocab_native_[sym] = id;
+    }
 }
 
 std::vector<int32_t> BpeState::get_chunk_symbols(int32_t chunk_id) const {
@@ -299,4 +318,19 @@ void BpeState::drop_pair(int32_t a, int32_t b) {
     uint64_t key = pack_pair(a, b);
     pair_counts_.erase(key);
     where_.erase(key);
+}
+
+std::string BpeState::id2sym(int32_t id) const {
+    if (id < 0 || id >= static_cast<int32_t>(id2sym_native_.size())) {
+        throw std::out_of_range("id out of range");
+    }
+    return id2sym_native_[id];
+}
+
+int32_t BpeState::vocab_id(const std::string& sym) const {
+    auto it = vocab_native_.find(sym);
+    if (it == vocab_native_.end()) {
+        throw std::out_of_range("symbol not in native vocab");
+    }
+    return it->second;
 }
