@@ -11,11 +11,6 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/**'
-  push:
-    branches-ignore: [main]
-    paths:
-      - '.github/**'
-      - 'tests/**'
   workflow_dispatch:
 
 concurrency:
