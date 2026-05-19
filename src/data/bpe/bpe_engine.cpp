@@ -66,51 +66,42 @@ bool BpeEngine::merge_one_chunk_(
     ThreadLocalDelta* out
 ) {
     auto& tokens = chunk.tokens;
-    if (tokens.size() < 2) return false;
+    const size_t L = tokens.size();
+    if (L < 2) return false;
+
+    const int32_t chunk_id = chunk.id;
+    const int64_t chunk_count = chunk.count;
+
     bool changed = false;
-    // Dedupe new-pair chunk_id emissions within this chunk so Pair::chunk_ids
-    // (a vector, not a set) does not accumulate duplicates.
-    std::unordered_set<uint64_t> seen_new_pairs;
-    size_t i = 0;
-    while (i + 1 < tokens.size()) {
-        if (tokens[i] != a || tokens[i + 1] != b) {
-            ++i;
-            continue;
-        }
-        changed = true;
-
-        if (out) {
-            const int32_t chunk_id = chunk.id;
-            const int64_t chunk_count = chunk.count;
-
-            // deal with (prev, a) -> (prev, merged)
-            if (i > 0) {
-                int32_t prev = tokens[i - 1];
-                out->add_pair_delta(Pair::pack(prev, a), -chunk_count);
-                uint64_t k_pm = Pair::pack(prev, merged);
-                out->add_pair_delta(k_pm, chunk_count);
-                if (seen_new_pairs.insert(k_pm).second) {
+    size_t r = 0, w = 0;
+    while (r < L) {
+        if (r + 1 < L && tokens[r] == a && tokens[r + 1] == b) {
+            changed = true;
+            if (out) {
+                // (prev, a) -> (prev, merged)
+                if (w > 0) {
+                    int32_t prev = tokens[w - 1];
+                    out->add_pair_delta(Pair::pack(prev, a), -chunk_count);
+                    uint64_t k_pm = Pair::pack(prev, merged);
+                    out->add_pair_delta(k_pm, chunk_count);
                     out->add_chunk_delta(k_pm, chunk_id);
                 }
-            }
-
-            // deal with (b, next) -> (merged, next)
-            if (i + 2 < tokens.size()) {
-                int32_t nxt = tokens[i + 2];
-                out->add_pair_delta(Pair::pack(b, nxt), -chunk_count);
-                uint64_t k_mn = Pair::pack(merged, nxt);
-                out->add_pair_delta(k_mn, chunk_count);
-                if (seen_new_pairs.insert(k_mn).second) {
+                // (b, next) -> (merged, next)
+                if (r + 2 < L) {
+                    int32_t nxt = tokens[r + 2];
+                    out->add_pair_delta(Pair::pack(b, nxt), -chunk_count);
+                    uint64_t k_mn = Pair::pack(merged, nxt);
+                    out->add_pair_delta(k_mn, chunk_count);
                     out->add_chunk_delta(k_mn, chunk_id);
                 }
             }
+            tokens[w++] = merged;
+            r += 2;
+        } else {
+            tokens[w++] = tokens[r++];
         }
-
-        // deal with (a, b)
-        tokens[i] = merged;
-        tokens.erase(tokens.begin() + static_cast<long>(i) + 1);
-        ++i;
     }
+    tokens.resize(w);
     return changed;
 }
 

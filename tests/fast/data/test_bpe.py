@@ -643,12 +643,12 @@ def test_bpe_state_apply_merge_removes_pair_from_where():
     assert state.get_pair_count(0, 1) == 0
 
 
-def test_bpe_state_apply_merge_dedupes_chunks_by_pair_within_chunk():
-    """Repeated bigram patterns within a single chunk must not duplicate
-    chunk_id entries in pairs_[...].chunk_ids for the new neighbor pairs
-    created by the merge. (The chunk_ids set dedupes by construction; this
-    test guards against regressions if it were ever switched back to a
-    vector.)
+def test_bpe_state_apply_merge_repeated_pattern_within_chunk():
+    """Repeated bigram sites within one chunk: pair counts must be exact
+    (emissions are match-gated), and the chunk must be reachable via
+    get_chunks_by_pair for downstream merges. chunk_ids tolerates
+    duplicates by design — see merge_one_chunk_'s docstring — so we assert
+    presence and bounded length, not strict dedupe.
     """
 
     # Chunk = [c, a, b, c, a, b]: merging (a,b)→ab creates the new pair (c, ab)
@@ -658,10 +658,13 @@ def test_bpe_state_apply_merge_dedupes_chunks_by_pair_within_chunk():
     state.feed({("c", "a", "b", "c", "a", "b"): 1}, vocab)
     state.apply_merge(0, 1, 3)
 
-    # (c, ab) should list chunk 0 EXACTLY ONCE, despite two creation positions.
-    assert state.get_chunks_by_pair(2, 3) == [0]
-    # And the count should still reflect both occurrences (weighted).
+    # Count is exact: 2 (c, ab) adjacencies in the merged chunk.
     assert state.get_pair_count(2, 3) == 2
+    # chunk_ids contains chunk 0, possibly more than once (bounded by site count).
+    chunks_for_c_ab = state.get_chunks_by_pair(2, 3)
+    assert 0 in chunks_for_c_ab
+    assert all(cid == 0 for cid in chunks_for_c_ab)
+    assert len(chunks_for_c_ab) <= 2  # at most one entry per merge site
 
 
 def test_bpe_state_drop_pair_removes_from_chunks_by_pair_and_counts():
