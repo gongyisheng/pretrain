@@ -4,7 +4,7 @@
 # (one JSON blob per file). Run collect_results.py afterward to
 # aggregate into experiments/superbpe/results.csv.
 #
-# Usage: bash experiments/superbpe/run_eval.sh
+# Usage: bash experiments/superbpe/run_eval_tok.sh
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."

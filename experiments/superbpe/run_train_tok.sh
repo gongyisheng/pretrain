@@ -3,11 +3,10 @@
 # Smallest V first, BPE baseline before SuperBPE configs in each folder.
 # Each run streams to logs/superbpe/train/<name>.log.
 #
-# Usage: nohup bash experiments/superbpe/run_train.sh > logs/superbpe_train.log 2>&1 &
+# Usage: nohup bash experiments/superbpe/run_train_tok.sh > logs/superbpe_train.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-
 
 for V in 50 100 150 200; do
     folder="experiments/superbpe/v${V}k"
