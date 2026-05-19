@@ -6,7 +6,7 @@ adds two capabilities HF lacks:
 
   - Resume/extend from a saved tokenizer (via `initial_vocab` + `initial_merges`).
   - Per-merge veto via the `merge_filter` callback (used by SuperBPE for the
-    `max_superword_words` cap and the ":Ġ" exclusion). The C++ `run_merge_loop`
+    `max_superword_words` cap and the ":Ġ" exclusion). The C++ `train`
     invokes the Python callable once per candidate pair via GIL re-acquire.
 
 Encode/decode at inference stays on HF: emit a HF-compatible (vocab, merges)
@@ -26,49 +26,6 @@ from tqdm import tqdm
 from src.data.bpe import BpeEngine
 
 
-def _make_progress_callback(
-    user_callback: Callable[..., None] | None,
-    total: int,
-    initial: int,
-    progress_desc: str,
-    show_progress: bool,
-):
-    """Return ``(callback, ctx)`` for driving a tqdm bar around a native
-    BpeEngine call that emits per-tick progress through ``progress_callback``.
-
-    The native methods call ``progress_callback(*args)`` where ``args[0]`` is
-    the current cumulative count (vocab size for ``run_merge_loop``, merges
-    done for ``run_replay_merges``). The wrapper updates the bar by the delta
-    since the last tick and then forwards ``*args`` to ``user_callback``.
-
-    When ``show_progress=False``, ``ctx`` is a no-op context manager and
-    ``callback`` is just ``user_callback`` (no wrapping). Use with::
-
-        callback, ctx = _make_progress_callback(...)
-        with ctx:
-            engine.run_merge_loop(..., progress_callback=callback)
-    """
-    if not show_progress:
-        return user_callback, nullcontext()
-    bar = tqdm(total=total, initial=initial, desc=progress_desc, dynamic_ncols=True)
-    state = {"last": initial}
-
-    def wrapped(*args):
-        current = args[0]
-        bar.update(current - state["last"])
-        state["last"] = current
-        if user_callback is not None:
-            user_callback(*args)
-
-    return wrapped, bar
-
-
-# Module-level shared worker pool. Spawned lazily on first use, resized only
-# if a caller requests a different n_workers, torn down at process exit.
-# Used by `_build_chunks` for pretokenize fan-out (the only mp-parallel
-# step left after the C++ BpeEngine rewire). Keeping it module-level lets
-# us reuse the same pool across multiple `BpeTrainer.train()` calls in one
-# process (e.g., SuperBPE's subword + superword passes).
 _MP_CTX = get_context("spawn")
 _POOL = None
 _POOL_N_WORKERS: int | None = None
@@ -168,19 +125,17 @@ def _pretokenize(doc: str, mode: str) -> list[str]:
         raise ValueError(
             f"unknown pretokenizer mode: {mode!r}; expected 'bpe' or 'bytelevel'"
         )
-    # Simulate HF Split(behavior="isolated"): cover the full string, including
-    # segments between matches (e.g., pure-digit runs not captured by the letter/
-    # punctuation alternatives).
+
     segments: list[str] = []
     prev = 0
     for m in _PRETOK_BPE_REGEX.finditer(doc):
         start, end = m.start(), m.end()
         if start > prev:
-            segments.append(doc[prev:start])  # unmatched segment (e.g., digits)
+            segments.append(doc[prev:start])
         segments.append(doc[start:end])
         prev = end
     if prev < len(doc):
-        segments.append(doc[prev:])  # trailing unmatched
+        segments.append(doc[prev:])
     pieces: list[str] = []
     for seg in segments:
         for sub in _split_digit_groups(seg):
@@ -201,6 +156,11 @@ def _pretokenize_batch(batch: list[str], mode: str) -> Counter:
     return counts
 
 
+def _pretokenize_batch_starargs(args):
+    """Pickle-friendly wrapper that unpacks (batch, mode) for imap_unordered."""
+    return _pretokenize_batch(*args)
+
+
 def _iter_batches(stream, batch_size, mode):
     """Yield (batch, mode) tuples from a stream of documents."""
     batch: list[str] = []
@@ -211,11 +171,6 @@ def _iter_batches(stream, batch_size, mode):
             batch = []
     if batch:
         yield (batch, mode)
-
-
-def _pretokenize_batch_starargs(args):
-    """Pickle-friendly wrapper that unpacks (batch, mode) for imap_unordered."""
-    return _pretokenize_batch(*args)
 
 
 def _build_chunks(
@@ -238,8 +193,7 @@ def _build_chunks(
         _iter_batches(corpus_iter(), batch_size, mode),
         chunksize=1,
     )
-    # Total batch count is unknown (corpus is a stream) — tqdm shows running
-    # count and rate without an ETA.
+
     results = tqdm(
         results,
         desc=f"{progress_desc} pretokenize".strip(),
@@ -250,6 +204,29 @@ def _build_chunks(
     for partial in results:
         total.update(partial)
     return dict(total)
+
+
+def _make_progress_callback(
+    user_callback: Callable[..., None] | None,
+    total: int,
+    initial: int,
+    progress_desc: str,
+    show_progress: bool,
+):
+
+    if not show_progress:
+        return user_callback, nullcontext()
+    bar = tqdm(total=total, initial=initial, desc=progress_desc, dynamic_ncols=True)
+    state = {"last": initial}
+
+    def wrapped(*args):
+        current = args[0]
+        bar.update(current - state["last"])
+        state["last"] = current
+        if user_callback is not None:
+            user_callback(*args)
+
+    return wrapped, bar
 
 
 class BpeTrainer:
@@ -337,7 +314,7 @@ class BpeTrainer:
         and, if ``initial_merges`` is set, replays them on each chunk to
         recover the post-resume state.
         """
-        # 1. Pretokenize + dedup. Still mp.Pool-parallel (regex bound).
+
         chunks = _build_chunks(
             corpus_iter,
             self.pretokenizer,
@@ -349,7 +326,6 @@ class BpeTrainer:
         if not chunks:
             raise ValueError("corpus produced no trainable chunks")
 
-        # 2. Build vocab: specials + byte alphabet (or initial_vocab on resume).
         if self.initial_vocab is None:
             vocab: dict[str, int] = {}
             for sp in self.special_tokens:
@@ -361,16 +337,12 @@ class BpeTrainer:
             vocab = dict(self.initial_vocab)
             merges = list(self.initial_merges)  # type: ignore[arg-type]
 
-        # 3. BPE engine: load + replay (on resume) + initial pair counts.
         engine = BpeEngine()
         engine.set_num_threads(self.n_workers)
-        engine.load_chunks(chunks, vocab)
-        del chunks  # release the chunk dict before native build_pair_index allocates pair_counts_ + chunks_by_pair_
+        engine.feed(chunks, vocab)
+        del chunks
         if merges:
-            token_to_id = vocab  # vocab IS the str→int table after load_chunks
-            merges_int = [
-                (token_to_id[a], token_to_id[b], token_to_id[a + b]) for a, b in merges
-            ]
+            merges_int = [(vocab[a], vocab[b], vocab[a + b]) for a, b in merges]
             replay_callback, replay_ctx = _make_progress_callback(
                 user_callback=None,
                 total=len(merges_int),
@@ -379,31 +351,25 @@ class BpeTrainer:
                 show_progress=self.show_progress,
             )
             with replay_ctx:
-                engine.run_replay_merges(
+                engine.replay_merges(
                     merges_int,
                     progress_callback=replay_callback,
                     progress_every=self.progress_every,
                 )
-        engine.build_pair_index()
 
-        # 4. Run the merge loop natively. `merge_filter` (if any) is invoked
-        #    by the C++ side once per candidate pair via GIL re-acquire.
-        merge_callback, merge_ctx = _make_progress_callback(
+        train_callback, train_ctx = _make_progress_callback(
             user_callback=self.progress_callback,
             total=self.vocab_size,
             initial=engine.get_vocab_size(),
             progress_desc=f"{self.progress_desc} merge".strip(),
             show_progress=self.show_progress,
         )
-        with merge_ctx:
-            engine.run_merge_loop(
+        with train_ctx:
+            engine.train(
                 target_vocab_size=self.vocab_size,
                 merge_filter=self.merge_filter,
-                progress_callback=merge_callback,
+                progress_callback=train_callback,
                 progress_every=self.progress_every,
             )
 
-        # 5. Marshal final output back to Python. `engine.get_merges()` returns
-        #    the full merge history (initial_merges replayed at seed time +
-        #    new merges added by run_merge_loop), so no prepend is needed.
         return engine.get_vocab(), engine.get_merges()
