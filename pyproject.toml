@@ -35,7 +35,7 @@ dev = [
 ]
 
 [tool.uv]
-# Rebuild the editable install (and therefore the C++ `bpe_native` extension)
+# Rebuild the editable install (and therefore the C++ `_bpe_engine` extension)
 # when any of these files change. Default cache-keys only watch pyproject.toml,
 # so without this an edit to a .cpp/.h file would be picked up only after an
 # explicit `uv sync --reinstall-package pretrain`.

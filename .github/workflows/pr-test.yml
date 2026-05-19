@@ -109,7 +109,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --frozen
+      # `--reinstall-package pretrain` forces rebuild of the C++ `_bpe_engine`
+      # extension. The .so is built into the source tree, which actions/checkout
+      # wipes each run; uv's cache-keys see unchanged .cpp/.h and would otherwise
+      # skip the rebuild, leaving the .so missing.
+      - run: uv sync --frozen --reinstall-package pretrain
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
