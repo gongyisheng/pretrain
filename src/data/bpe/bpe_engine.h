@@ -4,7 +4,6 @@
 #include <pybind11/pybind11.h>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace py = pybind11;
@@ -41,7 +40,11 @@ struct Pair {
     int32_t a;
     int32_t b;
     int64_t count;
-    std::unordered_set<int32_t> chunk_ids;
+    // Invariant: no duplicates. Maintainers must dedupe at every insertion
+    // site (init_pairs_, merge_one_chunk_'s delta emission) since vector
+    // doesn't enforce it. Vector chosen over unordered_set for ~8x lower
+    // per-element memory.
+    std::vector<int32_t> chunk_ids;
 
     // Pack (a, b) into a uint64 hash-map key. High 32 bits = a, low 32 = b.
     static uint64_t pack(int32_t a, int32_t b);

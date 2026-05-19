@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 #include <omp.h>
@@ -67,6 +68,9 @@ bool BpeEngine::merge_one_chunk_(
     auto& tokens = chunk.tokens;
     if (tokens.size() < 2) return false;
     bool changed = false;
+    // Dedupe new-pair chunk_id emissions within this chunk so Pair::chunk_ids
+    // (a vector, not a set) does not accumulate duplicates.
+    std::unordered_set<uint64_t> seen_new_pairs;
     size_t i = 0;
     while (i + 1 < tokens.size()) {
         if (tokens[i] != a || tokens[i + 1] != b) {
@@ -85,7 +89,9 @@ bool BpeEngine::merge_one_chunk_(
                 out->add_pair_delta(Pair::pack(prev, a), -chunk_count);
                 uint64_t k_pm = Pair::pack(prev, merged);
                 out->add_pair_delta(k_pm, chunk_count);
-                out->add_chunk_delta(k_pm, chunk_id);
+                if (seen_new_pairs.insert(k_pm).second) {
+                    out->add_chunk_delta(k_pm, chunk_id);
+                }
             }
 
             // deal with (b, next) -> (merged, next)
@@ -94,7 +100,9 @@ bool BpeEngine::merge_one_chunk_(
                 out->add_pair_delta(Pair::pack(b, nxt), -chunk_count);
                 uint64_t k_mn = Pair::pack(merged, nxt);
                 out->add_pair_delta(k_mn, chunk_count);
-                out->add_chunk_delta(k_mn, chunk_id);
+                if (seen_new_pairs.insert(k_mn).second) {
+                    out->add_chunk_delta(k_mn, chunk_id);
+                }
             }
         }
 
@@ -192,10 +200,13 @@ int64_t BpeEngine::get_chunk_count(int32_t chunk_id) const {
 void BpeEngine::init_pairs_() {
     pairs_.clear();
 
+    std::unordered_set<uint64_t> seen_in_chunk;
+
     const int32_t n = static_cast<int32_t>(chunks_.size());
     for (int32_t cid = 0; cid < n; ++cid) {
         const auto& chunk = chunks_[cid];
         if (chunk.tokens.size() < 2) continue;
+        seen_in_chunk.clear();
         for (size_t i = 0; i + 1 < chunk.tokens.size(); ++i) {
             int32_t a = chunk.tokens[i];
             int32_t b = chunk.tokens[i + 1];
@@ -207,7 +218,9 @@ void BpeEngine::init_pairs_() {
                 it->second.count = 0;
             }
             it->second.count += chunk.count;
-            it->second.chunk_ids.insert(cid);  // set dedupes repeats within a chunk
+            if (seen_in_chunk.insert(key).second) {
+                it->second.chunk_ids.push_back(cid);
+            }
         }
     }
 }
@@ -246,8 +259,7 @@ int64_t BpeEngine::get_pair_count(int32_t a, int32_t b) const {
 std::vector<int32_t> BpeEngine::get_chunks_by_pair(int32_t a, int32_t b) const {
     auto it = pairs_.find(Pair::pack(a, b));
     if (it == pairs_.end()) return {};
-    const auto& s = it->second.chunk_ids;
-    return std::vector<int32_t>(s.begin(), s.end());
+    return it->second.chunk_ids;
 }
 
 void BpeEngine::set_num_threads(int n) {
@@ -317,12 +329,13 @@ std::unordered_map<uint64_t, int64_t> BpeEngine::apply_merge_(
 ) {
     uint64_t pair_key = Pair::pack(a, b);
 
-    // Snapshot affected chunks, then drop the (a,b) entry.
+    // Snapshot affected chunks, then drop the (a,b) entry. Move the vector
+    // out before erase to avoid an extra copy.
     std::vector<int32_t> affected;
     {
         auto it = pairs_.find(pair_key);
         if (it != pairs_.end()) {
-            affected.assign(it->second.chunk_ids.begin(), it->second.chunk_ids.end());
+            affected = std::move(it->second.chunk_ids);
             pairs_.erase(it);
         }
     }
@@ -380,7 +393,7 @@ std::unordered_map<uint64_t, int64_t> BpeEngine::apply_merge_(
         for (auto& [key, cid] : local.chunk_id_adds) {
             auto it = pairs_.find(key);
             if (it != pairs_.end()) {
-                it->second.chunk_ids.insert(cid);
+                it->second.chunk_ids.push_back(cid);
             }
         }
     }
