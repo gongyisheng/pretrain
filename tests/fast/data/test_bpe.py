@@ -136,62 +136,62 @@ def test_build_chunks_empty_corpus_returns_empty_dict():
 def test_init_pair_state_counts_adjacent_pairs():
     """Pair counts (weighted by chunk freq) via BpeEngine."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 2, ("a", "b"): 3}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b", "c"): 2, ("a", "b"): 3}, vocab)
+    state.build_pair_index()
 
-    assert state.pair_count(0, 1) == 5
-    assert state.pair_count(1, 2) == 2
+    assert state.get_pair_count(0, 1) == 5
+    assert state.get_pair_count(1, 2) == 2
 
 
-def test_init_pair_state_where_to_update_indexes_chunks():
+def test_init_pair_state_chunks_by_pair_to_update_indexes_chunks():
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b"): 1, ("a", "c"): 1}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b"): 1, ("a", "c"): 1}, vocab)
+    state.build_pair_index()
 
-    ab = state.pair_chunks(0, 1)
-    ac = state.pair_chunks(0, 2)
+    ab = state.get_chunks_by_pair(0, 1)
+    ac = state.get_chunks_by_pair(0, 2)
     assert len(ab) == 1
     assert len(ac) == 1
     assert ab != ac
 
 
-def test_init_pair_state_symbols_per_chunk_are_lists():
+def test_init_pair_state_tokens_by_chunk_are_lists():
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 1}, symbol_table)
+    state.load_chunks({("a", "b", "c"): 1}, vocab)
 
-    assert state.get_chunk_symbols(0) == [0, 1, 2]
+    assert state.get_chunk_tokens(0) == [0, 1, 2]
 
 
-def test_init_pair_state_chunk_counts_track_input_weights():
+def test_init_pair_state_chunk_counts_track_input_counts():
 
-    symbol_table = {"a": 0}
+    vocab = {"a": 0}
     state = BpeEngine()
-    state.seed({("a",): 7}, symbol_table)
+    state.load_chunks({("a",): 7}, vocab)
 
-    assert state.get_chunk_weight(0) == 7
+    assert state.get_chunk_count(0) == 7
 
 
 def test_init_pair_state_chunk_id_assignment_is_deterministic():
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     chunks = {("b",): 1, ("a",): 1, ("c",): 1}
 
     s1 = BpeEngine()
-    s1.seed(chunks, symbol_table)
+    s1.load_chunks(chunks, vocab)
     s2 = BpeEngine()
-    s2.seed(chunks, symbol_table)
+    s2.load_chunks(chunks, vocab)
 
-    syms1 = [s1.get_chunk_symbols(i) for i in range(s1.get_num_chunks())]
-    syms2 = [s2.get_chunk_symbols(i) for i in range(s2.get_num_chunks())]
-    assert syms1 == syms2
+    tokens1 = [s1.get_chunk_tokens(i) for i in range(s1.get_num_chunks())]
+    tokens2 = [s2.get_chunk_tokens(i) for i in range(s2.get_num_chunks())]
+    assert tokens1 == tokens2
     # Sorted by tuple: a < b < c.
-    assert syms1 == [[0], [1], [2]]
+    assert tokens1 == [[0], [1], [2]]
 
 
 SAMPLE_TEXTS = [
@@ -210,7 +210,7 @@ def test_bpe_train_returns_vocab_and_merges():
     vocab, merges = BpeTrainer(vocab_size=300, n_workers=1).train(_corpus)
     assert isinstance(vocab, dict)
     assert isinstance(merges, list)
-    # All merge symbols must be in vocab.
+    # All merge tokens must be in vocab.
     for a, b in merges:
         assert a in vocab and b in vocab
         assert a + b in vocab
@@ -446,47 +446,47 @@ def test_bpe_n_workers_default_is_safe():
     BpeTrainer(vocab_size=300, n_workers=None).train(_corpus)
 
 
-def test_bpe_state_seed_assigns_chunk_ids_in_tuple_order():
+def test_bpe_state_load_chunks_assigns_chunk_ids_in_tuple_order():
     """Chunks must be sorted by tuple-of-IDs, matching today's
     sorted(chunks.items(), key=lambda kv: kv[0]).
     """
 
-    # IDs assigned so that lex-of-id order == lex-of-str order on the symbols used.
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    # IDs assigned so that lex-of-id order == lex-of-str order on the tokens used.
+    vocab = {"a": 0, "b": 1, "c": 2}
     chunks = {("b", "c"): 1, ("a", "b"): 2, ("a", "c"): 3}
 
     state = BpeEngine()
-    state.seed(chunks, symbol_table)
+    state.load_chunks(chunks, vocab)
 
     # Sorted tuples: ("a","b"), ("a","c"), ("b","c") → chunk_ids 0,1,2.
-    assert state.get_chunk_symbols(0) == [0, 1]
-    assert state.get_chunk_symbols(1) == [0, 2]
-    assert state.get_chunk_symbols(2) == [1, 2]
-    assert state.get_chunk_weight(0) == 2
-    assert state.get_chunk_weight(1) == 3
-    assert state.get_chunk_weight(2) == 1
+    assert state.get_chunk_tokens(0) == [0, 1]
+    assert state.get_chunk_tokens(1) == [0, 2]
+    assert state.get_chunk_tokens(2) == [1, 2]
+    assert state.get_chunk_count(0) == 2
+    assert state.get_chunk_count(1) == 3
+    assert state.get_chunk_count(2) == 1
     assert state.get_num_chunks() == 3
 
 
-def test_bpe_state_seed_unknown_symbol_raises():
+def test_bpe_state_load_chunks_unknown_symbol_raises():
 
-    symbol_table = {"a": 0, "b": 1}
-    chunks = {("a", "z"): 1}  # 'z' not in symbol_table
+    vocab = {"a": 0, "b": 1}
+    chunks = {("a", "z"): 1}  # 'z' not in vocab
 
     state = BpeEngine()
     with pytest.raises((KeyError, RuntimeError, ValueError)):
-        state.seed(chunks, symbol_table)
+        state.load_chunks(chunks, vocab)
 
 
-def test_bpe_state_build_initial_pairs_counts_adjacent():
+def test_bpe_state_build_pair_index_counts_adjacent():
     """Counts adjacent-pair occurrences weighted by chunk frequency."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     chunks = {("a", "b", "c"): 2, ("a", "b"): 3}
 
     state = BpeEngine()
-    state.seed(chunks, symbol_table)
-    pairs = state.build_initial_pairs()
+    state.load_chunks(chunks, vocab)
+    pairs = state.build_pair_index()
 
     # Convert to dict for assertion. Each entry is (a_id, b_id, count).
     by_pair = {(a, b): c for a, b, c in pairs}
@@ -497,91 +497,91 @@ def test_bpe_state_build_initial_pairs_counts_adjacent():
     assert len(by_pair) == 2
 
 
-def test_bpe_state_pair_chunks_indexes_membership():
-    """pair_chunks returns the chunk_ids where (a,b) appears."""
+def test_bpe_state_chunks_by_pair_indexes_membership():
+    """get_chunks_by_pair returns the chunk_ids where (a,b) appears."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     chunks = {("a", "b"): 1, ("a", "c"): 1}
 
     state = BpeEngine()
-    state.seed(chunks, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks(chunks, vocab)
+    state.build_pair_index()
 
-    ab = sorted(state.pair_chunks(0, 1))
-    ac = sorted(state.pair_chunks(0, 2))
+    ab = sorted(state.get_chunks_by_pair(0, 1))
+    ac = sorted(state.get_chunks_by_pair(0, 2))
     assert len(ab) == 1
     assert len(ac) == 1
     assert ab != ac
 
 
 def test_bpe_state_pair_count_matches_initial_pairs():
-    """pair_count(a,b) reflects what build_initial_pairs returned."""
+    """get_pair_count(a,b) reflects what build_pair_index returned."""
 
-    symbol_table = {"a": 0, "b": 1}
+    vocab = {"a": 0, "b": 1}
     state = BpeEngine()
-    state.seed({("a", "b"): 7}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b"): 7}, vocab)
+    state.build_pair_index()
 
-    assert state.pair_count(0, 1) == 7
-    assert state.pair_count(1, 0) == 0  # never observed
+    assert state.get_pair_count(0, 1) == 7
+    assert state.get_pair_count(1, 0) == 0  # never observed
 
 
-def test_bpe_state_build_initial_pairs_dedupes_pair_within_chunk():
+def test_bpe_state_build_pair_index_dedupes_pair_within_chunk():
     """If (a,b) appears multiple times in one chunk, the chunk_id is listed
-    in where_[(a,b)] exactly once, but pair_count counts every occurrence
-    weighted by chunk weight."""
+    in chunks_by_pair_[(a,b)] exactly once, but get_pair_count counts every occurrence
+    weighted by chunk count."""
 
-    symbol_table = {"a": 0, "b": 1}
+    vocab = {"a": 0, "b": 1}
     chunks = {("a", "b", "a", "b"): 3}
 
     state = BpeEngine()
-    state.seed(chunks, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks(chunks, vocab)
+    state.build_pair_index()
 
     # Two occurrences of (a,b) in a single chunk with weight 3.
-    assert state.pair_count(0, 1) == 6
-    # But the chunk_id appears only once in pair_chunks.
-    assert state.pair_chunks(0, 1) == [0]
+    assert state.get_pair_count(0, 1) == 6
+    # But the chunk_id appears only once in get_chunks_by_pair.
+    assert state.get_chunks_by_pair(0, 1) == [0]
 
 
 def test_bpe_state_replay_single_merge():
     """Replaying (a,b)→ab on chunk ("a","b","c") gives [ab_id, c_id]."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 1}, symbol_table)
+    state.load_chunks({("a", "b", "c"): 1}, vocab)
     state.run_replay_merges([(0, 1, 3)])  # (a_id, b_id, merged_id)
 
-    assert state.get_chunk_symbols(0) == [3, 2]
+    assert state.get_chunk_tokens(0) == [3, 2]
 
 
 def test_bpe_state_replay_multi_merge_in_order():
     """Replaying (a,b)→ab then (ab,c)→abc collapses to a single token."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3, "abc": 4}
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3, "abc": 4}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 1}, symbol_table)
+    state.load_chunks({("a", "b", "c"): 1}, vocab)
     state.run_replay_merges([(0, 1, 3), (3, 2, 4)])
 
-    assert state.get_chunk_symbols(0) == [4]
+    assert state.get_chunk_tokens(0) == [4]
 
 
 def test_bpe_state_replay_left_to_right_overlap():
     """Replaying (a,a)→aa on ("a","a","a") gives [aa, a], not [a, aa]."""
 
-    symbol_table = {"a": 0, "aa": 1}
+    vocab = {"a": 0, "aa": 1}
     state = BpeEngine()
-    state.seed({("a", "a", "a"): 1}, symbol_table)
+    state.load_chunks({("a", "a", "a"): 1}, vocab)
     state.run_replay_merges([(0, 0, 1)])
 
-    assert state.get_chunk_symbols(0) == [1, 0]
+    assert state.get_chunk_tokens(0) == [1, 0]
 
 
 def test_bpe_state_replay_parallel_matches_serial():
     """OMP_NUM_THREADS=1 vs default must produce identical final state."""
     from src.data.bpe import _byte_encode
 
-    symbol_table = {
+    vocab = {
         c: i
         for i, c in enumerate(
             sorted(
@@ -596,55 +596,55 @@ def test_bpe_state_replay_parallel_matches_serial():
             _byte_encode(f"sample document number {i} with some repeated content")
         )
         for ch in toks:
-            symbol_table.setdefault(ch, len(symbol_table))
+            vocab.setdefault(ch, len(vocab))
         chunks[toks] = chunks.get(toks, 0) + 1
 
     # Pick a merge that will fire frequently: (' ', 's') if both present.
-    space_id = symbol_table.get("Ġ")
-    s_id = symbol_table.get("s")
+    space_id = vocab.get("Ġ")
+    s_id = vocab.get("s")
     if space_id is None or s_id is None:
-        pytest.skip("expected byte-encoded space and 's' in symbol_table")
+        pytest.skip("expected byte-encoded space and 's' in vocab")
     merged_str = "Ġs"
-    merged_id = len(symbol_table)
-    symbol_table[merged_str] = merged_id
+    merged_id = len(vocab)
+    vocab[merged_str] = merged_id
 
     s1 = BpeEngine()
-    s1.seed(chunks, symbol_table)
+    s1.load_chunks(chunks, vocab)
     s1.set_num_threads(1)
     s1.run_replay_merges([(space_id, s_id, merged_id)])
 
     s2 = BpeEngine()
-    s2.seed(chunks, symbol_table)
+    s2.load_chunks(chunks, vocab)
     s2.set_num_threads(4)
     s2.run_replay_merges([(space_id, s_id, merged_id)])
 
     n = s1.get_num_chunks()
     assert n == s2.get_num_chunks()
     for i in range(n):
-        assert s1.get_chunk_symbols(i) == s2.get_chunk_symbols(i)
+        assert s1.get_chunk_tokens(i) == s2.get_chunk_tokens(i)
 
 
 def test_bpe_state_apply_merge_rewrites_symbols():
     """All (a,b) occurrences collapsed to merged_id."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 1, ("a", "b"): 1}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b", "c"): 1, ("a", "b"): 1}, vocab)
+    state.build_pair_index()
     state.apply_merge(0, 1, 3)  # merge (a,b) → ab
 
     # Sorted chunks: ("a","b") < ("a","b","c") → chunk 0 = [a,b], chunk 1 = [a,b,c].
-    assert state.get_chunk_symbols(0) == [3]
-    assert state.get_chunk_symbols(1) == [3, 2]
+    assert state.get_chunk_tokens(0) == [3]
+    assert state.get_chunk_tokens(1) == [3, 2]
 
 
 def test_bpe_state_apply_merge_returns_pair_deltas():
     """Returns list[(a, b, dv)] of pair-count changes for the Python heap."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 1}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b", "c"): 1}, vocab)
+    state.build_pair_index()
     deltas = state.apply_merge(0, 1, 3)
     by_pair = {(a, b): d for a, b, d in deltas}
 
@@ -657,24 +657,24 @@ def test_bpe_state_apply_merge_returns_pair_deltas():
 def test_bpe_state_apply_merge_overlapping_pairs_left_to_right():
     """'a a a' merging (a,a)→aa yields [aa, a] (left consume first)."""
 
-    symbol_table = {"a": 0, "aa": 1}
+    vocab = {"a": 0, "aa": 1}
     state = BpeEngine()
-    state.seed({("a", "a", "a"): 1}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "a", "a"): 1}, vocab)
+    state.build_pair_index()
     state.apply_merge(0, 0, 1)
 
-    assert state.get_chunk_symbols(0) == [1, 0]
+    assert state.get_chunk_tokens(0) == [1, 0]
     # New pair (aa, a) gained 1.
-    assert state.pair_count(1, 0) == 1
+    assert state.get_pair_count(1, 0) == 1
 
 
-def test_bpe_state_apply_merge_respects_chunk_weight():
+def test_bpe_state_apply_merge_respects_chunk_count():
     """A merge in a weight-5 chunk emits weight-5 deltas."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 5}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b", "c"): 5}, vocab)
+    state.build_pair_index()
     deltas = state.apply_merge(0, 1, 3)
     by_pair = {(a, b): d for a, b, d in deltas}
 
@@ -682,21 +682,21 @@ def test_bpe_state_apply_merge_respects_chunk_weight():
 
 
 def test_bpe_state_apply_merge_removes_pair_from_where():
-    """After applying (a,b), pair_chunks(a,b) is empty."""
+    """After applying (a,b), get_chunks_by_pair(a,b) is empty."""
 
-    symbol_table = {"a": 0, "b": 1, "ab": 2}
+    vocab = {"a": 0, "b": 1, "ab": 2}
     state = BpeEngine()
-    state.seed({("a", "b"): 1}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b"): 1}, vocab)
+    state.build_pair_index()
     state.apply_merge(0, 1, 2)
 
-    assert state.pair_chunks(0, 1) == []
-    assert state.pair_count(0, 1) == 0
+    assert state.get_chunks_by_pair(0, 1) == []
+    assert state.get_pair_count(0, 1) == 0
 
 
-def test_bpe_state_apply_merge_dedupes_where_within_chunk():
+def test_bpe_state_apply_merge_dedupes_chunks_by_pair_within_chunk():
     """Repeated bigram patterns within a single chunk must not duplicate
-    chunk_id entries in where_ for the new neighbor pairs created by the
+    chunk_id entries in chunks_by_pair_ for the new neighbor pairs created by the
     merge. Without per-chunk dedupe, the duplicate cid causes a data race
     on the next apply_merge for that pair (concurrent mutation of the same
     vector by two OpenMP threads).
@@ -704,59 +704,59 @@ def test_bpe_state_apply_merge_dedupes_where_within_chunk():
 
     # Chunk = [c, a, b, c, a, b]: merging (a,b)→ab creates the new pair (c, ab)
     # at TWO positions within this one chunk.
-    symbol_table = {"a": 0, "b": 1, "c": 2, "ab": 3}
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3}
     state = BpeEngine()
-    state.seed({("c", "a", "b", "c", "a", "b"): 1}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("c", "a", "b", "c", "a", "b"): 1}, vocab)
+    state.build_pair_index()
     state.apply_merge(0, 1, 3)
 
     # (c, ab) should list chunk 0 EXACTLY ONCE, despite two creation positions.
-    assert state.pair_chunks(2, 3) == [0]
+    assert state.get_chunks_by_pair(2, 3) == [0]
     # And the count should still reflect both occurrences (weighted).
-    assert state.pair_count(2, 3) == 2
+    assert state.get_pair_count(2, 3) == 2
 
 
-def test_bpe_state_drop_pair_removes_from_where_and_counts():
+def test_bpe_state_drop_pair_removes_from_chunks_by_pair_and_counts():
     """drop_pair removes the pair from internal state so it's never selected."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 1}, symbol_table)
-    state.build_initial_pairs()
-    assert state.pair_count(0, 1) == 1
-    assert state.pair_chunks(0, 1) != []
+    state.load_chunks({("a", "b", "c"): 1}, vocab)
+    state.build_pair_index()
+    assert state.get_pair_count(0, 1) == 1
+    assert state.get_chunks_by_pair(0, 1) != []
 
     state.drop_pair(0, 1)
 
-    assert state.pair_count(0, 1) == 0
-    assert state.pair_chunks(0, 1) == []
+    assert state.get_pair_count(0, 1) == 0
+    assert state.get_chunks_by_pair(0, 1) == []
 
 
-def test_bpe_state_seed_records_id2sym_native():
-    """seed() must populate id2sym_native + vocab_native so the C++ side
+def test_bpe_state_load_chunks_records_id2token_native():
+    """seed() must populate id2token_native + vocab_native so the C++ side
     can build merged-token strings without bouncing through Python."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 1}, symbol_table)
+    state.load_chunks({("a", "b", "c"): 1}, vocab)
 
     # New test accessors expose the native vocab to verify population.
-    assert state.id2sym(0) == "a"
-    assert state.id2sym(1) == "b"
-    assert state.id2sym(2) == "c"
-    assert state.sym2id("a") == 0
-    assert state.sym2id("b") == 1
-    assert state.sym2id("c") == 2
+    assert state.id2token(0) == "a"
+    assert state.id2token(1) == "b"
+    assert state.id2token(2) == "c"
+    assert state.token2id("a") == 0
+    assert state.token2id("b") == 1
+    assert state.token2id("c") == 2
     assert state.get_vocab_size() == 3
 
 
 def test_bpe_state_run_merge_loop_basic_grows_vocab():
     """run_merge_loop grows the native vocab from seed-size to the target."""
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 5, ("a", "b"): 3}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b", "c"): 5, ("a", "b"): 3}, vocab)
+    state.build_pair_index()
 
     n_accepted = state.run_merge_loop(target_vocab_size=5)
 
@@ -774,13 +774,13 @@ def test_bpe_state_run_merge_loop_tie_break_smaller_id_wins():
 
     # Three pairs at equal count. (a,b)=(0,1), (a,c)=(0,2), (a,d)=(0,3).
     # Tie-break picks (a,b) first → merge "ab" gets ID 4.
-    symbol_table = {"a": 0, "b": 1, "c": 2, "d": 3}
+    vocab = {"a": 0, "b": 1, "c": 2, "d": 3}
     state = BpeEngine()
-    state.seed(
+    state.load_chunks(
         {("a", "b"): 3, ("a", "c"): 3, ("a", "d"): 3},
-        symbol_table,
+        vocab,
     )
-    state.build_initial_pairs()
+    state.build_pair_index()
     state.run_merge_loop(target_vocab_size=5)
 
     merges = state.get_merges()
@@ -796,10 +796,10 @@ def test_bpe_state_run_merge_loop_merge_filter_vetoes():
 
     # Two competing pairs: (a,b)=count 5 (will be vetoed), (a,c)=count 3.
     # Without the filter, run_merge_loop would pick (a,b) first.
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b"): 5, ("a", "c"): 3}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b"): 5, ("a", "c"): 3}, vocab)
+    state.build_pair_index()
     state.run_merge_loop(target_vocab_size=4, merge_filter=reject_ab)
 
     merges = state.get_merges()
@@ -810,10 +810,10 @@ def test_bpe_state_run_merge_loop_merge_filter_vetoes():
 def test_bpe_state_get_vocab_returns_strings_and_ids():
     """get_vocab returns dict[str, int] containing all seed + merged tokens."""
 
-    symbol_table = {"a": 0, "b": 1}
+    vocab = {"a": 0, "b": 1}
     state = BpeEngine()
-    state.seed({("a", "b"): 2}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b"): 2}, vocab)
+    state.build_pair_index()
     state.run_merge_loop(target_vocab_size=3)
 
     vocab = state.get_vocab()
@@ -830,10 +830,10 @@ def test_bpe_state_progress_callback_invoked_at_intervals():
     def cb(size, vocab, merges):
         calls.append((size, dict(vocab), list(merges)))
 
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 5}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b", "c"): 5}, vocab)
+    state.build_pair_index()
     state.run_merge_loop(
         target_vocab_size=5,
         progress_callback=cb,
@@ -858,10 +858,10 @@ def test_bpe_state_progress_callback_fires_on_vocab_size_multiples():
     # Seed vocab size = 3. progress_every = 4. The first callback should fire
     # when get_vocab_size() reaches 4 (after 1 accepted merge), NOT
     # when n_accepted reaches 4.
-    symbol_table = {"a": 0, "b": 1, "c": 2}
+    vocab = {"a": 0, "b": 1, "c": 2}
     state = BpeEngine()
-    state.seed({("a", "b", "c"): 5, ("a", "b"): 3}, symbol_table)
-    state.build_initial_pairs()
+    state.load_chunks({("a", "b", "c"): 5, ("a", "b"): 3}, vocab)
+    state.build_pair_index()
     state.run_merge_loop(
         target_vocab_size=5,
         progress_callback=cb,

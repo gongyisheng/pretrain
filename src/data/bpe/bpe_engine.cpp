@@ -13,18 +13,19 @@ namespace py = pybind11;
 
 namespace {
 
-// Single-chunk, single-merge left-to-right collapse. Matches the Python
-// `_replay_merges` inner loop byte-for-byte. After a collapse we advance
-// `i` by 1: safe because `merged` is a fresh symbol id and can't equal
-// `a`, so the next iteration would not match at the same `i` anyway.
-inline void replay_single_merge_one_chunk(std::vector<int32_t>& syms,
-                                          int32_t a, int32_t b, int32_t merged) {
-    if (syms.size() < 2) return;
+// Single-merge left-to-right collapse for one chunk.
+inline void replay_single_merge_one_chunk(
+    std::vector<int32_t>& chunk,
+    int32_t a,
+    int32_t b,
+    int32_t merged
+) {
+    if (chunk.size() < 2) return;
     size_t i = 0;
-    while (i + 1 < syms.size()) {
-        if (syms[i] == a && syms[i + 1] == b) {
-            syms[i] = merged;
-            syms.erase(syms.begin() + static_cast<long>(i) + 1);
+    while (i + 1 < chunk.size()) {
+        if (chunk[i] == a && chunk[i + 1] == b) {
+            chunk[i] = merged;
+            chunk.erase(chunk.begin() + static_cast<long>(i) + 1);
             ++i;
         } else {
             ++i;
@@ -32,164 +33,164 @@ inline void replay_single_merge_one_chunk(std::vector<int32_t>& syms,
     }
 }
 
-// Per-chunk scan for `apply_merge`. Mutates `syms` in place to collapse
-// every (a,b) → merged. Emits delta updates for the four neighbor-pair
-// patterns (prev,a)↓ (prev,merged)↑ (b,nxt)↓ (merged,nxt)↑, each scaled
-// by chunk weight `w`. Records the chunk_id under any NEW pair so the
-// reverse index `where_` stays current.
-//
-// Returns `true` if the chunk was mutated.
-//
-// Mirrors `_apply_merge_on_chunks` in src/data/bpe.py: left-to-right
-// linear scan; after a collapse `i` stays put so overlapping patterns
-// chain correctly (same overlap rule as `replay_one_chunk`).
 struct LocalDeltas {
-    std::vector<std::pair<uint64_t, int64_t>> count_deltas;  // (packed pair, dv)
-    std::vector<std::pair<uint64_t, int32_t>> where_adds;    // (packed pair, chunk_id)
+    std::vector<std::pair<uint64_t, int64_t>> count_deltas;  // (packed pair, delta_value)
+    std::vector<std::pair<uint64_t, int32_t>> chunks_by_pair_adds;    // (packed pair, chunk_id)
 };
 
-inline bool apply_merge_one_chunk(std::vector<int32_t>& syms,
-                                  int32_t chunk_id,
-                                  int64_t w,
-                                  int32_t a,
-                                  int32_t b,
-                                  int32_t merged,
-                                  LocalDeltas& out) {
-    if (syms.size() < 2) return false;
-    // Track new (prev,merged) / (merged,nxt) pair keys this chunk has
-    // already added to where_adds — mirrors the set-based dedupe in
-    // Python's `_apply_merge_on_chunks` (`wtu_adds.setdefault(p, set()).add(chunk_id)`).
-    // Without it, the same chunk_id can land in where_[pair] multiple times,
-    // leading to a data race on the next apply_merge for that pair.
+// Apply caller-supplied thread count to OMP and return the effective count.
+// num_threads <= 0 leaves OMP at its default; the return is sized for
+// per-thread buffer allocation.
+int configure_omp_threads(int num_threads) {
+    if (num_threads > 0) {
+        omp_set_num_threads(num_threads);
+        return num_threads;
+    }
+    return omp_get_max_threads();
+}
+
+inline bool apply_merge_one_chunk(
+    std::vector<int32_t>& chunk,
+    int32_t chunk_id,
+    int64_t chunk_count,
+    int32_t a,
+    int32_t b,
+    int32_t merged,
+    LocalDeltas& out
+) {
+    if (chunk.size() < 2) return false;
+    // Dedupe pair keys per chunk
     std::unordered_set<uint64_t> seen_in_chunk;
     bool changed = false;
     size_t i = 0;
-    while (i + 1 < syms.size()) {
-        if (syms[i] != a || syms[i + 1] != b) {
+    while (i + 1 < chunk.size()) {
+        if (chunk[i] != a || chunk[i + 1] != b) {
             ++i;
             continue;
         }
         changed = true;
+
+        // deal with (prev, a)
         if (i > 0) {
-            int32_t prev = syms[i - 1];
-            out.count_deltas.emplace_back(pack_pair(prev, a), -w);
+            int32_t prev = chunk[i - 1];
+            out.count_deltas.emplace_back(pack_pair(prev, a), -chunk_count);
             uint64_t k_pm = pack_pair(prev, merged);
-            out.count_deltas.emplace_back(k_pm, w);
+            out.count_deltas.emplace_back(k_pm, chunk_count);
             if (seen_in_chunk.insert(k_pm).second) {
-                out.where_adds.emplace_back(k_pm, chunk_id);
+                out.chunks_by_pair_adds.emplace_back(k_pm, chunk_id);
             }
         }
-        if (i + 2 < syms.size()) {
-            int32_t nxt = syms[i + 2];
-            out.count_deltas.emplace_back(pack_pair(b, nxt), -w);
+
+        // deal with (b, next)
+        if (i + 2 < chunk.size()) {
+            int32_t nxt = chunk[i + 2];
+            out.count_deltas.emplace_back(pack_pair(b, nxt), -chunk_count);
             uint64_t k_mn = pack_pair(merged, nxt);
-            out.count_deltas.emplace_back(k_mn, w);
+            out.count_deltas.emplace_back(k_mn, chunk_count);
             if (seen_in_chunk.insert(k_mn).second) {
-                out.where_adds.emplace_back(k_mn, chunk_id);
+                out.chunks_by_pair_adds.emplace_back(k_mn, chunk_id);
             }
         }
-        syms[i] = merged;
-        syms.erase(syms.begin() + static_cast<long>(i) + 1);
-        ++i;  // safe to advance: syms[i] is now `merged` which can't equal `a`
-              // (merged is a fresh symbol id), so the next iteration would
-              // not match anyway. Advancing by 1 skips the redundant check.
+
+        // deal with (a, b)
+        chunk[i] = merged;
+        chunk.erase(chunk.begin() + static_cast<long>(i) + 1);
+        ++i;
     }
     return changed;
 }
 
 }  // namespace
 
-void BpeEngine::seed(py::dict chunks, py::dict symbol_table) {
-    // 1. Resolve each chunk-tuple of str into a vector<int32_t> via symbol_table.
-    //    Collect (int32_chunk, weight) pairs so we can sort them deterministically.
+void BpeEngine::load_chunks(py::dict chunks, py::dict vocab) {
+
     std::vector<std::pair<std::vector<int32_t>, int64_t>> resolved;
     resolved.reserve(chunks.size());
 
     for (auto item : chunks) {
         py::tuple tup = py::reinterpret_borrow<py::tuple>(item.first);
-        int64_t weight = py::cast<int64_t>(item.second);
+        int64_t chunk_count = py::cast<int64_t>(item.second);
 
         std::vector<int32_t> ids;
         ids.reserve(tup.size());
-        for (auto sym : tup) {
-            // symbol_table[sym] — raises KeyError if missing, propagating to Python.
-            py::object id_obj = symbol_table[sym];
+        for (auto token : tup) {
+            // Explicit check so the KeyError names the offending token AND
+            // the chunk that referenced it; the implicit vocab[token] miss
+            // would surface only the bare token repr.
+            if (!vocab.contains(token)) {
+                std::string token_repr = py::cast<std::string>(py::repr(token));
+                std::string chunk_repr = py::cast<std::string>(py::repr(tup));
+                throw py::key_error(
+                    "token " + token_repr + " not in vocab "
+                    "(referenced by chunk " + chunk_repr + ")"
+                );
+            }
+            py::object id_obj = vocab[token];
             ids.push_back(py::cast<int32_t>(id_obj));
         }
-        resolved.emplace_back(std::move(ids), weight);
+        resolved.emplace_back(std::move(ids), chunk_count);
     }
 
-    // 2. Sort by chunk-tuple of int32 IDs — same order as Python's
-    //    sorted(chunks.items(), key=lambda kv: kv[0]) over str-tuples, because
-    //    the byte alphabet's IDs are assigned in lex-of-unicode-char order
-    //    and chunks at seed time contain only byte-alphabet single-char tokens.
     std::sort(resolved.begin(), resolved.end(),
-              [](const auto& lhs, const auto& rhs) {
-                  return lhs.first < rhs.first;
-              });
+    [](const auto& lhs, const auto& rhs) {
+        return lhs.first < rhs.first;
+    });
 
-    // 3. Move into final storage.
-    symbols_per_chunk_.clear();
-    chunk_weights_.clear();
-    symbols_per_chunk_.reserve(resolved.size());
-    chunk_weights_.reserve(resolved.size());
-    for (auto& [ids, weight] : resolved) {
-        symbols_per_chunk_.push_back(std::move(ids));
-        chunk_weights_.push_back(weight);
+    tokens_by_chunk_.clear();
+    chunk_counts_.clear();
+    tokens_by_chunk_.reserve(resolved.size());
+    chunk_counts_.reserve(resolved.size());
+    for (auto& [ids, chunk_count] : resolved) {
+        tokens_by_chunk_.push_back(std::move(ids));
+        chunk_counts_.push_back(chunk_count);
     }
 
-    // Phase 4: record the symbol-table contents natively so run_merge_loop
-    // can build merged-token strings without bouncing through Python.
-    // We use the int32 IDs as indices into id2sym_native_, so resize first
-    // then write each (str, id) into the right slot.
-    id2sym_native_.clear();
-    vocab_native_.clear();
+    id2token_.clear();
+    token2id_.clear();
     int32_t max_id = -1;
-    for (auto item : symbol_table) {
+    for (auto item : vocab) {
         int32_t id = py::cast<int32_t>(item.second);
         if (id > max_id) max_id = id;
     }
-    id2sym_native_.assign(max_id + 1, std::string{});
-    for (auto item : symbol_table) {
-        std::string sym = py::cast<std::string>(item.first);
+    id2token_.assign(max_id + 1, std::string{});
+    for (auto item : vocab) {
+        std::string token = py::cast<std::string>(item.first);
         int32_t id = py::cast<int32_t>(item.second);
-        id2sym_native_[id] = sym;
-        vocab_native_[sym] = id;
+        id2token_[id] = token;
+        token2id_[token] = id;
     }
 }
 
-std::vector<int32_t> BpeEngine::get_chunk_symbols(int32_t chunk_id) const {
-    if (chunk_id < 0 || chunk_id >= static_cast<int32_t>(symbols_per_chunk_.size())) {
+std::vector<int32_t> BpeEngine::get_chunk_tokens(int32_t chunk_id) const {
+    if (chunk_id < 0 || chunk_id >= static_cast<int32_t>(tokens_by_chunk_.size())) {
         throw std::out_of_range("chunk_id out of range");
     }
-    return symbols_per_chunk_[chunk_id];
+    return tokens_by_chunk_[chunk_id];
 }
 
-int64_t BpeEngine::get_chunk_weight(int32_t chunk_id) const {
-    if (chunk_id < 0 || chunk_id >= static_cast<int32_t>(chunk_weights_.size())) {
+int64_t BpeEngine::get_chunk_count(int32_t chunk_id) const {
+    if (chunk_id < 0 || chunk_id >= static_cast<int32_t>(chunk_counts_.size())) {
         throw std::out_of_range("chunk_id out of range");
     }
-    return chunk_weights_[chunk_id];
+    return chunk_counts_[chunk_id];
 }
 
-py::list BpeEngine::build_initial_pairs() {
+py::list BpeEngine::build_pair_index() {
     pair_counts_.clear();
-    where_.clear();
+    chunks_by_pair_.clear();
 
-    const int32_t n = static_cast<int32_t>(symbols_per_chunk_.size());
+    const int32_t n = static_cast<int32_t>(tokens_by_chunk_.size());
     for (int32_t cid = 0; cid < n; ++cid) {
-        const auto& syms = symbols_per_chunk_[cid];
-        const int64_t w = chunk_weights_[cid];
-        if (syms.size() < 2) continue;
-        // Track which pairs this chunk contributes to, to avoid duplicate
-        // entries in where_[pair] for chunks where the same pair occurs
-        // multiple times.
+        const auto& chunk = tokens_by_chunk_[cid];
+        const int64_t chunk_count = chunk_counts_[cid];
+        if (chunk.size() < 2) continue;
+        // Dedupe so chunks_by_pair_[pair] doesn't list the same chunk twice.
         std::unordered_set<uint64_t> seen_in_chunk;
-        for (size_t i = 0; i + 1 < syms.size(); ++i) {
-            uint64_t key = pack_pair(syms[i], syms[i + 1]);
-            pair_counts_[key] += w;
+        for (size_t i = 0; i + 1 < chunk.size(); ++i) {
+            uint64_t key = pack_pair(chunk[i], chunk[i + 1]);
+            pair_counts_[key] += chunk_count;
             if (seen_in_chunk.insert(key).second) {
-                where_[key].push_back(cid);
+                chunks_by_pair_[key].push_back(cid);
             }
         }
     }
@@ -201,15 +202,15 @@ py::list BpeEngine::build_initial_pairs() {
     return out;
 }
 
-int64_t BpeEngine::pair_count(int32_t a, int32_t b) const {
+int64_t BpeEngine::get_pair_count(int32_t a, int32_t b) const {
     auto it = pair_counts_.find(pack_pair(a, b));
     if (it == pair_counts_.end()) return 0;
     return it->second;
 }
 
-std::vector<int32_t> BpeEngine::pair_chunks(int32_t a, int32_t b) const {
-    auto it = where_.find(pack_pair(a, b));
-    if (it == where_.end()) return {};
+std::vector<int32_t> BpeEngine::get_chunks_by_pair(int32_t a, int32_t b) const {
+    auto it = chunks_by_pair_.find(pack_pair(a, b));
+    if (it == chunks_by_pair_.end()) return {};
     return it->second;
 }
 
@@ -217,41 +218,32 @@ void BpeEngine::set_num_threads(int n) {
     num_threads_ = n;
 }
 
-void BpeEngine::run_replay_merges(py::list merges,
-                                  py::object progress_callback,
-                                  int32_t progress_every) {
-    // Convert merges to a flat C++ vector once. Also record each (a, b)
-    // pair in merges_native_ so that mid-training snapshots (get_merges())
-    // include the full merge history (initial + new), not just the new
-    // ones added by run_merge_loop. Without this, the W&B progress
-    // callback in stage 2 of SuperBPE gets only the stage 2 merges and
-    // HF's BPE encoder can't tokenize past the byte alphabet.
+void BpeEngine::run_replay_merges(
+    py::list merges,
+    py::object progress_callback,
+    int32_t progress_every
+) {
+
     std::vector<std::tuple<int32_t, int32_t, int32_t>> ms;
     ms.reserve(merges.size());
-    merges_native_.reserve(merges_native_.size() + merges.size());
+    merges_.reserve(merges_.size() + merges.size());
     for (auto item : merges) {
         py::tuple t = py::reinterpret_borrow<py::tuple>(item);
         int32_t a = py::cast<int32_t>(t[0]);
         int32_t b = py::cast<int32_t>(t[1]);
         int32_t merged = py::cast<int32_t>(t[2]);
         ms.emplace_back(a, b, merged);
-        merges_native_.emplace_back(a, b);
+        merges_.emplace_back(a, b);
     }
 
-    const int n_chunks = static_cast<int>(symbols_per_chunk_.size());
+    const int n_chunks = static_cast<int>(tokens_by_chunk_.size());
     const int n_merges = static_cast<int>(ms.size());
-    if (num_threads_ > 0) {
-        omp_set_num_threads(num_threads_);
-    }
+    configure_omp_threads(num_threads_);
     const bool has_progress = !progress_callback.is_none() && progress_every > 0;
 
-    // Batch merges so each chunk is visited once per batch (cache-friendly)
-    // instead of once per merge. Each chunk's inner loop runs the whole
-    // batch sequentially, keeping the symbol vector hot in L1/L2 across
-    // the batch. Batching also bounds Ctrl+C latency to one batch's work.
+    // keeps the token vector hot in L1/L2 across the batch
     const int batch_size = progress_every > 0 ? progress_every : n_merges;
     for (int m_start = 0; m_start < n_merges; m_start += batch_size) {
-        // Honor Python signals (Ctrl+C) between batches. GIL is held here.
         if (PyErr_CheckSignals() != 0) throw py::error_already_set();
         const int m_end = std::min(m_start + batch_size, n_merges);
         {
@@ -260,7 +252,7 @@ void BpeEngine::run_replay_merges(py::list merges,
             for (int cid = 0; cid < n_chunks; ++cid) {
                 for (int m = m_start; m < m_end; ++m) {
                     const auto& [a, b, merged] = ms[m];
-                    replay_single_merge_one_chunk(symbols_per_chunk_[cid], a, b, merged);
+                    replay_single_merge_one_chunk(tokens_by_chunk_[cid], a, b, merged);
                 }
             }
         }
@@ -271,27 +263,25 @@ void BpeEngine::run_replay_merges(py::list merges,
 }
 
 std::unordered_map<uint64_t, int64_t> BpeEngine::apply_merge_internal(
-    int32_t a, int32_t b, int32_t merged_id) {
+    int32_t a, 
+    int32_t b, 
+    int32_t merged_id
+) {
     uint64_t pair_key = pack_pair(a, b);
 
-    // Snapshot the chunks containing (a,b), then drop the entry —
-    // it's about to be gone.
+    // Snapshot affected chunks, then drop the (a,b) entry.
     std::vector<int32_t> affected;
     {
-        auto it = where_.find(pair_key);
-        if (it != where_.end()) {
+        auto it = chunks_by_pair_.find(pair_key);
+        if (it != chunks_by_pair_.end()) {
             affected = std::move(it->second);
-            where_.erase(it);
+            chunks_by_pair_.erase(it);
         }
     }
     pair_counts_.erase(pair_key);
 
     const int n = static_cast<int>(affected.size());
-    if (num_threads_ > 0) {
-        omp_set_num_threads(num_threads_);
-    }
-
-    const int actual_threads = num_threads_ > 0 ? num_threads_ : omp_get_max_threads();
+    const int actual_threads = configure_omp_threads(num_threads_);
     std::vector<LocalDeltas> per_thread(actual_threads);
 
     {
@@ -303,15 +293,15 @@ std::unordered_map<uint64_t, int64_t> BpeEngine::apply_merge_internal(
             #pragma omp for schedule(dynamic, 64)
             for (int idx = 0; idx < n; ++idx) {
                 int32_t cid = affected[idx];
-                apply_merge_one_chunk(symbols_per_chunk_[cid],
-                                      cid,
-                                      chunk_weights_[cid],
-                                      a, b, merged_id, local);
+                apply_merge_one_chunk(
+                    tokens_by_chunk_[cid],
+                    cid,
+                    chunk_counts_[cid],
+                    a, b, merged_id, local);
             }
         }
     }
 
-    // Reduce thread-local deltas.
     std::unordered_map<uint64_t, int64_t> total_deltas;
     for (auto& local : per_thread) {
         for (auto& [key, dv] : local.count_deltas) {
@@ -319,15 +309,11 @@ std::unordered_map<uint64_t, int64_t> BpeEngine::apply_merge_internal(
         }
     }
     for (auto& local : per_thread) {
-        for (auto& [key, cid] : local.where_adds) {
-            where_[key].push_back(cid);
+        for (auto& [key, cid] : local.chunks_by_pair_adds) {
+            chunks_by_pair_[key].push_back(cid);
         }
     }
 
-    // Fold per-pair deltas into pair_counts_; erase pairs whose new count
-    // is <= 0. Caller decides what to do with the returned map (build a
-    // py::list for the public path, or push to the native heap for the
-    // run_merge_loop path).
     for (auto& [key, dv] : total_deltas) {
         int64_t new_count = pair_counts_[key] + dv;
         if (new_count <= 0) {
@@ -352,29 +338,30 @@ py::list BpeEngine::apply_merge(int32_t a, int32_t b, int32_t merged_id) {
 void BpeEngine::drop_pair(int32_t a, int32_t b) {
     uint64_t key = pack_pair(a, b);
     pair_counts_.erase(key);
-    where_.erase(key);
+    chunks_by_pair_.erase(key);
 }
 
-std::string BpeEngine::id2sym(int32_t id) const {
-    if (id < 0 || id >= static_cast<int32_t>(id2sym_native_.size())) {
+std::string BpeEngine::id2token(int32_t id) const {
+    if (id < 0 || id >= static_cast<int32_t>(id2token_.size())) {
         throw std::out_of_range("id out of range");
     }
-    return id2sym_native_[id];
+    return id2token_[id];
 }
 
-int32_t BpeEngine::sym2id(const std::string& sym) const {
-    auto it = vocab_native_.find(sym);
-    if (it == vocab_native_.end()) {
-        throw std::out_of_range("symbol not in native vocab");
+int32_t BpeEngine::token2id(const std::string& token) const {
+    auto it = token2id_.find(token);
+    if (it == token2id_.end()) {
+        throw std::out_of_range("token not in native vocab");
     }
     return it->second;
 }
 
-int BpeEngine::run_merge_loop(int32_t target_vocab_size,
-                             py::object merge_filter,
-                             py::object progress_callback,
-                             int32_t progress_every) {
-    // Seed the heap from current pair_counts_.
+int BpeEngine::run_merge_loop(
+    int32_t target_vocab_size,
+    py::object merge_filter,
+    py::object progress_callback,
+    int32_t progress_every
+) {
     heap_.clear();
     heap_.reserve(pair_counts_.size());
     for (const auto& [key, count] : pair_counts_) {
@@ -386,10 +373,9 @@ int BpeEngine::run_merge_loop(int32_t target_vocab_size,
     const bool has_progress = !progress_callback.is_none() && progress_every > 0;
     int n_accepted = 0;
 
-    while (static_cast<int32_t>(id2sym_native_.size()) < target_vocab_size) {
-        // Honor Python signals (Ctrl+C) between merges. GIL is held here.
+    while (static_cast<int32_t>(id2token_.size()) < target_vocab_size) {
+        // Ctrl+C check (GIL held).
         if (PyErr_CheckSignals() != 0) throw py::error_already_set();
-        // Pop until live entry.
         HeapEntry top{};
         bool found_live = false;
         while (!heap_.empty()) {
@@ -405,28 +391,26 @@ int BpeEngine::run_merge_loop(int32_t target_vocab_size,
 
         int32_t a = unpack_a(top.pair_key);
         int32_t b = unpack_b(top.pair_key);
-        std::string merged_s = id2sym_native_[a] + id2sym_native_[b];
+        std::string merged_s = id2token_[a] + id2token_[b];
 
-        // Optional Python merge_filter callback. False → veto.
+        // merge_filter returning False vetoes the merge.
         if (has_filter) {
             bool accept = py::cast<bool>(
-                merge_filter(id2sym_native_[a], id2sym_native_[b], merged_s));
+                merge_filter(id2token_[a], id2token_[b], merged_s));
             if (!accept) {
                 uint64_t key = pack_pair(a, b);
                 pair_counts_.erase(key);
-                where_.erase(key);
+                chunks_by_pair_.erase(key);
                 continue;
             }
         }
 
-        // Accept the merge.
-        int32_t merged_id = static_cast<int32_t>(id2sym_native_.size());
-        id2sym_native_.push_back(merged_s);
-        vocab_native_[merged_s] = merged_id;
-        merges_native_.emplace_back(a, b);
+        int32_t merged_id = static_cast<int32_t>(id2token_.size());
+        id2token_.push_back(merged_s);
+        token2id_[merged_s] = merged_id;
+        merges_.emplace_back(a, b);
 
-        // Apply the merge to symbols_per_chunk_, fold deltas into
-        // pair_counts_ + where_, push new heap entries for each changed pair.
+        // Push heap entries for each pair whose count changed.
         auto deltas = apply_merge_internal(a, b, merged_id);
         for (const auto& [key, _dv] : deltas) {
             auto it = pair_counts_.find(key);
@@ -437,13 +421,11 @@ int BpeEngine::run_merge_loop(int32_t target_vocab_size,
 
         ++n_accepted;
 
-        // Progress callback when total vocab size hits a multiple of
-        // progress_every — matches Python's `len(vocab) % progress_every == 0`.
         if (has_progress
-         && static_cast<int32_t>(id2sym_native_.size()) % progress_every == 0) {
+         && static_cast<int32_t>(id2token_.size()) % progress_every == 0) {
             py::dict snapshot_vocab = get_vocab();
             py::list snapshot_merges = get_merges();
-            progress_callback(static_cast<int>(id2sym_native_.size()),
+            progress_callback(static_cast<int>(id2token_.size()),
                               snapshot_vocab, snapshot_merges);
         }
     }
@@ -453,16 +435,16 @@ int BpeEngine::run_merge_loop(int32_t target_vocab_size,
 
 py::dict BpeEngine::get_vocab() const {
     py::dict out;
-    for (size_t i = 0; i < id2sym_native_.size(); ++i) {
-        out[py::str(id2sym_native_[i])] = static_cast<int32_t>(i);
+    for (size_t i = 0; i < id2token_.size(); ++i) {
+        out[py::str(id2token_[i])] = static_cast<int32_t>(i);
     }
     return out;
 }
 
 py::list BpeEngine::get_merges() const {
     py::list out;
-    for (const auto& [a, b] : merges_native_) {
-        out.append(py::make_tuple(id2sym_native_[a], id2sym_native_[b]));
+    for (const auto& [a, b] : merges_) {
+        out.append(py::make_tuple(id2token_[a], id2token_[b]));
     }
     return out;
 }

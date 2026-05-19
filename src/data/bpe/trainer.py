@@ -189,7 +189,7 @@ def _pretokenize(doc: str, mode: str) -> list[str]:
 
 
 def _pretokenize_batch(batch: list[str], mode: str) -> Counter:
-    """Pretokenize a batch of documents, return Counter of symbol-tuples.
+    """Pretokenize a batch of documents, return Counter of token-tuples.
 
     Module-level (not nested) for `mp.Pool` pickling. Used by `_build_chunks`
     in both serial (n_workers=1) and parallel paths.
@@ -226,7 +226,7 @@ def _build_chunks(
     show_progress: bool = False,
     progress_desc: str = "",
 ) -> dict[tuple[str, ...], int]:
-    """Pretokenize the corpus and aggregate by symbol-tuple.
+    """Pretokenize the corpus and aggregate by token-tuple.
 
     Fans out over doc batches via the shared module pool; merges per-batch
     Counters on the main process.
@@ -301,9 +301,9 @@ class BpeTrainer:
                 raise ValueError("initial_vocab IDs must be contiguous from 0")
             for a, b in initial_merges:  # type: ignore[union-attr]
                 if a not in initial_vocab:
-                    raise ValueError(f"initial_merges references unknown symbol: {a!r}")
+                    raise ValueError(f"initial_merges references unknown token: {a!r}")
                 if b not in initial_vocab:
-                    raise ValueError(f"initial_merges references unknown symbol: {b!r}")
+                    raise ValueError(f"initial_merges references unknown token: {b!r}")
                 if (a + b) not in initial_vocab:
                     raise ValueError(
                         f"initial_merges produces {a + b!r} but it is not in initial_vocab"
@@ -349,7 +349,7 @@ class BpeTrainer:
         if not chunks:
             raise ValueError("corpus produced no trainable chunks")
 
-        # 2. Seed vocab: specials + byte alphabet (or initial_vocab on resume).
+        # 2. Build vocab: specials + byte alphabet (or initial_vocab on resume).
         if self.initial_vocab is None:
             vocab: dict[str, int] = {}
             for sp in self.special_tokens:
@@ -361,15 +361,15 @@ class BpeTrainer:
             vocab = dict(self.initial_vocab)
             merges = list(self.initial_merges)  # type: ignore[arg-type]
 
-        # 3. BPE engine: seed + replay (on resume) + initial pair counts.
+        # 3. BPE engine: load + replay (on resume) + initial pair counts.
         engine = BpeEngine()
         engine.set_num_threads(self.n_workers)
-        engine.seed(chunks, vocab)
-        del chunks  # release the chunk dict before native build_initial_pairs allocates pair_counts_ + where_
+        engine.load_chunks(chunks, vocab)
+        del chunks  # release the chunk dict before native build_pair_index allocates pair_counts_ + chunks_by_pair_
         if merges:
-            sym_to_id = vocab  # vocab IS the str→int symbol table after seeding
+            token_to_id = vocab  # vocab IS the str→int table after load_chunks
             merges_int = [
-                (sym_to_id[a], sym_to_id[b], sym_to_id[a + b]) for a, b in merges
+                (token_to_id[a], token_to_id[b], token_to_id[a + b]) for a, b in merges
             ]
             replay_callback, replay_ctx = _make_progress_callback(
                 user_callback=None,
@@ -384,7 +384,7 @@ class BpeTrainer:
                     progress_callback=replay_callback,
                     progress_every=self.progress_every,
                 )
-        engine.build_initial_pairs()
+        engine.build_pair_index()
 
         # 4. Run the merge loop natively. `merge_filter` (if any) is invoked
         #    by the C++ side once per candidate pair via GIL re-acquire.
