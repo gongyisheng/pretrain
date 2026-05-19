@@ -13,12 +13,12 @@ namespace py = pybind11;
 
 namespace {
 
-int configure_omp_threads(int num_threads) {
-    if (num_threads > 0) {
-        omp_set_num_threads(num_threads);
-        return num_threads;
+int set_omp_threads(int num_threads) {
+    if (num_threads <= 0) {
+        num_threads = omp_get_max_threads();
     }
-    return omp_get_max_threads();
+    omp_set_num_threads(num_threads);
+    return num_threads;
 }
 
 }  // namespace
@@ -298,7 +298,7 @@ void BpeEngine::replay_merges_(
     const int n_chunks = static_cast<int>(chunks_.size());
     const int n_merges = static_cast<int>(merges_copy.size());
 
-    configure_omp_threads(num_threads_);
+    set_omp_threads(num_threads_);
     const bool has_progress = !progress_callback.is_none() && progress_every > 0;
 
     // keeps the token vector hot in L1/L2 across the batch
@@ -341,7 +341,7 @@ std::unordered_map<uint64_t, int64_t> BpeEngine::apply_merge_(
     }
 
     const int n = static_cast<int>(affected.size());
-    const int actual_threads = configure_omp_threads(num_threads_);
+    const int actual_threads = set_omp_threads(num_threads_);
     std::vector<ThreadLocalDelta> per_thread(actual_threads);
 
     {
