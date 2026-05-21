@@ -445,6 +445,8 @@ class Trainer:
         total_loss = 0.0
         total_aux_loss = 0.0
         n_batches = 0
+        bpb_tokens = 0
+        bpb_bytes = 0
 
         for i, batch in enumerate(self.val_loader):
             if i >= self.config.training.eval_steps:
@@ -479,17 +481,36 @@ class Trainer:
             total_loss += loss.item()
             if aux_loss is not None:
                 total_aux_loss += aux_loss.item()
+            if self.tokenizer is not None:
+                # Count loss-contributing tokens; decode them and count UTF-8 bytes.
+                # loss_mask is shape (B, S) aligned with y.
+                if loss_mask is None:
+                    target_ids = y.reshape(-1).tolist()
+                else:
+                    keep = loss_mask.reshape(-1).bool()
+                    target_ids = y.reshape(-1)[keep].tolist()
+                bpb_tokens += len(target_ids)
+                bpb_bytes += len(
+                    self.tokenizer.decode(target_ids, skip_special_tokens=True).encode(
+                        "utf-8"
+                    )
+                )
             n_batches += 1
 
         avg_loss = total_loss / max(n_batches, 1)
         avg_aux_loss = (
             (total_aux_loss / max(n_batches, 1)) if total_aux_loss > 0 else None
         )
+        tokens_per_byte = bpb_tokens / bpb_bytes if bpb_bytes > 0 else None
         log_dict = self.metrics.build_eval_log_dict(
-            avg_loss=avg_loss, avg_aux_loss=avg_aux_loss
+            avg_loss=avg_loss,
+            avg_aux_loss=avg_aux_loss,
+            tokens_per_byte=tokens_per_byte,
         )
         self.logger.log(log_dict, step=self.step)
         eval_msg = f"\n[eval] val_loss={avg_loss:.4f} | val_ppl={log_dict['val/perplexity']:.2f}"
+        if "val/bpb" in log_dict:
+            eval_msg += f" | val_bpb={log_dict['val/bpb']:.4f}"
         if "val/aux_loss" in log_dict:
             eval_msg += f" | val_aux_loss={log_dict['val/aux_loss']:.4f}"
         print(eval_msg)
