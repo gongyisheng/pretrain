@@ -16,7 +16,7 @@ from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
-from src.training.loss import shift_inputs, compute_loss
+from src.training.loss import compute_loss
 from src.utils.masking_utils import (
     build_causal_attention_mask,
     build_intra_doc_attention_mask,
@@ -137,15 +137,11 @@ class Trainer:
                 **dataset_kwargs,
             )
         elif config.task == "sft":
-            import json
-
-            meta_path = os.path.join(config.data.data_dir, "meta.json")
-            with open(meta_path) as f:
-                meta = json.load(f)
             sft_kwargs = dict(
                 vocab_size=config.model.vocab_size,
-                question_len=meta["question_len"],
-                answer_len=meta["answer_len"],
+                question_len=config.data.question_len,
+                answer_len=config.data.answer_len,
+                packing=config.data.packing,
             )
             self.train_dataset = SFTDataset(train_path, **sft_kwargs)
             self.val_dataset = SFTDataset(val_path, **sft_kwargs)
@@ -361,7 +357,6 @@ class Trainer:
                 with torch.amp.autocast(
                     self.device, dtype=self.amp_dtype, enabled=self.use_amp
                 ):
-                    x = shift_inputs(input_ids)
                     if self.config.training.intra_doc_masking:
                         mask_dtype = self.amp_dtype if self.use_amp else torch.float32
                         attn_mask = build_intra_doc_attention_mask(
@@ -379,7 +374,7 @@ class Trainer:
                             attn_implementation=self.config.model.attn_implementation,
                         )
                     logits, aux_loss = self.model(
-                        x, position_ids=position_ids, attn_mask=attn_mask
+                        input_ids, position_ids=position_ids, attn_mask=attn_mask
                     )
                     loss = compute_loss(logits, labels, self._loss_fn)
                     if aux_loss is not None:
@@ -388,7 +383,7 @@ class Trainer:
 
                 self.scaler.scale(loss).backward()
                 accum_loss_tensor += loss.detach()
-                tokens_since_log += x.numel()
+                tokens_since_log += input_ids.numel()
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
@@ -500,7 +495,6 @@ class Trainer:
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                x = shift_inputs(input_ids)
                 if self.config.training.intra_doc_masking:
                     mask_dtype = self.amp_dtype if self.use_amp else torch.float32
                     attn_mask = build_intra_doc_attention_mask(
@@ -518,7 +512,7 @@ class Trainer:
                         attn_implementation=self.config.model.attn_implementation,
                     )
                 logits, aux_loss = self.model(
-                    x, position_ids=position_ids, attn_mask=attn_mask
+                    input_ids, position_ids=position_ids, attn_mask=attn_mask
                 )
                 loss = compute_loss(logits, labels, self._loss_fn)
             total_loss += loss.item()
@@ -598,7 +592,6 @@ class Trainer:
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                x = shift_inputs(input_ids)
                 if self.config.training.intra_doc_masking:
                     mask_dtype = self.amp_dtype if self.use_amp else torch.float32
                     attn_mask = build_intra_doc_attention_mask(
@@ -616,7 +609,7 @@ class Trainer:
                         attn_implementation=self.config.model.attn_implementation,
                     )
                 logits, _ = self.model(
-                    x, position_ids=position_ids, attn_mask=attn_mask
+                    input_ids, position_ids=position_ids, attn_mask=attn_mask
                 )
             preds = logits.argmax(dim=-1)
             mask = labels != -100

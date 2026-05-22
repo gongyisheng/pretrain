@@ -73,6 +73,9 @@ class DataConfig:
     tokenizer_train_num_samples: int = 1_000_000
     # SuperBPE-only: interval (in merges) at which to log/evaluate curve points.
     tokenizer_train_eval_every: int = 5000
+    # SFT-only: per-sample question and answer lengths on disk (0 = unused).
+    question_len: int = 0
+    answer_len: int = 0
 
 
 @dataclass

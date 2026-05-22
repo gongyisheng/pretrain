@@ -17,6 +17,8 @@ data:
   data_dir: "data/grokking_sub_p97_f0.3/"
   packing: false
   num_workers: 2
+  question_len: 4
+  answer_len: 1
 
 training:
   batch_size: 512

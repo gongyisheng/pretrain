@@ -2,17 +2,6 @@ import torch
 import torch.nn.functional as F
 
 
-def shift_inputs(tokens: torch.Tensor) -> torch.Tensor:
-    """Drop the last token along sequence dim — the model input for next-token prediction.
-
-    Args:
-        tokens: shape (B, S+1)
-    Returns:
-        x: shape (B, S)
-    """
-    return tokens[:, :-1]
-
-
 def compute_loss(
     logits: torch.Tensor, labels: torch.Tensor, loss_fn=None
 ) -> torch.Tensor:

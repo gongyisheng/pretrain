@@ -8,9 +8,12 @@ from src.utils.masking_utils import build_position_ids
 class PretrainDataset(Dataset):
     """Memory-mapped dataset for pretraining.
 
-    Returns (input_ids, position_ids, labels).
+    Returns (input_ids, position_ids, labels), all of shape (seq_len,). The
+    next-token shift is applied here so the trainer feeds ``input_ids`` to the
+    model directly.
 
-    - ``input_ids``: shape (seq_len + 1,). The model input is ``input_ids[:-1]``.
+    - ``input_ids``: shape (seq_len,). The model input, already shifted (the
+      raw on-disk slice is seq_len+1 tokens; the last is dropped).
     - ``position_ids``: shape (seq_len,). Intra-document positions of the input
       tokens. In packing=False mode, negative entries mark padding.
     - ``labels``: shape (seq_len,). Next-token targets aligned with the model
@@ -60,11 +63,12 @@ class PretrainDataset(Dataset):
         if self.packing:
             start = idx * self.seq_len
             chunk = self.data[start : start + self.seq_len + 1].astype(np.int64)
-            input_ids = torch.from_numpy(chunk)
+            chunk_t = torch.from_numpy(chunk)
+            input_ids = chunk_t[:-1]
+            labels = chunk_t[1:].clone()
             position_ids = build_position_ids(
-                input_ids[:-1].unsqueeze(0), self.eot_token_id, packing=True
+                input_ids.unsqueeze(0), self.eot_token_id, packing=True
             ).squeeze(0)
-            labels = input_ids[1:].clone()
             return input_ids, position_ids, labels
 
         doc_start = int(self._doc_starts[idx])
@@ -73,18 +77,19 @@ class PretrainDataset(Dataset):
         n_content = min(doc_len, self.seq_len + 1)
         doc = self.data[doc_start : doc_start + n_content].astype(np.int64)
 
-        input_ids_arr = np.full(self.seq_len + 1, self.pad_token_id, dtype=np.int64)
-        input_ids_arr[:n_content] = doc[:n_content]
-        input_ids = torch.from_numpy(input_ids_arr)
+        chunk_arr = np.full(self.seq_len + 1, self.pad_token_id, dtype=np.int64)
+        chunk_arr[:n_content] = doc[:n_content]
+        chunk_t = torch.from_numpy(chunk_arr)
+        input_ids = chunk_t[:-1]
+        labels = chunk_t[1:].clone()
 
         position_ids = build_position_ids(
-            input_ids[:-1].unsqueeze(0), self.eot_token_id, packing=False
+            input_ids.unsqueeze(0), self.eot_token_id, packing=False
         ).squeeze(0)
 
-        # labels are the next-token targets for the input tokens (x = input_ids[:-1]).
-        # Wherever x is padding (position_ids[i] < 0), the loss should be skipped
-        # → set labels[i] = -100 via the cross-entropy ignore_index convention.
-        labels = input_ids[1:].clone()
+        # Wherever input_ids[i] is padding (position_ids[i] < 0), the loss
+        # should be skipped → set labels[i] = -100 via the cross-entropy
+        # ignore_index convention.
         labels[position_ids < 0] = -100
         return input_ids, position_ids, labels
 
@@ -93,15 +98,19 @@ class SFTDataset(Dataset):
     """Memory-mapped dataset for supervised fine-tuning.
 
     Each on-disk sample is ``question_len + answer_len`` tokens laid out as
-    ``[question_tokens..., answer_tokens...]``. The dataset assembles the full
-    sequence in code and constructs the ``labels`` tensor with the HF -100
-    ignore-index convention: only the last ``answer_len`` label positions
-    carry the answer tokens; all earlier positions are -100 and skipped by the
-    loss.
+    ``[question_tokens..., answer_tokens...]``. The dataset applies the
+    next-token shift internally and constructs the ``labels`` tensor with the
+    HF -100 ignore-index convention: only the last ``answer_len`` label
+    positions carry the answer tokens; all earlier positions are -100 and
+    skipped by the loss.
 
-    Returns ``(input_ids, position_ids, labels)`` with shapes
-    ``(stride,), (stride - 1,), (stride - 1,)`` where ``stride = question_len +
-    answer_len``.
+    Returns ``(input_ids, position_ids, labels)`` all of shape ``(stride - 1,)``
+    where ``stride = question_len + answer_len``. The trainer feeds
+    ``input_ids`` to the model directly — no further shifting needed.
+
+    ``packing`` mirrors the flag on ``PretrainDataset`` for config symmetry,
+    but only ``packing=False`` is implemented. ``packing=True`` (concatenating
+    multiple Q/A pairs into a longer sequence) raises ``NotImplementedError``.
     """
 
     def __init__(
@@ -110,7 +119,13 @@ class SFTDataset(Dataset):
         vocab_size: int,
         question_len: int,
         answer_len: int,
+        packing: bool = False,
     ):
+        if packing:
+            raise NotImplementedError(
+                "SFTDataset does not yet support packing=True. "
+                "Set data.packing=false in your config."
+            )
         self.question_len = question_len
         self.answer_len = answer_len
         self.stride = question_len + answer_len
@@ -129,10 +144,13 @@ class SFTDataset(Dataset):
 
     def __getitem__(self, idx):
         start = idx * self.stride
-        chunk = self.data[start : start + self.stride].astype(np.int64)
-        input_ids = torch.from_numpy(chunk)
+        chunk = torch.from_numpy(
+            self.data[start : start + self.stride].astype(np.int64)
+        )
+        input_ids = chunk[:-1]
         position_ids = torch.arange(self.stride - 1, dtype=torch.long)
         labels = torch.full((self.stride - 1,), -100, dtype=torch.long)
-        # Last `answer_len` label positions hold the answer tokens.
-        labels[-self.answer_len :] = input_ids[-self.answer_len :]
+        # Last `answer_len` label positions hold the answer tokens (taken from
+        # the unshifted chunk's tail).
+        labels[-self.answer_len :] = chunk[-self.answer_len :]
         return input_ids, position_ids, labels

@@ -35,7 +35,8 @@ def test_dataset_getitem_shape(mock_memmap):
     mock_memmap["/x.bin"] = np.arange(1024, dtype=np.uint16)
     ds = PretrainDataset("/x.bin", seq_len=128, vocab_size=1024)
     input_ids, position_ids, labels = ds[0]
-    assert input_ids.shape == (129,)
+    # All three are pre-shifted by the dataset: shape (seq_len,) each.
+    assert input_ids.shape == (128,)
     assert input_ids.dtype == torch.long
     assert position_ids.shape == (128,)
     assert position_ids.dtype == torch.long
@@ -50,12 +51,14 @@ def test_dataset_getitem_position_ids(mock_memmap):
     assert position_ids.tolist() == list(range(128))
 
 
-def test_dataset_packed_labels_match_shifted_inputs(mock_memmap):
-    """packing=True: labels == input_ids[1:] with no -100s."""
-    mock_memmap["/x.bin"] = np.arange(1024, dtype=np.uint16)
+def test_dataset_packed_shift_against_disk(mock_memmap):
+    """packing=True: input_ids == data[:seq_len], labels == data[1:seq_len+1], no -100s."""
+    data = np.arange(1024, dtype=np.uint16)
+    mock_memmap["/x.bin"] = data
     ds = PretrainDataset("/x.bin", seq_len=128, vocab_size=1024, eot_token_id=9999)
     input_ids, _, labels = ds[0]
-    assert torch.equal(labels, input_ids[1:])
+    assert torch.equal(input_ids, torch.from_numpy(data[:128].astype(np.int64)))
+    assert torch.equal(labels, torch.from_numpy(data[1:129].astype(np.int64)))
     assert (labels != -100).all()
 
 
@@ -95,7 +98,8 @@ def test_single_doc_getitem_returns_three_tuple(packed_docs):
 
 def test_single_doc_shapes(packed_docs):
     input_ids, position_ids, labels = _unpacked_ds(packed_docs)[0]
-    assert input_ids.shape == (9,)
+    # All three pre-shifted: shape (seq_len,) each.
+    assert input_ids.shape == (8,)
     assert position_ids.shape == (8,)
     assert labels.shape == (8,)
 
@@ -111,14 +115,13 @@ def test_single_doc_content(packed_docs):
 
 
 def test_single_doc_unpacked_labels_minus_100_at_padding(packed_docs):
-    """packing=False: labels has -100 wherever the corresponding x is padding (position_ids < 0)."""
+    """packing=False: labels has -100 wherever input_ids is padding (position_ids < 0)."""
     # doc0 = [2, 3, EOT]
-    # input_ids = [2, 3, EOT, PAD, PAD, PAD, PAD, PAD, PAD]
-    # x         = input_ids[:-1] = [2, 3, EOT, PAD, PAD, PAD, PAD, PAD]
+    # raw chunk    = [2, 3, EOT, PAD, PAD, PAD, PAD, PAD, PAD]  (seq_len + 1 = 9 tokens)
+    # input_ids    = chunk[:-1] = [2, 3, EOT, PAD, PAD, PAD, PAD, PAD]
     # position_ids = [0, 1, 2, -1, -1, -1, -1, -1]
-    # x[0..2] are real (position_ids[0..2] = [0,1,2]),
-    # so labels[0..2] = input_ids[1..3] = [3, EOT, PAD].
-    # x[3..7] are padding, so labels[3..7] = -100.
+    # labels (raw) = chunk[1:]  = [3, EOT, PAD, PAD, PAD, PAD, PAD, PAD]
+    # then labels[position_ids < 0] = -100  →  [3, EOT, PAD, -100, -100, -100, -100, -100]
     input_ids, position_ids, labels = _unpacked_ds(packed_docs)[0]
     assert labels[:3].tolist() == [3, EOT, PAD]
     assert (labels[3:] == -100).all()
@@ -126,8 +129,9 @@ def test_single_doc_unpacked_labels_minus_100_at_padding(packed_docs):
 
 def test_single_doc_eot_in_loss(packed_docs):
     """EOT prediction (predicting EOT from previous token) must be included in the loss."""
-    # doc1 = [4, 5, 6, EOT] → x = [4, 5, 6, EOT, PAD, PAD, PAD, PAD]
-    # labels = [5, 6, EOT, PAD, -100, -100, -100, -100]
+    # doc1 = [4, 5, 6, EOT]
+    # input_ids = [4, 5, 6, EOT, PAD, PAD, PAD, PAD]
+    # labels    = [5, 6, EOT, PAD, -100, -100, -100, -100]
     input_ids, position_ids, labels = _unpacked_ds(packed_docs)[1]
     assert labels[2].item() == EOT
     assert labels[3].item() == PAD
@@ -145,7 +149,8 @@ def test_single_doc_truncation(mock_memmap):
         pad_token_id=PAD,
     )
     input_ids, position_ids, labels = ds[0]
-    assert input_ids.shape == (5,)
+    # Pre-shifted: input_ids is seq_len long, not seq_len+1.
+    assert input_ids.shape == (4,)
     assert (position_ids >= 0).all()
     assert position_ids.tolist() == [0, 1, 2, 3]
     assert (labels != -100).all()
@@ -185,7 +190,8 @@ def test_sft_dataset_length(sft_bin):
 def test_sft_dataset_shapes(sft_bin):
     ds = _sft_ds(sft_bin)
     input_ids, position_ids, labels = ds[0]
-    assert input_ids.shape == (5,)
+    # Pre-shifted: all three are (stride - 1,) = (4,).
+    assert input_ids.shape == (4,)
     assert position_ids.shape == (4,)
     assert labels.shape == (4,)
     assert input_ids.dtype == torch.long
@@ -194,9 +200,11 @@ def test_sft_dataset_shapes(sft_bin):
 
 
 def test_sft_dataset_input_ids_match_disk(sft_bin):
+    """input_ids is the on-disk sample with the answer token dropped (model input only)."""
     ds = _sft_ds(sft_bin)
     input_ids, _, _ = ds[1]
-    assert input_ids.tolist() == [10, 100, 20, 104, 30]
+    # Sample 1 on disk: [10, 100, 20, 104, 30]; input_ids drops the final answer token.
+    assert input_ids.tolist() == [10, 100, 20, 104]
 
 
 def test_sft_dataset_position_ids_sequential(sft_bin):
@@ -217,7 +225,11 @@ def test_sft_dataset_labels_mask_layout(sft_bin):
 
 
 def test_sft_dataset_labels_multi_token_answer(mock_memmap):
-    """Generalization check: answer_len=2 sets the last two labels to the answer tokens."""
+    """Generalization check: answer_len=2 sets the last two labels to the answer tokens.
+
+    On disk each sample is 6 tokens; pre-shifted input_ids drops the very last token.
+    The model's input still contains the first answer token (so it can predict the second).
+    """
     mock_memmap["/sft2.bin"] = np.array(
         [1, 2, 100, 104, 5, 6, 11, 12, 100, 104, 15, 16],
         dtype=np.uint16,
@@ -225,7 +237,8 @@ def test_sft_dataset_labels_multi_token_answer(mock_memmap):
     ds = SFTDataset(bin_path="/sft2.bin", vocab_size=128, question_len=4, answer_len=2)
     assert len(ds) == 2
     input_ids, position_ids, labels = ds[1]
-    assert input_ids.tolist() == [11, 12, 100, 104, 15, 16]
+    # Sample 1 on disk = [11, 12, 100, 104, 15, 16]; input_ids drops the last (16).
+    assert input_ids.tolist() == [11, 12, 100, 104, 15]
     assert position_ids.tolist() == [0, 1, 2, 3, 4]
     assert labels[:3].tolist() == [-100, -100, -100]
     assert labels[-2:].tolist() == [15, 16]
@@ -236,3 +249,15 @@ def test_sft_dataset_raises_on_misaligned_file(mock_memmap):
     mock_memmap["/bad.bin"] = np.arange(13, dtype=np.uint16)  # 13 % 5 != 0
     with pytest.raises(ValueError, match="not a multiple of stride"):
         SFTDataset(bin_path="/bad.bin", vocab_size=128, question_len=4, answer_len=1)
+
+
+def test_sft_dataset_packing_true_raises(sft_bin):
+    """packing=True is not yet implemented; constructor must raise."""
+    with pytest.raises(NotImplementedError, match="packing"):
+        SFTDataset(
+            bin_path=sft_bin,
+            vocab_size=128,
+            question_len=4,
+            answer_len=1,
+            packing=True,
+        )
