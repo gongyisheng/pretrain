@@ -124,37 +124,88 @@ class SFTDataset(_AbstractDataset):
     - ``question_ids``: tokens of the question (prompt). Length varies per row.
     - ``answer_ids``:   tokens of the answer. Length varies per row.
 
-    Per-sample, the dataset constructs the full sequence
-    ``[q_ids..., a_ids..., EOT]``, pads it with ``pad_token_id`` to
-    ``seq_len + 1`` tokens, and applies the next-token shift. Labels carry
-    ``-100`` everywhere except at the positions that predict the answer tokens
-    and the EOT itself, so the loss is computed only on the answer (and the
-    stop-token prediction).
+    The per-sample on-the-wire form is ``[q_ids..., a_ids..., EOT]``. Labels
+    are ``-100`` for question positions and the position after EOT; loss is
+    computed only at positions predicting answer tokens or EOT.
+
+    Two modes:
+
+    - ``packing=False`` (default): one parquet row → one sample, padded with
+      ``pad_token_id`` to ``seq_len + 1`` tokens. Wasteful when samples are
+      much shorter than ``seq_len``.
+    - ``packing=True``: at ``__init__`` time, all samples are concatenated
+      into a single flat stream (``[q0..., a0..., EOT, q1..., a1..., EOT, ...]``).
+      A parallel boolean ``is_target`` array marks each token as an answer/EOT
+      (supervised target) or question (not a target). ``__getitem__`` then
+      slices a ``seq_len + 1`` window from the stream — the same single-slice
+      pattern as ``PretrainDataset(packing=True)`` — and uses the parallel
+      mask to set ``-100`` on labels whose target token isn't an answer/EOT.
+      Samples may span chunk boundaries, exactly like documents in the
+      pretrain packed mode.
     """
 
     def __init__(
         self,
         parquet_path: str,
         seq_len: int,
+        packing: bool = False,
         eot_token_id: int = 0,
         pad_token_id: int = 0,
     ):
         self.seq_len = seq_len
         self.eot_token_id = eot_token_id
         self.pad_token_id = pad_token_id
+        self.packing = packing
         table = pq.read_table(parquet_path)
         self._question_ids = table.column("question_ids").to_pylist()
         self._answer_ids = table.column("answer_ids").to_pylist()
+        if packing:
+            self._build_flat_stream()
+
+    def _build_flat_stream(self):
+        """Concatenate all samples into one flat stream plus parallel target mask.
+
+        ``self._data[i]`` is the i-th token. ``self._is_target[i]`` is True iff
+        token i is an answer or EOT (something the model should predict),
+        False iff it's a question token (input only).
+        """
+        flat_tokens: list[int] = []
+        flat_is_target: list[bool] = []
+        for q, a in zip(self._question_ids, self._answer_ids):
+            flat_tokens.extend(q)
+            flat_is_target.extend([False] * len(q))
+            flat_tokens.extend(a)
+            flat_is_target.extend([True] * len(a))
+            flat_tokens.append(self.eot_token_id)
+            flat_is_target.append(True)
+        self._data = torch.tensor(flat_tokens, dtype=torch.long)
+        self._is_target = torch.tensor(flat_is_target, dtype=torch.bool)
+        self.n_sequences = len(self._data) // self.seq_len - 1
 
     def __len__(self):
+        if self.packing:
+            return self.n_sequences
         return len(self._question_ids)
 
     def __getitem__(self, idx):
+        if self.packing:
+            start = idx * self.seq_len
+            chunk = self._data[start : start + self.seq_len + 1]
+            target_mask = self._is_target[start : start + self.seq_len + 1]
+            input_ids = chunk[:-1]
+            labels = chunk[1:].clone()
+            # labels[i] predicts chunk[i+1]; supervise iff target_mask[i+1].
+            labels[~target_mask[1:]] = -100
+            position_ids = build_position_ids(
+                input_ids.unsqueeze(0), self.eot_token_id, packing=True
+            ).squeeze(0)
+            return input_ids, position_ids, labels
+
+        # packing=False: one row → one padded sample.
         q = self._question_ids[idx]
         a = self._answer_ids[idx]
         q_len = len(q)
         a_len = len(a)
-        # Full on-the-wire sample: [q..., a..., EOT].
         sample = q + a + [self.eot_token_id]
         n_content = min(len(sample), self.seq_len + 1)
 
@@ -163,9 +214,6 @@ class SFTDataset(_AbstractDataset):
         chunk_t = torch.from_numpy(chunk_arr)
         input_ids = chunk_t[:-1]
 
-        # Labels: -100 everywhere except the answer-prediction range.
-        # Supervised label indices: [q_len - 1, q_len + a_len) = predicting
-        # each answer token plus the EOT.
         labels = torch.full((self.seq_len,), -100, dtype=torch.long)
         sup_lo = q_len - 1
         sup_hi = min(q_len + a_len, self.seq_len)

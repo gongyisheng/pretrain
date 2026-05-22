@@ -292,3 +292,77 @@ def test_sft_dataset_variable_length_per_sample(tmp_path):
     assert labels1[:2].tolist() == [-100, -100]
     assert labels1[2:5].tolist() == [40, 50, SFT_EOT]
     assert (labels1[5:] == -100).all()
+
+
+# --- SFTDataset packing=True ---
+#
+# Packing concatenates all samples into a flat stream and slices every
+# seq_len tokens — same single-slice pattern as PretrainDataset(packing=True),
+# with a parallel target-mask array to set -100 on question-position labels.
+
+
+def test_sft_packing_flat_stream_length(tmp_path):
+    """n_sequences = total tokens // seq_len - 1, like PretrainDataset packing."""
+    # 3 samples × (2 q + 1 a + 1 EOT) = 12 flat tokens. seq_len=4 → n = 12//4 - 1 = 2.
+    rows = [([1, 2], [3]), ([5, 6], [7]), ([9, 10], [11])]
+    path = tmp_path / "pack_len.parquet"
+    _write_sft_parquet(path, rows)
+    ds = SFTDataset(
+        parquet_path=str(path),
+        seq_len=4,
+        eot_token_id=SFT_EOT,
+        pad_token_id=SFT_PAD,
+        packing=True,
+    )
+    assert len(ds) == 2
+
+
+def test_sft_packing_masks_question_positions(tmp_path):
+    """In a packed chunk, labels at positions predicting question tokens are -100."""
+    # Flat stream: [1, 2, 3, EOT, 5, 6, 7, EOT, 9, 10, 11, EOT].
+    # is_target:   [F, F, T, T,   F, F, T, T,   F, F, T,  T]
+    # seq_len=8 → chunk 0 spans flat[0:9] = [1, 2, 3, EOT, 5, 6, 7, EOT, 9].
+    # input_ids = chunk[:-1] = [1, 2, 3, EOT, 5, 6, 7, EOT]  (length 8)
+    # labels    = chunk[1:]  = [2, 3, EOT, 5, 6, 7, EOT, 9]
+    # target_mask[1:9] = [F, T, T, F, F, T, T, F]
+    # After mask: labels = [-100, 3, EOT, -100, -100, 7, EOT, -100]
+    rows = [([1, 2], [3]), ([5, 6], [7]), ([9, 10], [11])]
+    path = tmp_path / "pack_mask.parquet"
+    _write_sft_parquet(path, rows)
+    ds = SFTDataset(
+        parquet_path=str(path),
+        seq_len=8,
+        eot_token_id=SFT_EOT,
+        pad_token_id=SFT_PAD,
+        packing=True,
+    )
+    input_ids, position_ids, labels = ds[0]
+    assert input_ids.tolist() == [1, 2, 3, SFT_EOT, 5, 6, 7, SFT_EOT]
+    assert labels.tolist() == [-100, 3, SFT_EOT, -100, -100, 7, SFT_EOT, -100]
+    # Intra-doc position_ids reset after each EOT inside the chunk.
+    assert position_ids.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
+
+
+def test_sft_packing_sample_can_span_chunk_boundary(tmp_path):
+    """A long sample straddling chunk boundaries works — masking is per-token,
+    not per-sample. Behavior matches PretrainDataset(packing=True) where
+    documents may also span chunks."""
+    # One big sample: q=[1,2,3,4,5], a=[6,7,8], + EOT → 9 flat tokens.
+    # seq_len=4 → n = 9//4 - 1 = 1, chunk 0 = flat[0:5] = [1, 2, 3, 4, 5].
+    # is_target[0:5] = [F, F, F, F, F]  (all question tokens — answer starts at flat[5]=6)
+    # labels = [2, 3, 4, 5], target_mask[1:5] = [F, F, F, F]
+    # → all labels become -100.
+    rows = [([1, 2, 3, 4, 5], [6, 7, 8])]
+    path = tmp_path / "pack_span.parquet"
+    _write_sft_parquet(path, rows)
+    ds = SFTDataset(
+        parquet_path=str(path),
+        seq_len=4,
+        eot_token_id=SFT_EOT,
+        pad_token_id=SFT_PAD,
+        packing=True,
+    )
+    assert len(ds) == 1
+    input_ids, _, labels = ds[0]
+    assert input_ids.tolist() == [1, 2, 3, 4]
+    assert (labels == -100).all()
