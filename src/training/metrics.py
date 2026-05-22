@@ -117,14 +117,25 @@ class MetricsTracker:
         avg_loss: float,
         avg_aux_loss: float | None = None,
         tokens_per_byte: float | None = None,
+        avg_acc: float | None = None,
+        train_avg_acc: float | None = None,
     ) -> dict[str, float]:
-        """Assemble validation metrics dict for logging."""
-        d: dict[str, float] = {
-            "val/loss": avg_loss,
-            "val/perplexity": min(float(torch.exp(torch.tensor(avg_loss))), 1e6),
-        }
-        if tokens_per_byte is not None:
-            d["val/bpb"] = avg_loss * tokens_per_byte / math.log(2)
+        """Assemble validation metrics dict for logging.
+
+        Routing is governed by `self.config.task`:
+        - "pretrain": logs val/loss, val/perplexity, val/bpb (when tokenizer present).
+        - "sft": logs val/loss, val/acc, and train/acc when train_avg_acc is given.
+        """
+        d: dict[str, float] = {"val/loss": avg_loss}
+        if self.config.task == "pretrain":
+            d["val/perplexity"] = min(float(torch.exp(torch.tensor(avg_loss))), 1e6)
+            if tokens_per_byte is not None:
+                d["val/bpb"] = avg_loss * tokens_per_byte / math.log(2)
+        elif self.config.task == "sft":
+            if avg_acc is not None:
+                d["val/acc"] = avg_acc
+            if train_avg_acc is not None:
+                d["train/acc"] = train_avg_acc
         if self.is_moe and avg_aux_loss is not None:
             d["val/aux_loss"] = avg_aux_loss - self._aux_floor
         return d

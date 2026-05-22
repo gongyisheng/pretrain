@@ -196,3 +196,35 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
     _populate_grads(compiled, model_cfg.vocab_size, impl)
     result = MetricsTracker.compute_layer_grad_norms(compiled)
     _assert_keys_match(result, compiled)
+
+
+def test_eval_log_dict_pretrain_includes_perplexity_and_bpb():
+    cfg = TrainConfig(model=_qwen3_cfg("flex_attention"))
+    cfg.task = "pretrain"
+    tracker = MetricsTracker(cfg, n_active_non_emb_params=1_000_000, device="cpu")
+    d = tracker.build_eval_log_dict(avg_loss=0.5, tokens_per_byte=0.25)
+    assert "val/loss" in d
+    assert "val/perplexity" in d
+    assert "val/bpb" in d
+    assert "val/acc" not in d
+
+
+def test_eval_log_dict_sft_includes_acc_only():
+    cfg = TrainConfig(model=_qwen3_cfg("flex_attention"))
+    cfg.task = "sft"
+    tracker = MetricsTracker(cfg, n_active_non_emb_params=1_000_000, device="cpu")
+    d = tracker.build_eval_log_dict(avg_loss=0.5, avg_acc=0.87)
+    assert "val/loss" in d
+    assert "val/acc" in d
+    assert d["val/acc"] == pytest.approx(0.87)
+    assert "val/perplexity" not in d
+    assert "val/bpb" not in d
+
+
+def test_eval_log_dict_sft_with_train_acc():
+    cfg = TrainConfig(model=_qwen3_cfg("flex_attention"))
+    cfg.task = "sft"
+    tracker = MetricsTracker(cfg, n_active_non_emb_params=1_000_000, device="cpu")
+    d = tracker.build_eval_log_dict(avg_loss=0.5, avg_acc=0.87, train_avg_acc=0.99)
+    assert d["val/acc"] == pytest.approx(0.87)
+    assert d["train/acc"] == pytest.approx(0.99)

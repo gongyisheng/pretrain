@@ -485,6 +485,8 @@ class Trainer:
         n_batches = 0
         bpb_tokens = 0
         bpb_bytes = 0
+        acc_correct = 0
+        acc_total = 0
 
         for i, batch in enumerate(self.val_loader):
             if i >= self.config.training.eval_steps:
@@ -519,7 +521,12 @@ class Trainer:
             total_loss += loss.item()
             if aux_loss is not None:
                 total_aux_loss += aux_loss.item()
-            if self.tokenizer is not None:
+            if self.config.task == "sft":
+                preds = logits.argmax(dim=-1)
+                mask = labels != -100
+                acc_correct += (preds[mask] == labels[mask]).sum().item()
+                acc_total += int(mask.sum().item())
+            if self.tokenizer is not None and self.config.task == "pretrain":
                 # Count loss-contributing tokens; decode them and count UTF-8 bytes.
                 keep = labels.reshape(-1) != -100
                 target_ids = labels.reshape(-1)[keep].tolist()
@@ -536,15 +543,25 @@ class Trainer:
             (total_aux_loss / max(n_batches, 1)) if total_aux_loss > 0 else None
         )
         tokens_per_byte = bpb_tokens / bpb_bytes if bpb_bytes > 0 else None
+        avg_acc = (
+            (acc_correct / acc_total)
+            if (self.config.task == "sft" and acc_total > 0)
+            else None
+        )
         log_dict = self.metrics.build_eval_log_dict(
             avg_loss=avg_loss,
             avg_aux_loss=avg_aux_loss,
             tokens_per_byte=tokens_per_byte,
+            avg_acc=avg_acc,
         )
         self.logger.log(log_dict, step=self.step)
-        eval_msg = f"\n[eval] val_loss={avg_loss:.4f} | val_ppl={log_dict['val/perplexity']:.2f}"
+        eval_msg = f"\n[eval] val_loss={avg_loss:.4f}"
+        if "val/perplexity" in log_dict:
+            eval_msg += f" | val_ppl={log_dict['val/perplexity']:.2f}"
         if "val/bpb" in log_dict:
             eval_msg += f" | val_bpb={log_dict['val/bpb']:.4f}"
+        if "val/acc" in log_dict:
+            eval_msg += f" | val_acc={log_dict['val/acc']:.4f}"
         if "val/aux_loss" in log_dict:
             eval_msg += f" | val_aux_loss={log_dict['val/aux_loss']:.4f}"
         print(eval_msg)
