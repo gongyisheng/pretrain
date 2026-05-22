@@ -9,7 +9,7 @@ import torch.utils.checkpoint
 from tqdm import tqdm
 
 from src.model.registry import build_model
-from src.data.dataset import PretrainDataset
+from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
@@ -118,17 +118,41 @@ class Trainer:
         # Data
         train_path = os.path.join(config.data.data_dir, "train.bin")
         val_path = os.path.join(config.data.data_dir, "val.bin")
-        dataset_kwargs = dict(
-            packing=config.data.packing,
-            eot_token_id=self.eot_token_id,
-            pad_token_id=self.pad_token_id,
-        )
-        self.train_dataset = PretrainDataset(
-            train_path, config.max_seq_len, config.model.vocab_size, **dataset_kwargs
-        )
-        self.val_dataset = PretrainDataset(
-            val_path, config.max_seq_len, config.model.vocab_size, **dataset_kwargs
-        )
+        if config.task == "pretrain":
+            dataset_kwargs = dict(
+                packing=config.data.packing,
+                eot_token_id=self.eot_token_id,
+                pad_token_id=self.pad_token_id,
+            )
+            self.train_dataset = PretrainDataset(
+                train_path,
+                config.max_seq_len,
+                config.model.vocab_size,
+                **dataset_kwargs,
+            )
+            self.val_dataset = PretrainDataset(
+                val_path,
+                config.max_seq_len,
+                config.model.vocab_size,
+                **dataset_kwargs,
+            )
+        elif config.task == "sft":
+            import json
+
+            meta_path = os.path.join(config.data.data_dir, "meta.json")
+            with open(meta_path) as f:
+                meta = json.load(f)
+            sft_kwargs = dict(
+                vocab_size=config.model.vocab_size,
+                question_len=meta["question_len"],
+                answer_len=meta["answer_len"],
+            )
+            self.train_dataset = SFTDataset(train_path, **sft_kwargs)
+            self.val_dataset = SFTDataset(val_path, **sft_kwargs)
+        else:
+            raise ValueError(
+                f"unknown task: {config.task!r}; expected 'pretrain' or 'sft'"
+            )
 
         nw = config.data.num_workers
         g = torch.Generator()
@@ -525,7 +549,8 @@ class Trainer:
             eval_msg += f" | val_aux_loss={log_dict['val/aux_loss']:.4f}"
         print(eval_msg)
 
-        self._generate_sample()
+        if self.config.task == "pretrain":
+            self._generate_sample()
         self.model.train()
 
     @torch.no_grad()
