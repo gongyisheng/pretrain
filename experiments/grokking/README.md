@@ -13,7 +13,7 @@ A small Qwen3 (~1M params) trained on a fraction (30%) of all `(a, b)` pairs und
 - **Data:** `a op b = c` sequences, 5 tokens per sample. p=97. Train/val = 30% / 70% partition of all valid `(a, b)` pairs (deterministic given seed).
 - **Loss:** cross-entropy on the answer position only, via the HF `-100` ignore-index labels convention (`SFTDataset` masks the question positions).
 - **Optimizer:** AdamW, lr=1e-3, betas=(0.9, 0.98), constant scheduler with 10-step linear warmup.
-- **Batch:** 512, gradient_accumulation=1, max_steps=100k.
+- **Batch:** 512, gradient_accumulation=1, max_steps=500k.
 - **Eval:** every 100 steps; train+val accuracy logged.
 
 | Run | op | weight_decay |

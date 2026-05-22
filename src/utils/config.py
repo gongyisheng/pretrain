@@ -81,6 +81,7 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 16
     max_steps: int = 50000
     mixed_precision: str = "bf16"
+    loss_fn: str = "cross_entropy"
     activation_checkpointing: bool = False
     use_deterministic_algo: bool = False
     seed: int = 42

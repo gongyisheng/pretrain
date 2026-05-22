@@ -17,7 +17,7 @@
 #   # pin to cuda:1 by prefixing CUDA_VISIBLE_DEVICES
 #   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run.sh > logs/grokking.log 2>&1 &
 #
-# MAX_CONCURRENCY (default 1) controls how many training runs execute in
+# MAX_CONCURRENCY (default 6) controls how many training runs execute in
 # parallel during the sweep. Each concurrent run gets its own per-config log
 # under logs/grokking/<op>_wd<wd>.log so output isn't interleaved. All runs
 # share whatever GPUs CUDA_VISIBLE_DEVICES exposes — for the 1M-param grokking
@@ -27,7 +27,8 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-OPS=(add sub mul div)
+# OPS=(add sub mul div)
+OPS=(mul div)
 WDS=(0.0 0.1 1.0)
 P=97
 TRAIN_FRAC=0.3

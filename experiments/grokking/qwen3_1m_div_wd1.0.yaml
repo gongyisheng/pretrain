@@ -16,12 +16,12 @@ data:
   tokenizer_path: "tokenizers/grokking"
   data_dir: "data/grokking_div_p97_f0.3/"
   packing: false
-  num_workers: 8
+  num_workers: 4
 
 training:
   batch_size: 512
   gradient_accumulation_steps: 1
-  max_steps: 1000000
+  max_steps: 500000
   mixed_precision: "no"
   seed: 42
   grad_clip: 1.0

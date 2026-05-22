@@ -12,9 +12,9 @@ model:
   rope_theta: 10000.0
 
 data:
-  dataset: "grokking_add_p97_f0.3"
+  dataset: "grokking_sub_p97_f0.3"
   tokenizer_path: "tokenizers/grokking"
-  data_dir: "data/grokking_add_p97_f0.3/"
+  data_dir: "data/grokking_sub_p97_f0.3/"
   packing: false
   num_workers: 4
 
@@ -23,9 +23,10 @@ training:
   gradient_accumulation_steps: 1
   max_steps: 500000
   mixed_precision: "no"
+  loss_fn: "mse_fp64"
   seed: 42
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/grokking/qwen3_1m_add_wd0.1/"
+  checkpoint_dir: "checkpoints/grokking/qwen3_1m_sub_wd0.1_mse_fp64/"
   checkpoint_every: 10000
   eval_every: 100
   eval_steps: 0
@@ -44,5 +45,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-grokking"
-  wandb_run_name: "grokking-qwen3-1m-add-wd0.1"
+  wandb_run_name: "grokking-qwen3-1m-sub-wd0.1-mse-fp64"
   log_every: 10

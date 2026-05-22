@@ -16,18 +16,11 @@ from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
-from src.training.loss import compute_loss
+from src.training.loss import LOSS_REGISTRY, compute_loss
 from src.utils.masking_utils import (
     build_causal_attention_mask,
     build_intra_doc_attention_mask,
 )
-
-
-@torch.compile
-def _cross_entropy(
-    logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100
-) -> torch.Tensor:
-    return F.cross_entropy(logits, targets, ignore_index=ignore_index)
 
 
 class Trainer:
@@ -51,7 +44,11 @@ class Trainer:
         # Seed for reproducibility
         self._seed(config.training.seed)
 
-        self._loss_fn = _cross_entropy
+        if config.training.loss_fn not in LOSS_REGISTRY:
+            raise ValueError(
+                f"unknown loss_fn {config.training.loss_fn!r}; "
+                f"expected one of {sorted(LOSS_REGISTRY)}"
+            )
 
         # Tokenizer — loaded early to provide special token IDs to the dataset
         self.tokenizer = (
@@ -379,7 +376,7 @@ class Trainer:
                     logits, aux_loss = self.model(
                         input_ids, position_ids=position_ids, attn_mask=attn_mask
                     )
-                    loss = compute_loss(logits, labels, self._loss_fn)
+                    loss = compute_loss(logits, labels, self.config.training.loss_fn)
                     if aux_loss is not None:
                         loss = loss + self.config.model.moe_aux_loss_coef * aux_loss
                     loss = loss / cfg.gradient_accumulation_steps
@@ -539,7 +536,7 @@ class Trainer:
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                loss = compute_loss(logits, labels, self._loss_fn)
+                loss = compute_loss(logits, labels, self.config.training.loss_fn)
             total_loss += loss.item()
             if aux_loss is not None:
                 total_aux_loss += aux_loss.item()
