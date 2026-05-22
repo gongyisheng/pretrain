@@ -548,11 +548,17 @@ class Trainer:
             if (self.config.task == "sft" and acc_total > 0)
             else None
         )
+        train_avg_acc = None
+        if self.config.task == "sft" and self.config.training.eval_train:
+            train_avg_acc = self._evaluate_train_acc()
+            self.model.eval()  # _evaluate_train_acc may have left model in eval; keep symmetry
+
         log_dict = self.metrics.build_eval_log_dict(
             avg_loss=avg_loss,
             avg_aux_loss=avg_aux_loss,
             tokens_per_byte=tokens_per_byte,
             avg_acc=avg_acc,
+            train_avg_acc=train_avg_acc,
         )
         self.logger.log(log_dict, step=self.step)
         eval_msg = f"\n[eval] val_loss={avg_loss:.4f}"
@@ -562,6 +568,8 @@ class Trainer:
             eval_msg += f" | val_bpb={log_dict['val/bpb']:.4f}"
         if "val/acc" in log_dict:
             eval_msg += f" | val_acc={log_dict['val/acc']:.4f}"
+        if "train/acc" in log_dict:
+            eval_msg += f" | train_acc={log_dict['train/acc']:.4f}"
         if "val/aux_loss" in log_dict:
             eval_msg += f" | val_aux_loss={log_dict['val/aux_loss']:.4f}"
         print(eval_msg)
@@ -569,6 +577,40 @@ class Trainer:
         if self.config.task == "pretrain":
             self._generate_sample()
         self.model.train()
+
+    @torch.no_grad()
+    def _evaluate_train_acc(self) -> float:
+        """Run a single pass over the train loader and return overall accuracy.
+
+        Only used in SFT mode (`config.task == "sft"`) when `training.eval_train`
+        is true. Cheap because grokking train sets are small (~3k samples).
+        """
+        self.model.eval()
+        correct = 0
+        total = 0
+        for batch in self.train_loader:
+            input_ids = batch[0].to(self.device)
+            position_ids = batch[1].to(self.device)
+            labels = batch[2].to(self.device)
+            with torch.amp.autocast(
+                self.device, dtype=self.amp_dtype, enabled=self.use_amp
+            ):
+                x = shift_inputs(input_ids)
+                B, S = position_ids.shape
+                attn_mask = build_causal_attention_mask(
+                    B,
+                    S,
+                    self.device,
+                    attn_implementation=self.config.model.attn_implementation,
+                )
+                logits, _ = self.model(
+                    x, position_ids=position_ids, attn_mask=attn_mask
+                )
+            preds = logits.argmax(dim=-1)
+            mask = labels != -100
+            correct += (preds[mask] == labels[mask]).sum().item()
+            total += int(mask.sum().item())
+        return correct / total if total > 0 else 0.0
 
     @torch.no_grad()
     def _generate_sample(self, max_new_tokens: int = 50):
