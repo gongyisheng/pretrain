@@ -16,13 +16,13 @@ data:
   tokenizer_path: "tokenizers/grokking"
   data_dir: "data/grokking_mul_p97_f0.3/"
   packing: false
-  num_workers: 2
+  num_workers: 8
 
 training:
   batch_size: 512
   gradient_accumulation_steps: 1
   max_steps: 100000
-  mixed_precision: "bf16"
+  mixed_precision: "no"
   seed: 42
   grad_clip: 1.0
   checkpoint_dir: "checkpoints/grokking/qwen3_1m_mul_wd0.1/"
