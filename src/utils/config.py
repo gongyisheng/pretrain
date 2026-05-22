@@ -89,7 +89,9 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 100
     eval_steps: int = 25
-    eval_train: bool = False  # run eval pass over train set (logs train/acc for SFT)
+    eval_train: bool = (
+        False  # run eval pass over train set (logs val/train_acc for SFT)
+    )
     intra_doc_masking: bool = True
 
 

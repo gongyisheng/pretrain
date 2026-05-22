@@ -206,7 +206,7 @@ def test_eval_log_dict_pretrain_includes_perplexity_and_bpb():
     assert "val/loss" in d
     assert "val/perplexity" in d
     assert "val/bpb" in d
-    assert "val/acc" not in d
+    assert "val/val_acc" not in d
 
 
 def test_eval_log_dict_sft_includes_acc_only():
@@ -215,8 +215,8 @@ def test_eval_log_dict_sft_includes_acc_only():
     tracker = MetricsTracker(cfg, device="cpu")
     d = tracker.build_eval_log_dict(avg_loss=0.5, avg_acc=0.87)
     assert "val/loss" in d
-    assert "val/acc" in d
-    assert d["val/acc"] == pytest.approx(0.87)
+    assert "val/val_acc" in d
+    assert d["val/val_acc"] == pytest.approx(0.87)
     assert "val/perplexity" not in d
     assert "val/bpb" not in d
 
@@ -226,8 +226,8 @@ def test_eval_log_dict_sft_with_train_acc():
     cfg.task = "sft"
     tracker = MetricsTracker(cfg, device="cpu")
     d = tracker.build_eval_log_dict(avg_loss=0.5, avg_acc=0.87, train_avg_acc=0.99)
-    assert d["val/acc"] == pytest.approx(0.87)
-    assert d["train/acc"] == pytest.approx(0.99)
+    assert d["val/val_acc"] == pytest.approx(0.87)
+    assert d["val/train_acc"] == pytest.approx(0.99)
 
 
 # ---------------------------------------------------------------------------

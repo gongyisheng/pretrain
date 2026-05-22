@@ -227,7 +227,7 @@ class MetricsTracker:
 
         Routing is governed by `self.config.task`:
         - "pretrain": logs val/loss, val/perplexity, val/bpb (when tokenizer present).
-        - "sft": logs val/loss, val/acc, and train/acc when train_avg_acc is given.
+        - "sft": logs val/loss, val/val_acc, and val/train_acc when train_avg_acc is given.
         """
         d: dict[str, float] = {"val/loss": avg_loss}
         if self.config.task == "pretrain":
@@ -236,9 +236,9 @@ class MetricsTracker:
                 d["val/bpb"] = avg_loss * tokens_per_byte / math.log(2)
         elif self.config.task == "sft":
             if avg_acc is not None:
-                d["val/acc"] = avg_acc
+                d["val/val_acc"] = avg_acc
             if train_avg_acc is not None:
-                d["train/acc"] = train_avg_acc
+                d["val/train_acc"] = train_avg_acc
         if self.is_moe and avg_aux_loss is not None:
             d["val/aux_loss"] = avg_aux_loss - self._aux_floor
         return d

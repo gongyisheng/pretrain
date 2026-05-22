@@ -466,7 +466,9 @@ class Trainer:
 
             # Evaluation
             if self.step % cfg.eval_every == 0:
+                self.model.eval()
                 self._evaluate()
+                self.model.train()
 
             # Checkpoint
             if self.step % cfg.checkpoint_every == 0:
@@ -475,9 +477,50 @@ class Trainer:
         pbar.close()
         self.logger.finish()
 
+    def _forward_batch(self, batch):
+        """Move a (input_ids, position_ids, labels) batch to device, build the
+        attention mask, and run a forward pass under autocast. Returns
+        (logits, labels, aux_loss). Loss is left to the caller — wrap it in
+        the same autocast context to match training-time numerics."""
+        input_ids = batch[0].to(self.device)
+        position_ids = batch[1].to(self.device)
+        labels = batch[2].to(self.device)
+        with torch.amp.autocast(
+            self.device, dtype=self.amp_dtype, enabled=self.use_amp
+        ):
+            if self.config.training.intra_doc_masking:
+                mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                attn_mask = build_intra_doc_attention_mask(
+                    position_ids,
+                    self.device,
+                    mask_dtype,
+                    attn_implementation=self.config.model.attn_implementation,
+                )
+            else:
+                B, S = position_ids.shape
+                attn_mask = build_causal_attention_mask(
+                    B,
+                    S,
+                    self.device,
+                    attn_implementation=self.config.model.attn_implementation,
+                )
+            logits, aux_loss = self.model(
+                input_ids, position_ids=position_ids, attn_mask=attn_mask
+            )
+        return logits, labels, aux_loss
+
+    @staticmethod
+    def _count_correct(logits, labels):
+        """Count non-ignored positions where argmax(logits) == labels. Returns
+        (correct, total) as python ints."""
+        preds = logits.argmax(dim=-1)
+        mask = labels != -100
+        correct = (preds[mask] == labels[mask]).sum().item()
+        total = int(mask.sum().item())
+        return correct, total
+
     @torch.no_grad()
     def _evaluate(self):
-        self.model.eval()
         total_loss = 0.0
         total_aux_loss = 0.0
         n_batches = 0
@@ -492,40 +535,18 @@ class Trainer:
                 and i >= self.config.training.eval_steps
             ):
                 break
-            input_ids = batch[0].to(self.device)
-            position_ids = batch[1].to(self.device)
-            labels = batch[2].to(self.device)
+            logits, labels, aux_loss = self._forward_batch(batch)
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                if self.config.training.intra_doc_masking:
-                    mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                    attn_mask = build_intra_doc_attention_mask(
-                        position_ids,
-                        self.device,
-                        mask_dtype,
-                        attn_implementation=self.config.model.attn_implementation,
-                    )
-                else:
-                    B, S = position_ids.shape
-                    attn_mask = build_causal_attention_mask(
-                        B,
-                        S,
-                        self.device,
-                        attn_implementation=self.config.model.attn_implementation,
-                    )
-                logits, aux_loss = self.model(
-                    input_ids, position_ids=position_ids, attn_mask=attn_mask
-                )
                 loss = compute_loss(logits, labels, self._loss_fn)
             total_loss += loss.item()
             if aux_loss is not None:
                 total_aux_loss += aux_loss.item()
             if self.config.task == "sft":
-                preds = logits.argmax(dim=-1)
-                mask = labels != -100
-                acc_correct += (preds[mask] == labels[mask]).sum().item()
-                acc_total += int(mask.sum().item())
+                c, t = self._count_correct(logits, labels)
+                acc_correct += c
+                acc_total += t
             if self.tokenizer is not None and self.config.task == "pretrain":
                 # Count loss-contributing tokens; decode them and count UTF-8 bytes.
                 keep = labels.reshape(-1) != -100
@@ -551,7 +572,6 @@ class Trainer:
         train_avg_acc = None
         if self.config.task == "sft" and self.config.training.eval_train:
             train_avg_acc = self._evaluate_train_acc()
-            self.model.eval()  # _evaluate_train_acc may have left model in eval; keep symmetry
 
         log_dict = self.metrics.build_eval_log_dict(
             avg_loss=avg_loss,
@@ -566,17 +586,16 @@ class Trainer:
             eval_msg += f" | val_ppl={log_dict['val/perplexity']:.2f}"
         if "val/bpb" in log_dict:
             eval_msg += f" | val_bpb={log_dict['val/bpb']:.4f}"
-        if "val/acc" in log_dict:
-            eval_msg += f" | val_acc={log_dict['val/acc']:.4f}"
-        if "train/acc" in log_dict:
-            eval_msg += f" | train_acc={log_dict['train/acc']:.4f}"
+        if "val/val_acc" in log_dict:
+            eval_msg += f" | val_acc={log_dict['val/val_acc']:.4f}"
+        if "val/train_acc" in log_dict:
+            eval_msg += f" | train_acc={log_dict['val/train_acc']:.4f}"
         if "val/aux_loss" in log_dict:
             eval_msg += f" | val_aux_loss={log_dict['val/aux_loss']:.4f}"
         print(eval_msg)
 
         if self.config.task == "pretrain":
             self._generate_sample()
-        self.model.train()
 
     @torch.no_grad()
     def _evaluate_train_acc(self) -> float:
@@ -584,48 +603,25 @@ class Trainer:
 
         Only used in SFT mode (`config.task == "sft"`) when `training.eval_train`
         is true. Cheap because grokking train sets are small (~3k samples).
+        Caller is responsible for setting the model to eval mode.
         """
-        self.model.eval()
         correct = 0
         total = 0
         for batch in self.train_loader:
-            input_ids = batch[0].to(self.device)
-            position_ids = batch[1].to(self.device)
-            labels = batch[2].to(self.device)
-            with torch.amp.autocast(
-                self.device, dtype=self.amp_dtype, enabled=self.use_amp
-            ):
-                if self.config.training.intra_doc_masking:
-                    mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                    attn_mask = build_intra_doc_attention_mask(
-                        position_ids,
-                        self.device,
-                        mask_dtype,
-                        attn_implementation=self.config.model.attn_implementation,
-                    )
-                else:
-                    B, S = position_ids.shape
-                    attn_mask = build_causal_attention_mask(
-                        B,
-                        S,
-                        self.device,
-                        attn_implementation=self.config.model.attn_implementation,
-                    )
-                logits, _ = self.model(
-                    input_ids, position_ids=position_ids, attn_mask=attn_mask
-                )
-            preds = logits.argmax(dim=-1)
-            mask = labels != -100
-            correct += (preds[mask] == labels[mask]).sum().item()
-            total += int(mask.sum().item())
+            logits, labels, _ = self._forward_batch(batch)
+            c, t = self._count_correct(logits, labels)
+            correct += c
+            total += t
         return correct / total if total > 0 else 0.0
 
     @torch.no_grad()
     def _generate_sample(self, max_new_tokens: int = 50):
-        """Generate a short text sample for qualitative monitoring."""
+        """Generate a short text sample for qualitative monitoring.
+
+        Caller is responsible for setting the model to eval mode.
+        """
         if self.tokenizer is None:
             return
-        self.model.eval()
         # <|endoftext|> (token 0) acts as BOS, prompting the model to start a new document
         idx = torch.zeros((1, 1), dtype=torch.long, device=self.device)
         for _ in range(max_new_tokens):

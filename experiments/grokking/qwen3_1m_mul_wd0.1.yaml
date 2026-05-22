@@ -1,5 +1,5 @@
 task: "sft"
-max_seq_len: 6
+max_seq_len: 128
 
 model:
   arch: "qwen3"
@@ -15,7 +15,7 @@ data:
   dataset: "grokking_mul_p97_f0.3"
   tokenizer_path: "tokenizers/grokking"
   data_dir: "data/grokking_mul_p97_f0.3/"
-  packing: false
+  packing: true
   num_workers: 2
 
 training:
@@ -30,7 +30,7 @@ training:
   eval_every: 100
   eval_steps: 0
   eval_train: true
-  intra_doc_masking: false
+  intra_doc_masking: true
 
 optimizer:
   name: "adamw"
@@ -40,9 +40,9 @@ optimizer:
 
 scheduler:
   name: "constant"
-  warmup_steps: 10
+  warmup_steps: 0
 
 logging:
   wandb_project: "pretrain-grokking"
   wandb_run_name: "grokking-qwen3-1m-mul-wd0.1"
-  log_every: 50
+  log_every: 10
