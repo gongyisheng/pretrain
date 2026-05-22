@@ -489,7 +489,10 @@ class Trainer:
         acc_total = 0
 
         for i, batch in enumerate(self.val_loader):
-            if i >= self.config.training.eval_steps:
+            if (
+                self.config.training.eval_steps > 0
+                and i >= self.config.training.eval_steps
+            ):
                 break
             input_ids = batch[0].to(self.device)
             position_ids = batch[1].to(self.device)
@@ -596,13 +599,22 @@ class Trainer:
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
                 x = shift_inputs(input_ids)
-                B, S = position_ids.shape
-                attn_mask = build_causal_attention_mask(
-                    B,
-                    S,
-                    self.device,
-                    attn_implementation=self.config.model.attn_implementation,
-                )
+                if self.config.training.intra_doc_masking:
+                    mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                    attn_mask = build_intra_doc_attention_mask(
+                        position_ids,
+                        self.device,
+                        mask_dtype,
+                        attn_implementation=self.config.model.attn_implementation,
+                    )
+                else:
+                    B, S = position_ids.shape
+                    attn_mask = build_causal_attention_mask(
+                        B,
+                        S,
+                        self.device,
+                        attn_implementation=self.config.model.attn_implementation,
+                    )
                 logits, _ = self.model(
                     x, position_ids=position_ids, attn_mask=attn_mask
                 )

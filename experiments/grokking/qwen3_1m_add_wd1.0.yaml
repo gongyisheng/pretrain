@@ -28,7 +28,7 @@ training:
   checkpoint_dir: "checkpoints/grokking/qwen3_1m_add_wd1.0/"
   checkpoint_every: 10000
   eval_every: 100
-  eval_steps: 13
+  eval_steps: 0
   eval_train: true
   intra_doc_masking: false
 

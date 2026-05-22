@@ -71,7 +71,6 @@ class MetricsTracker:
         d: dict[str, float] = {
             # train
             "train/loss": loss,
-            "train/perplexity": min(float(torch.exp(torch.tensor(loss))), 1e6),
             "train/flops": 6 * self.n_active_non_emb_params * total_tokens,
             "train/total_tokens": total_tokens,
             # optim
@@ -86,6 +85,9 @@ class MetricsTracker:
             # grad norm
             "grad_norm/total": grad_norm,
         }
+
+        if self.config.task == "pretrain":
+            d["train/perplexity"] = min(float(torch.exp(torch.tensor(loss))), 1e6)
 
         # MFU
         if self._gpu_peak_flops and tokens_per_sec > 0:
