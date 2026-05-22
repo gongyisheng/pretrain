@@ -510,7 +510,7 @@ class Trainer:
         return logits, labels, aux_loss
 
     @staticmethod
-    def _count_correct(logits, labels, eot_token_id):
+    def _calc_accuracy(logits, labels, eot_token_id):
         """Count answer-token positions where argmax(logits) == labels.
         Returns (correct, total) as python ints."""
         preds = logits.argmax(dim=-1)
@@ -544,7 +544,7 @@ class Trainer:
             if aux_loss is not None:
                 total_aux_loss += aux_loss.item()
             if self.config.task == "sft":
-                c, t = self._count_correct(logits, labels, self.eot_token_id)
+                c, t = self._calc_accuracy(logits, labels, self.eot_token_id)
                 acc_correct += c
                 acc_total += t
             if self.tokenizer is not None and self.config.task == "pretrain":
@@ -609,7 +609,7 @@ class Trainer:
         total = 0
         for batch in self.train_loader:
             logits, labels, _ = self._forward_batch(batch)
-            c, t = self._count_correct(logits, labels, self.eot_token_id)
+            c, t = self._calc_accuracy(logits, labels, self.eot_token_id)
             correct += c
             total += t
         return correct / total if total > 0 else 0.0
