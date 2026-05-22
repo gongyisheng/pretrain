@@ -1,11 +1,13 @@
-"""Tests for MetricsTracker.compute_layer_grad_norms."""
+"""Tests for MetricsTracker."""
+
+import math
 
 import pytest
 import torch
 
 from src.model.registry import build_model
 from src.training.metrics import MetricsTracker
-from src.utils.config import ModelConfig
+from src.utils.config import ModelConfig, TrainConfig
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 # ---------------------------------------------------------------------------
@@ -143,6 +145,32 @@ def _assert_keys_match(result: dict, model: torch.nn.Module):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def _make_tracker():
+    """Build a MetricsTracker with a minimal non-MoE TrainConfig."""
+    cfg = TrainConfig()
+    cfg.model = ModelConfig(
+        arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256
+    )
+    return MetricsTracker(cfg, n_active_non_emb_params=1, device="cpu")
+
+
+def test_build_eval_log_dict_no_bpb_without_tokens_per_byte():
+    tracker = _make_tracker()
+    d = tracker.build_eval_log_dict(avg_loss=2.0)
+    assert "val/loss" in d and d["val/loss"] == 2.0
+    assert "val/perplexity" in d
+    assert "val/bpb" not in d
+
+
+def test_build_eval_log_dict_emits_bpb():
+    tracker = _make_tracker()
+    avg_loss = 2.5
+    tpb = 0.4  # tokens per byte
+    d = tracker.build_eval_log_dict(avg_loss=avg_loss, tokens_per_byte=tpb)
+    expected = avg_loss * tpb / math.log(2)
+    assert d["val/bpb"] == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))

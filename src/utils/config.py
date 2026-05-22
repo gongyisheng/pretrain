@@ -63,11 +63,16 @@ class ModelConfig:
 @dataclass
 class DataConfig:
     dataset: str = "openwebtext"
-    tokenizer_path: str = "tokenizers/custom_bpe"
     data_dir: str = "data/"
     val_split: float = 0.01
     num_workers: int = 4
     packing: bool = True
+    tokenizer_path: str = "tokenizers/custom_bpe"
+    tokenizer_train_method: str = "bpe"
+    tokenizer_train_method_kwargs: dict = field(default_factory=dict)
+    tokenizer_train_num_samples: int = 1_000_000
+    # SuperBPE-only: interval (in merges) at which to log/evaluate curve points.
+    tokenizer_train_eval_every: int = 5000
 
 
 @dataclass

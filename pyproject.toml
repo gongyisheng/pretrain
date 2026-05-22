@@ -1,3 +1,10 @@
+[build-system]
+requires = ["setuptools>=64", "pybind11>=2.11", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+
 [project]
 name = "pretrain"
 version = "0.1.0"
@@ -6,6 +13,7 @@ requires-python = ">=3.12"
 dependencies = [
     "torch>=2.10",
     "tokenizers>=0.22",
+    "regex>=2024.0",
     "datasets>=4.5",
     "wandb>=0.26.0",
     "pyyaml>=6.0",
@@ -14,18 +22,26 @@ dependencies = [
     "torchao>=0.16",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=9.0",
-    "transformers>=4.51",
-]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 
 [dependency-groups]
 dev = [
+    "pytest>=9.0",
+    "transformers>=4.51",
     "ruff>=0.15.6",
     "pre-commit>=4.0",
+]
+
+[tool.uv]
+# Rebuild the editable install (and therefore the C++ `_bpe_engine` extension)
+# when any of these files change. Default cache-keys only watch pyproject.toml,
+# so without this an edit to a .cpp/.h file would be picked up only after an
+# explicit `uv sync --reinstall-package pretrain`.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "src/data/bpe/**/*.cpp" },
+    { file = "src/data/bpe/**/*.h" },
 ]

@@ -1103,11 +1103,12 @@ wheels = [
 [[package]]
 name = "pretrain"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "datasets" },
     { name = "numpy" },
     { name = "pyyaml" },
+    { name = "regex" },
     { name = "tokenizers" },
     { name = "torch" },
     { name = "torchao" },
@@ -1115,37 +1116,33 @@ dependencies = [
     { name = "wandb" },
 ]
 
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "transformers" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "pre-commit" },
+    { name = "pytest" },
     { name = "ruff" },
+    { name = "transformers" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "datasets", specifier = ">=4.5" },
     { name = "numpy", specifier = ">=2.4" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "regex", specifier = ">=2024.0" },
     { name = "tokenizers", specifier = ">=0.22" },
     { name = "torch", specifier = ">=2.10" },
     { name = "torchao", specifier = ">=0.16" },
-    { name = "transformers", marker = "extra == 'dev'", specifier = ">=4.51" },
     { name = "triton", specifier = ">=3.6" },
     { name = "wandb", specifier = ">=0.26.0" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pre-commit", specifier = ">=4.0" },
+    { name = "pytest", specifier = ">=9.0" },
     { name = "ruff", specifier = ">=0.15.6" },
+    { name = "transformers", specifier = ">=4.51" },
 ]
 
 [[package]]

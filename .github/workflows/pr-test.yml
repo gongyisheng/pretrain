@@ -11,15 +11,10 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/**'
-  push:
-    branches-ignore: [main]
-    paths:
-      - '.github/**'
-      - 'tests/**'
   workflow_dispatch:
 
 concurrency:
-  group: pr-test-${{ github.event.pull_request.number || github.ref }}
+  group: pr-test-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -76,8 +71,6 @@ jobs:
 
   lint:
     runs-on: [self-hosted]
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -86,19 +79,23 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --extra dev --frozen
+      - run: uv sync --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - run: uv run ruff check src/ tests/
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - run: uv run ruff format --check src/ tests/
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
   test-data:
     needs: [prepare]
     if: needs.prepare.outputs.has_data == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 30
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -107,11 +104,18 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --extra dev --frozen
+      # `--reinstall-package pretrain` forces rebuild of the C++ `_bpe_engine`
+      # extension. The .so is built into the source tree, which actions/checkout
+      # wipes each run; uv's cache-keys see unchanged .cpp/.h and would otherwise
+      # skip the rebuild, leaving the .so missing.
+      - run: uv sync --frozen --reinstall-package pretrain
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - name: Run data tests (CPU only)
         env:
           CUDA_VISIBLE_DEVICES: ""
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: uv run pytest tests/fast/data/ -v
 
   test-model:
@@ -119,8 +123,6 @@ jobs:
     if: needs.prepare.outputs.has_model == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 240
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -129,10 +131,14 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --extra dev --frozen
+      - run: uv sync --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - name: Pick free GPU
         id: pick
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           idx=$(uv run python tests/ci/gpu_lock_exec.py)
           echo "index=$idx" >> "$GITHUB_OUTPUT"
@@ -141,6 +147,7 @@ jobs:
       - name: Run model tests
         env:
           CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run pytest \
             tests/fast/layers/ \
@@ -153,8 +160,6 @@ jobs:
     if: needs.prepare.outputs.has_training == 'true'
     runs-on: [self-hosted]
     timeout-minutes: 240
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
     steps:
       - uses: actions/checkout@v4
 
@@ -163,34 +168,38 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --extra dev --frozen
+      - run: uv sync --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
       - name: Pick free GPU
         id: pick
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           idx=$(uv run python tests/ci/gpu_lock_exec.py)
           echo "index=$idx" >> "$GITHUB_OUTPUT"
           echo "Picked GPU $idx"
 
-      - name: Cache tokenizer + dataset
-        id: cache-hf-data
-        uses: actions/cache@v4
-        with:
-          path: |
-            tokenizers
-            data
-          key: hf-openwebtext-exp-v1
-
-      - name: Download tokenizer + dataset for e2e smoke tests
-        if: steps.cache-hf-data.outputs.cache-hit != 'true'
-        run: uv run hf download gongyisheng/openwebtext-exp --repo-type dataset --local-dir .
+      - name: Restore tokenizer + dataset
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+          HF_DATA_DIR: ${{ runner.tool_cache }}/hf-openwebtext-exp
+        run: |
+          if [ ! -d "$HF_DATA_DIR/tokenizers" ] || [ ! -d "$HF_DATA_DIR/data" ]; then
+            mkdir -p "$HF_DATA_DIR"
+            uv run hf download gongyisheng/openwebtext-exp --repo-type dataset --local-dir "$HF_DATA_DIR"
+          fi
+          ln -sfn "$HF_DATA_DIR/tokenizers" tokenizers
+          ln -sfn "$HF_DATA_DIR/data" data
 
       - name: Run training tests
         env:
           CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run pytest \
             tests/fast/training/ \
-            tests/fast/utils/test_config.py \
+            tests/fast/utils/ \
             tests/e2e/ \
             -v
