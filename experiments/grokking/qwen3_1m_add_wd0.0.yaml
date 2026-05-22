@@ -21,7 +21,7 @@ data:
 training:
   batch_size: 512
   gradient_accumulation_steps: 1
-  max_steps: 100000
+  max_steps: 1000000
   mixed_precision: "no"
   seed: 42
   grad_clip: 1.0
