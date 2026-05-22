@@ -256,13 +256,16 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
     assert f["qkv_proj"] == 2 * 24768
     # o_proj per layer: 2*64*64 + 64 = 8256
     assert f["o_proj"] == 2 * 8256
-    # attn_matmul per layer (causal T/2): 2 * n_heads*head_dim*seq_len = 2*2*32*128 = 16384
-    assert f["attn_matmul"] == 2 * 16384
+    # attn_matmul per layer (full T, PaLM): 4 * n_heads*head_dim*seq_len = 4*2*32*128 = 32768
+    assert f["attn_matmul"] == 2 * 32768
     # ffn ungated per layer: 4*64*256 + (256+64) = 65856
     assert f["ffn"] == 2 * 65856
     # lm_head: 2*64*256 = 32768 (no bias by default)
     assert f["lm_head"] == 32768
-    expected_fwd = 2 * 24768 + 2 * 8256 + 2 * 16384 + 2 * 65856 + 32768
+    # norm: per-layer (2 RMSNorms) = 2*3*64 = 384; final = 3*64 = 192
+    # qk_norm=False (default), so no extra term. Total = 2*384 + 192 = 960
+    assert f["norm"] == 2 * 384 + 192
+    expected_fwd = 2 * 24768 + 2 * 8256 + 2 * 32768 + 2 * 65856 + 960 + 32768
     assert f["fwd_total"] == expected_fwd
     # default activation_checkpointing=False -> 3x
     assert f["total"] == 3 * expected_fwd
@@ -290,8 +293,8 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
     assert f["qkv_proj"] == 2 * 16384
     # o per layer: 2*64*64 = 8192
     assert f["o_proj"] == 2 * 8192
-    # attn matmul: 2 * 4*16*128 = 16384 per layer
-    assert f["attn_matmul"] == 2 * 16384
+    # attn matmul (full T): 4 * 4*16*128 = 32768 per layer
+    assert f["attn_matmul"] == 2 * 32768
     # gated ffn: 6*64*256 = 98304 per layer
     assert f["ffn"] == 2 * 98304
     assert f["lm_head"] == 2 * 64 * 256
@@ -365,3 +368,18 @@ def test_compute_flops_per_token_lm_head_bias():
     f_off = compute_flops_per_token(cfg_off)
     f_on = compute_flops_per_token(cfg_on)
     assert f_on["lm_head"] - f_off["lm_head"] == 128
+
+
+def test_compute_flops_per_token_qk_norm():
+    """qk_norm adds 3 * (n_heads + n_kv_heads) * head_dim per layer."""
+    base = dict(
+        arch="qwen3", n_layers=2, n_heads=4, n_kv_heads=2, d_model=64, vocab_size=256
+    )
+    cfg_off = TrainConfig(max_seq_len=128, model=ModelConfig(**base, qk_norm=False))
+    cfg_on = TrainConfig(max_seq_len=128, model=ModelConfig(**base, qk_norm=True))
+    f_off = compute_flops_per_token(cfg_off)
+    f_on = compute_flops_per_token(cfg_on)
+    # head_dim=16; per-layer extra = 3 * (4+2) * 16 = 288; x n_layers=2 = 576
+    expected_delta = 2 * 3 * (4 + 2) * 16
+    assert f_on["norm"] - f_off["norm"] == expected_delta
+    assert f_on["fwd_total"] - f_off["fwd_total"] == expected_delta

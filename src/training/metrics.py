@@ -9,61 +9,88 @@ from src.utils.config import TrainConfig
 def compute_flops_per_token(config: TrainConfig) -> dict[str, int]:
     """Per-token training FLOPs broken down by component.
 
-    Returns dict with: qkv_proj, o_proj, attn_matmul, ffn, lm_head (each
-    summed across n_layers where applicable), fwd_total, total. The total
-    applies a backward multiplier of 4 if activation_checkpointing else 3.
-    Attention matmul uses causal-aware T/2 averaging. Embedding lookup,
-    RMSNorm, and RoPE are treated as 0 FLOPs.
+    Returns dict with: qkv_proj, o_proj, attn_matmul, ffn, norm, lm_head
+    (each summed across n_layers where applicable), fwd_total, total. The
+    total applies a backward multiplier of 4 if activation_checkpointing
+    else 3. Attention matmul uses full max_seq_len (PaLM/nanoGPT convention,
+    ignores causal masking and intra-doc masking; comparable to literature
+    MFU numbers). Norms (pre-attn, pre-FFN, optional qk_norm, final
+    pre-lm_head) are counted at ~3 FLOPs per element. Embedding lookup and
+    RoPE are 0 FLOPs.
     """
-    mc = config.model
-    T = config.max_seq_len
-    head_dim = mc.d_model // mc.n_heads
-    L = mc.n_layers
+    head_dim = config.model.d_model // config.model.n_heads
 
     # Attention projections (per layer per token)
-    qkv_matmul = 2 * mc.d_model * (mc.n_heads + 2 * mc.n_kv_heads) * head_dim
-    qkv_bias = (mc.n_heads + 2 * mc.n_kv_heads) * head_dim if mc.attn_bias else 0
+    qkv_matmul = (
+        2
+        * config.model.d_model
+        * (config.model.n_heads + 2 * config.model.n_kv_heads)
+        * head_dim
+    )
+    qkv_bias = (
+        (config.model.n_heads + 2 * config.model.n_kv_heads) * head_dim
+        if config.model.attn_bias
+        else 0
+    )
     qkv_per_layer = qkv_matmul + qkv_bias
 
-    o_matmul = 2 * mc.d_model * mc.d_model
-    o_bias = mc.d_model if mc.attn_bias else 0
+    o_matmul = 2 * config.model.d_model * config.model.d_model
+    o_bias = config.model.d_model if config.model.attn_bias else 0
     o_per_layer = o_matmul + o_bias
 
-    # Causal attention: average attended length is T/2.
-    # Per token: QK^T = n_heads*head_dim*T, AV = n_heads*head_dim*T
-    attn_matmul_per_layer = 2 * mc.n_heads * head_dim * T
+    # Attention matmul: full max_seq_len (PaLM/nanoGPT convention, no causal
+    # or intra-doc-mask discount; matches literature MFU). Per token per layer:
+    # QK^T = 2*n_heads*head_dim*max_seq_len, AV = same -> sum = 4*...
+    attn_matmul_per_layer = 4 * config.model.n_heads * head_dim * config.max_seq_len
 
     # FFN
-    if mc.moe_n_experts > 0:
+    if config.model.moe_n_experts > 0:
         # Router: 2 * d * n_experts
-        router = 2 * mc.d_model * mc.moe_n_experts
-        d_ff = mc.moe_intermediate_size
-        k = mc.moe_n_experts_per_token
-        if mc.mlp_gated:
-            expert_matmul = 6 * mc.d_model * d_ff
-            expert_bias = (2 * d_ff + mc.d_model) if mc.mlp_bias else 0
+        router = 2 * config.model.d_model * config.model.moe_n_experts
+        d_ff = config.model.moe_intermediate_size
+        k = config.model.moe_n_experts_per_token
+        if config.model.mlp_gated:
+            expert_matmul = 6 * config.model.d_model * d_ff
+            expert_bias = (
+                (2 * d_ff + config.model.d_model) if config.model.mlp_bias else 0
+            )
         else:
-            expert_matmul = 4 * mc.d_model * d_ff
-            expert_bias = (d_ff + mc.d_model) if mc.mlp_bias else 0
+            expert_matmul = 4 * config.model.d_model * d_ff
+            expert_bias = (d_ff + config.model.d_model) if config.model.mlp_bias else 0
         ffn_per_layer = router + k * (expert_matmul + expert_bias)
     else:
-        d_ff = mc.intermediate_size
-        if mc.mlp_gated:
-            ffn_matmul = 6 * mc.d_model * d_ff
-            ffn_bias = (2 * d_ff + mc.d_model) if mc.mlp_bias else 0
+        d_ff = config.model.intermediate_size
+        if config.model.mlp_gated:
+            ffn_matmul = 6 * config.model.d_model * d_ff
+            ffn_bias = (2 * d_ff + config.model.d_model) if config.model.mlp_bias else 0
         else:
-            ffn_matmul = 4 * mc.d_model * d_ff
-            ffn_bias = (d_ff + mc.d_model) if mc.mlp_bias else 0
+            ffn_matmul = 4 * config.model.d_model * d_ff
+            ffn_bias = (d_ff + config.model.d_model) if config.model.mlp_bias else 0
         ffn_per_layer = ffn_matmul + ffn_bias
 
-    # LM head (once per token, not per layer)
-    lm_head = 2 * mc.d_model * mc.vocab_size + (mc.vocab_size if mc.lm_head_bias else 0)
+    # Norms (RMSNorm/LayerNorm ~3 FLOPs per element: x*x, sum, rsqrt, x*inv*gamma)
+    # Per layer: pre-attn norm + pre-FFN norm. Plus optional qk_norm on Q/K.
+    norm_ops_per_element = 3
+    norm_per_layer = 2 * norm_ops_per_element * config.model.d_model
+    if config.model.qk_norm:
+        norm_per_layer += (
+            norm_ops_per_element
+            * (config.model.n_heads + config.model.n_kv_heads)
+            * head_dim
+        )
+    final_norm = norm_ops_per_element * config.model.d_model  # before lm_head
 
-    qkv_proj = L * qkv_per_layer
-    o_proj = L * o_per_layer
-    attn_matmul = L * attn_matmul_per_layer
-    ffn = L * ffn_per_layer
-    fwd_total = qkv_proj + o_proj + attn_matmul + ffn + lm_head
+    # LM head (once per token, not per layer)
+    lm_head = 2 * config.model.d_model * config.model.vocab_size + (
+        config.model.vocab_size if config.model.lm_head_bias else 0
+    )
+
+    qkv_proj = config.model.n_layers * qkv_per_layer
+    o_proj = config.model.n_layers * o_per_layer
+    attn_matmul = config.model.n_layers * attn_matmul_per_layer
+    ffn = config.model.n_layers * ffn_per_layer
+    norm = config.model.n_layers * norm_per_layer + final_norm
+    fwd_total = qkv_proj + o_proj + attn_matmul + ffn + norm + lm_head
 
     backward_mult = 4 if config.training.activation_checkpointing else 3
 
@@ -72,6 +99,7 @@ def compute_flops_per_token(config: TrainConfig) -> dict[str, int]:
         "o_proj": o_proj,
         "attn_matmul": attn_matmul,
         "ffn": ffn,
+        "norm": norm,
         "lm_head": lm_head,
         "fwd_total": fwd_total,
         "total": fwd_total * backward_mult,
