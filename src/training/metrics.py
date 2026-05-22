@@ -6,18 +6,91 @@ import torch
 from src.utils.config import TrainConfig
 
 
+def compute_flops_per_token(config: TrainConfig) -> dict[str, int]:
+    """Per-token training FLOPs broken down by component.
+
+    Returns dict with: qkv_proj, o_proj, attn_matmul, ffn, lm_head (each
+    summed across n_layers where applicable), fwd_total, total. The total
+    applies a backward multiplier of 4 if activation_checkpointing else 3.
+    Attention matmul uses causal-aware T/2 averaging. Embedding lookup,
+    RMSNorm, and RoPE are treated as 0 FLOPs.
+    """
+    mc = config.model
+    T = config.max_seq_len
+    head_dim = mc.d_model // mc.n_heads
+    L = mc.n_layers
+
+    # Attention projections (per layer per token)
+    qkv_matmul = 2 * mc.d_model * (mc.n_heads + 2 * mc.n_kv_heads) * head_dim
+    qkv_bias = (mc.n_heads + 2 * mc.n_kv_heads) * head_dim if mc.attn_bias else 0
+    qkv_per_layer = qkv_matmul + qkv_bias
+
+    o_matmul = 2 * mc.d_model * mc.d_model
+    o_bias = mc.d_model if mc.attn_bias else 0
+    o_per_layer = o_matmul + o_bias
+
+    # Causal attention: average attended length is T/2.
+    # Per token: QK^T = n_heads*head_dim*T, AV = n_heads*head_dim*T
+    attn_matmul_per_layer = 2 * mc.n_heads * head_dim * T
+
+    # FFN
+    if mc.moe_n_experts > 0:
+        # Router: 2 * d * n_experts
+        router = 2 * mc.d_model * mc.moe_n_experts
+        d_ff = mc.moe_intermediate_size
+        k = mc.moe_n_experts_per_token
+        if mc.mlp_gated:
+            expert_matmul = 6 * mc.d_model * d_ff
+            expert_bias = (2 * d_ff + mc.d_model) if mc.mlp_bias else 0
+        else:
+            expert_matmul = 4 * mc.d_model * d_ff
+            expert_bias = (d_ff + mc.d_model) if mc.mlp_bias else 0
+        ffn_per_layer = router + k * (expert_matmul + expert_bias)
+    else:
+        d_ff = mc.intermediate_size
+        if mc.mlp_gated:
+            ffn_matmul = 6 * mc.d_model * d_ff
+            ffn_bias = (2 * d_ff + mc.d_model) if mc.mlp_bias else 0
+        else:
+            ffn_matmul = 4 * mc.d_model * d_ff
+            ffn_bias = (d_ff + mc.d_model) if mc.mlp_bias else 0
+        ffn_per_layer = ffn_matmul + ffn_bias
+
+    # LM head (once per token, not per layer)
+    lm_head = 2 * mc.d_model * mc.vocab_size + (mc.vocab_size if mc.lm_head_bias else 0)
+
+    qkv_proj = L * qkv_per_layer
+    o_proj = L * o_per_layer
+    attn_matmul = L * attn_matmul_per_layer
+    ffn = L * ffn_per_layer
+    fwd_total = qkv_proj + o_proj + attn_matmul + ffn + lm_head
+
+    backward_mult = 4 if config.training.activation_checkpointing else 3
+
+    return {
+        "qkv_proj": qkv_proj,
+        "o_proj": o_proj,
+        "attn_matmul": attn_matmul,
+        "ffn": ffn,
+        "lm_head": lm_head,
+        "fwd_total": fwd_total,
+        "total": fwd_total * backward_mult,
+    }
+
+
 class MetricsTracker:
     """Tracks and assembles training metrics for W&B logging."""
 
-    def __init__(self, config: TrainConfig, n_active_non_emb_params: int, device: str):
+    def __init__(self, config: TrainConfig, device: str):
         self.config = config
-        self.n_active_non_emb_params = n_active_non_emb_params
         self.device = device
         self.is_moe = config.model.arch == "qwen3_moe"
         if self.is_moe:
             self._aux_floor = (
                 config.model.n_layers * config.model.moe_n_experts_per_token
             )
+
+        self.flops_per_token = compute_flops_per_token(config)
 
         self._grad_clip_steps = 0
         self._steps_since_log = 0
@@ -71,7 +144,7 @@ class MetricsTracker:
         d: dict[str, float] = {
             # train
             "train/loss": loss,
-            "train/flops": 6 * self.n_active_non_emb_params * total_tokens,
+            "train/flops": self.flops_per_token["total"] * total_tokens,
             "train/total_tokens": total_tokens,
             # optim
             "optim/lr": lr,
@@ -91,7 +164,7 @@ class MetricsTracker:
 
         # MFU
         if self._gpu_peak_flops and tokens_per_sec > 0:
-            flops_per_sec = 6 * self.n_active_non_emb_params * tokens_per_sec
+            flops_per_sec = self.flops_per_token["total"] * tokens_per_sec
             d["perf/mfu"] = flops_per_sec / self._gpu_peak_flops
 
         # GPU memory
