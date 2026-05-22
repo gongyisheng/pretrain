@@ -1,5 +1,5 @@
 task: "sft"
-max_seq_len: 128
+max_seq_len: 6
 
 model:
   arch: "qwen3"
@@ -15,7 +15,7 @@ data:
   dataset: "grokking_sub_p97_f0.3"
   tokenizer_path: "tokenizers/grokking"
   data_dir: "data/grokking_sub_p97_f0.3/"
-  packing: true
+  packing: false
   num_workers: 2
 
 training:
@@ -30,7 +30,7 @@ training:
   eval_every: 100
   eval_steps: 0
   eval_train: true
-  intra_doc_masking: true
+  intra_doc_masking: false
 
 optimizer:
   name: "adamw"
