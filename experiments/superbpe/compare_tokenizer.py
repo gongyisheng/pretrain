@@ -8,17 +8,50 @@ Reports:
 
 Usage:
     uv run python experiments/superbpe/compare_tokenizer.py \
-        --tokenizer_a tokenizers/experiments/superbpe_v50k_t40k_m2 \
-        --tokenizer_b tokenizers/experiments/superbpe_v150k_t140k_m2
+        --tokenizer_a tokenizers/experiments/superbpe_v150k_t140k_m2 \
+        --tokenizer_b tokenizers/experiments/superbpe_v150k_t140k_m3
+        --n_samples 200
+
+    uv run python experiments/superbpe/compare_tokenizer.py \
+        --tokenizer_a tmp/tokenizer_json/olmo2_p99_truncate_10G_20K_extend_200K_mw4_colon \
+        --tokenizer_b tmp/tokenizer_json/olmo2_p99_truncate_10G_180K_extend_200K_mw4_colon \
+        --n_samples 25
 """
 
 import argparse
 import os
-import sys
+import re
 
-sys.path.insert(0, ".")
+from tokenizers import Tokenizer
 
-from src.data.tokenizer import load_tokenizer
+OUTPUT_ROOT = "tmp/tokenizer_compare"
+
+
+def _escape(token: str) -> str:
+    # Order matters: escape backslash first so we don't double-escape later.
+    return (
+        token.replace("\\", "\\\\")
+        .replace("\t", "\\t")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
+def _safe_filename(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "tok"
+
+
+def _write_tokens_tsv(path: str, tokens: set[str]) -> None:
+    sortd = sorted(tokens, key=lambda s: (len(s), s))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("token\n")
+        for tok in sortd:
+            f.write(_escape(tok) + "\n")
+
+
+def load_tokenizer(path: str) -> Tokenizer:
+    """Load a trained tokenizer from disk."""
+    return Tokenizer.from_file(os.path.join(path, "tokenizer.json"))
 
 
 def _vocab_set(tokenizer) -> set[str]:
@@ -125,6 +158,21 @@ def main():
     ]:
         samples = _sample(region, args.n_samples)
         print(f"  [{label}] {samples}")
+
+    out_dir = os.path.join(
+        OUTPUT_ROOT, f"{_safe_filename(name_a)}_vs_{_safe_filename(name_b)}"
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    outputs = [
+        ("common.tsv", common),
+        (f"{_safe_filename(name_a)}_only.tsv", a_only),
+        (f"{_safe_filename(name_b)}_only.tsv", b_only),
+    ]
+    print()
+    print(f"Writing token lists to {out_dir}/")
+    for fname, region in outputs:
+        _write_tokens_tsv(os.path.join(out_dir, fname), region)
+        print(f"  {fname}: {len(region):,d} tokens")
 
 
 if __name__ == "__main__":
