@@ -89,6 +89,7 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 100
     eval_steps: int = 25
+    eval_train: bool = False  # run eval pass over train set (logs train/acc for SFT)
     intra_doc_masking: bool = True
 
 
@@ -137,6 +138,7 @@ class DebugConfig:
 
 @dataclass
 class TrainConfig:
+    task: str = "pretrain"  # "pretrain" | "sft"
     max_seq_len: int = 1024
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
@@ -211,6 +213,7 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         raw = yaml.safe_load(f)
 
     config = TrainConfig(
+        task=raw.get("task", "pretrain"),
         max_seq_len=raw.get("max_seq_len", 1024),
         model=ModelConfig(**_coerce_types(ModelConfig, raw.get("model", {}))),
         data=DataConfig(**_coerce_types(DataConfig, raw.get("data", {}))),
