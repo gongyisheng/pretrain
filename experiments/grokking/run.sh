@@ -5,15 +5,23 @@
 # output already exists), then launches training.
 #
 # Usage:
-#   # full 12-config sweep
+#   # full 12-config sweep, sequential (one run at a time)
 #   nohup bash experiments/grokking/run.sh > logs/grokking.log 2>&1 &
 #
-#   # single config (op=add, wd=1.0)
+#   # full sweep with 4 concurrent runs sharing the visible GPU
+#   MAX_CONCURRENCY=4 nohup bash experiments/grokking/run.sh > logs/grokking.log 2>&1 &
+#
+#   # single config (op=add, wd=1.0); MAX_CONCURRENCY ignored here
 #   nohup bash experiments/grokking/run.sh add 1.0 > logs/grokking.log 2>&1 &
 #
 #   # pin to cuda:1 by prefixing CUDA_VISIBLE_DEVICES
 #   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run.sh > logs/grokking.log 2>&1 &
-#   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run.sh add 1.0 > logs/grokking.log 2>&1 &
+#
+# MAX_CONCURRENCY (default 1) controls how many training runs execute in
+# parallel during the sweep. Each concurrent run gets its own per-config log
+# under logs/grokking/<op>_wd<wd>.log so output isn't interleaved. All runs
+# share whatever GPUs CUDA_VISIBLE_DEVICES exposes — for the 1M-param grokking
+# model this fits ~dozens of runs per GPU; bump cautiously.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -25,6 +33,8 @@ P=97
 TRAIN_FRAC=0.3
 TOKENIZER_DIR="tokenizers/grokking"
 TOKENIZER_FILE="${TOKENIZER_DIR}/tokenizer.json"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-6}"
+PER_RUN_LOG_DIR="logs/grokking"
 
 prep_tokenizer() {
     if [ -f "$TOKENIZER_FILE" ]; then
@@ -66,6 +76,17 @@ run_one() {
     uv run python scripts/train.py --config "$cfg"
 }
 
+run_one_logged() {
+    # Background-friendly variant: redirects stdout/stderr to a per-config
+    # log file so parallel jobs don't interleave output on the parent stream.
+    local op="$1"
+    local wd="$2"
+    local cfg="experiments/grokking/qwen3_1m_${op}_wd${wd}.yaml"
+    local log="${PER_RUN_LOG_DIR}/${op}_wd${wd}.log"
+    echo "[run.sh] $cfg → $log"
+    uv run python scripts/train.py --config "$cfg" >"$log" 2>&1
+}
+
 prep_tokenizer
 
 if [ $# -eq 2 ]; then
@@ -75,9 +96,19 @@ else
     for op in "${OPS[@]}"; do
         prep_data "$op"
     done
+
+    mkdir -p "$PER_RUN_LOG_DIR"
+    echo "[run.sh] launching sweep with MAX_CONCURRENCY=$MAX_CONCURRENCY"
+    running=0
     for op in "${OPS[@]}"; do
         for wd in "${WDS[@]}"; do
-            run_one "$op" "$wd"
+            run_one_logged "$op" "$wd" &
+            running=$((running + 1))
+            if [ "$running" -ge "$MAX_CONCURRENCY" ]; then
+                wait -n
+                running=$((running - 1))
+            fi
         done
     done
+    wait
 fi
