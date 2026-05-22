@@ -16,7 +16,7 @@ from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
-from src.training.loss import next_token_targets, compute_loss
+from src.training.loss import shift_inputs, compute_loss
 from src.utils.masking_utils import (
     build_causal_attention_mask,
     build_intra_doc_attention_mask,
@@ -24,8 +24,10 @@ from src.utils.masking_utils import (
 
 
 @torch.compile
-def _cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    return F.cross_entropy(logits, targets)
+def _cross_entropy(
+    logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100
+) -> torch.Tensor:
+    return F.cross_entropy(logits, targets, ignore_index=ignore_index)
 
 
 class Trainer:
@@ -278,14 +280,20 @@ class Trainer:
 
             # Prefetch first batch
             batch_cpu, train_iter = self._next_batch(train_iter)
-            input_ids_cpu, position_ids_cpu = batch_cpu[0], batch_cpu[1]
+            input_ids_cpu, position_ids_cpu, labels_cpu = (
+                batch_cpu[0],
+                batch_cpu[1],
+                batch_cpu[2],
+            )
             if prefetch_stream is not None:
                 with torch.cuda.stream(prefetch_stream):
                     input_ids = input_ids_cpu.to(self.device, non_blocking=True)
                     position_ids = position_ids_cpu.to(self.device, non_blocking=True)
+                    labels = labels_cpu.to(self.device, non_blocking=True)
             else:
                 input_ids = input_ids_cpu.to(self.device)
                 position_ids = position_ids_cpu.to(self.device)
+                labels = labels_cpu.to(self.device)
 
             for micro_step in range(cfg.gradient_accumulation_steps):
                 # Wait for current batch transfer to complete
@@ -300,13 +308,15 @@ class Trainer:
                     # and biases the gradient (worst case: ~+0.6 nats val gap).
                     input_ids.record_stream(torch.cuda.current_stream())
                     position_ids.record_stream(torch.cuda.current_stream())
+                    labels.record_stream(torch.cuda.current_stream())
 
                 # Start prefetching next batch while computing
                 if micro_step < cfg.gradient_accumulation_steps - 1:
                     next_batch_cpu, train_iter = self._next_batch(train_iter)
-                    next_input_ids_cpu, next_position_ids_cpu = (
+                    next_input_ids_cpu, next_position_ids_cpu, next_labels_cpu = (
                         next_batch_cpu[0],
                         next_batch_cpu[1],
+                        next_batch_cpu[2],
                     )
                     if prefetch_stream is not None:
                         with torch.cuda.stream(prefetch_stream):
@@ -316,18 +326,18 @@ class Trainer:
                             next_position_ids = next_position_ids_cpu.to(
                                 self.device, non_blocking=True
                             )
+                            next_labels = next_labels_cpu.to(
+                                self.device, non_blocking=True
+                            )
                     else:
                         next_input_ids = next_input_ids_cpu.to(self.device)
                         next_position_ids = next_position_ids_cpu.to(self.device)
+                        next_labels = next_labels_cpu.to(self.device)
 
                 with torch.amp.autocast(
                     self.device, dtype=self.amp_dtype, enabled=self.use_amp
                 ):
-                    x, y = next_token_targets(input_ids)
-                    # packing=False: position_ids < 0 marks padding — derive loss mask
-                    loss_mask = (
-                        None if self.config.data.packing else (position_ids >= 0)
-                    )
+                    x = shift_inputs(input_ids)
                     if self.config.training.intra_doc_masking:
                         mask_dtype = self.amp_dtype if self.use_amp else torch.float32
                         attn_mask = build_intra_doc_attention_mask(
@@ -347,7 +357,7 @@ class Trainer:
                     logits, aux_loss = self.model(
                         x, position_ids=position_ids, attn_mask=attn_mask
                     )
-                    loss = compute_loss(logits, y, loss_mask, self._loss_fn)
+                    loss = compute_loss(logits, labels, self._loss_fn)
                     if aux_loss is not None:
                         loss = loss + self.config.model.moe_aux_loss_coef * aux_loss
                     loss = loss / cfg.gradient_accumulation_steps
@@ -358,7 +368,11 @@ class Trainer:
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
-                    input_ids, position_ids = next_input_ids, next_position_ids
+                    input_ids, position_ids, labels = (
+                        next_input_ids,
+                        next_position_ids,
+                        next_labels,
+                    )
 
             # Gradient clipping
             self.scaler.unscale_(self.optimizer)
@@ -453,11 +467,11 @@ class Trainer:
                 break
             input_ids = batch[0].to(self.device)
             position_ids = batch[1].to(self.device)
+            labels = batch[2].to(self.device)
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                x, y = next_token_targets(input_ids)
-                loss_mask = None if self.config.data.packing else (position_ids >= 0)
+                x = shift_inputs(input_ids)
                 if self.config.training.intra_doc_masking:
                     mask_dtype = self.amp_dtype if self.use_amp else torch.float32
                     attn_mask = build_intra_doc_attention_mask(
@@ -477,18 +491,14 @@ class Trainer:
                 logits, aux_loss = self.model(
                     x, position_ids=position_ids, attn_mask=attn_mask
                 )
-                loss = compute_loss(logits, y, loss_mask, self._loss_fn)
+                loss = compute_loss(logits, labels, self._loss_fn)
             total_loss += loss.item()
             if aux_loss is not None:
                 total_aux_loss += aux_loss.item()
             if self.tokenizer is not None:
                 # Count loss-contributing tokens; decode them and count UTF-8 bytes.
-                # loss_mask is shape (B, S) aligned with y.
-                if loss_mask is None:
-                    target_ids = y.reshape(-1).tolist()
-                else:
-                    keep = loss_mask.reshape(-1).bool()
-                    target_ids = y.reshape(-1)[keep].tolist()
+                keep = labels.reshape(-1) != -100
+                target_ids = labels.reshape(-1)[keep].tolist()
                 bpb_tokens += len(target_ids)
                 bpb_bytes += len(
                     self.tokenizer.decode(target_ids, skip_special_tokens=True).encode(
