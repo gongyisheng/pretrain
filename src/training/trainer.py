@@ -74,7 +74,7 @@ class Trainer:
         self.n_non_emb_params = n_params - sum(
             p.numel() for name, p in self.model.named_parameters() if "emb" in name
         )
-        # For MoE, FLOPs use active params (k experts activated) not total params.
+        # For MoE, the startup print shows active params (k experts activated) not total.
         # Replace total expert FFN params with the k-active subset in the count.
         if self.is_moe:
             mc = config.model
@@ -116,9 +116,9 @@ class Trainer:
             )
 
         # Data
-        train_path = os.path.join(config.data.data_dir, "train.bin")
-        val_path = os.path.join(config.data.data_dir, "val.bin")
         if config.task == "pretrain":
+            train_path = os.path.join(config.data.data_dir, "train.bin")
+            val_path = os.path.join(config.data.data_dir, "val.bin")
             dataset_kwargs = dict(
                 packing=config.data.packing,
                 eot_token_id=self.eot_token_id,
@@ -137,11 +137,12 @@ class Trainer:
                 **dataset_kwargs,
             )
         elif config.task == "sft":
+            train_path = os.path.join(config.data.data_dir, "train.parquet")
+            val_path = os.path.join(config.data.data_dir, "val.parquet")
             sft_kwargs = dict(
-                vocab_size=config.model.vocab_size,
-                question_len=config.data.question_len,
-                answer_len=config.data.answer_len,
-                packing=config.data.packing,
+                seq_len=config.max_seq_len,
+                eot_token_id=self.eot_token_id,
+                pad_token_id=self.pad_token_id,
             )
             self.train_dataset = SFTDataset(train_path, **sft_kwargs)
             self.val_dataset = SFTDataset(val_path, **sft_kwargs)
@@ -227,7 +228,7 @@ class Trainer:
                     block.forward = make_ckpt_forward(block)
 
         # Metrics
-        self.metrics = MetricsTracker(config, self.n_active_non_emb_params, self.device)
+        self.metrics = MetricsTracker(config, self.device)
 
         # Logger
         self.logger = WandbLogger(config, enabled=wandb_enabled)

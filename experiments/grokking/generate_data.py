@@ -1,10 +1,14 @@
-"""Generate grokking train/val .bin files + meta.json for a (op, p, train_frac, seed).
+"""Generate raw grokking SFT data as text Parquet files.
 
-Output layout (mirrors data/openwebtext/):
+Stage 1 of the SFT data pipeline: emit (question, answer) string pairs for a
+modular-arithmetic task. Stage 2 (tokenize_data.py) reads this Parquet and
+produces the tokenized Parquet that the trainer consumes.
+
+Output layout:
     data/grokking_<op>_p<p>_f<frac>/
-        train.bin    # uint16, stride = 5 tokens per sample [a, op, b, =, c]
-        val.bin      # same shape, disjoint pairs
-        meta.json    # vocab + split metadata
+        train_text.parquet   # columns: question, answer
+        val_text.parquet     # same schema, disjoint pairs
+        meta.json            # informational
 """
 
 import argparse
@@ -12,7 +16,8 @@ import json
 import os
 
 import numpy as np
-from tokenizers import Tokenizer
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 OPS = {"add", "sub", "mul", "div"}
 OP_SYMBOLS = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
@@ -34,20 +39,23 @@ def _valid_pairs(op: str, p: int):
             for b in range(p):
                 yield a, b, (a - b) % p
     elif op == "mul":
-        for a in range(1, p):  # exclude 0
+        for a in range(1, p):
             for b in range(1, p):
                 yield a, b, (a * b) % p
     elif op == "div":
         for a in range(p):
-            for b in range(1, p):  # exclude b=0
+            for b in range(1, p):
                 yield a, b, (a * _modinv(b, p)) % p
     else:
         raise ValueError(f"unknown op: {op}")
 
 
-def _encode_sample(tokenizer: Tokenizer, a: int, b: int, op: str, c: int) -> list[int]:
-    """Token IDs for [a, op_symbol, b, =, c]."""
-    return tokenizer.encode(f"{a} {OP_SYMBOLS[op]} {b} = {c}").ids
+def _format_question(a: int, b: int, op: str) -> str:
+    return f"{a} {OP_SYMBOLS[op]} {b} ="
+
+
+def _format_answer(c: int) -> str:
+    return str(c)
 
 
 def main():
@@ -57,24 +65,15 @@ def main():
     parser.add_argument("--train_frac", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--tokenizer_path",
-        default="tokenizers/grokking",
-        help="Directory containing tokenizer.json built by generate_tokenizer.py",
-    )
-    parser.add_argument(
         "--out_dir",
         default=None,
         help="Output dir (defaults to data/grokking_<op>_p<p>_f<frac>/)",
     )
     args = parser.parse_args()
 
-    tokenizer = Tokenizer.from_file(os.path.join(args.tokenizer_path, "tokenizer.json"))
-    vocab_size = tokenizer.get_vocab_size()
-
     out_dir = args.out_dir or f"data/grokking_{args.op}_p{args.p}_f{args.train_frac}"
     os.makedirs(out_dir, exist_ok=True)
 
-    # Build all valid pairs + encode each to 5 token IDs.
     pairs = list(_valid_pairs(args.op, args.p))
     rng = np.random.default_rng(args.seed)
     perm = rng.permutation(len(pairs))
@@ -84,16 +83,14 @@ def main():
     train_pairs = pairs[:n_train]
     val_pairs = pairs[n_train:]
 
-    def _write_bin(samples, path):
-        flat = np.array(
-            [tok for (a, b, c) in samples for tok in _encode_sample(tokenizer, a, b, args.op, c)],
-            dtype=np.uint16,
-        )
-        flat.tofile(path)
-        return flat
+    def _write_parquet(samples, path):
+        questions = [_format_question(a, b, args.op) for (a, b, _) in samples]
+        answers = [_format_answer(c) for (_, _, c) in samples]
+        table = pa.table({"question": questions, "answer": answers})
+        pq.write_table(table, path)
 
-    train_flat = _write_bin(train_pairs, os.path.join(out_dir, "train.bin"))
-    val_flat = _write_bin(val_pairs, os.path.join(out_dir, "val.bin"))
+    _write_parquet(train_pairs, os.path.join(out_dir, "train_text.parquet"))
+    _write_parquet(val_pairs, os.path.join(out_dir, "val_text.parquet"))
 
     meta = {
         "dataset": "grokking",
@@ -101,19 +98,14 @@ def main():
         "p": args.p,
         "train_frac": args.train_frac,
         "seed": args.seed,
-        "vocab_size": vocab_size,
-        "question_len": 4,
-        "answer_len": 1,
         "n_train": len(train_pairs),
         "n_val": len(val_pairs),
-        "special_tokens": {sym: tokenizer.token_to_id(sym) for sym in ["+", "-", "*", "/", "="]},
     }
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
     print(
-        f"[generate_data] {args.op}: train={len(train_pairs)} val={len(val_pairs)} "
-        f"({len(train_flat)} + {len(val_flat)} tokens) → {out_dir}"
+        f"[generate_data] {args.op}: train={len(train_pairs)} val={len(val_pairs)} → {out_dir}"
     )
 
 

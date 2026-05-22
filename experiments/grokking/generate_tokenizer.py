@@ -1,4 +1,4 @@
-"""Build the grokking tokenizer (residues 0..99 + 5 operators) and save it.
+"""Build the grokking tokenizer (residues 0..99 + 5 operators + EOT) and save it.
 
 Run once before generate_data.py. Idempotent — re-running overwrites the file.
 """
@@ -8,21 +8,24 @@ import os
 
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.pre_tokenizers import WhitespaceSplit
 
 
 def build_grokking_tokenizer() -> Tokenizer:
-    """Return a WordLevel tokenizer with the fixed grokking vocab (105 tokens).
+    """Return a WordLevel tokenizer with the fixed grokking vocab (106 tokens).
 
     IDs 0..99   → residue tokens "0".."99"
     IDs 100..104 → operators "+", "-", "*", "/", "="
+    ID 105      → end-of-text token "<|endoftext|>" (sample boundary)
     """
     vocab = {str(i): i for i in range(100)}
     operators = ["+", "-", "*", "/", "="]
     for i, op in enumerate(operators):
         vocab[op] = 100 + i
+    vocab["<|endoftext|>"] = 105
     tokenizer = Tokenizer(WordLevel(vocab, unk_token=None))
-    tokenizer.pre_tokenizer = Whitespace()
+    # WhitespaceSplit (not Whitespace) so `<|endoftext|>` isn't broken on punctuation.
+    tokenizer.pre_tokenizer = WhitespaceSplit()
     return tokenizer
 
 

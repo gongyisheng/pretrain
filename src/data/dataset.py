@@ -1,26 +1,47 @@
+from abc import ABC, abstractmethod
+
 import numpy as np
+import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
 
 from src.utils.masking_utils import build_position_ids
 
 
-class PretrainDataset(Dataset):
-    """Memory-mapped dataset for pretraining.
+class _AbstractDataset(Dataset, ABC):
+    """Abstract base for token datasets used by the trainer.
 
-    Returns (input_ids, position_ids, labels), all of shape (seq_len,). The
-    next-token shift is applied here so the trainer feeds ``input_ids`` to the
-    model directly.
+    Concrete subclasses return ``(input_ids, position_ids, labels)`` from
+    ``__getitem__``, all tensors of shape ``(seq_len,)``:
 
-    - ``input_ids``: shape (seq_len,). The model input, already shifted (the
-      raw on-disk slice is seq_len+1 tokens; the last is dropped).
-    - ``position_ids``: shape (seq_len,). Intra-document positions of the input
-      tokens. In packing=False mode, negative entries mark padding.
-    - ``labels``: shape (seq_len,). Next-token targets aligned with the model
-      input. Positions whose corresponding input token is padding (i.e.
-      ``position_ids[i] < 0``) are set to -100 so the loss skips them via the
-      cross-entropy ``ignore_index=-100`` convention. In packing=True mode no
-      -100s appear because there's no padding.
+    - ``input_ids``: model input, with the next-token shift already applied.
+    - ``position_ids``: intra-document positions; negative values mark padding.
+    - ``labels``: next-token targets, with ``-100`` at positions to skip
+      (consumed by ``F.cross_entropy(..., ignore_index=-100)``).
+
+    Storage formats and constructor arguments are subclass-specific.
+    """
+
+    @abstractmethod
+    def __len__(self) -> int: ...
+
+    @abstractmethod
+    def __getitem__(self, idx): ...
+
+
+class PretrainDataset(_AbstractDataset):
+    """Memory-mapped .bin dataset for pretraining.
+
+    Two modes:
+
+    - ``packing=True`` (default): the on-disk stream is sliced every ``seq_len``
+      tokens, so a single returned chunk may span multiple documents joined by
+      ``eot_token_id``. ``labels`` has no ``-100``s — every position contributes
+      to the loss.
+    - ``packing=False``: each returned sample is one document (delimited by
+      ``eot_token_id`` in the stream), padded with ``pad_token_id`` to
+      ``seq_len + 1`` tokens. ``labels`` is set to ``-100`` at padding
+      positions so the loss skips them.
     """
 
     def __init__(
@@ -33,9 +54,9 @@ class PretrainDataset(Dataset):
         pad_token_id: int = 0,
     ):
         self.seq_len = seq_len
-        self.packing = packing
-        self.pad_token_id = pad_token_id
         self.eot_token_id = eot_token_id
+        self.pad_token_id = pad_token_id
+        self.packing = packing
         dtype = np.uint32 if vocab_size > 65535 else np.uint16
         self.data = np.memmap(bin_path, dtype=dtype, mode="r")
 
@@ -94,63 +115,64 @@ class PretrainDataset(Dataset):
         return input_ids, position_ids, labels
 
 
-class SFTDataset(Dataset):
-    """Memory-mapped dataset for supervised fine-tuning.
+class SFTDataset(_AbstractDataset):
+    """Parquet-backed dataset for supervised fine-tuning.
 
-    Each on-disk sample is ``question_len + answer_len`` tokens laid out as
-    ``[question_tokens..., answer_tokens...]``. The dataset applies the
-    next-token shift internally and constructs the ``labels`` tensor with the
-    HF -100 ignore-index convention: only the last ``answer_len`` label
-    positions carry the answer tokens; all earlier positions are -100 and
-    skipped by the loss.
+    Reads a tokenized Parquet file with two list-of-int columns produced by
+    ``experiments/grokking/tokenize_data.py``:
 
-    Returns ``(input_ids, position_ids, labels)`` all of shape ``(stride - 1,)``
-    where ``stride = question_len + answer_len``. The trainer feeds
-    ``input_ids`` to the model directly — no further shifting needed.
+    - ``question_ids``: tokens of the question (prompt). Length varies per row.
+    - ``answer_ids``:   tokens of the answer. Length varies per row.
 
-    ``packing`` mirrors the flag on ``PretrainDataset`` for config symmetry,
-    but only ``packing=False`` is implemented. ``packing=True`` (concatenating
-    multiple Q/A pairs into a longer sequence) raises ``NotImplementedError``.
+    Per-sample, the dataset constructs the full sequence
+    ``[q_ids..., a_ids..., EOT]``, pads it with ``pad_token_id`` to
+    ``seq_len + 1`` tokens, and applies the next-token shift. Labels carry
+    ``-100`` everywhere except at the positions that predict the answer tokens
+    and the EOT itself, so the loss is computed only on the answer (and the
+    stop-token prediction).
     """
 
     def __init__(
         self,
-        bin_path: str,
-        vocab_size: int,
-        question_len: int,
-        answer_len: int,
-        packing: bool = False,
+        parquet_path: str,
+        seq_len: int,
+        eot_token_id: int = 0,
+        pad_token_id: int = 0,
     ):
-        if packing:
-            raise NotImplementedError(
-                "SFTDataset does not yet support packing=True. "
-                "Set data.packing=false in your config."
-            )
-        self.question_len = question_len
-        self.answer_len = answer_len
-        self.stride = question_len + answer_len
-        dtype = np.uint32 if vocab_size > 65535 else np.uint16
-        self.data = np.memmap(bin_path, dtype=dtype, mode="r")
-        if len(self.data) % self.stride != 0:
-            raise ValueError(
-                f"SFTDataset: bin file length {len(self.data)} is not a multiple "
-                f"of stride {self.stride} (question_len={question_len} + "
-                f"answer_len={answer_len})"
-            )
-        self.n_samples = len(self.data) // self.stride
+        self.seq_len = seq_len
+        self.eot_token_id = eot_token_id
+        self.pad_token_id = pad_token_id
+        table = pq.read_table(parquet_path)
+        self._question_ids = table.column("question_ids").to_pylist()
+        self._answer_ids = table.column("answer_ids").to_pylist()
 
     def __len__(self):
-        return self.n_samples
+        return len(self._question_ids)
 
     def __getitem__(self, idx):
-        start = idx * self.stride
-        chunk = torch.from_numpy(
-            self.data[start : start + self.stride].astype(np.int64)
-        )
-        input_ids = chunk[:-1]
-        position_ids = torch.arange(self.stride - 1, dtype=torch.long)
-        labels = torch.full((self.stride - 1,), -100, dtype=torch.long)
-        # Last `answer_len` label positions hold the answer tokens (taken from
-        # the unshifted chunk's tail).
-        labels[-self.answer_len :] = chunk[-self.answer_len :]
+        q = self._question_ids[idx]
+        a = self._answer_ids[idx]
+        q_len = len(q)
+        a_len = len(a)
+        # Full on-the-wire sample: [q..., a..., EOT].
+        sample = q + a + [self.eot_token_id]
+        n_content = min(len(sample), self.seq_len + 1)
+
+        chunk_arr = np.full(self.seq_len + 1, self.pad_token_id, dtype=np.int64)
+        chunk_arr[:n_content] = sample[:n_content]
+        chunk_t = torch.from_numpy(chunk_arr)
+        input_ids = chunk_t[:-1]
+
+        # Labels: -100 everywhere except the answer-prediction range.
+        # Supervised label indices: [q_len - 1, q_len + a_len) = predicting
+        # each answer token plus the EOT.
+        labels = torch.full((self.seq_len,), -100, dtype=torch.long)
+        sup_lo = q_len - 1
+        sup_hi = min(q_len + a_len, self.seq_len)
+        if 0 <= sup_lo < sup_hi:
+            labels[sup_lo:sup_hi] = chunk_t[sup_lo + 1 : sup_hi + 1]
+
+        position_ids = build_position_ids(
+            input_ids.unsqueeze(0), self.eot_token_id, packing=False
+        ).squeeze(0)
         return input_ids, position_ids, labels

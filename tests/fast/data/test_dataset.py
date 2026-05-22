@@ -5,6 +5,8 @@ keyed by a synthetic "path" rather than writing real .bin files.
 """
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import torch
 
@@ -157,107 +159,136 @@ def test_single_doc_truncation(mock_memmap):
 
 
 # --- SFTDataset ---
+#
+# SFTDataset is parquet-backed. Tests write small parquet files to tmp_path
+# and verify the per-row (question_ids, answer_ids) → (input_ids, position_ids,
+# labels) assembly + masking.
+
+
+SFT_EOT = 99
+SFT_PAD = 99
+
+
+def _write_sft_parquet(path, rows):
+    """rows = [(q_ids, a_ids), ...]"""
+    table = pa.table(
+        {
+            "question_ids": [list(q) for q, _ in rows],
+            "answer_ids": [list(a) for _, a in rows],
+        }
+    )
+    pq.write_table(table, path)
 
 
 @pytest.fixture
-def sft_bin(mock_memmap):
-    # Three samples, each [a, op, b, =, c] = 5 tokens.
-    # Sample 0: [3, 100, 5, 104, 8]
-    # Sample 1: [10, 100, 20, 104, 30]
-    # Sample 2: [50, 100, 40, 104, 90]
-    flat = np.array(
-        [3, 100, 5, 104, 8, 10, 100, 20, 104, 30, 50, 100, 40, 104, 90],
-        dtype=np.uint16,
-    )
-    mock_memmap["/sft.bin"] = flat
-    return "/sft.bin"
+def sft_parquet(tmp_path):
+    rows = [
+        ([3, 100, 5, 104], [8]),
+        ([10, 100, 20, 104], [30]),
+        ([50, 100, 40, 104], [90]),
+    ]
+    path = tmp_path / "sft.parquet"
+    _write_sft_parquet(path, rows)
+    return str(path)
 
 
-def _sft_ds(path, question_len=4, answer_len=1):
+def _sft_ds(path, seq_len=6):
     return SFTDataset(
-        bin_path=path,
-        vocab_size=128,
-        question_len=question_len,
-        answer_len=answer_len,
+        parquet_path=path,
+        seq_len=seq_len,
+        eot_token_id=SFT_EOT,
+        pad_token_id=SFT_PAD,
     )
 
 
-def test_sft_dataset_length(sft_bin):
-    ds = _sft_ds(sft_bin)
+def test_sft_dataset_length(sft_parquet):
+    ds = _sft_ds(sft_parquet)
     assert len(ds) == 3
 
 
-def test_sft_dataset_shapes(sft_bin):
-    ds = _sft_ds(sft_bin)
+def test_sft_dataset_shapes(sft_parquet):
+    ds = _sft_ds(sft_parquet)
     input_ids, position_ids, labels = ds[0]
-    # Pre-shifted: all three are (stride - 1,) = (4,).
-    assert input_ids.shape == (4,)
-    assert position_ids.shape == (4,)
-    assert labels.shape == (4,)
+    assert input_ids.shape == (6,)
+    assert position_ids.shape == (6,)
+    assert labels.shape == (6,)
     assert input_ids.dtype == torch.long
     assert position_ids.dtype == torch.long
     assert labels.dtype == torch.long
 
 
-def test_sft_dataset_input_ids_match_disk(sft_bin):
-    """input_ids is the on-disk sample with the answer token dropped (model input only)."""
-    ds = _sft_ds(sft_bin)
+def test_sft_dataset_input_ids_assembled(sft_parquet):
+    """input_ids = [q..., a..., EOT, PAD...] then shifted left by 1."""
+    ds = _sft_ds(sft_parquet, seq_len=6)
+    # Row 1: q=[10, 100, 20, 104], a=[30] → sample=[10, 100, 20, 104, 30, EOT]
+    # Padded to seq_len + 1 = 7: [10, 100, 20, 104, 30, EOT, PAD]
+    # input_ids = chunk[:-1] = [10, 100, 20, 104, 30, EOT]
     input_ids, _, _ = ds[1]
-    # Sample 1 on disk: [10, 100, 20, 104, 30]; input_ids drops the final answer token.
-    assert input_ids.tolist() == [10, 100, 20, 104]
+    assert input_ids.tolist() == [10, 100, 20, 104, 30, SFT_EOT]
 
 
-def test_sft_dataset_position_ids_sequential(sft_bin):
-    ds = _sft_ds(sft_bin)
-    _, position_ids, _ = ds[0]
-    assert position_ids.tolist() == [0, 1, 2, 3]
-
-
-def test_sft_dataset_labels_mask_layout(sft_bin):
-    """Labels: -100 for the first (question_len-1) positions; answer tokens for the last answer_len."""
-    # stride=5, question_len=4, answer_len=1 → 4 label positions.
-    # labels[0..2] = -100  (first Lq-1=3 positions masked)
-    # labels[3]   = 8      (last La=1 positions hold the answer)
-    ds = _sft_ds(sft_bin, question_len=4, answer_len=1)
+def test_sft_dataset_labels_mask_question_supervise_answer(sft_parquet):
+    """Labels: -100 for the first (q_len - 1) positions; answer + EOT supervised."""
+    # Row 0: q_len=4, a_len=1, sample=[3, 100, 5, 104, 8, EOT], n_content=6.
+    # chunk = [3, 100, 5, 104, 8, EOT, PAD]
+    # input_ids = [3, 100, 5, 104, 8, EOT]
+    # Supervised label indices: [q_len-1, q_len+a_len) = [3, 5).
+    #   labels[3] = chunk[4] = 8        (answer prediction)
+    #   labels[4] = chunk[5] = EOT      (stop prediction)
+    # All others (labels[0..2] and labels[5]) = -100.
+    ds = _sft_ds(sft_parquet, seq_len=6)
     _, _, labels = ds[0]
     assert labels[:3].tolist() == [-100, -100, -100]
-    assert labels[-1].item() == 8
+    assert labels[3].item() == 8
+    assert labels[4].item() == SFT_EOT
+    assert labels[5].item() == -100
 
 
-def test_sft_dataset_labels_multi_token_answer(mock_memmap):
-    """Generalization check: answer_len=2 sets the last two labels to the answer tokens.
-
-    On disk each sample is 6 tokens; pre-shifted input_ids drops the very last token.
-    The model's input still contains the first answer token (so it can predict the second).
-    """
-    mock_memmap["/sft2.bin"] = np.array(
-        [1, 2, 100, 104, 5, 6, 11, 12, 100, 104, 15, 16],
-        dtype=np.uint16,
+def test_sft_dataset_labels_multi_token_answer(tmp_path):
+    """Generalization: multi-token answer supervises every answer position + EOT."""
+    rows = [([1, 2, 3], [10, 20])]  # q_len=3, a_len=2
+    path = tmp_path / "multi.parquet"
+    _write_sft_parquet(path, rows)
+    ds = SFTDataset(
+        parquet_path=str(path),
+        seq_len=6,
+        eot_token_id=SFT_EOT,
+        pad_token_id=SFT_PAD,
     )
-    ds = SFTDataset(bin_path="/sft2.bin", vocab_size=128, question_len=4, answer_len=2)
-    assert len(ds) == 2
-    input_ids, position_ids, labels = ds[1]
-    # Sample 1 on disk = [11, 12, 100, 104, 15, 16]; input_ids drops the last (16).
-    assert input_ids.tolist() == [11, 12, 100, 104, 15]
-    assert position_ids.tolist() == [0, 1, 2, 3, 4]
-    assert labels[:3].tolist() == [-100, -100, -100]
-    assert labels[-2:].tolist() == [15, 16]
+    input_ids, _, labels = ds[0]
+    # sample = [1, 2, 3, 10, 20, EOT], padded to 7: [..., PAD]
+    # input_ids = [1, 2, 3, 10, 20, EOT]
+    # Supervised range: [q_len-1, q_len+a_len) = [2, 5).
+    #   labels[2] = chunk[3] = 10
+    #   labels[3] = chunk[4] = 20
+    #   labels[4] = chunk[5] = EOT
+    assert input_ids.tolist() == [1, 2, 3, 10, 20, SFT_EOT]
+    assert labels[:2].tolist() == [-100, -100]
+    assert labels[2:5].tolist() == [10, 20, SFT_EOT]
+    assert labels[5].item() == -100
 
 
-def test_sft_dataset_raises_on_misaligned_file(mock_memmap):
-    """ValueError if the .bin file length isn't a multiple of stride."""
-    mock_memmap["/bad.bin"] = np.arange(13, dtype=np.uint16)  # 13 % 5 != 0
-    with pytest.raises(ValueError, match="not a multiple of stride"):
-        SFTDataset(bin_path="/bad.bin", vocab_size=128, question_len=4, answer_len=1)
+def test_sft_dataset_variable_length_per_sample(tmp_path):
+    """Different rows can have different q_len / a_len; masking adapts."""
+    rows = [
+        ([1, 2], [3]),  # q_len=2, a_len=1
+        ([10, 20, 30], [40, 50]),  # q_len=3, a_len=2
+    ]
+    path = tmp_path / "var.parquet"
+    _write_sft_parquet(path, rows)
+    ds = SFTDataset(
+        parquet_path=str(path), seq_len=8, eot_token_id=SFT_EOT, pad_token_id=SFT_PAD
+    )
+    # Row 0: sample=[1, 2, 3, EOT], padded to 9. input_ids = [1, 2, 3, EOT, PAD, PAD, PAD, PAD].
+    # Supervised labels[q_len-1 : q_len+a_len) = labels[1:3] = chunk[2:4] = [3, EOT].
+    _, _, labels0 = ds[0]
+    assert labels0[0].item() == -100
+    assert labels0[1:3].tolist() == [3, SFT_EOT]
+    assert (labels0[3:] == -100).all()
 
-
-def test_sft_dataset_packing_true_raises(sft_bin):
-    """packing=True is not yet implemented; constructor must raise."""
-    with pytest.raises(NotImplementedError, match="packing"):
-        SFTDataset(
-            bin_path=sft_bin,
-            vocab_size=128,
-            question_len=4,
-            answer_len=1,
-            packing=True,
-        )
+    # Row 1: sample=[10, 20, 30, 40, 50, EOT], padded to 9.
+    # Supervised labels[2:5] = chunk[3:6] = [40, 50, EOT].
+    _, _, labels1 = ds[1]
+    assert labels1[:2].tolist() == [-100, -100]
+    assert labels1[2:5].tolist() == [40, 50, SFT_EOT]
+    assert (labels1[5:] == -100).all()

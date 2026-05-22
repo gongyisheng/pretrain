@@ -18,6 +18,7 @@ dependencies = [
     "wandb>=0.26.0",
     "pyyaml>=6.0",
     "numpy>=2.4",
+    "pyarrow>=17.0",
     "triton>=3.6",
     "torchao>=0.16",
 ]
