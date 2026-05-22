@@ -15,7 +15,7 @@
 #   bash experiments/grokking/run_loss.sh ce_fp64
 #
 #   # pin to a GPU
-#   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run_loss.sh > logs/grokking/loss_sweep.log 2>&1 &
+#   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run_loss.sh > logs/grokking_loss.log 2>&1 &
 #
 # MAX_CONCURRENCY (default 4) controls parallelism. Each run gets its own
 # per-config log under logs/grokking/sub_wd0.1_<variant>.log.
