@@ -5,8 +5,6 @@ keyed by a synthetic "path" rather than writing real .bin files.
 """
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 import torch
 
@@ -160,54 +158,63 @@ def test_single_doc_truncation(mock_memmap):
 
 # --- SFTDataset ---
 #
-# SFTDataset is parquet-backed. Tests write small parquet files to tmp_path
-# and verify the per-row (question_ids, answer_ids) → (input_ids, position_ids,
-# labels) assembly + masking.
+# SFTDataset memmaps two parallel .bin files: tokens and a uint8 targets mask.
+# Tests register both via the mock_memmap fixture. Stream layout follows
+# tokenize_data.py: [q0..., a0..., EOT, q1..., a1..., EOT, ...].
 
 
 SFT_EOT = 99
 SFT_PAD = 99
 
 
-def _write_sft_parquet(path, rows):
-    """rows = [(q_ids, a_ids), ...]"""
-    table = pa.table(
-        {
-            "question_ids": [list(q) for q, _ in rows],
-            "answer_ids": [list(a) for _, a in rows],
-        }
-    )
-    pq.write_table(table, path)
+def _register_sft_bins(mock_memmap, bin_path, rows, eot=SFT_EOT):
+    """rows = [(q_ids, a_ids), ...]. Registers <bin_path> and <stem>_targets.bin."""
+    tokens: list[int] = []
+    targets: list[int] = []
+    for q, a in rows:
+        tokens.extend(q)
+        targets.extend([0] * len(q))
+        tokens.extend(a)
+        targets.extend([1] * len(a))
+        tokens.append(eot)
+        targets.append(1)
+    mock_memmap[bin_path] = np.array(tokens, dtype=np.uint16)
+    targets_path = bin_path.removesuffix(".bin") + "_targets.bin"
+    mock_memmap[targets_path] = np.array(targets, dtype=np.uint8)
 
 
 @pytest.fixture
-def sft_parquet(tmp_path):
+def sft_bin(mock_memmap):
     rows = [
         ([3, 100, 5, 104], [8]),
         ([10, 100, 20, 104], [30]),
         ([50, 100, 40, 104], [90]),
     ]
-    path = tmp_path / "sft.parquet"
-    _write_sft_parquet(path, rows)
-    return str(path)
+    _register_sft_bins(mock_memmap, "/sft.bin", rows)
+    return "/sft.bin"
 
 
-def _sft_ds(path, seq_len=6):
+def _sft_ds(path, seq_len=6, packing=False):
     return SFTDataset(
-        parquet_path=path,
+        bin_path=path,
         seq_len=seq_len,
+        vocab_size=128,
+        packing=packing,
         eot_token_id=SFT_EOT,
         pad_token_id=SFT_PAD,
     )
 
 
-def test_sft_dataset_length(sft_parquet):
-    ds = _sft_ds(sft_parquet)
+# packing=False
+
+
+def test_sft_dataset_length(sft_bin):
+    ds = _sft_ds(sft_bin)
     assert len(ds) == 3
 
 
-def test_sft_dataset_shapes(sft_parquet):
-    ds = _sft_ds(sft_parquet)
+def test_sft_dataset_shapes(sft_bin):
+    ds = _sft_ds(sft_bin)
     input_ids, position_ids, labels = ds[0]
     assert input_ids.shape == (6,)
     assert position_ids.shape == (6,)
@@ -217,26 +224,25 @@ def test_sft_dataset_shapes(sft_parquet):
     assert labels.dtype == torch.long
 
 
-def test_sft_dataset_input_ids_assembled(sft_parquet):
+def test_sft_dataset_input_ids_assembled(sft_bin):
     """input_ids = [q..., a..., EOT, PAD...] then shifted left by 1."""
-    ds = _sft_ds(sft_parquet, seq_len=6)
+    ds = _sft_ds(sft_bin, seq_len=6)
     # Row 1: q=[10, 100, 20, 104], a=[30] → sample=[10, 100, 20, 104, 30, EOT]
-    # Padded to seq_len + 1 = 7: [10, 100, 20, 104, 30, EOT, PAD]
+    # chunk_arr (size 7): [10, 100, 20, 104, 30, EOT, PAD]
     # input_ids = chunk[:-1] = [10, 100, 20, 104, 30, EOT]
     input_ids, _, _ = ds[1]
     assert input_ids.tolist() == [10, 100, 20, 104, 30, SFT_EOT]
 
 
-def test_sft_dataset_labels_mask_question_supervise_answer(sft_parquet):
-    """Labels: -100 for the first (q_len - 1) positions; answer + EOT supervised."""
+def test_sft_dataset_labels_mask_question_supervise_answer(sft_bin):
+    """Labels: -100 for question and padding positions; answer + EOT supervised."""
     # Row 0: q_len=4, a_len=1, sample=[3, 100, 5, 104, 8, EOT], n_content=6.
-    # chunk = [3, 100, 5, 104, 8, EOT, PAD]
     # input_ids = [3, 100, 5, 104, 8, EOT]
-    # Supervised label indices: [q_len-1, q_len+a_len) = [3, 5).
-    #   labels[3] = chunk[4] = 8        (answer prediction)
-    #   labels[4] = chunk[5] = EOT      (stop prediction)
-    # All others (labels[0..2] and labels[5]) = -100.
-    ds = _sft_ds(sft_parquet, seq_len=6)
+    # targets   = [0,   0, 0,   0, 1,   1] (q=0, a=1, EOT=1)
+    # labels[i] supervised iff targets[i+1] == 1, i.e. targets[1:7] = [0, 0, 0, 1, 1, 0]
+    #   labels[3] = chunk[4] = 8         (answer)
+    #   labels[4] = chunk[5] = EOT       (stop)
+    ds = _sft_ds(sft_bin, seq_len=6)
     _, _, labels = ds[0]
     assert labels[:3].tolist() == [-100, -100, -100]
     assert labels[3].item() == 8
@@ -244,125 +250,104 @@ def test_sft_dataset_labels_mask_question_supervise_answer(sft_parquet):
     assert labels[5].item() == -100
 
 
-def test_sft_dataset_labels_multi_token_answer(tmp_path):
-    """Generalization: multi-token answer supervises every answer position + EOT."""
-    rows = [([1, 2, 3], [10, 20])]  # q_len=3, a_len=2
-    path = tmp_path / "multi.parquet"
-    _write_sft_parquet(path, rows)
-    ds = SFTDataset(
-        parquet_path=str(path),
-        seq_len=6,
-        eot_token_id=SFT_EOT,
-        pad_token_id=SFT_PAD,
-    )
+def test_sft_dataset_labels_multi_token_answer(mock_memmap):
+    """Multi-token answer supervises every answer position + EOT."""
+    _register_sft_bins(mock_memmap, "/multi.bin", [([1, 2, 3], [10, 20])])
+    ds = _sft_ds("/multi.bin", seq_len=6)
     input_ids, _, labels = ds[0]
-    # sample = [1, 2, 3, 10, 20, EOT], padded to 7: [..., PAD]
-    # input_ids = [1, 2, 3, 10, 20, EOT]
-    # Supervised range: [q_len-1, q_len+a_len) = [2, 5).
-    #   labels[2] = chunk[3] = 10
-    #   labels[3] = chunk[4] = 20
-    #   labels[4] = chunk[5] = EOT
+    # sample = [1, 2, 3, 10, 20, EOT]; targets = [0,0,0,1,1,1]
+    # labels[i] supervised iff targets[i+1] == 1 → indices 2, 3, 4
     assert input_ids.tolist() == [1, 2, 3, 10, 20, SFT_EOT]
     assert labels[:2].tolist() == [-100, -100]
     assert labels[2:5].tolist() == [10, 20, SFT_EOT]
     assert labels[5].item() == -100
 
 
-def test_sft_dataset_variable_length_per_sample(tmp_path):
+def test_sft_dataset_variable_length_per_sample(mock_memmap):
     """Different rows can have different q_len / a_len; masking adapts."""
-    rows = [
-        ([1, 2], [3]),  # q_len=2, a_len=1
-        ([10, 20, 30], [40, 50]),  # q_len=3, a_len=2
-    ]
-    path = tmp_path / "var.parquet"
-    _write_sft_parquet(path, rows)
-    ds = SFTDataset(
-        parquet_path=str(path), seq_len=8, eot_token_id=SFT_EOT, pad_token_id=SFT_PAD
+    _register_sft_bins(
+        mock_memmap,
+        "/var.bin",
+        [
+            ([1, 2], [3]),  # q_len=2, a_len=1
+            ([10, 20, 30], [40, 50]),  # q_len=3, a_len=2
+        ],
     )
-    # Row 0: sample=[1, 2, 3, EOT], padded to 9. input_ids = [1, 2, 3, EOT, PAD, PAD, PAD, PAD].
-    # Supervised labels[q_len-1 : q_len+a_len) = labels[1:3] = chunk[2:4] = [3, EOT].
+    ds = _sft_ds("/var.bin", seq_len=8)
+    # Row 0: sample=[1, 2, 3, EOT]. Supervised labels at indices 1, 2.
     _, _, labels0 = ds[0]
     assert labels0[0].item() == -100
     assert labels0[1:3].tolist() == [3, SFT_EOT]
     assert (labels0[3:] == -100).all()
-
-    # Row 1: sample=[10, 20, 30, 40, 50, EOT], padded to 9.
-    # Supervised labels[2:5] = chunk[3:6] = [40, 50, EOT].
+    # Row 1: sample=[10, 20, 30, 40, 50, EOT]. Supervised labels at indices 2, 3, 4.
     _, _, labels1 = ds[1]
     assert labels1[:2].tolist() == [-100, -100]
     assert labels1[2:5].tolist() == [40, 50, SFT_EOT]
     assert (labels1[5:] == -100).all()
 
 
-# --- SFTDataset packing=True ---
+# packing=True
 #
-# Packing concatenates all samples into a flat stream and slices every
-# seq_len tokens — same single-slice pattern as PretrainDataset(packing=True),
-# with a parallel target-mask array to set -100 on question-position labels.
+# Just slice the flat stream every seq_len tokens — same pattern as
+# PretrainDataset(packing=True). Targets memmap is sliced in lockstep.
 
 
-def test_sft_packing_flat_stream_length(tmp_path):
+def test_sft_packing_length(mock_memmap):
     """n_sequences = total tokens // seq_len - 1, like PretrainDataset packing."""
     # 3 samples × (2 q + 1 a + 1 EOT) = 12 flat tokens. seq_len=4 → n = 12//4 - 1 = 2.
-    rows = [([1, 2], [3]), ([5, 6], [7]), ([9, 10], [11])]
-    path = tmp_path / "pack_len.parquet"
-    _write_sft_parquet(path, rows)
-    ds = SFTDataset(
-        parquet_path=str(path),
-        seq_len=4,
-        eot_token_id=SFT_EOT,
-        pad_token_id=SFT_PAD,
-        packing=True,
+    _register_sft_bins(
+        mock_memmap,
+        "/pack_len.bin",
+        [([1, 2], [3]), ([5, 6], [7]), ([9, 10], [11])],
     )
+    ds = _sft_ds("/pack_len.bin", seq_len=4, packing=True)
     assert len(ds) == 2
 
 
-def test_sft_packing_masks_question_positions(tmp_path):
+def test_sft_packing_masks_question_positions(mock_memmap):
     """In a packed chunk, labels at positions predicting question tokens are -100."""
-    # Flat stream: [1, 2, 3, EOT, 5, 6, 7, EOT, 9, 10, 11, EOT].
-    # is_target:   [F, F, T, T,   F, F, T, T,   F, F, T,  T]
-    # seq_len=8 → chunk 0 spans flat[0:9] = [1, 2, 3, EOT, 5, 6, 7, EOT, 9].
-    # input_ids = chunk[:-1] = [1, 2, 3, EOT, 5, 6, 7, EOT]  (length 8)
-    # labels    = chunk[1:]  = [2, 3, EOT, 5, 6, 7, EOT, 9]
-    # target_mask[1:9] = [F, T, T, F, F, T, T, F]
-    # After mask: labels = [-100, 3, EOT, -100, -100, 7, EOT, -100]
-    rows = [([1, 2], [3]), ([5, 6], [7]), ([9, 10], [11])]
-    path = tmp_path / "pack_mask.parquet"
-    _write_sft_parquet(path, rows)
-    ds = SFTDataset(
-        parquet_path=str(path),
-        seq_len=8,
-        eot_token_id=SFT_EOT,
-        pad_token_id=SFT_PAD,
-        packing=True,
+    # Flat tokens:  [1, 2, 3, EOT, 5, 6, 7, EOT, 9, 10, 11, EOT]
+    # targets mask: [0, 0, 1, 1,   0, 0, 1, 1,   0, 0, 1,  1]
+    # seq_len=8 → chunk 0 = tokens[0:9] = [1, 2, 3, EOT, 5, 6, 7, EOT, 9]
+    # input_ids = [1, 2, 3, EOT, 5, 6, 7, EOT]
+    # labels    = [2, 3, EOT, 5, 6, 7, EOT, 9]
+    # supervised iff targets[1:9] = [0, 1, 1, 0, 0, 1, 1, 0]
+    # → labels = [-100, 3, EOT, -100, -100, 7, EOT, -100]
+    _register_sft_bins(
+        mock_memmap,
+        "/pack_mask.bin",
+        [([1, 2], [3]), ([5, 6], [7]), ([9, 10], [11])],
     )
+    ds = _sft_ds("/pack_mask.bin", seq_len=8, packing=True)
     input_ids, position_ids, labels = ds[0]
     assert input_ids.tolist() == [1, 2, 3, SFT_EOT, 5, 6, 7, SFT_EOT]
     assert labels.tolist() == [-100, 3, SFT_EOT, -100, -100, 7, SFT_EOT, -100]
-    # Intra-doc position_ids reset after each EOT inside the chunk.
     assert position_ids.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
 
 
-def test_sft_packing_sample_can_span_chunk_boundary(tmp_path):
-    """A long sample straddling chunk boundaries works — masking is per-token,
-    not per-sample. Behavior matches PretrainDataset(packing=True) where
-    documents may also span chunks."""
-    # One big sample: q=[1,2,3,4,5], a=[6,7,8], + EOT → 9 flat tokens.
-    # seq_len=4 → n = 9//4 - 1 = 1, chunk 0 = flat[0:5] = [1, 2, 3, 4, 5].
-    # is_target[0:5] = [F, F, F, F, F]  (all question tokens — answer starts at flat[5]=6)
-    # labels = [2, 3, 4, 5], target_mask[1:5] = [F, F, F, F]
-    # → all labels become -100.
-    rows = [([1, 2, 3, 4, 5], [6, 7, 8])]
-    path = tmp_path / "pack_span.parquet"
-    _write_sft_parquet(path, rows)
-    ds = SFTDataset(
-        parquet_path=str(path),
-        seq_len=4,
-        eot_token_id=SFT_EOT,
-        pad_token_id=SFT_PAD,
-        packing=True,
+def test_sft_packing_sample_can_span_chunk_boundary(mock_memmap):
+    """A long sample straddling chunk boundaries — masking is per-token, not
+    per-sample. Matches PretrainDataset(packing=True) where docs may span."""
+    # q=[1,2,3,4,5], a=[6,7,8], + EOT → 9 flat tokens.
+    # targets = [0,0,0,0,0, 1,1,1, 1]
+    # seq_len=4 → n = 9//4 - 1 = 1, chunk 0 = tokens[0:5] = [1, 2, 3, 4, 5]
+    # input_ids = [1, 2, 3, 4]; labels = [2, 3, 4, 5]
+    # targets[1:5] = [0, 0, 0, 0] → all labels -100 in this chunk.
+    _register_sft_bins(
+        mock_memmap,
+        "/pack_span.bin",
+        [([1, 2, 3, 4, 5], [6, 7, 8])],
     )
+    ds = _sft_ds("/pack_span.bin", seq_len=4, packing=True)
     assert len(ds) == 1
     input_ids, _, labels = ds[0]
     assert input_ids.tolist() == [1, 2, 3, 4]
     assert (labels == -100).all()
+
+
+def test_sft_dataset_mismatched_lengths_raise(mock_memmap):
+    """Token stream and targets mask must have the same length."""
+    mock_memmap["/bad.bin"] = np.array([1, 2, 3, SFT_EOT], dtype=np.uint16)
+    mock_memmap["/bad_targets.bin"] = np.array([0, 0, 1], dtype=np.uint8)  # too short
+    with pytest.raises(ValueError, match="different lengths"):
+        _sft_ds("/bad.bin", seq_len=4)

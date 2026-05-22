@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 
 import numpy as np
-import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
 
@@ -116,38 +115,32 @@ class PretrainDataset(_AbstractDataset):
 
 
 class SFTDataset(_AbstractDataset):
-    """Parquet-backed dataset for supervised fine-tuning.
+    """Memory-mapped .bin dataset for supervised fine-tuning.
 
-    Reads a tokenized Parquet file with two list-of-int columns produced by
+    Reads two parallel flat streams produced by
     ``experiments/grokking/tokenize_data.py``:
 
-    - ``question_ids``: tokens of the question (prompt). Length varies per row.
-    - ``answer_ids``:   tokens of the answer. Length varies per row.
+    - ``<bin_path>``                   — tokens, ``uint16``/``uint32``.
+      Format: ``[q0..., a0..., EOT, q1..., a1..., EOT, ...]``.
+    - ``<bin_path stem>_targets.bin``  — parallel uint8 mask.
+      1 at positions whose token is an answer or EOT (a supervised target);
+      0 at question positions.
 
-    The per-sample on-the-wire form is ``[q_ids..., a_ids..., EOT]``. Labels
-    are ``-100`` for question positions and the position after EOT; loss is
-    computed only at positions predicting answer tokens or EOT.
+    Two modes (mirror ``PretrainDataset``):
 
-    Two modes:
-
-    - ``packing=False`` (default): one parquet row → one sample, padded with
-      ``pad_token_id`` to ``seq_len + 1`` tokens. Wasteful when samples are
-      much shorter than ``seq_len``.
-    - ``packing=True``: at ``__init__`` time, all samples are concatenated
-      into a single flat stream (``[q0..., a0..., EOT, q1..., a1..., EOT, ...]``).
-      A parallel boolean ``is_target`` array marks each token as an answer/EOT
-      (supervised target) or question (not a target). ``__getitem__`` then
-      slices a ``seq_len + 1`` window from the stream — the same single-slice
-      pattern as ``PretrainDataset(packing=True)`` — and uses the parallel
-      mask to set ``-100`` on labels whose target token isn't an answer/EOT.
-      Samples may span chunk boundaries, exactly like documents in the
-      pretrain packed mode.
+    - ``packing=True``: slice every ``seq_len`` tokens. The targets mask is
+      sliced in lockstep and used to set ``-100`` on label positions whose
+      target token isn't an answer/EOT. Single one-line ``__getitem__``.
+    - ``packing=False``: each returned sample is one inter-EOT document,
+      padded to ``seq_len + 1``. Labels for question positions become ``-100``
+      via the same targets mask; padding positions also become ``-100``.
     """
 
     def __init__(
         self,
-        parquet_path: str,
+        bin_path: str,
         seq_len: int,
+        vocab_size: int,
         packing: bool = False,
         eot_token_id: int = 0,
         pad_token_id: int = 0,
@@ -156,44 +149,45 @@ class SFTDataset(_AbstractDataset):
         self.eot_token_id = eot_token_id
         self.pad_token_id = pad_token_id
         self.packing = packing
-        table = pq.read_table(parquet_path)
-        self._question_ids = table.column("question_ids").to_pylist()
-        self._answer_ids = table.column("answer_ids").to_pylist()
+        dtype = np.uint32 if vocab_size > 65535 else np.uint16
+        self.data = np.memmap(bin_path, dtype=dtype, mode="r")
+        targets_path = bin_path.removesuffix(".bin") + "_targets.bin"
+        self.targets = np.memmap(targets_path, dtype=np.uint8, mode="r")
+        if len(self.data) != len(self.targets):
+            raise ValueError(
+                f"SFTDataset: token stream ({len(self.data)}) and targets mask "
+                f"({len(self.targets)}) have different lengths"
+            )
+
         if packing:
-            self._build_flat_stream()
-
-    def _build_flat_stream(self):
-        """Concatenate all samples into one flat stream plus parallel target mask.
-
-        ``self._data[i]`` is the i-th token. ``self._is_target[i]`` is True iff
-        token i is an answer or EOT (something the model should predict),
-        False iff it's a question token (input only).
-        """
-        flat_tokens: list[int] = []
-        flat_is_target: list[bool] = []
-        for q, a in zip(self._question_ids, self._answer_ids):
-            flat_tokens.extend(q)
-            flat_is_target.extend([False] * len(q))
-            flat_tokens.extend(a)
-            flat_is_target.extend([True] * len(a))
-            flat_tokens.append(self.eot_token_id)
-            flat_is_target.append(True)
-        self._data = torch.tensor(flat_tokens, dtype=torch.long)
-        self._is_target = torch.tensor(flat_is_target, dtype=torch.bool)
-        self.n_sequences = len(self._data) // self.seq_len - 1
+            self.n_sequences = len(self.data) // seq_len - 1
+        else:
+            eot_positions = np.where(self.data == eot_token_id)[0]
+            if len(eot_positions) == 0:
+                starts = np.array([0], dtype=np.int64)
+                ends = np.array([len(self.data)], dtype=np.int64)
+            else:
+                starts = np.concatenate([[0], eot_positions[:-1] + 1]).astype(np.int64)
+                ends = (eot_positions + 1).astype(np.int64)
+            lengths = ends - starts
+            valid = lengths > 1
+            self._doc_starts = starts[valid]
+            self._doc_ends = ends[valid]
 
     def __len__(self):
         if self.packing:
             return self.n_sequences
-        return len(self._question_ids)
+        return len(self._doc_starts)
 
     def __getitem__(self, idx):
         if self.packing:
             start = idx * self.seq_len
-            chunk = self._data[start : start + self.seq_len + 1]
-            target_mask = self._is_target[start : start + self.seq_len + 1]
-            input_ids = chunk[:-1]
-            labels = chunk[1:].clone()
+            chunk = self.data[start : start + self.seq_len + 1].astype(np.int64)
+            tgt = self.targets[start : start + self.seq_len + 1]
+            chunk_t = torch.from_numpy(chunk)
+            target_mask = torch.from_numpy(tgt.astype(np.bool_))
+            input_ids = chunk_t[:-1]
+            labels = chunk_t[1:].clone()
             # labels[i] predicts chunk[i+1]; supervise iff target_mask[i+1].
             labels[~target_mask[1:]] = -100
             position_ids = build_position_ids(
@@ -201,25 +195,23 @@ class SFTDataset(_AbstractDataset):
             ).squeeze(0)
             return input_ids, position_ids, labels
 
-        # packing=False: one row → one padded sample.
-        q = self._question_ids[idx]
-        a = self._answer_ids[idx]
-        q_len = len(q)
-        a_len = len(a)
-        sample = q + a + [self.eot_token_id]
-        n_content = min(len(sample), self.seq_len + 1)
+        # packing=False: one inter-EOT document → one padded sample.
+        doc_start = int(self._doc_starts[idx])
+        doc_end = int(self._doc_ends[idx])
+        n_content = min(doc_end - doc_start, self.seq_len + 1)
+        doc = self.data[doc_start : doc_start + n_content].astype(np.int64)
+        tgt = self.targets[doc_start : doc_start + n_content]
 
         chunk_arr = np.full(self.seq_len + 1, self.pad_token_id, dtype=np.int64)
-        chunk_arr[:n_content] = sample[:n_content]
+        chunk_arr[:n_content] = doc[:n_content]
+        tgt_arr = np.zeros(self.seq_len + 1, dtype=np.bool_)
+        tgt_arr[:n_content] = tgt.astype(np.bool_)
         chunk_t = torch.from_numpy(chunk_arr)
+        target_mask = torch.from_numpy(tgt_arr)
         input_ids = chunk_t[:-1]
-
-        labels = torch.full((self.seq_len,), -100, dtype=torch.long)
-        sup_lo = q_len - 1
-        sup_hi = min(q_len + a_len, self.seq_len)
-        if 0 <= sup_lo < sup_hi:
-            labels[sup_lo:sup_hi] = chunk_t[sup_lo + 1 : sup_hi + 1]
-
+        labels = chunk_t[1:].clone()
+        # Mask positions whose target token isn't an answer/EOT (questions + padding).
+        labels[~target_mask[1:]] = -100
         position_ids = build_position_ids(
             input_ids.unsqueeze(0), self.eot_token_id, packing=False
         ).squeeze(0)

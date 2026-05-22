@@ -137,13 +137,14 @@ class Trainer:
                 **dataset_kwargs,
             )
         elif config.task == "sft":
-            train_path = os.path.join(config.data.data_dir, "train.parquet")
-            val_path = os.path.join(config.data.data_dir, "val.parquet")
+            train_path = os.path.join(config.data.data_dir, "train.bin")
+            val_path = os.path.join(config.data.data_dir, "val.bin")
             sft_kwargs = dict(
                 seq_len=config.max_seq_len,
+                vocab_size=config.model.vocab_size,
+                packing=config.data.packing,
                 eot_token_id=self.eot_token_id,
                 pad_token_id=self.pad_token_id,
-                packing=config.data.packing,
             )
             self.train_dataset = SFTDataset(train_path, **sft_kwargs)
             self.val_dataset = SFTDataset(val_path, **sft_kwargs)
