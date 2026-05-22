@@ -87,3 +87,52 @@ class PretrainDataset(Dataset):
         labels = input_ids[1:].clone()
         labels[position_ids < 0] = -100
         return input_ids, position_ids, labels
+
+
+class SFTDataset(Dataset):
+    """Memory-mapped dataset for supervised fine-tuning.
+
+    Each on-disk sample is ``question_len + answer_len`` tokens laid out as
+    ``[question_tokens..., answer_tokens...]``. The dataset assembles the full
+    sequence in code and constructs the ``labels`` tensor with the HF -100
+    ignore-index convention: only the last ``answer_len`` label positions
+    carry the answer tokens; all earlier positions are -100 and skipped by the
+    loss.
+
+    Returns ``(input_ids, position_ids, labels)`` with shapes
+    ``(stride,), (stride - 1,), (stride - 1,)`` where ``stride = question_len +
+    answer_len``.
+    """
+
+    def __init__(
+        self,
+        bin_path: str,
+        vocab_size: int,
+        question_len: int,
+        answer_len: int,
+    ):
+        self.question_len = question_len
+        self.answer_len = answer_len
+        self.stride = question_len + answer_len
+        dtype = np.uint32 if vocab_size > 65535 else np.uint16
+        self.data = np.memmap(bin_path, dtype=dtype, mode="r")
+        if len(self.data) % self.stride != 0:
+            raise ValueError(
+                f"SFTDataset: bin file length {len(self.data)} is not a multiple "
+                f"of stride {self.stride} (question_len={question_len} + "
+                f"answer_len={answer_len})"
+            )
+        self.n_samples = len(self.data) // self.stride
+
+    def __len__(self):
+        return self.n_samples
+
+    def __getitem__(self, idx):
+        start = idx * self.stride
+        chunk = self.data[start : start + self.stride].astype(np.int64)
+        input_ids = torch.from_numpy(chunk)
+        position_ids = torch.arange(self.stride - 1, dtype=torch.long)
+        labels = torch.full((self.stride - 1,), -100, dtype=torch.long)
+        # Last `answer_len` label positions hold the answer tokens.
+        labels[-self.answer_len :] = input_ids[-self.answer_len :]
+        return input_ids, position_ids, labels

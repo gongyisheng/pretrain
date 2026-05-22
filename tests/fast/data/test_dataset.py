@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.data.dataset import PretrainDataset
+from src.data.dataset import PretrainDataset, SFTDataset
 
 
 @pytest.fixture
@@ -149,3 +149,90 @@ def test_single_doc_truncation(mock_memmap):
     assert (position_ids >= 0).all()
     assert position_ids.tolist() == [0, 1, 2, 3]
     assert (labels != -100).all()
+
+
+# --- SFTDataset ---
+
+
+@pytest.fixture
+def sft_bin(mock_memmap):
+    # Three samples, each [a, op, b, =, c] = 5 tokens.
+    # Sample 0: [3, 100, 5, 104, 8]
+    # Sample 1: [10, 100, 20, 104, 30]
+    # Sample 2: [50, 100, 40, 104, 90]
+    flat = np.array(
+        [3, 100, 5, 104, 8, 10, 100, 20, 104, 30, 50, 100, 40, 104, 90],
+        dtype=np.uint16,
+    )
+    mock_memmap["/sft.bin"] = flat
+    return "/sft.bin"
+
+
+def _sft_ds(path, question_len=4, answer_len=1):
+    return SFTDataset(
+        bin_path=path,
+        vocab_size=128,
+        question_len=question_len,
+        answer_len=answer_len,
+    )
+
+
+def test_sft_dataset_length(sft_bin):
+    ds = _sft_ds(sft_bin)
+    assert len(ds) == 3
+
+
+def test_sft_dataset_shapes(sft_bin):
+    ds = _sft_ds(sft_bin)
+    input_ids, position_ids, labels = ds[0]
+    assert input_ids.shape == (5,)
+    assert position_ids.shape == (4,)
+    assert labels.shape == (4,)
+    assert input_ids.dtype == torch.long
+    assert position_ids.dtype == torch.long
+    assert labels.dtype == torch.long
+
+
+def test_sft_dataset_input_ids_match_disk(sft_bin):
+    ds = _sft_ds(sft_bin)
+    input_ids, _, _ = ds[1]
+    assert input_ids.tolist() == [10, 100, 20, 104, 30]
+
+
+def test_sft_dataset_position_ids_sequential(sft_bin):
+    ds = _sft_ds(sft_bin)
+    _, position_ids, _ = ds[0]
+    assert position_ids.tolist() == [0, 1, 2, 3]
+
+
+def test_sft_dataset_labels_mask_layout(sft_bin):
+    """Labels: -100 for the first (question_len-1) positions; answer tokens for the last answer_len."""
+    # stride=5, question_len=4, answer_len=1 → 4 label positions.
+    # labels[0..2] = -100  (first Lq-1=3 positions masked)
+    # labels[3]   = 8      (last La=1 positions hold the answer)
+    ds = _sft_ds(sft_bin, question_len=4, answer_len=1)
+    _, _, labels = ds[0]
+    assert labels[:3].tolist() == [-100, -100, -100]
+    assert labels[-1].item() == 8
+
+
+def test_sft_dataset_labels_multi_token_answer(mock_memmap):
+    """Generalization check: answer_len=2 sets the last two labels to the answer tokens."""
+    mock_memmap["/sft2.bin"] = np.array(
+        [1, 2, 100, 104, 5, 6, 11, 12, 100, 104, 15, 16],
+        dtype=np.uint16,
+    )
+    ds = SFTDataset(bin_path="/sft2.bin", vocab_size=128, question_len=4, answer_len=2)
+    assert len(ds) == 2
+    input_ids, position_ids, labels = ds[1]
+    assert input_ids.tolist() == [11, 12, 100, 104, 15, 16]
+    assert position_ids.tolist() == [0, 1, 2, 3, 4]
+    assert labels[:3].tolist() == [-100, -100, -100]
+    assert labels[-2:].tolist() == [15, 16]
+
+
+def test_sft_dataset_raises_on_misaligned_file(mock_memmap):
+    """ValueError if the .bin file length isn't a multiple of stride."""
+    mock_memmap["/bad.bin"] = np.arange(13, dtype=np.uint16)  # 13 % 5 != 0
+    with pytest.raises(ValueError, match="not a multiple of stride"):
+        SFTDataset(bin_path="/bad.bin", vocab_size=128, question_len=4, answer_len=1)
