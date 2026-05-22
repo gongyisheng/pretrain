@@ -20,7 +20,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 OPS = {"add", "sub", "mul", "div"}
-OP_SYMBOLS = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
+# All ops use a single generic symbol "o" in the question string: each
+# experiment trains on a single op, so the symbol carries no information and a
+# uniform token keeps the vocab small.
+OP_SYMBOL = "o"
 
 
 def _modinv(a: int, p: int) -> int:
@@ -51,7 +54,8 @@ def _valid_pairs(op: str, p: int):
 
 
 def _format_question(a: int, b: int, op: str) -> str:
-    return f"{a} {OP_SYMBOLS[op]} {b} ="
+    del op  # op selects the math (in _valid_pairs); the symbol is uniform "o"
+    return f"{a} {OP_SYMBOL} {b} ="
 
 
 def _format_answer(c: int) -> str:

@@ -7,7 +7,7 @@ model:
   n_heads: 4
   n_kv_heads: 2
   d_model: 128
-  vocab_size: 106
+  vocab_size: 103
   qk_norm: true
   rope_theta: 10000.0
 

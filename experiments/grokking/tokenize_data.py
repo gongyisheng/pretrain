@@ -44,8 +44,11 @@ def _tokenize_split(
         targets.extend([0] * len(q.ids))
         tokens.extend(a.ids)
         targets.extend([1] * len(a.ids))
+        # EOT terminates each sample (still required as a boundary marker for
+        # SFTDataset packing=False), but it is *not* a supervised target — its
+        # prediction is trivial and dilutes the grokking loss/accuracy curves.
         tokens.append(eot_token_id)
-        targets.append(1)
+        targets.append(0)
 
     np.asarray(tokens, dtype=dtype).tofile(out_bin)
     np.asarray(targets, dtype=np.uint8).tofile(out_targets)
