@@ -4,15 +4,18 @@
 # Runs 4 configs side by side:
 #   ce, ce_fp64, mse, mse_fp64
 #
-# Reuses the tokenizer and sub-task data prepared by run.sh; if either is
-# missing, run experiments/grokking/run.sh first to build them.
+# Configs live in experiments/grokking/loss/.
+#
+# Reuses the tokenizer and sub-task data prepared by run_weight_decay.sh; if
+# either is missing, run experiments/grokking/run_weight_decay.sh first to
+# build them.
 #
 # Usage:
 #   # all 4 variants in parallel
-#   nohup bash experiments/grokking/run_loss.sh > logs/grokking/loss_sweep.log 2>&1 &
+#   nohup bash experiments/grokking/run_loss.sh > logs/grokking_loss.log 2>&1 &
 #
 #   # single variant
-#   bash experiments/grokking/run_loss.sh ce_fp64
+#   nohup bash experiments/grokking/run_loss.sh ce_fp64 > logs/grokking_loss.log 2>&1 &
 #
 #   # pin to a GPU
 #   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run_loss.sh > logs/grokking_loss.log 2>&1 &
@@ -32,13 +35,13 @@ DATA_DIR="data/grokking_sub_p97_f0.3"
 
 if [ ! -f "$TOKENIZER_FILE" ]; then
     echo "[run_loss.sh] tokenizer missing: $TOKENIZER_FILE"
-    echo "  → run experiments/grokking/run.sh first to build tokenizer + data"
+    echo "  → run experiments/grokking/run_weight_decay.sh first to build tokenizer + data"
     exit 1
 fi
 
 if [ ! -f "${DATA_DIR}/train.bin" ] || [ ! -f "${DATA_DIR}/val.bin" ]; then
     echo "[run_loss.sh] tokenized sub data missing under $DATA_DIR"
-    echo "  → run experiments/grokking/run.sh first to build data"
+    echo "  → run experiments/grokking/run_weight_decay.sh first to build data"
     exit 1
 fi
 
@@ -46,7 +49,7 @@ mkdir -p "$PER_RUN_LOG_DIR"
 
 run_one() {
     local variant="$1"
-    local cfg="experiments/grokking/qwen3_1m_sub_wd0.1_${variant}.yaml"
+    local cfg="experiments/grokking/loss/qwen3_1m_sub_wd0.1_${variant}.yaml"
     local log="${PER_RUN_LOG_DIR}/sub_wd0.1_${variant}.log"
     echo "[run_loss.sh] $cfg → $log"
     uv run python scripts/train.py --config "$cfg" >"$log" 2>&1
