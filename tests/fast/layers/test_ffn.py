@@ -96,3 +96,41 @@ def test_ffn_gated_matches_ref(activation, dtype, atol):
     )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
+
+
+@pytest.mark.parametrize("gated", [False, True])
+@pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
+def test_ffn_bias_true_matches_ref(gated, dtype, atol):
+    """With bias=True the projection biases must propagate through the forward.
+
+    Guards against regressions in which FFN.forward bypasses nn.Linear's bias
+    (e.g. by reading .weight and doing a raw matmul).
+    """
+    torch.manual_seed(0)
+    ffn = FFN(
+        d_model=64,
+        intermediate_size=128,
+        activation="silu",
+        gated=gated,
+        bias=True,
+        dropout=0.0,
+    ).to(dtype)
+    ffn.eval()
+    # Initialize biases to non-zero so a missing bias-add would change the output.
+    with torch.no_grad():
+        if gated:
+            ffn.gate_up_proj.bias.normal_(mean=0.5, std=0.1)
+        else:
+            ffn.up_proj.bias.normal_(mean=0.5, std=0.1)
+        ffn.down_proj.bias.normal_(mean=-0.3, std=0.1)
+
+    x = torch.randn(2, 16, 64, dtype=dtype)
+    out = ffn(x)
+    if gated:
+        out_ref = ffn_ref(
+            x, ffn.down_proj, activation="silu", gate_up_proj=ffn.gate_up_proj
+        )
+    else:
+        out_ref = ffn_ref(x, ffn.down_proj, activation="silu", up_proj=ffn.up_proj)
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)

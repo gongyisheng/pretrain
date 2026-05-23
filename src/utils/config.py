@@ -90,6 +90,14 @@ class TrainingConfig:
     eval_every: int = 100
     eval_steps: int = 25
     intra_doc_masking: bool = True
+    # FP8 training via torchao.float8 module swap. Requires SM 9.0+ (H100/Blackwell).
+    # Wraps nn.Linear layers in Float8Linear; dispatches matmuls to cuBLASLt FP8 GEMM.
+    # MoE expert paths are not eligible (they use raw nn.Parameter + bmm).
+    fp8: bool = False
+    fp8_recipe: str = "tensorwise"  # "tensorwise" | "rowwise" | "rowwise_with_gw_hp"
+    fp8_exclude_lm_head: bool = (
+        True  # numerically sensitive, especially with tied embeddings
+    )
 
 
 @dataclass

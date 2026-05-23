@@ -105,22 +105,14 @@ class FFN(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Route through nn.Linear so that module-swap quantization paths
+        # (e.g. torchao.float8.convert_to_float8_training) can replace these
+        # projections in-place. The surrounding activation and elementwise ops
+        # are still fused by the outer torch.compile pass.
         if self.gated:
-            out = gated_ffn(
-                x,
-                self.gate_up_proj.weight,
-                self.down_proj.weight,
-                self.act_fn,
-                self.gate_up_proj.bias,
-                self.down_proj.bias,
-            )
+            gate_up = self.gate_up_proj(x)
+            gate, up = gate_up.chunk(2, dim=-1)
+            hidden = self.act_fn(gate, up)
         else:
-            out = ungated_ffn(
-                x,
-                self.up_proj.weight,
-                self.down_proj.weight,
-                self.act_fn,
-                self.up_proj.bias,
-                self.down_proj.bias,
-            )
-        return self.dropout(out)
+            hidden = self.act_fn(self.up_proj(x))
+        return self.dropout(self.down_proj(hidden))
