@@ -11,6 +11,7 @@ from tqdm import tqdm
 from src.model.registry import build_model
 from src.data.dataset import PretrainDataset
 from src.data.tokenizer import load_tokenizer
+from src.training.fp8 import maybe_convert_to_fp8
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
@@ -168,6 +169,10 @@ class Trainer:
         self.scaler = torch.amp.GradScaler(
             enabled=(self.use_amp and self.amp_dtype == torch.float16)
         )
+
+        # FP8: swap eligible nn.Linear modules to Float8Linear. Must run before
+        # torch.compile so the tracer sees the swapped modules.
+        maybe_convert_to_fp8(self.model, config)
 
         # Disable assert_indirect_indexing to avoid spurious CUDA assertions during
         # torchinductor autotuning, which may dispatch kernel test runs on a stream
