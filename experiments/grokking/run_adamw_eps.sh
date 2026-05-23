@@ -16,7 +16,7 @@
 #
 # Usage:
 #   # all 12 variants in parallel (respect MAX_CONCURRENCY)
-#   nohup bash experiments/grokking/run_adamw_eps.sh > logs/grokking/eps_sweep.log 2>&1 &
+#   nohup bash experiments/grokking/run_adamw_eps.sh > logs/grokking_adamw_eps.log 2>&1 &
 #
 #   # single variant
 #   bash experiments/grokking/run_adamw_eps.sh ce_eps1e-5
