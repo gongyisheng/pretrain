@@ -26,7 +26,7 @@ training:
   loss_fn: "cross_entropy_fp64"
   seed: 42
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/grokking/qwen3_1m_sub_wd0.1_ce_fp64_spike/"
+  checkpoint_dir: "checkpoints/grokking/qwen3_1m_sub_wd0.1_ce_fp64/"
   checkpoint_every: 10000
   eval_every: 100
   eval_steps: 0
@@ -45,5 +45,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-grokking"
-  wandb_run_name: "grokking-qwen3-1m-sub-wd0.1-ce-fp64-spike"
+  wandb_run_name: "grokking-qwen3-1m-sub-wd0.1-ce-fp64"
   log_every: 10
