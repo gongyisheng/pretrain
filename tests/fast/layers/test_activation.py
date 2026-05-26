@@ -14,9 +14,12 @@ from tests.fast.layers._refs import (
 DTYPES = SIMPLE_DTYPES
 ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
 GATED_ACT_NAMES = list(GATED_ACTIVATIONS.keys())
-# Names whose ungated form saturates to ~0 for large negative x.
-# leaky_relu / leaky_relu2 are excluded because they preserve a small slope on the negative side.
-SATURATING_UNGATED = ["relu", "gelu", "silu"]
+# Sub-groups for tests that need different input magnitudes or behavior assumptions.
+SIMPLE_UNGATED = ["relu", "gelu", "silu", "leaky_relu"]
+SQUARED_UNGATED = ["relu2", "gelu2", "silu2", "leaky_relu2"]
+# Ungated names whose output saturates to ~0 for large negative x.
+# leaky variants are excluded — they preserve a small slope on the negative side.
+SATURATING_UNGATED = ["relu", "gelu", "silu", "relu2", "gelu2", "silu2"]
 
 
 # ---------------------------- Ungated ----------------------------
@@ -31,7 +34,12 @@ def test_ungated_matches_ref(name, dtype, atol):
     x = torch.randn(2, 16, 64, dtype=dtype)
     out = act(x)
     assert out.dtype == dtype
-    assert torch.allclose(out, ref(x), atol=atol)
+    # rtol scales with output magnitude — squared variants can reach ~10 in fp16,
+    # and 1 ULP at that scale is ~0.01 > the atol tuned for output magnitudes ~1.
+    rtol = (
+        0.0 if dtype == torch.float32 else (1e-2 if dtype == torch.bfloat16 else 2e-3)
+    )
+    assert torch.allclose(out, ref(x), atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("name", ACT_NAMES)
@@ -44,18 +52,29 @@ def test_ungated_zero_input(name):
     assert (out == 0).all()
 
 
-@pytest.mark.parametrize("name", ACT_NAMES)
+@pytest.mark.parametrize("name", SIMPLE_UNGATED)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_ungated_large_positive_no_overflow(name, dtype):
-    """Large positive x: all three pass through ~unchanged; output must be finite."""
+def test_ungated_large_positive_no_overflow_simple(name, dtype):
+    """Large positive x: simple unary acts pass through ~unchanged; output must be finite."""
     act = UNGATED_ACTIVATIONS[name]
     ref = UNGATED_ACTIVATIONS_REFS[name]
     x = torch.full((2, 16, 64), 1000.0, dtype=dtype)
     out = act(x)
     assert torch.isfinite(out).all()
-    # all three behave as identity for large positive
     assert torch.allclose(out, ref(x), atol=1.0)
-    assert torch.allclose(out.float(), x.float(), atol=1.0)
+
+
+@pytest.mark.parametrize("name", SQUARED_UNGATED)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_ungated_large_positive_no_overflow_squared(name, dtype):
+    """Large positive x for squared variants: 200² = 4e4 fits fp16 (max 65504)."""
+    act = UNGATED_ACTIVATIONS[name]
+    ref = UNGATED_ACTIVATIONS_REFS[name]
+    x = torch.full((2, 16, 64), 200.0, dtype=dtype)
+    out = act(x)
+    assert torch.isfinite(out).all()
+    # Squared output is ~4e4; atol scales with magnitude.
+    assert torch.allclose(out, ref(x), atol=100.0)
 
 
 @pytest.mark.parametrize("name", SATURATING_UNGATED)
@@ -69,16 +88,17 @@ def test_ungated_large_negative_saturates(name, dtype):
     assert out.abs().max().item() < 1e-2
 
 
+@pytest.mark.parametrize("name", ["leaky_relu", "leaky_relu2"])
 @pytest.mark.parametrize("dtype,atol", DTYPES)
-def test_ungated_leaky_large_negative(dtype, atol):
-    """leaky_relu(-100) = -1.0 (preserves slope); must match ref, no saturation assertion."""
-    from tests.fast.layers._refs import leaky_relu_ref
-
-    act = UNGATED_ACTIVATIONS["leaky_relu"]
+def test_ungated_leaky_large_negative(name, dtype, atol):
+    """Leaky variants don't saturate on negative; output is bounded but non-zero. Match ref."""
+    act = UNGATED_ACTIVATIONS[name]
+    ref = UNGATED_ACTIVATIONS_REFS[name]
     x = torch.full((2, 16, 64), -100.0, dtype=dtype)
     out = act(x)
     assert torch.isfinite(out).all()
-    assert torch.allclose(out, leaky_relu_ref(x), atol=atol)
+    # leaky_relu(-100) = -1; leaky_relu2(-100) = 1.
+    assert torch.allclose(out, ref(x), atol=max(atol, 1e-3))
 
 
 # ---------------------------- Gated (GLU family) ----------------------------

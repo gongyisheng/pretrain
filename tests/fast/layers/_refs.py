@@ -78,6 +78,22 @@ def leaky_relu_ref(x: torch.Tensor) -> torch.Tensor:
     return torch.where(x > 0, x, 0.01 * x)
 
 
+def relu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return relu_ref(x) ** 2
+
+
+def gelu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return gelu_ref(x) ** 2
+
+
+def silu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return silu_ref(x) ** 2
+
+
+def leaky_relu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return leaky_relu_ref(x) ** 2
+
+
 # --- Gated (GLU family): (gate, up) → act(gate) * up ---
 
 
@@ -98,6 +114,10 @@ UNGATED_ACTIVATIONS_REFS = {
     "gelu": gelu_ref,
     "silu": silu_ref,
     "leaky_relu": leaky_relu_ref,
+    "relu2": relu2_ref,
+    "gelu2": gelu2_ref,
+    "silu2": silu2_ref,
+    "leaky_relu2": leaky_relu2_ref,
 }
 GATED_ACTIVATIONS_REFS = {
     "relu": relu_glu_ref,
