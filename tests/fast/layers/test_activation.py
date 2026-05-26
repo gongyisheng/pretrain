@@ -13,6 +13,10 @@ from tests.fast.layers._refs import (
 
 DTYPES = SIMPLE_DTYPES
 ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
+GATED_ACT_NAMES = list(GATED_ACTIVATIONS.keys())
+# Names whose ungated form saturates to ~0 for large negative x.
+# leaky_relu / leaky_relu2 are excluded because they preserve a small slope on the negative side.
+SATURATING_UNGATED = ["relu", "gelu", "silu"]
 
 
 # ---------------------------- Ungated ----------------------------
@@ -54,7 +58,7 @@ def test_ungated_large_positive_no_overflow(name, dtype):
     assert torch.allclose(out.float(), x.float(), atol=1.0)
 
 
-@pytest.mark.parametrize("name", ACT_NAMES)
+@pytest.mark.parametrize("name", SATURATING_UNGATED)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_ungated_large_negative_saturates(name, dtype):
     """Large negative x: relu/gelu/silu all → ~0; sigmoid/exp must not underflow to nan."""
@@ -65,10 +69,22 @@ def test_ungated_large_negative_saturates(name, dtype):
     assert out.abs().max().item() < 1e-2
 
 
+@pytest.mark.parametrize("dtype,atol", DTYPES)
+def test_ungated_leaky_large_negative(dtype, atol):
+    """leaky_relu(-100) = -1.0 (preserves slope); must match ref, no saturation assertion."""
+    from tests.fast.layers._refs import leaky_relu_ref
+
+    act = UNGATED_ACTIVATIONS["leaky_relu"]
+    x = torch.full((2, 16, 64), -100.0, dtype=dtype)
+    out = act(x)
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out, leaky_relu_ref(x), atol=atol)
+
+
 # ---------------------------- Gated (GLU family) ----------------------------
 
 
-@pytest.mark.parametrize("name", ACT_NAMES)
+@pytest.mark.parametrize("name", GATED_ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", DTYPES)
 def test_gated_matches_ref(name, dtype, atol):
     """Each gated activation matches act(gate) * up."""
@@ -86,7 +102,7 @@ def test_gated_matches_ref(name, dtype, atol):
     )
 
 
-@pytest.mark.parametrize("name", ACT_NAMES)
+@pytest.mark.parametrize("name", GATED_ACT_NAMES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_gated_large_input_no_overflow(name, dtype):
     """Large gate/up: output magnitude grows but must remain finite."""
@@ -98,7 +114,7 @@ def test_gated_large_input_no_overflow(name, dtype):
     assert torch.allclose(out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=10.0)
 
 
-@pytest.mark.parametrize("name", ACT_NAMES)
+@pytest.mark.parametrize("name", GATED_ACT_NAMES)
 def test_gated_zero_gate_zeros_output(name):
     """gate=0 → act(0)=0 → output=0 regardless of up."""
     act = GATED_ACTIVATIONS[name]

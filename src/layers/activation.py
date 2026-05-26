@@ -33,6 +33,10 @@ def silu(x: torch.Tensor) -> torch.Tensor:
     return F.silu(x)
 
 
+def leaky_relu(x: torch.Tensor) -> torch.Tensor:
+    return F.leaky_relu(x, 0.01)
+
+
 # --- Gated (GLU) activations: (gate, up) → act(gate) * up, fused ---
 
 
@@ -51,5 +55,10 @@ def silu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.silu(gate) * up
 
 
-UNGATED_ACTIVATIONS = {"relu": relu, "gelu": gelu, "silu": silu}
+UNGATED_ACTIVATIONS = {
+    "relu": relu,
+    "gelu": gelu,
+    "silu": silu,
+    "leaky_relu": leaky_relu,
+}
 GATED_ACTIVATIONS = {"relu": relu_glu, "gelu": gelu_glu, "silu": silu_glu}
