@@ -20,6 +20,8 @@ SQUARED_UNGATED = ["relu2", "gelu2", "silu2", "leaky_relu2"]
 # Ungated names whose output saturates to ~0 for large negative x.
 # leaky variants are excluded — they preserve a small slope on the negative side.
 SATURATING_UNGATED = ["relu", "gelu", "silu", "relu2", "gelu2", "silu2"]
+SIMPLE_GATED = ["relu", "gelu", "silu", "leaky_relu"]
+SQUARED_GATED = ["relu2", "gelu2", "silu2", "leaky_relu2"]
 
 
 # ---------------------------- Ungated ----------------------------
@@ -122,16 +124,28 @@ def test_gated_matches_ref(name, dtype, atol):
     )
 
 
-@pytest.mark.parametrize("name", GATED_ACT_NAMES)
+@pytest.mark.parametrize("name", SIMPLE_GATED)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_gated_large_input_no_overflow(name, dtype):
-    """Large gate/up: output magnitude grows but must remain finite."""
+def test_gated_large_input_no_overflow_simple(name, dtype):
+    """Large gate/up for simple gated activations: output finite, matches ref."""
     act = GATED_ACTIVATIONS[name]
     gate = torch.full((2, 16, 64), 100.0, dtype=dtype)
     up = torch.full((2, 16, 64), 100.0, dtype=dtype)
     out = act(gate, up)
     assert torch.isfinite(out).all()
     assert torch.allclose(out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=10.0)
+
+
+@pytest.mark.parametrize("name", SQUARED_GATED)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_gated_large_input_no_overflow_squared(name, dtype):
+    """Squared gated act: act(20)² · 20 ≈ 8000 fits fp16 (max 65504)."""
+    act = GATED_ACTIVATIONS[name]
+    gate = torch.full((2, 16, 64), 20.0, dtype=dtype)
+    up = torch.full((2, 16, 64), 20.0, dtype=dtype)
+    out = act(gate, up)
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=100.0)
 
 
 @pytest.mark.parametrize("name", GATED_ACT_NAMES)
