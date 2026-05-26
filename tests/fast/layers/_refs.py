@@ -114,19 +114,19 @@ def leaky_relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 
 def relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return relu_ref(gate) ** 2 * up
+    return (relu_ref(gate) ** 2) * up
 
 
 def gelu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return gelu_ref(gate) ** 2 * up
+    return (gelu_ref(gate) ** 2) * up
 
 
 def silu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return silu_ref(gate) ** 2 * up
+    return (silu_ref(gate) ** 2) * up
 
 
 def leaky_relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return leaky_relu_ref(gate) ** 2 * up
+    return (leaky_relu_ref(gate) ** 2) * up
 
 
 UNGATED_ACTIVATIONS_REFS = {

@@ -78,22 +78,22 @@ def leaky_relu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 @torch.compile
 def relu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return F.relu(gate) ** 2 * up
+    return (F.relu(gate) ** 2) * up
 
 
 @torch.compile
 def gelu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return F.gelu(gate) ** 2 * up
+    return (F.gelu(gate) ** 2) * up
 
 
 @torch.compile
 def silu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return F.silu(gate) ** 2 * up
+    return (F.silu(gate) ** 2) * up
 
 
 @torch.compile
 def leaky_relu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return F.leaky_relu(gate, 0.01) ** 2 * up
+    return (F.leaky_relu(gate, 0.01) ** 2) * up
 
 
 UNGATED_ACTIVATIONS = {
