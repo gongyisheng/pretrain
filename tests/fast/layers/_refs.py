@@ -129,6 +129,16 @@ def leaky_relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (leaky_relu_ref(gate) ** 2) * up
 
 
+def bilinear_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Bilinear GLU: gate * up (no unary activation). From Shazeer 2020."""
+    return gate * up
+
+
+def bilinear2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Squared Bilinear GLU: gate² * up (squared identity activation on gate)."""
+    return (gate**2) * up
+
+
 UNGATED_ACTIVATIONS_REFS = {
     "relu": relu_ref,
     "gelu": gelu_ref,
@@ -148,6 +158,8 @@ GATED_ACTIVATIONS_REFS = {
     "gelu2": gelu2_glu_ref,
     "silu2": silu2_glu_ref,
     "leaky_relu2": leaky_relu2_glu_ref,
+    "bilinear": bilinear_ref,
+    "bilinear2": bilinear2_ref,
 }
 
 

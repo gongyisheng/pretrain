@@ -20,8 +20,8 @@ SQUARED_UNGATED = ["relu2", "gelu2", "silu2", "leaky_relu2"]
 # Ungated names whose output saturates to ~0 for large negative x.
 # leaky variants are excluded — they preserve a small slope on the negative side.
 SATURATING_UNGATED = ["relu", "gelu", "silu", "relu2", "gelu2", "silu2"]
-SIMPLE_GATED = ["relu", "gelu", "silu", "leaky_relu"]
-SQUARED_GATED = ["relu2", "gelu2", "silu2", "leaky_relu2"]
+SIMPLE_GATED = ["relu", "gelu", "silu", "leaky_relu", "bilinear"]
+SQUARED_GATED = ["relu2", "gelu2", "silu2", "leaky_relu2", "bilinear2"]
 
 
 # ---------------------------- Ungated ----------------------------

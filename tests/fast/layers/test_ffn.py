@@ -54,6 +54,14 @@ def test_ffn_unknown_activation_in_gated_raises():
         FFN(d_model=64, intermediate_size=128, activation="mish", gated=True)
 
 
+@pytest.mark.parametrize("name", ["bilinear", "bilinear2"])
+def test_ffn_gated_only_activation_rejected_when_ungated(name):
+    """bilinear / bilinear2 live only in GATED_ACTIVATIONS. Using them with
+    gated=False must raise the same ValueError as any other unknown unary activation."""
+    with pytest.raises(ValueError, match="Unknown activation"):
+        FFN(d_model=64, intermediate_size=128, activation=name, gated=False)
+
+
 # --- Numerical parity ---
 
 
