@@ -109,6 +109,10 @@ def silu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return silu_ref(gate) * up
 
 
+def leaky_relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return leaky_relu_ref(gate) * up
+
+
 UNGATED_ACTIVATIONS_REFS = {
     "relu": relu_ref,
     "gelu": gelu_ref,
@@ -123,6 +127,7 @@ GATED_ACTIVATIONS_REFS = {
     "relu": relu_glu_ref,
     "gelu": gelu_glu_ref,
     "silu": silu_glu_ref,
+    "leaky_relu": leaky_relu_glu_ref,
 }
 
 
