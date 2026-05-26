@@ -108,6 +108,31 @@ def bilinear2(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (gate**2) * up
 
 
+def powlu(x: torch.Tensor) -> torch.Tensor:
+    """PowLU helper: arXiv:2605.25704 (May 2026), m=3.0.
+
+    Piecewise:
+        x > 0:  x · x^(m/(sqrt(x)+1)) · sigmoid(x)
+        x <= 0: x² · sigmoid(x)
+
+    The √x denominator makes large positive growth sub-quadratic, reducing
+    activation outliers vs. SwiGLU's near-x² growth. The `+1` and the
+    `safe_x` guard keep both branches finite at x→0⁺ and avoid sqrt of
+    non-positive values.
+    """
+    m = 3.0
+    safe_x = torch.where(x > 0, x, torch.ones_like(x))
+    exponent = m / (torch.sqrt(safe_x) + 1.0)
+    pos = x * (safe_x**exponent) * torch.sigmoid(x)
+    neg = x * x * torch.sigmoid(x)
+    return torch.where(x > 0, pos, neg)
+
+
+@torch.compile
+def powlu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return powlu(gate) * up
+
+
 UNGATED_ACTIVATIONS = {
     "relu": relu,
     "gelu": gelu,
@@ -129,4 +154,5 @@ GATED_ACTIVATIONS = {
     "leaky_relu2": leaky_relu2_glu,
     "bilinear": bilinear,
     "bilinear2": bilinear2,
+    "powlu": powlu_glu,
 }

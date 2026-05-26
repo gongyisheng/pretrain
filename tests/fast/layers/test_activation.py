@@ -20,7 +20,7 @@ SQUARED_UNGATED = ["relu2", "gelu2", "silu2", "leaky_relu2"]
 # Ungated names whose output saturates to ~0 for large negative x.
 # leaky variants are excluded — they preserve a small slope on the negative side.
 SATURATING_UNGATED = ["relu", "gelu", "silu", "relu2", "gelu2", "silu2"]
-SIMPLE_GATED = ["relu", "gelu", "silu", "leaky_relu", "bilinear"]
+SIMPLE_GATED = ["relu", "gelu", "silu", "leaky_relu", "bilinear", "powlu"]
 SQUARED_GATED = ["relu2", "gelu2", "silu2", "leaky_relu2", "bilinear2"]
 
 
@@ -115,10 +115,15 @@ def test_gated_matches_ref(name, dtype, atol):
     up = torch.randn(2, 16, 64, dtype=dtype)
     out = act(gate, up)
     assert out.dtype == dtype
-    # rtol scales tolerance with magnitude (output ~ act(gate)*up, can be O(10))
-    rtol = (
-        0.0 if dtype == torch.float32 else (1e-2 if dtype == torch.bfloat16 else 2e-3)
-    )
+    # rtol scales tolerance with magnitude (output ~ act(gate)*up, can be O(10)).
+    # powlu's compound op chain (sqrt + pow + sigmoid) accumulates more error,
+    # so it needs a looser rtol in low precision than the simple gated forms.
+    if dtype == torch.float32:
+        rtol = 0.0
+    elif dtype == torch.bfloat16:
+        rtol = 6e-2 if name == "powlu" else 1e-2
+    else:  # fp16
+        rtol = 1e-2 if name == "powlu" else 2e-3
     assert torch.allclose(
         out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=atol, rtol=rtol
     )
@@ -133,7 +138,12 @@ def test_gated_large_input_no_overflow_simple(name, dtype):
     up = torch.full((2, 16, 64), 100.0, dtype=dtype)
     out = act(gate, up)
     assert torch.isfinite(out).all()
-    assert torch.allclose(out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=10.0)
+    # rtol scales with output magnitude — powlu(100)*100 ≈ 3.5e4, where 1 ULP
+    # is ~32 (fp16) / ~256 (bf16), well over the atol tuned for outputs ~1e4.
+    rtol = 1e-2 if dtype == torch.bfloat16 else 2e-3
+    assert torch.allclose(
+        out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=10.0, rtol=rtol
+    )
 
 
 @pytest.mark.parametrize("name", SQUARED_GATED)
@@ -157,3 +167,15 @@ def test_gated_zero_gate_zeros_output(name):
     out = act(gate, up)
     assert torch.isfinite(out).all()
     assert (out == 0).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_powlu_negative_gate_saturates(dtype):
+    """PowLU's negative branch is x² · sigmoid(x). For gate=-50, sigmoid(-50) ≈ 0
+    so output ≈ 0 regardless of up. Important for stability under low-precision."""
+    act = GATED_ACTIVATIONS["powlu"]
+    gate = torch.full((2, 16, 64), -50.0, dtype=dtype)
+    up = torch.full((2, 16, 64), 1.0, dtype=dtype)
+    out = act(gate, up)
+    assert torch.isfinite(out).all()
+    assert out.abs().max().item() < 1e-3

@@ -139,6 +139,23 @@ def bilinear2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (gate**2) * up
 
 
+def powlu_ref(x: torch.Tensor) -> torch.Tensor:
+    """PowLU helper (unary part of the gated activation). arXiv:2605.25704, m=3.
+    Pos branch: x · x^(m/(sqrt(x)+1)) · sigmoid(x).
+    Neg branch: x² · sigmoid(x)  (equals x · silu(x))."""
+    m = 3.0
+    safe_x = torch.where(x > 0, x, torch.ones_like(x))
+    exponent = m / (torch.sqrt(safe_x) + 1.0)
+    pos = x * (safe_x**exponent) * torch.sigmoid(x)
+    neg = x * x * torch.sigmoid(x)
+    return torch.where(x > 0, pos, neg)
+
+
+def powlu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """PowLU GLU: powlu(gate) * up. The gated form from arXiv:2605.25704."""
+    return powlu_ref(gate) * up
+
+
 UNGATED_ACTIVATIONS_REFS = {
     "relu": relu_ref,
     "gelu": gelu_ref,
@@ -160,6 +177,7 @@ GATED_ACTIVATIONS_REFS = {
     "leaky_relu2": leaky_relu2_glu_ref,
     "bilinear": bilinear_ref,
     "bilinear2": bilinear2_ref,
+    "powlu": powlu_glu_ref,
 }
 
 
