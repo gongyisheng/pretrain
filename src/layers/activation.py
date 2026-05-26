@@ -116,9 +116,16 @@ def powlu(x: torch.Tensor) -> torch.Tensor:
         x <= 0: x² · sigmoid(x)
 
     The √x denominator makes large positive growth sub-quadratic, reducing
-    activation outliers vs. SwiGLU's near-x² growth. The `+1` and the
-    `safe_x` guard keep both branches finite at x→0⁺ and avoid sqrt of
-    non-positive values.
+    activation outliers vs. SwiGLU's near-x² growth.
+
+    `safe_x = where(x > 0, x, 1.0)` serves a dual purpose so the pos branch
+    is NaN-free everywhere (required for torch.compile tracing and autograd
+    through the unselected branch):
+      - sqrt argument: avoids sqrt(negative) on the discarded path.
+      - pow base: avoids negative ** non_integer on the discarded path.
+
+    The outer `torch.where(x > 0, pos, neg)` selects the correct branch;
+    when x > 0, safe_x == x, so the forward value is unchanged.
     """
     m = 3.0
     safe_x = torch.where(x > 0, x, torch.ones_like(x))
