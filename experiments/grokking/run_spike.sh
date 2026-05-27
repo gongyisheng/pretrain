@@ -15,6 +15,7 @@
 #   wd0.0_ce_fp64       - fp64 CE,  AdamW, wd=0   (paper's fix;      expected: no spikes)
 #   wd0.1_ce_fp64       - fp64 CE,  AdamW, wd=0.1 (our regime;       observed: spikes)
 #   wd0.1_ce_fp64_lion  - fp64 CE,  Lion,  wd=0.1 (matched-wd to spike regime)
+#   wd0.3_ce_fp64_lion  - fp64 CE,  Lion,  wd=0.3 (matched effective decay: lr*wd ≈ AdamW baseline)
 #
 # Configs live in experiments/grokking/spike/.
 #
@@ -39,8 +40,8 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-VARIANTS=(wd0.0_ce wd0.0_ce_fp64 wd0.1_ce_fp64 wd0.1_ce_fp64_lion)
-MAX_CONCURRENCY="${MAX_CONCURRENCY:-4}"
+VARIANTS=(wd0.0_ce wd0.0_ce_fp64 wd0.1_ce_fp64 wd0.1_ce_fp64_lion wd0.3_ce_fp64_lion)
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-5}"
 PER_RUN_LOG_DIR="logs/grokking"
 TOKENIZER_FILE="tokenizers/grokking/tokenizer.json"
 DATA_DIR="data/grokking_sub_p97_f0.3"
