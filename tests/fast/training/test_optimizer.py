@@ -2,9 +2,17 @@
 
 import math
 
+import pytest
+import torch
+
 from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, SchedulerConfig
 from src.model.registry import build_model
-from src.training.optimizer import build_optimizer, build_scheduler
+from src.training.optimizer import (
+    build_optimizer,
+    build_scheduler,
+    ConstantWarmupScheduler,
+    CosineWarmupScheduler,
+)
 
 
 def _make_cfg(tie: bool = False, lr_mult: dict | None = None) -> TrainConfig:
@@ -180,3 +188,79 @@ def test_all_params_covered_exactly_once():
     trainable = [id(p) for p in model.parameters() if p.requires_grad]
     assert sorted(seen) == sorted(trainable)
     assert len(seen) == len(set(seen))  # no duplicates
+
+
+def _dummy_optimizer():
+    p = torch.nn.Parameter(torch.zeros(4))
+    return torch.optim.SGD([p], lr=1.0)
+
+
+def test_constant_scheduler_warmup_ramps_linearly():
+    opt = _dummy_optimizer()
+    sched = ConstantWarmupScheduler(opt, warmup_steps=10, max_lr=1e-3)
+    # Step 1..10: linear ramp from 0 to max_lr
+    sched.step()  # step 1
+    assert opt.param_groups[0]["lr"] == pytest.approx(1e-3 * 1 / 10)
+    for _ in range(9):
+        sched.step()
+    assert opt.param_groups[0]["lr"] == pytest.approx(1e-3)
+
+
+def test_constant_scheduler_plateau_stays_at_max_lr():
+    opt = _dummy_optimizer()
+    sched = ConstantWarmupScheduler(opt, warmup_steps=5, max_lr=2e-3)
+    for _ in range(100):
+        sched.step()
+    assert opt.param_groups[0]["lr"] == pytest.approx(2e-3)
+
+
+def test_constant_scheduler_state_dict_roundtrip():
+    opt = _dummy_optimizer()
+    sched = ConstantWarmupScheduler(opt, warmup_steps=5, max_lr=1e-3)
+    for _ in range(7):
+        sched.step()
+    state = sched.state_dict()
+
+    opt2 = _dummy_optimizer()
+    sched2 = ConstantWarmupScheduler(opt2, warmup_steps=5, max_lr=1e-3)
+    sched2.load_state_dict(state)
+    assert sched2.current_step == 7
+    # Verify the resumed scheduler produces the same LR as the original at the next step.
+    sched.step()
+    sched2.step()
+    assert opt2.param_groups[0]["lr"] == pytest.approx(opt.param_groups[0]["lr"])
+
+
+def test_constant_scheduler_zero_warmup_immediately_at_max_lr():
+    opt = _dummy_optimizer()
+    sched = ConstantWarmupScheduler(opt, warmup_steps=0, max_lr=5e-4)
+    sched.step()
+    assert opt.param_groups[0]["lr"] == pytest.approx(5e-4)
+
+
+def test_build_scheduler_dispatch_cosine():
+    cfg = _make_cfg()
+    cfg.scheduler.name = "cosine"
+    cfg.scheduler.warmup_steps = 5
+    cfg.training.max_steps = 100
+    opt = torch.optim.SGD([torch.nn.Parameter(torch.zeros(4))], lr=1.0)
+    sched = build_scheduler(opt, cfg)
+    assert isinstance(sched, CosineWarmupScheduler)
+
+
+def test_build_scheduler_dispatch_constant():
+    cfg = _make_cfg()
+    cfg.scheduler.name = "constant"
+    cfg.scheduler.warmup_steps = 5
+    cfg.training.max_steps = 100
+    opt = torch.optim.SGD([torch.nn.Parameter(torch.zeros(4))], lr=1.0)
+    sched = build_scheduler(opt, cfg)
+    assert isinstance(sched, ConstantWarmupScheduler)
+
+
+def test_build_scheduler_unknown_name_raises():
+    cfg = _make_cfg()
+    cfg.scheduler.name = "linear"
+    opt = torch.optim.SGD([torch.nn.Parameter(torch.zeros(4))], lr=1.0)
+    with pytest.raises(ValueError, match="unknown scheduler"):
+        build_scheduler(opt, cfg)

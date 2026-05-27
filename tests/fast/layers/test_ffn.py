@@ -3,12 +3,13 @@
 import pytest
 import torch
 
-from src.layers.activation import UNGATED_ACTIVATIONS
+from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.ffn import FFN
 from tests.fast.layers._refs import SIMPLE_DTYPES, ffn_ref
 
 
 ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
+GATED_ACT_NAMES = list(GATED_ACTIVATIONS.keys())
 
 
 # --- Behavior ---
@@ -53,6 +54,14 @@ def test_ffn_unknown_activation_in_gated_raises():
         FFN(d_model=64, intermediate_size=128, activation="mish", gated=True)
 
 
+@pytest.mark.parametrize("name", ["bilinear", "bilinear2"])
+def test_ffn_gated_only_activation_rejected_when_ungated(name):
+    """bilinear / bilinear2 live only in GATED_ACTIVATIONS. Using them with
+    gated=False must raise the same ValueError as any other unknown unary activation."""
+    with pytest.raises(ValueError, match="Unknown activation"):
+        FFN(d_model=64, intermediate_size=128, activation=name, gated=False)
+
+
 # --- Numerical parity ---
 
 
@@ -76,7 +85,7 @@ def test_ffn_ungated_matches_ref(activation, dtype, atol):
     assert torch.allclose(out, out_ref, atol=atol)
 
 
-@pytest.mark.parametrize("activation", ACT_NAMES)
+@pytest.mark.parametrize("activation", GATED_ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
 def test_ffn_gated_matches_ref(activation, dtype, atol):
     """FFN(gated=True, activation=A) = down_proj(A(gate, up)) with fused gate_up_proj."""

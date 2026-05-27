@@ -2,44 +2,80 @@ import torch
 import torch.nn.functional as F
 
 
-def next_token_targets(tokens: torch.Tensor):
-    """Split a packed token sequence into model inputs and next-token targets.
-
-    Args:
-        tokens: shape (B, S+1)
-
-    Returns:
-        x: shape (B, S) — input tokens
-        y: shape (B, S) — target tokens (next-token labels)
-    """
-    return tokens[:, :-1], tokens[:, 1:]
+@torch.compile
+def _cross_entropy(
+    logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100
+) -> torch.Tensor:
+    return F.cross_entropy(logits, targets, ignore_index=ignore_index)
 
 
-def compute_loss(logits, y, loss_mask=None, loss_fn=None):
-    """Compute next-token prediction loss.
+@torch.compile
+def _cross_entropy_fp64(
+    logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100
+) -> torch.Tensor:
+    # Upcast logits to fp64 for softmax+CE so the correct-class gradient does
+    # not absorb to zero in high-confidence regimes — eliminates slingshot
+    # spikes (Liu et al. 2025, arXiv:2605.06152).
+    return F.cross_entropy(logits.double(), targets, ignore_index=ignore_index)
+
+
+@torch.compile
+def _mse_loss(
+    logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100
+) -> torch.Tensor:
+    # MSE between softmax(logits) and one-hot(targets), averaged over classes
+    # per sample, then averaged over non-ignored samples. Returns NaN when all
+    # samples are ignored (matches F.cross_entropy with ignore_index).
+    # F.mse_loss has no ignore_index, so masking is applied here.
+    valid = (targets != ignore_index).to(logits.dtype)
+    safe_targets = targets.clamp(min=0)
+    one_hot = F.one_hot(safe_targets, num_classes=logits.size(-1)).to(logits.dtype)
+    probs = F.softmax(logits, dim=-1)
+    per_sample = F.mse_loss(probs, one_hot, reduction="none").mean(dim=-1)
+    return (per_sample * valid).sum() / valid.sum()
+
+
+@torch.compile
+def _mse_loss_fp64(
+    logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100
+) -> torch.Tensor:
+    # fp64 variant: softmax in fp64 so p_correct doesn't absorb to exactly 1.0
+    # in high-confidence regimes (same motivation as _cross_entropy_fp64).
+    logits = logits.double()
+    valid = (targets != ignore_index).to(logits.dtype)
+    safe_targets = targets.clamp(min=0)
+    one_hot = F.one_hot(safe_targets, num_classes=logits.size(-1)).to(logits.dtype)
+    probs = F.softmax(logits, dim=-1)
+    per_sample = F.mse_loss(probs, one_hot, reduction="none").mean(dim=-1)
+    return (per_sample * valid).sum() / valid.sum()
+
+
+LOSS_REGISTRY = {
+    "cross_entropy": _cross_entropy,
+    "cross_entropy_fp64": _cross_entropy_fp64,
+    "mse": _mse_loss,
+    "mse_fp64": _mse_loss_fp64,
+}
+
+
+def compute_loss(
+    logits: torch.Tensor, labels: torch.Tensor, loss_fn: str = "cross_entropy"
+) -> torch.Tensor:
+    """Compute next-token loss with -100 ignore-index convention.
 
     Args:
         logits: shape (B, S, V)
-        y: shape (B, S) — target token IDs
-        loss_mask: optional bool tensor shape (B, S); when provided only True
-            positions contribute to the loss (used in packing=False mode to
-            exclude padding tokens)
-        loss_fn: callable(logits, targets, reduction=...) → loss tensor;
-            defaults to F.cross_entropy. Must support a ``reduction`` kwarg
-            ('mean' or 'none') when loss_mask is provided.
+        labels: shape (B, S); positions with label == -100 are ignored.
+        loss_fn: key into LOSS_REGISTRY (e.g. "cross_entropy", "cross_entropy_fp64",
+            "mse", "mse_fp64").
 
     Returns:
-        scalar loss tensor
+        Scalar loss tensor. NaN if every position is ignored.
     """
-    if loss_fn is None:
-        loss_fn = F.cross_entropy
-
+    if loss_fn not in LOSS_REGISTRY:
+        raise ValueError(
+            f"unknown loss_fn {loss_fn!r}; expected one of {sorted(LOSS_REGISTRY)}"
+        )
     flat_logits = logits.reshape(-1, logits.size(-1))
-    flat_y = y.reshape(-1)
-
-    if loss_mask is None:
-        return loss_fn(flat_logits, flat_y)
-
-    per_token_loss = loss_fn(flat_logits, flat_y, reduction="none")
-    mask = loss_mask.reshape(-1).float()
-    return (per_token_loss * mask).sum() / mask.sum().clamp(min=1)
+    flat_labels = labels.reshape(-1)
+    return LOSS_REGISTRY[loss_fn](flat_logits, flat_labels, ignore_index=-100)

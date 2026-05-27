@@ -104,12 +104,54 @@ class CosineWarmupScheduler:
         self.max_lr = state_dict.get("max_lr", self.max_lr)
 
 
+class ConstantWarmupScheduler:
+    """Linear warmup from 0 to max_lr over `warmup_steps`, then constant at max_lr."""
+
+    def __init__(self, optimizer, warmup_steps: int, max_lr: float):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.max_lr = max_lr
+        self.current_step = 0
+
+    def step(self):
+        self.current_step += 1
+        lr = self.get_lr()
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = lr * pg.get("lr_mult", 1.0)
+
+    def get_lr(self):
+        if self.warmup_steps > 0 and self.current_step < self.warmup_steps:
+            return self.max_lr * self.current_step / self.warmup_steps
+        return self.max_lr
+
+    def state_dict(self):
+        return {
+            "current_step": self.current_step,
+            "warmup_steps": self.warmup_steps,
+            "max_lr": self.max_lr,
+        }
+
+    def load_state_dict(self, state_dict):
+        self.current_step = state_dict["current_step"]
+        self.warmup_steps = state_dict.get("warmup_steps", self.warmup_steps)
+        self.max_lr = state_dict.get("max_lr", self.max_lr)
+
+
 def build_scheduler(optimizer, config: TrainConfig):
-    """Build LR scheduler from config."""
-    return CosineWarmupScheduler(
-        optimizer=optimizer,
-        warmup_steps=config.scheduler.warmup_steps,
-        max_steps=config.training.max_steps,
-        min_lr=config.scheduler.min_lr,
-        max_lr=config.optimizer.lr,
-    )
+    """Build LR scheduler from config. Dispatches on config.scheduler.name."""
+    name = config.scheduler.name
+    if name == "cosine":
+        return CosineWarmupScheduler(
+            optimizer=optimizer,
+            warmup_steps=config.scheduler.warmup_steps,
+            max_steps=config.training.max_steps,
+            min_lr=config.scheduler.min_lr,
+            max_lr=config.optimizer.lr,
+        )
+    if name == "constant":
+        return ConstantWarmupScheduler(
+            optimizer=optimizer,
+            warmup_steps=config.scheduler.warmup_steps,
+            max_lr=config.optimizer.lr,
+        )
+    raise ValueError(f"unknown scheduler: {name!r}; expected 'cosine' or 'constant'")

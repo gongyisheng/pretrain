@@ -6,18 +6,119 @@ import torch
 from src.utils.config import TrainConfig
 
 
+def compute_flops_per_token(config: TrainConfig) -> dict[str, int]:
+    """Per-token training FLOPs broken down by component.
+
+    Returns dict with: qkv_proj, o_proj, attn_matmul, ffn, norm, lm_head
+    (each summed across n_layers where applicable), fwd_total, total. The
+    total applies a backward multiplier of 4 if activation_checkpointing
+    else 3. Attention matmul uses full max_seq_len (PaLM/nanoGPT convention,
+    ignores causal masking and intra-doc masking; comparable to literature
+    MFU numbers). Norms (pre-attn, pre-FFN, optional qk_norm, final
+    pre-lm_head) are counted at ~3 FLOPs per element. Embedding lookup and
+    RoPE are 0 FLOPs.
+    """
+    head_dim = config.model.d_model // config.model.n_heads
+
+    # Attention projections (per layer per token)
+    qkv_matmul = (
+        2
+        * config.model.d_model
+        * (config.model.n_heads + 2 * config.model.n_kv_heads)
+        * head_dim
+    )
+    qkv_bias = (
+        (config.model.n_heads + 2 * config.model.n_kv_heads) * head_dim
+        if config.model.attn_bias
+        else 0
+    )
+    qkv_per_layer = qkv_matmul + qkv_bias
+
+    o_matmul = 2 * config.model.d_model * config.model.d_model
+    o_bias = config.model.d_model if config.model.attn_bias else 0
+    o_per_layer = o_matmul + o_bias
+
+    # Attention matmul: full max_seq_len (PaLM/nanoGPT convention, no causal
+    # or intra-doc-mask discount; matches literature MFU). Per token per layer:
+    # QK^T = 2*n_heads*head_dim*max_seq_len, AV = same -> sum = 4*...
+    attn_matmul_per_layer = 4 * config.model.n_heads * head_dim * config.max_seq_len
+
+    # FFN
+    if config.model.moe_n_experts > 0:
+        # Router: 2 * d * n_experts
+        router = 2 * config.model.d_model * config.model.moe_n_experts
+        d_ff = config.model.moe_intermediate_size
+        k = config.model.moe_n_experts_per_token
+        if config.model.mlp_gated:
+            expert_matmul = 6 * config.model.d_model * d_ff
+            expert_bias = (
+                (2 * d_ff + config.model.d_model) if config.model.mlp_bias else 0
+            )
+        else:
+            expert_matmul = 4 * config.model.d_model * d_ff
+            expert_bias = (d_ff + config.model.d_model) if config.model.mlp_bias else 0
+        ffn_per_layer = router + k * (expert_matmul + expert_bias)
+    else:
+        d_ff = config.model.intermediate_size
+        if config.model.mlp_gated:
+            ffn_matmul = 6 * config.model.d_model * d_ff
+            ffn_bias = (2 * d_ff + config.model.d_model) if config.model.mlp_bias else 0
+        else:
+            ffn_matmul = 4 * config.model.d_model * d_ff
+            ffn_bias = (d_ff + config.model.d_model) if config.model.mlp_bias else 0
+        ffn_per_layer = ffn_matmul + ffn_bias
+
+    # Norms (RMSNorm/LayerNorm ~3 FLOPs per element: x*x, sum, rsqrt, x*inv*gamma)
+    # Per layer: pre-attn norm + pre-FFN norm. Plus optional qk_norm on Q/K.
+    norm_ops_per_element = 3
+    norm_per_layer = 2 * norm_ops_per_element * config.model.d_model
+    if config.model.qk_norm:
+        norm_per_layer += (
+            norm_ops_per_element
+            * (config.model.n_heads + config.model.n_kv_heads)
+            * head_dim
+        )
+    final_norm = norm_ops_per_element * config.model.d_model  # before lm_head
+
+    # LM head (once per token, not per layer)
+    lm_head = 2 * config.model.d_model * config.model.vocab_size + (
+        config.model.vocab_size if config.model.lm_head_bias else 0
+    )
+
+    qkv_proj = config.model.n_layers * qkv_per_layer
+    o_proj = config.model.n_layers * o_per_layer
+    attn_matmul = config.model.n_layers * attn_matmul_per_layer
+    ffn = config.model.n_layers * ffn_per_layer
+    norm = config.model.n_layers * norm_per_layer + final_norm
+    fwd_total = qkv_proj + o_proj + attn_matmul + ffn + norm + lm_head
+
+    backward_mult = 4 if config.training.activation_checkpointing else 3
+
+    return {
+        "qkv_proj": qkv_proj,
+        "o_proj": o_proj,
+        "attn_matmul": attn_matmul,
+        "ffn": ffn,
+        "norm": norm,
+        "lm_head": lm_head,
+        "fwd_total": fwd_total,
+        "total": fwd_total * backward_mult,
+    }
+
+
 class MetricsTracker:
     """Tracks and assembles training metrics for W&B logging."""
 
-    def __init__(self, config: TrainConfig, n_active_non_emb_params: int, device: str):
+    def __init__(self, config: TrainConfig, device: str):
         self.config = config
-        self.n_active_non_emb_params = n_active_non_emb_params
         self.device = device
         self.is_moe = config.model.arch == "qwen3_moe"
         if self.is_moe:
             self._aux_floor = (
                 config.model.n_layers * config.model.moe_n_experts_per_token
             )
+
+        self.flops_per_token = compute_flops_per_token(config)
 
         self._grad_clip_steps = 0
         self._steps_since_log = 0
@@ -71,8 +172,7 @@ class MetricsTracker:
         d: dict[str, float] = {
             # train
             "train/loss": loss,
-            "train/perplexity": min(float(torch.exp(torch.tensor(loss))), 1e6),
-            "train/flops": 6 * self.n_active_non_emb_params * total_tokens,
+            "train/flops": self.flops_per_token["total"] * total_tokens,
             "train/total_tokens": total_tokens,
             # optim
             "optim/lr": lr,
@@ -87,9 +187,12 @@ class MetricsTracker:
             "grad_norm/total": grad_norm,
         }
 
+        if self.config.task == "pretrain":
+            d["train/perplexity"] = min(float(torch.exp(torch.tensor(loss))), 1e6)
+
         # MFU
         if self._gpu_peak_flops and tokens_per_sec > 0:
-            flops_per_sec = 6 * self.n_active_non_emb_params * tokens_per_sec
+            flops_per_sec = self.flops_per_token["total"] * tokens_per_sec
             d["perf/mfu"] = flops_per_sec / self._gpu_peak_flops
 
         # GPU memory
@@ -117,14 +220,25 @@ class MetricsTracker:
         avg_loss: float,
         avg_aux_loss: float | None = None,
         tokens_per_byte: float | None = None,
+        avg_acc: float | None = None,
+        train_avg_acc: float | None = None,
     ) -> dict[str, float]:
-        """Assemble validation metrics dict for logging."""
-        d: dict[str, float] = {
-            "val/loss": avg_loss,
-            "val/perplexity": min(float(torch.exp(torch.tensor(avg_loss))), 1e6),
-        }
-        if tokens_per_byte is not None:
-            d["val/bpb"] = avg_loss * tokens_per_byte / math.log(2)
+        """Assemble validation metrics dict for logging.
+
+        Routing is governed by `self.config.task`:
+        - "pretrain": logs val/loss, val/perplexity, val/bpb (when tokenizer present).
+        - "sft": logs val/loss, val/val_acc, and val/train_acc when train_avg_acc is given.
+        """
+        d: dict[str, float] = {"val/loss": avg_loss}
+        if self.config.task == "pretrain":
+            d["val/perplexity"] = min(float(torch.exp(torch.tensor(avg_loss))), 1e6)
+            if tokens_per_byte is not None:
+                d["val/bpb"] = avg_loss * tokens_per_byte / math.log(2)
+        elif self.config.task == "sft":
+            if avg_acc is not None:
+                d["val/val_acc"] = avg_acc
+            if train_avg_acc is not None:
+                d["val/train_acc"] = train_avg_acc
         if self.is_moe and avg_aux_loss is not None:
             d["val/aux_loss"] = avg_aux_loss - self._aux_floor
         return d

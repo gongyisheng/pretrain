@@ -159,3 +159,12 @@ def test_trainer_moe_runs_without_error(mock_memmap):
         trainer = Trainer(_tiny_moe_config(tmp), wandb_enabled=False)
         trainer.train()
         assert trainer.step == 5
+
+
+def test_trainer_rejects_unknown_loss_fn(mock_memmap):
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        cfg = _tiny_config(tmp)
+        cfg.training.loss_fn = "not_a_real_loss"
+        with pytest.raises(ValueError, match="unknown loss_fn"):
+            Trainer(cfg, wandb_enabled=False)
