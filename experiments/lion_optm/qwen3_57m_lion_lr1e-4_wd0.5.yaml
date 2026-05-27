@@ -24,7 +24,7 @@ training:
   mixed_precision: "bf16"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/lion_optm/qwen3_57m_lion_lr1e-4_wd0.1/"
+  checkpoint_dir: "checkpoints/lion_optm/qwen3_57m_lion_lr1e-4_wd0.5/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
@@ -32,7 +32,7 @@ training:
 optimizer:
   name: "lion"
   lr: 1e-4
-  weight_decay: 0.1
+  weight_decay: 0.5
   betas: [0.9, 0.99]
 
 scheduler:
@@ -42,5 +42,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-lion-optm"
-  wandb_run_name: "qwen3-57m-lion-lr1e-4-wd0.1"
+  wandb_run_name: "qwen3-57m-lion-lr1e-4-wd0.5"
   log_every: 10

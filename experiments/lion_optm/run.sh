@@ -6,13 +6,19 @@ set -e
 cd "$(dirname "$0")/../.."
 
 configs=(
-    "qwen3_57m_adamw"
+    "qwen3_57m_adamw_lr5e-4_wd0.1"
     "qwen3_57m_lion_lr5e-5_wd0.1"
+    "qwen3_57m_lion_lr5e-5_wd0.2"
+    "qwen3_57m_lion_lr5e-5_wd0.5"
     "qwen3_57m_lion_lr5e-5_wd1.0"
     "qwen3_57m_lion_lr1e-4_wd0.1"
+    "qwen3_57m_lion_lr1e-4_wd0.2"
+    "qwen3_57m_lion_lr1e-4_wd0.5"
     "qwen3_57m_lion_lr1e-4_wd1.0"
-    "qwen3_57m_lion_lr3e-4_wd0.1"
-    "qwen3_57m_lion_lr3e-4_wd1.0"
+    "qwen3_57m_lion_lr2e-4_wd0.1"
+    "qwen3_57m_lion_lr2e-4_wd0.2"
+    "qwen3_57m_lion_lr2e-4_wd0.5"
+    "qwen3_57m_lion_lr2e-4_wd1.0"
 )
 
 for config in "${configs[@]}"; do

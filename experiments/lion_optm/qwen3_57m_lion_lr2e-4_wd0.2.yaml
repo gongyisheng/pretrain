@@ -18,29 +18,29 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 4
-  gradient_accumulation_steps: 8
+  batch_size: 16
+  gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: "bf16"
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/lion_optm/qwen3_57m_lion_lr3e-4_wd1.0/"
+  checkpoint_dir: "checkpoints/lion_optm/qwen3_57m_lion_lr2e-4_wd0.2/"
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
 
 optimizer:
   name: "lion"
-  lr: 3e-4
-  weight_decay: 1.0
+  lr: 2e-4
+  weight_decay: 0.2
   betas: [0.9, 0.99]
 
 scheduler:
   name: "cosine"
   warmup_steps: 1000
-  min_lr: 3e-5
+  min_lr: 2e-5
 
 logging:
   wandb_project: "pretrain-lion-optm"
-  wandb_run_name: "qwen3-57m-lion-lr3e-4-wd1.0"
+  wandb_run_name: "qwen3-57m-lion-lr2e-4-wd0.2"
   log_every: 10

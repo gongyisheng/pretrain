@@ -10,18 +10,24 @@ Lion's sign-based update has unit per-coordinate magnitude, so the effective ste
 
 | Config | Optimizer | LR | min_lr | WD | Betas |
 |---|---|---|---|---|---|
-| qwen3_57m_adamw | AdamW | 5e-4 | 5e-5 | 0.1 | (0.9, 0.95) |
+| qwen3_57m_adamw_lr5e-4_wd0.1 | AdamW | 5e-4 | 5e-5 | 0.1 | (0.9, 0.95) |
 | qwen3_57m_lion_lr5e-5_wd0.1 | Lion | 5e-5 | 5e-6 | 0.1 | (0.9, 0.99) |
+| qwen3_57m_lion_lr5e-5_wd0.2 | Lion | 5e-5 | 5e-6 | 0.2 | (0.9, 0.99) |
+| qwen3_57m_lion_lr5e-5_wd0.5 | Lion | 5e-5 | 5e-6 | 0.5 | (0.9, 0.99) |
 | qwen3_57m_lion_lr5e-5_wd1.0 | Lion | 5e-5 | 5e-6 | 1.0 | (0.9, 0.99) |
 | qwen3_57m_lion_lr1e-4_wd0.1 | Lion | 1e-4 | 1e-5 | 0.1 | (0.9, 0.99) |
+| qwen3_57m_lion_lr1e-4_wd0.2 | Lion | 1e-4 | 1e-5 | 0.2 | (0.9, 0.99) |
+| qwen3_57m_lion_lr1e-4_wd0.5 | Lion | 1e-4 | 1e-5 | 0.5 | (0.9, 0.99) |
 | qwen3_57m_lion_lr1e-4_wd1.0 | Lion | 1e-4 | 1e-5 | 1.0 | (0.9, 0.99) |
-| qwen3_57m_lion_lr3e-4_wd0.1 | Lion | 3e-4 | 3e-5 | 0.1 | (0.9, 0.99) |
-| qwen3_57m_lion_lr3e-4_wd1.0 | Lion | 3e-4 | 3e-5 | 1.0 | (0.9, 0.99) |
+| qwen3_57m_lion_lr2e-4_wd0.1 | Lion | 2e-4 | 2e-5 | 0.1 | (0.9, 0.99) |
+| qwen3_57m_lion_lr2e-4_wd0.2 | Lion | 2e-4 | 2e-5 | 0.2 | (0.9, 0.99) |
+| qwen3_57m_lion_lr2e-4_wd0.5 | Lion | 2e-4 | 2e-5 | 0.5 | (0.9, 0.99) |
+| qwen3_57m_lion_lr2e-4_wd1.0 | Lion | 2e-4 | 2e-5 | 1.0 | (0.9, 0.99) |
 
 - AdamW anchor matches `configs/qwen3_57m.yaml` (5e-4 is the best LR from `experiments/lr/`).
-- Lion LR grid: 5e-5 (10x lower than AdamW), 1e-4 (5x lower), 3e-4 (high side per paper, expected to degrade).
-- Lion WD grid: 0.1 (matches AdamW to isolate optimizer effect) and 1.0 (paper-recommended 10x scaling).
-- All runs share: Qwen3 57M (d_model=512, layers=8, heads=8, kv_heads=4, qk_norm), seq_len=1024, batch_size=4, grad_accum=8 (effective batch=32), 50K steps, cosine schedule with 1K warmup, bf16, OpenWebText.
+- Lion LR grid: 5e-5 (10x lower than AdamW), 1e-4 (5x lower), 2e-4 (~2.5x lower).
+- Lion WD grid: 0.1 (matches AdamW to isolate optimizer effect), 0.2, 0.5, 1.0 (paper-recommended 10x scaling).
+- All runs share: Qwen3 57M (d_model=512, layers=8, heads=8, kv_heads=4, qk_norm), seq_len=1024, batch_size=16, grad_accum=16 (effective batch=256), 50K steps, cosine schedule with 1K warmup, bf16, OpenWebText.
 
 ## Run
 
@@ -35,11 +41,17 @@ nohup bash experiments/lion_optm/run.sh > logs/lion_optm.log 2>&1 &
 |---|---|
 | adamw (lr=5e-4, wd=0.1) | TBD |
 | lion lr=5e-5 wd=0.1 | TBD |
+| lion lr=5e-5 wd=0.2 | TBD |
+| lion lr=5e-5 wd=0.5 | TBD |
 | lion lr=5e-5 wd=1.0 | TBD |
 | lion lr=1e-4 wd=0.1 | TBD |
+| lion lr=1e-4 wd=0.2 | TBD |
+| lion lr=1e-4 wd=0.5 | TBD |
 | lion lr=1e-4 wd=1.0 | TBD |
-| lion lr=3e-4 wd=0.1 | TBD |
-| lion lr=3e-4 wd=1.0 | TBD |
+| lion lr=2e-4 wd=0.1 | TBD |
+| lion lr=2e-4 wd=0.2 | TBD |
+| lion lr=2e-4 wd=0.5 | TBD |
+| lion lr=2e-4 wd=1.0 | TBD |
 
 ## Notes
 
