@@ -24,10 +24,10 @@ training:
   max_steps: 500000
   mixed_precision: "no"
   loss_fn: "cross_entropy_fp64"
-  label_smoothing: 0.05
+  label_smoothing: 1e-5
   seed: 42
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/grokking/qwen3_1m_sub_wd1.0_ce_fp64_lion_ls0.05/"
+  checkpoint_dir: "checkpoints/grokking/qwen3_1m_sub_wd1.0_ce_fp64_lion_ls1e-5/"
   checkpoint_every: 10000
   eval_every: 100
   eval_steps: 0
@@ -46,5 +46,5 @@ scheduler:
 
 logging:
   wandb_project: "pretrain-grokking"
-  wandb_run_name: "grokking-qwen3-1m-sub-wd1.0-ce-fp64-lion-ls0.05"
+  wandb_run_name: "grokking-qwen3-1m-sub-wd1.0-ce-fp64-lion-ls1e-5"
   log_every: 10
