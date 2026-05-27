@@ -29,47 +29,10 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# OPS=(add sub mul div)
-OPS=(mul div)
+OPS=(add sub mul div)
 WDS=(0.0 0.1 1.0)
-P=97
-TRAIN_FRAC=0.3
-TOKENIZER_DIR="tokenizers/grokking"
-TOKENIZER_FILE="${TOKENIZER_DIR}/tokenizer.json"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-6}"
 PER_RUN_LOG_DIR="logs/grokking"
-
-prep_tokenizer() {
-    if [ -f "$TOKENIZER_FILE" ]; then
-        echo "[run_weight_decay.sh] tokenizer exists: $TOKENIZER_FILE (skip)"
-    else
-        echo "[run_weight_decay.sh] building tokenizer → $TOKENIZER_FILE"
-        uv run python experiments/grokking/generate_tokenizer.py --out_dir "$TOKENIZER_DIR"
-    fi
-}
-
-prep_data() {
-    local op="$1"
-    local data_dir="data/grokking_${op}_p${P}_f${TRAIN_FRAC}"
-
-    if [ -f "${data_dir}/train.bin" ] && [ -f "${data_dir}/val.bin" ] && \
-       [ -f "${data_dir}/train_targets.bin" ] && [ -f "${data_dir}/val_targets.bin" ]; then
-        echo "[run_weight_decay.sh] tokenized data exists: $data_dir (skip)"
-        return
-    fi
-
-    if [ ! -f "${data_dir}/train_text.parquet" ] || [ ! -f "${data_dir}/val_text.parquet" ]; then
-        echo "[run_weight_decay.sh] generating raw data for op=$op → $data_dir"
-        uv run python experiments/grokking/generate_data.py \
-            --op "$op" --p "$P" --train_frac "$TRAIN_FRAC"
-    else
-        echo "[run_weight_decay.sh] raw parquet exists for $op (skip generate_data)"
-    fi
-
-    echo "[run_weight_decay.sh] tokenizing $op → ${data_dir}/{train,val}.bin"
-    uv run python experiments/grokking/tokenize_data.py \
-        --data_dir "$data_dir" --tokenizer_path "$TOKENIZER_DIR"
-}
 
 run_one() {
     local op="$1"
@@ -90,15 +53,11 @@ run_one_logged() {
     uv run python scripts/train.py --config "$cfg" >"$log" 2>&1
 }
 
-prep_tokenizer
-
 if [ $# -eq 2 ]; then
-    prep_data "$1"
+    bash experiments/grokking/prepare.sh "$1"
     run_one "$1" "$2"
 else
-    for op in "${OPS[@]}"; do
-        prep_data "$op"
-    done
+    bash experiments/grokking/prepare.sh "${OPS[@]}"
 
     mkdir -p "$PER_RUN_LOG_DIR"
     echo "[run_weight_decay.sh] launching sweep with MAX_CONCURRENCY=$MAX_CONCURRENCY"

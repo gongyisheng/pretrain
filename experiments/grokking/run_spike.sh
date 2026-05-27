@@ -19,9 +19,7 @@
 #
 # Configs live in experiments/grokking/spike/.
 #
-# Reuses the tokenizer and sub-task data prepared by run_weight_decay.sh; if
-# either is missing, run experiments/grokking/run_weight_decay.sh first to
-# build them.
+# Tokenizer and sub-task data are prepared on demand via prepare.sh (idempotent).
 #
 # Usage:
 #   # all 3 variants in parallel
@@ -43,20 +41,8 @@ cd "$REPO_ROOT"
 VARIANTS=(wd0.0_ce wd0.0_ce_fp64 wd0.1_ce_fp64 wd0.1_ce_fp64_lion wd0.3_ce_fp64_lion)
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-5}"
 PER_RUN_LOG_DIR="logs/grokking"
-TOKENIZER_FILE="tokenizers/grokking/tokenizer.json"
-DATA_DIR="data/grokking_sub_p97_f0.3"
 
-if [ ! -f "$TOKENIZER_FILE" ]; then
-    echo "[run_spike.sh] tokenizer missing: $TOKENIZER_FILE"
-    echo "  → run experiments/grokking/run_weight_decay.sh first to build tokenizer + data"
-    exit 1
-fi
-
-if [ ! -f "${DATA_DIR}/train.bin" ] || [ ! -f "${DATA_DIR}/val.bin" ]; then
-    echo "[run_spike.sh] tokenized sub data missing under $DATA_DIR"
-    echo "  → run experiments/grokking/run_weight_decay.sh first to build data"
-    exit 1
-fi
+bash experiments/grokking/prepare.sh sub
 
 mkdir -p "$PER_RUN_LOG_DIR"
 

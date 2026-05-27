@@ -10,9 +10,7 @@
 #
 # Configs live in experiments/grokking/adamw_eps/.
 #
-# Reuses the tokenizer and sub-task data prepared by run_weight_decay.sh; if
-# either is missing, run experiments/grokking/run_weight_decay.sh first to
-# build them.
+# Tokenizer and sub-task data are prepared on demand via prepare.sh (idempotent).
 #
 # Usage:
 #   # all 12 variants in parallel (respect MAX_CONCURRENCY)
@@ -43,20 +41,8 @@ done
 
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-6}"
 PER_RUN_LOG_DIR="logs/grokking"
-TOKENIZER_FILE="tokenizers/grokking/tokenizer.json"
-DATA_DIR="data/grokking_sub_p97_f0.3"
 
-if [ ! -f "$TOKENIZER_FILE" ]; then
-    echo "[run_adamw_eps.sh] tokenizer missing: $TOKENIZER_FILE"
-    echo "  → run experiments/grokking/run_weight_decay.sh first to build tokenizer + data"
-    exit 1
-fi
-
-if [ ! -f "${DATA_DIR}/train.bin" ] || [ ! -f "${DATA_DIR}/val.bin" ]; then
-    echo "[run_adamw_eps.sh] tokenized sub data missing under $DATA_DIR"
-    echo "  → run experiments/grokking/run_weight_decay.sh first to build data"
-    exit 1
-fi
+bash experiments/grokking/prepare.sh sub
 
 mkdir -p "$PER_RUN_LOG_DIR"
 
