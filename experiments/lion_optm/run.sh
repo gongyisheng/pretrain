@@ -5,21 +5,14 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-configs=(
-    "qwen3_57m_adamw_lr5e-4_wd0.1"
-    "qwen3_57m_lion_lr5e-5_wd0.1"
-    "qwen3_57m_lion_lr5e-5_wd0.2"
-    "qwen3_57m_lion_lr5e-5_wd0.5"
-    "qwen3_57m_lion_lr5e-5_wd1.0"
-    "qwen3_57m_lion_lr1e-4_wd0.1"
-    "qwen3_57m_lion_lr1e-4_wd0.2"
-    "qwen3_57m_lion_lr1e-4_wd0.5"
-    "qwen3_57m_lion_lr1e-4_wd1.0"
-    "qwen3_57m_lion_lr2e-4_wd0.1"
-    "qwen3_57m_lion_lr2e-4_wd0.2"
-    "qwen3_57m_lion_lr2e-4_wd0.5"
-    "qwen3_57m_lion_lr2e-4_wd1.0"
-)
+configs=("qwen3_57m_adamw_lr5e-4_wd0.1")
+lrs=("5e-5" "1e-4" "2e-4")
+wds=("0.1" "0.2" "0.5" "1.0")
+for lr in "${lrs[@]}"; do
+    for wd in "${wds[@]}"; do
+        configs+=("qwen3_57m_lion_lr${lr}_wd${wd}")
+    done
+done
 
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
