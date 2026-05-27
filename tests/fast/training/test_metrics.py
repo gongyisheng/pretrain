@@ -7,7 +7,8 @@ import torch
 
 from src.model.registry import build_model
 from src.training.metrics import MetricsTracker, compute_flops_per_token
-from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+from src.training.optimizer import LionOptimizer
+from src.utils.config import LoggingConfig, ModelConfig, TrainConfig, TrainingConfig
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 # ---------------------------------------------------------------------------
@@ -154,6 +155,145 @@ def _make_tracker():
         arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256
     )
     return MetricsTracker(cfg, device="cpu")
+
+
+# ==================== optimizer step diagnostics ====================
+
+
+def test_logging_config_default_log_optimizer_step_norms_is_true():
+    """Optimizer step-norm logging is opt-in (extra memory + compute)."""
+    assert LoggingConfig().log_optimizer_step_norms is True
+
+
+def test_snapshot_and_param_step_norm_match_l2_of_diff():
+    """compute_param_step_norm = sqrt(sum((p_after - p_before)^2))."""
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Linear(4, 3), torch.nn.Linear(3, 2))
+    snapshot = MetricsTracker.snapshot_params(model)
+    # Add a known delta to every parameter.
+    delta = 0.1
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(torch.full_like(p, delta))
+    n_params = sum(p.numel() for p in model.parameters())
+    expected = delta * math.sqrt(n_params)
+    actual = MetricsTracker.compute_param_step_norm(model, snapshot)
+    assert math.isclose(actual, expected, rel_tol=1e-5)
+
+
+def test_param_step_norm_zero_when_unchanged():
+    """No update → step norm exactly 0."""
+    model = torch.nn.Linear(4, 2)
+    snapshot = MetricsTracker.snapshot_params(model)
+    assert MetricsTracker.compute_param_step_norm(model, snapshot) == 0.0
+
+
+def test_momentum_norm_reads_exp_avg_buffers():
+    """compute_momentum_norm = sqrt(sum_p ||state[p]['exp_avg']||^2)."""
+    torch.manual_seed(0)
+    model = torch.nn.Linear(4, 3, bias=True)
+    opt = LionOptimizer(model.parameters(), lr=1e-3)
+    # Lion populates state on first step; do one no-op step to seed exp_avg=0 buffers.
+    for p in model.parameters():
+        p.grad = torch.zeros_like(p)
+    opt.step()
+    # Now set the buffers to a known value.
+    fill = 0.5
+    for p in model.parameters():
+        opt.state[p]["exp_avg"].fill_(fill)
+    n_params = sum(p.numel() for p in model.parameters())
+    expected = fill * math.sqrt(n_params)
+    actual = MetricsTracker.compute_momentum_norm(opt)
+    assert math.isclose(actual, expected, rel_tol=1e-5)
+
+
+def test_momentum_norm_none_when_no_state():
+    """Before any optimizer.step(), no state buffers exist → None (no W&B series)."""
+    model = torch.nn.Linear(4, 2)
+    opt = LionOptimizer(model.parameters(), lr=1e-3)
+    assert MetricsTracker.compute_momentum_norm(opt) is None
+
+
+def test_build_train_log_dict_omits_step_norms_when_none():
+    """When param_step_norm/momentum_norm aren't passed, log_dict skips those keys."""
+    tracker = _make_tracker()
+    model = torch.nn.Linear(4, 2)
+    scaler = torch.amp.GradScaler(enabled=False)
+    d = tracker.build_train_log_dict(
+        loss=2.0,
+        total_tokens=1000,
+        lr=1e-4,
+        grad_norm=0.5,
+        tokens_per_sec=1000.0,
+        elapsed=0.1,
+        model=model,
+        scaler=scaler,
+    )
+    assert "optim/param_step_norm" not in d
+    assert "optim/momentum_norm" not in d
+
+
+def test_build_train_log_dict_includes_step_norms_when_passed():
+    """When values are passed, they appear under optim/ keys."""
+    tracker = _make_tracker()
+    model = torch.nn.Linear(4, 2)
+    scaler = torch.amp.GradScaler(enabled=False)
+    d = tracker.build_train_log_dict(
+        loss=2.0,
+        total_tokens=1000,
+        lr=1e-4,
+        grad_norm=0.5,
+        tokens_per_sec=1000.0,
+        elapsed=0.1,
+        model=model,
+        scaler=scaler,
+        param_step_norm=0.03,
+        momentum_norm=0.7,
+        variance_norm=0.02,
+    )
+    assert d["optim/param_step_norm"] == 0.03
+    assert d["optim/momentum_norm"] == 0.7
+    assert d["optim/variance_norm"] == 0.02
+
+
+def test_variance_norm_reads_exp_avg_sq_buffers():
+    """compute_variance_norm = sqrt(sum_p ||state[p]['exp_avg_sq']||^2)."""
+    torch.manual_seed(0)
+    model = torch.nn.Linear(4, 3, bias=True)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    # AdamW seeds exp_avg + exp_avg_sq on first step.
+    for p in model.parameters():
+        p.grad = torch.zeros_like(p)
+    opt.step()
+    fill = 0.25
+    for p in model.parameters():
+        opt.state[p]["exp_avg_sq"].fill_(fill)
+    n_params = sum(p.numel() for p in model.parameters())
+    expected = fill * math.sqrt(n_params)
+    actual = MetricsTracker.compute_variance_norm(opt)
+    assert math.isclose(actual, expected, rel_tol=1e-5)
+
+
+def test_variance_norm_none_for_lion():
+    """Lion stores only exp_avg (no second moment) → None (no W&B series)."""
+    torch.manual_seed(0)
+    model = torch.nn.Linear(4, 3)
+    opt = LionOptimizer(model.parameters(), lr=1e-3)
+    for p in model.parameters():
+        p.grad = torch.zeros_like(p)
+    opt.step()
+    assert "exp_avg" in opt.state[next(iter(opt.state))]  # sanity
+    assert MetricsTracker.compute_variance_norm(opt) is None
+
+
+def test_variance_norm_none_before_first_step():
+    """No optimizer state yet → None (no W&B series)."""
+    model = torch.nn.Linear(4, 2)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    assert MetricsTracker.compute_variance_norm(opt) is None
+
+
+# ==================== existing tests ====================
 
 
 def test_build_eval_log_dict_no_bpb_without_tokens_per_byte():

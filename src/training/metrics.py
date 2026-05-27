@@ -164,6 +164,9 @@ class MetricsTracker:
         model: torch.nn.Module,
         scaler: torch.amp.GradScaler,
         aux_loss: float | None = None,
+        param_step_norm: float | None = None,
+        momentum_norm: float | None = None,
+        variance_norm: float | None = None,
     ) -> dict[str, float]:
         """Assemble full metrics dict for logging. Resets per-window counters."""
         log_every = self.config.logging.log_every
@@ -204,6 +207,14 @@ class MetricsTracker:
         if self.is_moe and aux_loss is not None:
             d["train/aux_loss"] = aux_loss - self._aux_floor
 
+        # Optimizer step diagnostics (||Δθ||, ||m||, ||v||)
+        if param_step_norm is not None:
+            d["optim/param_step_norm"] = param_step_norm
+        if momentum_norm is not None:
+            d["optim/momentum_norm"] = momentum_norm
+        if variance_norm is not None:
+            d["optim/variance_norm"] = variance_norm
+
         # Per-layer gradient norms
         if self.config.logging.log_layer_grad_norms:
             d.update(self.compute_layer_grad_norms(model))
@@ -242,6 +253,66 @@ class MetricsTracker:
         if self.is_moe and avg_aux_loss is not None:
             d["val/aux_loss"] = avg_aux_loss - self._aux_floor
         return d
+
+    # ------------------------------------------------------------------
+    # Optimizer step diagnostics
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def snapshot_params(model: torch.nn.Module) -> list[torch.Tensor]:
+        """Detached clone of every trainable parameter, ordered by model.parameters().
+
+        Use with compute_param_step_norm to measure ||θ_after - θ_before||.
+        """
+        return [p.detach().clone() for p in model.parameters() if p.requires_grad]
+
+    @staticmethod
+    def compute_param_step_norm(
+        model: torch.nn.Module, snapshot: list[torch.Tensor]
+    ) -> float:
+        """L2 norm of the parameter delta vs. an earlier snapshot."""
+        total_sq = 0.0
+        params = (p for p in model.parameters() if p.requires_grad)
+        for p, p_before in zip(params, snapshot, strict=True):
+            total_sq += (p.detach() - p_before).pow(2).sum().item()
+        return math.sqrt(total_sq)
+
+    @staticmethod
+    def _aggregate_state_norm(
+        optimizer: torch.optim.Optimizer, *, key: str
+    ) -> float | None:
+        """L2 norm across all `state[p][key]` buffers, or None if no buffer exists."""
+        total_sq = 0.0
+        found = False
+        for state in optimizer.state.values():
+            buf = state.get(key)
+            if buf is None:
+                continue
+            found = True
+            total_sq += buf.pow(2).sum().item()
+        return math.sqrt(total_sq) if found else None
+
+    @staticmethod
+    def compute_momentum_norm(optimizer: torch.optim.Optimizer) -> float | None:
+        """L2 norm across optimizer first-moment buffers.
+
+        Reads `state[p]["exp_avg"]` for every param with state. Works for both
+        Lion (single momentum buffer) and AdamW (first moment). Returns None
+        if no such buffer exists (e.g. before the first optimizer.step()),
+        so the caller can skip logging the metric to W&B.
+        """
+        return MetricsTracker._aggregate_state_norm(optimizer, key="exp_avg")
+
+    @staticmethod
+    def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
+        """L2 norm across optimizer second-moment buffers.
+
+        Reads `state[p]["exp_avg_sq"]` for every param with state — AdamW's
+        running average of squared gradients. Returns None for Lion (no
+        second moment) and before the first optimizer.step(), so the caller
+        can skip logging the metric to W&B.
+        """
+        return MetricsTracker._aggregate_state_norm(optimizer, key="exp_avg_sq")
 
     # ------------------------------------------------------------------
     # Per-layer gradient norms

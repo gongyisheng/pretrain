@@ -48,3 +48,4 @@ logging:
   wandb_project: "pretrain-grokking"
   wandb_run_name: "grokking-qwen3-1m-sub-wd1.0-ce-fp64-lion-ls1e-5"
   log_every: 10
+  log_optimizer_step_norms: true

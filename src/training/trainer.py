@@ -407,10 +407,27 @@ class Trainer:
                 grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             )
 
+            # Optimizer step diagnostics: snapshot params before the step so
+            # we can measure ||Δθ|| after. ||Δθ|| proves Lion step is bounded
+            # regardless of ||g||; ||m|| is the first-moment EMA (AdamW + Lion);
+            # ||v|| is AdamW's second moment (None for Lion).
+            param_step_norm = None
+            momentum_norm = None
+            variance_norm = None
+            if self.config.logging.log_optimizer_step_norms:
+                param_snapshot = MetricsTracker.snapshot_params(self.model)
+
             # Optimizer step
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
+            if self.config.logging.log_optimizer_step_norms:
+                param_step_norm = MetricsTracker.compute_param_step_norm(
+                    self.model, param_snapshot
+                )
+                momentum_norm = MetricsTracker.compute_momentum_norm(self.optimizer)
+                variance_norm = MetricsTracker.compute_variance_norm(self.optimizer)
             self.metrics.on_step(
                 accum_loss,
                 self.step,
@@ -444,6 +461,9 @@ class Trainer:
                     model=self.model,
                     scaler=self.scaler,
                     aux_loss=aux_loss.item() if aux_loss is not None else None,
+                    param_step_norm=param_step_norm,
+                    momentum_norm=momentum_norm,
+                    variance_norm=variance_norm,
                 )
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(
