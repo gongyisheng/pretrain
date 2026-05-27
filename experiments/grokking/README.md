@@ -111,3 +111,38 @@ Reads:
 | 1e-7  | TBD | TBD | TBD | TBD |
 | 1e-6  | TBD | TBD | TBD | TBD |
 | 1e-5  | TBD | TBD | TBD | TBD |
+
+## Lion optimizer ablation (sub)
+
+Empirically the AdamW + wd combo still spiked even with `cross_entropy_fp64` and `eps=1e-5`, suggesting the spike trigger is the wd-driven drift off the memorized basin rather than AdamW's `1/sqrt(v)` amplification. Lion (Chen et al. 2023, [arXiv:2302.06675](https://arxiv.org/abs/2302.06675)) has no `v`: its update is `sign(β1·m + (1−β1)·g)`, bounded by `lr` per coordinate by construction. Same wd dynamics, no amplification path.
+
+Read:
+- If Lion + wd>0 groks smoothly (no spike) → the spike was AdamW-specific (`v` collapse + amplification).
+- If Lion + wd>0 still spikes (smaller magnitude but at similar steps) → the trigger is wd dynamics; the spike is intrinsic to the grokking phase transition.
+- If Lion + wd>0 fails to grok → bounded steps are too coarse for this loss surface.
+
+Hyperparameters follow the Lion paper's recommended scaling relative to the AdamW sweep: `lr=3e-4` (≈ AdamW lr / 3), `betas=(0.9, 0.99)`. All Lion variants use `cross_entropy_fp64` so the only varying axis vs the AdamW+fp64 spike configs is the optimizer.
+
+Configs live alongside the CE/fp64 spike configs under `experiments/grokking/spike/` and are driven by the same `run_spike.sh`.
+
+| variant | optimizer | loss | lr | weight_decay | betas |
+|---|---|---|---|---:|---|
+| wd0.1_ce_fp64_lion | lion | cross_entropy_fp64 | 3e-4 | 0.1 | (0.9, 0.99) |
+
+The wd=0.0 Lion variant is omitted — without weight decay there's no drift mechanism, so the "does removing AdamW's `1/sqrt(v)` amplification suppress the spike?" question doesn't apply. The matched comparison is `wd0.1_ce_fp64` (AdamW) vs `wd0.1_ce_fp64_lion` (Lion) at the same wd, loss, and data.
+
+Run (Lion variant is part of `run_spike.sh`'s full sweep, alongside the CE/fp64 AdamW variants):
+
+```bash
+# full spike sweep (3 AdamW CE/fp64 + 1 Lion); MAX_CONCURRENCY default = 4
+nohup bash experiments/grokking/run_spike.sh > logs/grokking/spike_sweep.log 2>&1 &
+
+# single Lion variant
+bash experiments/grokking/run_spike.sh wd0.1_ce_fp64_lion
+```
+
+### Results
+
+| wd | final val_acc | grok step | max train_loss spike | notes |
+|---:|---:|---:|---:|---|
+| 0.1 | TBD | TBD | TBD | TBD |

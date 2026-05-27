@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Slingshot-spike ablation for grokking (sub task).
 #
-# Tests whether the paper's fp64 CE fix (Liu et al. 2025, arXiv:2605.06152)
-# actually eliminates slingshot spikes in our setup, by isolating the
-# weight-decay variable:
+# Tests what eliminates the slingshot spikes observed in the wd>0 regime.
+# Two complementary hypotheses:
 #
-#   wd0.0_ce       - fp32 CE,  wd=0   (paper's regime; expected: spikes)
-#   wd0.0_ce_fp64  - fp64 CE,  wd=0   (paper's fix;    expected: no spikes)
-#   wd0.1_ce_fp64  - fp64 CE,  wd=0.1 (our regime;     observed: spikes)
+#   A) The spike is driven by fp32 CE precision collapse (Liu et al. 2025,
+#      arXiv:2605.06152). Use cross_entropy_fp64 to restore gradient direction.
+#   B) The spike is driven by AdamW's 1/sqrt(v) amplification when v collapses
+#      between memorization and wd-driven basin exit. Switch to Lion (no v,
+#      bounded sign-momentum step) to remove the amplification path.
+#
+# Variants:
+#   wd0.0_ce            - fp32 CE,  AdamW, wd=0   (paper's regime;   expected: spikes)
+#   wd0.0_ce_fp64       - fp64 CE,  AdamW, wd=0   (paper's fix;      expected: no spikes)
+#   wd0.1_ce_fp64       - fp64 CE,  AdamW, wd=0.1 (our regime;       observed: spikes)
+#   wd0.1_ce_fp64_lion  - fp64 CE,  Lion,  wd=0.1 (matched-wd to spike regime)
 #
 # Configs live in experiments/grokking/spike/.
 #
@@ -32,8 +39,8 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-VARIANTS=(wd0.0_ce wd0.0_ce_fp64 wd0.1_ce_fp64)
-MAX_CONCURRENCY="${MAX_CONCURRENCY:-3}"
+VARIANTS=(wd0.0_ce wd0.0_ce_fp64 wd0.1_ce_fp64 wd0.1_ce_fp64_lion)
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-4}"
 PER_RUN_LOG_DIR="logs/grokking"
 TOKENIZER_FILE="tokenizers/grokking/tokenizer.json"
 DATA_DIR="data/grokking_sub_p97_f0.3"
