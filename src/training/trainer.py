@@ -376,7 +376,12 @@ class Trainer:
                     logits, aux_loss = self.model(
                         input_ids, position_ids=position_ids, attn_mask=attn_mask
                     )
-                    loss = compute_loss(logits, labels, self.config.training.loss_fn)
+                    loss = compute_loss(
+                        logits,
+                        labels,
+                        self.config.training.loss_fn,
+                        label_smoothing=self.config.training.label_smoothing,
+                    )
                     if aux_loss is not None:
                         loss = loss + self.config.model.moe_aux_loss_coef * aux_loss
                     loss = loss / cfg.gradient_accumulation_steps

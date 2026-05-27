@@ -82,6 +82,7 @@ class TrainingConfig:
     max_steps: int = 50000
     mixed_precision: str = "bf16"
     loss_fn: str = "cross_entropy"
+    label_smoothing: float = 0.0  # for CE loss only
     activation_checkpointing: bool = False
     use_deterministic_algo: bool = False
     seed: int = 42

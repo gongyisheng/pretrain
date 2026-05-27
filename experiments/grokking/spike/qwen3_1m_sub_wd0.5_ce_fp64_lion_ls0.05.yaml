@@ -1,0 +1,50 @@
+task: "sft"
+max_seq_len: 6
+
+model:
+  arch: "qwen3"
+  n_layers: 4
+  n_heads: 4
+  n_kv_heads: 2
+  d_model: 128
+  vocab_size: 103
+  qk_norm: true
+  rope_theta: 10000.0
+
+data:
+  dataset: "grokking_sub_p97_f0.3"
+  tokenizer_path: "tokenizers/grokking"
+  data_dir: "data/grokking_sub_p97_f0.3/"
+  packing: false
+  num_workers: 4
+
+training:
+  batch_size: 512
+  gradient_accumulation_steps: 1
+  max_steps: 500000
+  mixed_precision: "no"
+  loss_fn: "cross_entropy_fp64"
+  label_smoothing: 0.05
+  seed: 42
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints/grokking/qwen3_1m_sub_wd0.5_ce_fp64_lion_ls0.05/"
+  checkpoint_every: 10000
+  eval_every: 100
+  eval_steps: 0
+  eval_train: true
+  intra_doc_masking: false
+
+optimizer:
+  name: "lion"
+  lr: 2e-4
+  weight_decay: 0.5
+  betas: [0.9, 0.98]
+
+scheduler:
+  name: "constant"
+  warmup_steps: 0
+
+logging:
+  wandb_project: "pretrain-grokking"
+  wandb_run_name: "grokking-qwen3-1m-sub-wd0.5-ce-fp64-lion-ls0.05"
+  log_every: 10
