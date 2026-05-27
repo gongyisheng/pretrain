@@ -4,6 +4,9 @@ import torch
 from src.utils.config import TrainConfig
 
 
+AdamWOptimizer = torch.optim.AdamW
+
+
 class LionOptimizer(torch.optim.Optimizer):
     """
     Lion: EvoLved Sign Momentum (Chen et al. 2023, https://arxiv.org/pdf/2302.06675).
@@ -144,7 +147,7 @@ def build_optimizer(
 
     name = config.optimizer.name
     if name == "adamw":
-        optimizer = torch.optim.AdamW(
+        optimizer = AdamWOptimizer(
             param_groups,
             lr=config.optimizer.lr,
             betas=tuple(config.optimizer.betas),

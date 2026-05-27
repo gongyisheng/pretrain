@@ -7,7 +7,7 @@ import torch
 
 from src.model.registry import build_model
 from src.training.metrics import MetricsTracker, compute_flops_per_token
-from src.training.optimizer import LionOptimizer
+from src.training.optimizer import AdamWOptimizer, LionOptimizer
 from src.utils.config import LoggingConfig, ModelConfig, TrainConfig, TrainingConfig
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
@@ -260,7 +260,7 @@ def test_variance_norm_reads_exp_avg_sq_buffers():
     """compute_variance_norm = sqrt(sum_p ||state[p]['exp_avg_sq']||^2)."""
     torch.manual_seed(0)
     model = torch.nn.Linear(4, 3, bias=True)
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    opt = AdamWOptimizer(model.parameters(), lr=1e-3)
     # AdamW seeds exp_avg + exp_avg_sq on first step.
     for p in model.parameters():
         p.grad = torch.zeros_like(p)
@@ -289,7 +289,7 @@ def test_variance_norm_none_for_lion():
 def test_variance_norm_none_before_first_step():
     """No optimizer state yet → None (no W&B series)."""
     model = torch.nn.Linear(4, 2)
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    opt = AdamWOptimizer(model.parameters(), lr=1e-3)
     assert MetricsTracker.compute_variance_norm(opt) is None
 
 
