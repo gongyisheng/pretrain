@@ -4,6 +4,102 @@ import torch
 from src.utils.config import TrainConfig
 
 
+class LionOptimizer(torch.optim.Optimizer):
+    """
+    Lion: EvoLved Sign Momentum (Chen et al. 2023, https://arxiv.org/pdf/2302.06675).
+
+    Per-coordinate update is `sign(β1·m + (1-β1)·g)` plus decoupled wd, scaled by lr.
+    State is a single momentum buffer `exp_avg` per param (half of AdamW).
+
+    Lion maintains one running statistic:
+    - m (momentum): EMA of the gradient.
+
+    Update per step:
+    c = β1·m + (1-β1)·g                   # interpolated gradient
+    θ ← θ - lr · sign(c) - lr · wd · θ
+    m = β2·m + (1-β2)·g                   # m updated AFTER use (slower decay)
+    """
+
+    def __init__(
+        self,
+        params,
+        lr: float,
+        betas=(0.9, 0.99),
+        weight_decay: float = 0.0,
+        foreach: bool = True,
+    ):
+        if lr <= 0.0:
+            raise ValueError(f"lr must be positive, got {lr}")
+        if not (0.0 <= betas[0] < 1.0 and 0.0 <= betas[1] < 1.0):
+            raise ValueError(f"betas must be in [0, 1), got {betas}")
+        defaults = dict(
+            lr=lr, betas=tuple(betas), weight_decay=weight_decay, foreach=foreach
+        )
+        super().__init__(params, defaults)
+
+    @staticmethod
+    def _single_tensor_lion(params, grads, exp_avgs, *, lr, beta1, beta2, wd):
+        for p, g, m in zip(params, grads, exp_avgs):
+            update = m.mul(beta1).add_(g, alpha=1 - beta1).sign_()
+            p.mul_(1 - lr * wd).add_(update, alpha=-lr)
+            m.mul_(beta2).add_(g, alpha=1 - beta2)
+
+    @staticmethod
+    def _multi_tensor_lion(params, grads, exp_avgs, *, lr, beta1, beta2, wd):
+        # foreach kernels require uniform device + dtype per call; group accordingly.
+        grouped: dict = {}
+        for p, g, m in zip(params, grads, exp_avgs):
+            key = (p.device, p.dtype)
+            if key not in grouped:
+                grouped[key] = ([], [], [])
+            grouped[key][0].append(p)
+            grouped[key][1].append(g)
+            grouped[key][2].append(m)
+
+        for p_list, g_list, m_list in grouped.values():
+            update = torch._foreach_mul(m_list, beta1)
+            torch._foreach_add_(update, g_list, alpha=1 - beta1)
+            torch._foreach_sign_(update)
+
+            torch._foreach_mul_(p_list, 1 - lr * wd)
+            torch._foreach_add_(p_list, update, alpha=-lr)
+
+            torch._foreach_mul_(m_list, beta2)
+            torch._foreach_add_(m_list, g_list, alpha=1 - beta2)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2 = group["betas"]
+            wd = group["weight_decay"]
+            foreach = group.get("foreach", True)
+
+            params, grads, exp_avgs = [], [], []
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                params.append(p)
+                grads.append(p.grad)
+                state = self.state[p]
+                if len(state) == 0:
+                    state["exp_avg"] = torch.zeros_like(p)
+                exp_avgs.append(state["exp_avg"])
+
+            if not params:
+                continue
+
+            fn = self._multi_tensor_lion if foreach else self._single_tensor_lion
+            fn(params, grads, exp_avgs, lr=lr, beta1=beta1, beta2=beta2, wd=wd)
+
+        return loss
+
+
 def build_optimizer(
     model: torch.nn.Module, config: TrainConfig
 ) -> torch.optim.Optimizer:
@@ -46,13 +142,24 @@ def build_optimizer(
             }
         )
 
-    optimizer = torch.optim.AdamW(
-        param_groups,
-        lr=config.optimizer.lr,
-        betas=tuple(config.optimizer.betas),
-        eps=config.optimizer.eps,
-        fused=True,
-    )
+    name = config.optimizer.name
+    if name == "adamw":
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            lr=config.optimizer.lr,
+            betas=tuple(config.optimizer.betas),
+            eps=config.optimizer.eps,
+            fused=True,
+        )
+    elif name == "lion":
+        # Lion has no `eps`; the field in OptimizerConfig is ignored.
+        optimizer = LionOptimizer(
+            param_groups,
+            lr=config.optimizer.lr,
+            betas=tuple(config.optimizer.betas),
+        )
+    else:
+        raise ValueError(f"unknown optimizer: {name!r}; expected 'adamw' or 'lion'")
     return optimizer
 
 
