@@ -38,7 +38,7 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-VARIANTS=(wd0.0_ce wd0.0_ce_fp64 wd0.1_ce_fp64 wd0.1_ce_fp64_lion wd0.3_ce_fp64_lion)
+VARIANTS=(wd0.0_ce wd0.0_ce_fp64 wd0.1_ce_fp64 wd0.1_ce_fp64_lion wd0.3_ce_fp64_lion wd0.1_ce_fp64_ls1e-5 wd0.1_ce_ls1e-5)
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-5}"
 PER_RUN_LOG_DIR="logs/grokking"
 
