@@ -1,4 +1,4 @@
-"""Unit tests for PretrainDataset.
+"""Unit tests for PretrainDataset and SFTDataset.
 
 Tests are in-memory: np.memmap is mocked so tests register pre-built ndarrays
 keyed by a synthetic "path" rather than writing real .bin files.
@@ -8,16 +8,11 @@ import numpy as np
 import pytest
 import torch
 
-from src.data.dataset import PretrainDataset
+from src.data.dataset import PretrainDataset, SFTDataset
 
 
 @pytest.fixture
 def mock_memmap(monkeypatch):
-    """Replace np.memmap with a dict-backed lookup.
-
-    Tests insert `storage[fake_path] = np.array(...)`; PretrainDataset(fake_path, ...)
-    receives that array instead of reading from disk.
-    """
     storage: dict[str, np.ndarray] = {}
 
     def fake_memmap(path, dtype, mode):
@@ -33,93 +28,84 @@ def mock_memmap(monkeypatch):
 def test_dataset_length(mock_memmap):
     mock_memmap["/x.bin"] = np.arange(1024, dtype=np.uint16)
     ds = PretrainDataset("/x.bin", seq_len=128, vocab_size=1024)
-    assert len(ds) == 1024 // 128 - 1  # 7
+    assert len(ds) == 1024 // 128 - 1
 
 
 def test_dataset_getitem_shape(mock_memmap):
     mock_memmap["/x.bin"] = np.arange(1024, dtype=np.uint16)
     ds = PretrainDataset("/x.bin", seq_len=128, vocab_size=1024)
-    input_ids, position_ids = ds[0]
-    assert input_ids.shape == (129,)  # seq_len + 1
+    input_ids, position_ids, labels = ds[0]
+    # All three are pre-shifted by the dataset: shape (seq_len,) each.
+    assert input_ids.shape == (128,)
     assert input_ids.dtype == torch.long
-    assert position_ids.shape == (128,)  # seq_len
+    assert position_ids.shape == (128,)
     assert position_ids.dtype == torch.long
+    assert labels.shape == (128,)
+    assert labels.dtype == torch.long
 
 
 def test_dataset_getitem_position_ids(mock_memmap):
-    """Without EOT tokens in the data, position_ids should be sequential."""
     mock_memmap["/x.bin"] = np.arange(1024, dtype=np.uint16)
     ds = PretrainDataset("/x.bin", seq_len=128, vocab_size=1024, eot_token_id=9999)
-    _, position_ids = ds[0]
+    _, position_ids, _ = ds[0]
     assert position_ids.tolist() == list(range(128))
+
+
+def test_dataset_packed_shift_against_disk(mock_memmap):
+    """packing=True: input_ids == data[:seq_len], labels == data[1:seq_len+1], no -100s."""
+    data = np.arange(1024, dtype=np.uint16)
+    mock_memmap["/x.bin"] = data
+    ds = PretrainDataset("/x.bin", seq_len=128, vocab_size=1024, eot_token_id=9999)
+    input_ids, _, labels = ds[0]
+    assert torch.equal(input_ids, torch.from_numpy(data[:128].astype(np.int64)))
+    assert torch.equal(labels, torch.from_numpy(data[1:129].astype(np.int64)))
+    assert (labels != -100).all()
 
 
 # --- packing=False ---
 
 EOT = 1
-PAD = 1  # pad_token_id == eot_token_id (same token)
+PAD = 1
 
 
 @pytest.fixture
 def packed_docs(mock_memmap):
-    """Three documents: [2,3,EOT], [4,5,6,EOT], [7,EOT]."""
     mock_memmap["/docs.bin"] = np.array(
         [2, 3, EOT, 4, 5, 6, EOT, 7, EOT], dtype=np.uint16
     )
     return "/docs.bin"
 
 
+def _unpacked_ds(path):
+    return PretrainDataset(
+        path,
+        seq_len=8,
+        vocab_size=256,
+        packing=False,
+        eot_token_id=EOT,
+        pad_token_id=PAD,
+    )
+
+
 def test_single_doc_length(packed_docs):
-    ds = PretrainDataset(
-        packed_docs,
-        seq_len=8,
-        vocab_size=256,
-        packing=False,
-        eot_token_id=EOT,
-        pad_token_id=PAD,
-    )
-    assert len(ds) == 3
+    assert len(_unpacked_ds(packed_docs)) == 3
 
 
-def test_single_doc_getitem_returns_two_tuple(packed_docs):
-    ds = PretrainDataset(
-        packed_docs,
-        seq_len=8,
-        vocab_size=256,
-        packing=False,
-        eot_token_id=EOT,
-        pad_token_id=PAD,
-    )
-    result = ds[0]
-    assert len(result) == 2
+def test_single_doc_getitem_returns_three_tuple(packed_docs):
+    result = _unpacked_ds(packed_docs)[0]
+    assert len(result) == 3
 
 
 def test_single_doc_shapes(packed_docs):
-    ds = PretrainDataset(
-        packed_docs,
-        seq_len=8,
-        vocab_size=256,
-        packing=False,
-        eot_token_id=EOT,
-        pad_token_id=PAD,
-    )
-    input_ids, position_ids = ds[0]
-    assert input_ids.shape == (9,)  # seq_len + 1
-    assert position_ids.shape == (8,)  # seq_len
-    assert position_ids.dtype == torch.long
+    input_ids, position_ids, labels = _unpacked_ds(packed_docs)[0]
+    # All three pre-shifted: shape (seq_len,) each.
+    assert input_ids.shape == (8,)
+    assert position_ids.shape == (8,)
+    assert labels.shape == (8,)
 
 
 def test_single_doc_content(packed_docs):
-    ds = PretrainDataset(
-        packed_docs,
-        seq_len=8,
-        vocab_size=256,
-        packing=False,
-        eot_token_id=EOT,
-        pad_token_id=PAD,
-    )
-    # doc0 = [2, 3, EOT] → input_ids=[2,3,EOT,PAD,...], position_ids=[0,1,2,-1,...]
-    input_ids, position_ids = ds[0]
+    input_ids, position_ids, _ = _unpacked_ds(packed_docs)[0]
     assert input_ids[0].item() == 2
     assert input_ids[1].item() == 3
     assert input_ids[2].item() == EOT
@@ -128,25 +114,31 @@ def test_single_doc_content(packed_docs):
     assert (position_ids[3:] == -1).all()
 
 
+def test_single_doc_unpacked_labels_minus_100_at_padding(packed_docs):
+    """packing=False: labels has -100 wherever input_ids is padding (position_ids < 0)."""
+    # doc0 = [2, 3, EOT]
+    # raw chunk    = [2, 3, EOT, PAD, PAD, PAD, PAD, PAD, PAD]  (seq_len + 1 = 9 tokens)
+    # input_ids    = chunk[:-1] = [2, 3, EOT, PAD, PAD, PAD, PAD, PAD]
+    # position_ids = [0, 1, 2, -1, -1, -1, -1, -1]
+    # labels (raw) = chunk[1:]  = [3, EOT, PAD, PAD, PAD, PAD, PAD, PAD]
+    # then labels[position_ids < 0] = -100  →  [3, EOT, PAD, -100, -100, -100, -100, -100]
+    input_ids, position_ids, labels = _unpacked_ds(packed_docs)[0]
+    assert labels[:3].tolist() == [3, EOT, PAD]
+    assert (labels[3:] == -100).all()
+
+
 def test_single_doc_eot_in_loss(packed_docs):
-    """EOT prediction must be included in the loss (position_ids[2] >= 0)."""
-    ds = PretrainDataset(
-        packed_docs,
-        seq_len=8,
-        vocab_size=256,
-        packing=False,
-        eot_token_id=EOT,
-        pad_token_id=PAD,
-    )
-    # doc1 = [4, 5, 6, EOT] → position_ids=[0,1,2,3,-1,-1,-1,-1]
-    _, position_ids = ds[1]
-    assert position_ids[3].item() == 3  # EOT is the 4th real token (position 3)
-    assert position_ids[4].item() == -1  # padding starts here
+    """EOT prediction (predicting EOT from previous token) must be included in the loss."""
+    # doc1 = [4, 5, 6, EOT]
+    # input_ids = [4, 5, 6, EOT, PAD, PAD, PAD, PAD]
+    # labels    = [5, 6, EOT, PAD, -100, -100, -100, -100]
+    input_ids, position_ids, labels = _unpacked_ds(packed_docs)[1]
+    assert labels[2].item() == EOT
+    assert labels[3].item() == PAD
+    assert (labels[4:] == -100).all()
 
 
 def test_single_doc_truncation(mock_memmap):
-    """Documents longer than seq_len+1 are truncated; all position_ids >= 0."""
-    # doc = [2,3,4,5,6,7,8,9,EOT], seq_len=4
     mock_memmap["/long.bin"] = np.array([2, 3, 4, 5, 6, 7, 8, 9, EOT], dtype=np.uint16)
     ds = PretrainDataset(
         "/long.bin",
@@ -156,7 +148,206 @@ def test_single_doc_truncation(mock_memmap):
         eot_token_id=EOT,
         pad_token_id=PAD,
     )
-    input_ids, position_ids = ds[0]
-    assert input_ids.shape == (5,)
+    input_ids, position_ids, labels = ds[0]
+    # Pre-shifted: input_ids is seq_len long, not seq_len+1.
+    assert input_ids.shape == (4,)
     assert (position_ids >= 0).all()
     assert position_ids.tolist() == [0, 1, 2, 3]
+    assert (labels != -100).all()
+
+
+# --- SFTDataset ---
+#
+# SFTDataset memmaps two parallel .bin files: tokens and a uint8 targets mask.
+# Tests register both via the mock_memmap fixture. Stream layout follows
+# tokenize_data.py: [q0..., a0..., EOT, q1..., a1..., EOT, ...].
+
+
+SFT_EOT = 99
+SFT_PAD = 99
+
+
+def _register_sft_bins(mock_memmap, bin_path, rows, eot=SFT_EOT):
+    """rows = [(q_ids, a_ids), ...]. Registers <bin_path> and <stem>_targets.bin."""
+    tokens: list[int] = []
+    targets: list[int] = []
+    for q, a in rows:
+        tokens.extend(q)
+        targets.extend([0] * len(q))
+        tokens.extend(a)
+        targets.extend([1] * len(a))
+        tokens.append(eot)
+        targets.append(1)
+    mock_memmap[bin_path] = np.array(tokens, dtype=np.uint16)
+    targets_path = bin_path.removesuffix(".bin") + "_targets.bin"
+    mock_memmap[targets_path] = np.array(targets, dtype=np.uint8)
+
+
+@pytest.fixture
+def sft_bin(mock_memmap):
+    rows = [
+        ([3, 100, 5, 104], [8]),
+        ([10, 100, 20, 104], [30]),
+        ([50, 100, 40, 104], [90]),
+    ]
+    _register_sft_bins(mock_memmap, "/sft.bin", rows)
+    return "/sft.bin"
+
+
+def _sft_ds(path, seq_len=6, packing=False):
+    return SFTDataset(
+        bin_path=path,
+        seq_len=seq_len,
+        vocab_size=128,
+        packing=packing,
+        eot_token_id=SFT_EOT,
+        pad_token_id=SFT_PAD,
+    )
+
+
+# packing=False
+
+
+def test_sft_dataset_length(sft_bin):
+    ds = _sft_ds(sft_bin)
+    assert len(ds) == 3
+
+
+def test_sft_dataset_shapes(sft_bin):
+    ds = _sft_ds(sft_bin)
+    input_ids, position_ids, labels = ds[0]
+    assert input_ids.shape == (6,)
+    assert position_ids.shape == (6,)
+    assert labels.shape == (6,)
+    assert input_ids.dtype == torch.long
+    assert position_ids.dtype == torch.long
+    assert labels.dtype == torch.long
+
+
+def test_sft_dataset_input_ids_assembled(sft_bin):
+    """input_ids = [q..., a..., EOT, PAD...] then shifted left by 1."""
+    ds = _sft_ds(sft_bin, seq_len=6)
+    # Row 1: q=[10, 100, 20, 104], a=[30] → sample=[10, 100, 20, 104, 30, EOT]
+    # chunk_arr (size 7): [10, 100, 20, 104, 30, EOT, PAD]
+    # input_ids = chunk[:-1] = [10, 100, 20, 104, 30, EOT]
+    input_ids, _, _ = ds[1]
+    assert input_ids.tolist() == [10, 100, 20, 104, 30, SFT_EOT]
+
+
+def test_sft_dataset_labels_mask_question_supervise_answer(sft_bin):
+    """Labels: -100 for question and padding positions; answer + EOT supervised."""
+    # Row 0: q_len=4, a_len=1, sample=[3, 100, 5, 104, 8, EOT], n_content=6.
+    # input_ids = [3, 100, 5, 104, 8, EOT]
+    # targets   = [0,   0, 0,   0, 1,   1] (q=0, a=1, EOT=1)
+    # labels[i] supervised iff targets[i+1] == 1, i.e. targets[1:7] = [0, 0, 0, 1, 1, 0]
+    #   labels[3] = chunk[4] = 8         (answer)
+    #   labels[4] = chunk[5] = EOT       (stop)
+    ds = _sft_ds(sft_bin, seq_len=6)
+    _, _, labels = ds[0]
+    assert labels[:3].tolist() == [-100, -100, -100]
+    assert labels[3].item() == 8
+    assert labels[4].item() == SFT_EOT
+    assert labels[5].item() == -100
+
+
+def test_sft_dataset_labels_multi_token_answer(mock_memmap):
+    """Multi-token answer supervises every answer position + EOT."""
+    _register_sft_bins(mock_memmap, "/multi.bin", [([1, 2, 3], [10, 20])])
+    ds = _sft_ds("/multi.bin", seq_len=6)
+    input_ids, _, labels = ds[0]
+    # sample = [1, 2, 3, 10, 20, EOT]; targets = [0,0,0,1,1,1]
+    # labels[i] supervised iff targets[i+1] == 1 → indices 2, 3, 4
+    assert input_ids.tolist() == [1, 2, 3, 10, 20, SFT_EOT]
+    assert labels[:2].tolist() == [-100, -100]
+    assert labels[2:5].tolist() == [10, 20, SFT_EOT]
+    assert labels[5].item() == -100
+
+
+def test_sft_dataset_variable_length_per_sample(mock_memmap):
+    """Different rows can have different q_len / a_len; masking adapts."""
+    _register_sft_bins(
+        mock_memmap,
+        "/var.bin",
+        [
+            ([1, 2], [3]),  # q_len=2, a_len=1
+            ([10, 20, 30], [40, 50]),  # q_len=3, a_len=2
+        ],
+    )
+    ds = _sft_ds("/var.bin", seq_len=8)
+    # Row 0: sample=[1, 2, 3, EOT]. Supervised labels at indices 1, 2.
+    _, _, labels0 = ds[0]
+    assert labels0[0].item() == -100
+    assert labels0[1:3].tolist() == [3, SFT_EOT]
+    assert (labels0[3:] == -100).all()
+    # Row 1: sample=[10, 20, 30, 40, 50, EOT]. Supervised labels at indices 2, 3, 4.
+    _, _, labels1 = ds[1]
+    assert labels1[:2].tolist() == [-100, -100]
+    assert labels1[2:5].tolist() == [40, 50, SFT_EOT]
+    assert (labels1[5:] == -100).all()
+
+
+# packing=True
+#
+# Just slice the flat stream every seq_len tokens — same pattern as
+# PretrainDataset(packing=True). Targets memmap is sliced in lockstep.
+
+
+def test_sft_packing_length(mock_memmap):
+    """n_sequences = total tokens // seq_len - 1, like PretrainDataset packing."""
+    # 3 samples × (2 q + 1 a + 1 EOT) = 12 flat tokens. seq_len=4 → n = 12//4 - 1 = 2.
+    _register_sft_bins(
+        mock_memmap,
+        "/pack_len.bin",
+        [([1, 2], [3]), ([5, 6], [7]), ([9, 10], [11])],
+    )
+    ds = _sft_ds("/pack_len.bin", seq_len=4, packing=True)
+    assert len(ds) == 2
+
+
+def test_sft_packing_masks_question_positions(mock_memmap):
+    """In a packed chunk, labels at positions predicting question tokens are -100."""
+    # Flat tokens:  [1, 2, 3, EOT, 5, 6, 7, EOT, 9, 10, 11, EOT]
+    # targets mask: [0, 0, 1, 1,   0, 0, 1, 1,   0, 0, 1,  1]
+    # seq_len=8 → chunk 0 = tokens[0:9] = [1, 2, 3, EOT, 5, 6, 7, EOT, 9]
+    # input_ids = [1, 2, 3, EOT, 5, 6, 7, EOT]
+    # labels    = [2, 3, EOT, 5, 6, 7, EOT, 9]
+    # supervised iff targets[1:9] = [0, 1, 1, 0, 0, 1, 1, 0]
+    # → labels = [-100, 3, EOT, -100, -100, 7, EOT, -100]
+    _register_sft_bins(
+        mock_memmap,
+        "/pack_mask.bin",
+        [([1, 2], [3]), ([5, 6], [7]), ([9, 10], [11])],
+    )
+    ds = _sft_ds("/pack_mask.bin", seq_len=8, packing=True)
+    input_ids, position_ids, labels = ds[0]
+    assert input_ids.tolist() == [1, 2, 3, SFT_EOT, 5, 6, 7, SFT_EOT]
+    assert labels.tolist() == [-100, 3, SFT_EOT, -100, -100, 7, SFT_EOT, -100]
+    assert position_ids.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
+
+
+def test_sft_packing_sample_can_span_chunk_boundary(mock_memmap):
+    """A long sample straddling chunk boundaries — masking is per-token, not
+    per-sample. Matches PretrainDataset(packing=True) where docs may span."""
+    # q=[1,2,3,4,5], a=[6,7,8], + EOT → 9 flat tokens.
+    # targets = [0,0,0,0,0, 1,1,1, 1]
+    # seq_len=4 → n = 9//4 - 1 = 1, chunk 0 = tokens[0:5] = [1, 2, 3, 4, 5]
+    # input_ids = [1, 2, 3, 4]; labels = [2, 3, 4, 5]
+    # targets[1:5] = [0, 0, 0, 0] → all labels -100 in this chunk.
+    _register_sft_bins(
+        mock_memmap,
+        "/pack_span.bin",
+        [([1, 2, 3, 4, 5], [6, 7, 8])],
+    )
+    ds = _sft_ds("/pack_span.bin", seq_len=4, packing=True)
+    assert len(ds) == 1
+    input_ids, _, labels = ds[0]
+    assert input_ids.tolist() == [1, 2, 3, 4]
+    assert (labels == -100).all()
+
+
+def test_sft_dataset_mismatched_lengths_raise(mock_memmap):
+    """Token stream and targets mask must have the same length."""
+    mock_memmap["/bad.bin"] = np.array([1, 2, 3, SFT_EOT], dtype=np.uint16)
+    mock_memmap["/bad_targets.bin"] = np.array([0, 0, 1], dtype=np.uint8)  # too short
+    with pytest.raises(ValueError, match="different lengths"):
+        _sft_ds("/bad.bin", seq_len=4)

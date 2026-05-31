@@ -183,6 +183,54 @@ def test_bpe_vocab_ids_contiguous_from_zero():
     assert sorted(vocab.values()) == list(range(len(vocab)))
 
 
+def test_bpe_colliding_merge_strings_no_hole():
+    """Two distinct ordered pairs whose concatenations collide must not leave
+    a hole in the vocab. Construction:
+
+      initial vocab: a=0, b=1, c=2, ab=3, bc=4
+      chunks:
+        ("ab", "c"): 10  →  pair (3, 2) merges to "abc"
+        ("a", "bc"): 10  →  pair (0, 4) merges to "abc" (same string)
+
+    The greedy loop picks one pair, allocates id 5 for "abc", then picks the
+    other and would re-allocate id 6 for the same string — leaving id 5 with
+    no surviving token in get_vocab()'s output dict.
+    """
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3, "bc": 4}
+    chunks = {("ab", "c"): 10, ("a", "bc"): 10}
+
+    engine = BpeEngine()
+    engine.set_num_threads(1)
+    engine.feed(chunks, vocab)
+    # target=7 keeps the loop running past the first merge so the second
+    # (colliding) pair gets popped from the heap.
+    engine.train(target_vocab_size=7)
+
+    out_vocab = engine.get_vocab()
+    assert sorted(out_vocab.values()) == list(range(len(out_vocab))), (
+        f"non-contiguous IDs: missing "
+        f"{sorted(set(range(len(out_vocab))) - set(out_vocab.values()))}"
+    )
+    assert "abc" in out_vocab
+    # Vocab grew by exactly one slot (the colliding merge reused the existing id).
+    assert len(out_vocab) == 6
+
+
+def test_bpe_colliding_merge_strings_both_merges_recorded():
+    """Both colliding merge entries are retained in the merge log, so HF can
+    apply them in order at inference time (the second one resolves to the
+    already-existing token id)."""
+    vocab = {"a": 0, "b": 1, "c": 2, "ab": 3, "bc": 4}
+    chunks = {("ab", "c"): 10, ("a", "bc"): 10}
+    engine = BpeEngine()
+    engine.set_num_threads(1)
+    engine.feed(chunks, vocab)
+    engine.train(target_vocab_size=7)
+    merges = engine.get_merges()
+    assert ("a", "bc") in merges
+    assert ("ab", "c") in merges
+
+
 def test_bpe_vocab_size_too_small_raises():
     # 256 byte alphabet + 1 special = 257 minimum.
     with pytest.raises(ValueError, match="vocab_size"):

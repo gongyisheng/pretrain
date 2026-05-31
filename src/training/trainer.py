@@ -9,23 +9,18 @@ import torch.utils.checkpoint
 from tqdm import tqdm
 
 from src.model.registry import build_model
-from src.data.dataset import PretrainDataset
+from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.logger import WandbLogger
 from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
 from src.utils.config import TrainConfig
-from src.training.loss import next_token_targets, compute_loss
+from src.training.loss import LOSS_REGISTRY, compute_loss
 from src.utils.masking_utils import (
     build_causal_attention_mask,
     build_intra_doc_attention_mask,
 )
-
-
-@torch.compile
-def _cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    return F.cross_entropy(logits, targets)
 
 
 class Trainer:
@@ -49,7 +44,11 @@ class Trainer:
         # Seed for reproducibility
         self._seed(config.training.seed)
 
-        self._loss_fn = _cross_entropy
+        if config.training.loss_fn not in LOSS_REGISTRY:
+            raise ValueError(
+                f"unknown loss_fn {config.training.loss_fn!r}; "
+                f"expected one of {sorted(LOSS_REGISTRY)}"
+            )
 
         # Tokenizer — loaded early to provide special token IDs to the dataset
         self.tokenizer = (
@@ -72,7 +71,7 @@ class Trainer:
         self.n_non_emb_params = n_params - sum(
             p.numel() for name, p in self.model.named_parameters() if "emb" in name
         )
-        # For MoE, FLOPs use active params (k experts activated) not total params.
+        # For MoE, the startup print shows active params (k experts activated) not total.
         # Replace total expert FFN params with the k-active subset in the count.
         if self.is_moe:
             mc = config.model
@@ -114,19 +113,42 @@ class Trainer:
             )
 
         # Data
-        train_path = os.path.join(config.data.data_dir, "train.bin")
-        val_path = os.path.join(config.data.data_dir, "val.bin")
-        dataset_kwargs = dict(
-            packing=config.data.packing,
-            eot_token_id=self.eot_token_id,
-            pad_token_id=self.pad_token_id,
-        )
-        self.train_dataset = PretrainDataset(
-            train_path, config.max_seq_len, config.model.vocab_size, **dataset_kwargs
-        )
-        self.val_dataset = PretrainDataset(
-            val_path, config.max_seq_len, config.model.vocab_size, **dataset_kwargs
-        )
+        if config.task == "pretrain":
+            train_path = os.path.join(config.data.data_dir, "train.bin")
+            val_path = os.path.join(config.data.data_dir, "val.bin")
+            dataset_kwargs = dict(
+                packing=config.data.packing,
+                eot_token_id=self.eot_token_id,
+                pad_token_id=self.pad_token_id,
+            )
+            self.train_dataset = PretrainDataset(
+                train_path,
+                config.max_seq_len,
+                config.model.vocab_size,
+                **dataset_kwargs,
+            )
+            self.val_dataset = PretrainDataset(
+                val_path,
+                config.max_seq_len,
+                config.model.vocab_size,
+                **dataset_kwargs,
+            )
+        elif config.task == "sft":
+            train_path = os.path.join(config.data.data_dir, "train.bin")
+            val_path = os.path.join(config.data.data_dir, "val.bin")
+            sft_kwargs = dict(
+                seq_len=config.max_seq_len,
+                vocab_size=config.model.vocab_size,
+                packing=config.data.packing,
+                eot_token_id=self.eot_token_id,
+                pad_token_id=self.pad_token_id,
+            )
+            self.train_dataset = SFTDataset(train_path, **sft_kwargs)
+            self.val_dataset = SFTDataset(val_path, **sft_kwargs)
+        else:
+            raise ValueError(
+                f"unknown task: {config.task!r}; expected 'pretrain' or 'sft'"
+            )
 
         nw = config.data.num_workers
         g = torch.Generator()
@@ -205,7 +227,7 @@ class Trainer:
                     block.forward = make_ckpt_forward(block)
 
         # Metrics
-        self.metrics = MetricsTracker(config, self.n_active_non_emb_params, self.device)
+        self.metrics = MetricsTracker(config, self.device)
 
         # Logger
         self.logger = WandbLogger(config, enabled=wandb_enabled)
@@ -278,14 +300,20 @@ class Trainer:
 
             # Prefetch first batch
             batch_cpu, train_iter = self._next_batch(train_iter)
-            input_ids_cpu, position_ids_cpu = batch_cpu[0], batch_cpu[1]
+            input_ids_cpu, position_ids_cpu, labels_cpu = (
+                batch_cpu[0],
+                batch_cpu[1],
+                batch_cpu[2],
+            )
             if prefetch_stream is not None:
                 with torch.cuda.stream(prefetch_stream):
                     input_ids = input_ids_cpu.to(self.device, non_blocking=True)
                     position_ids = position_ids_cpu.to(self.device, non_blocking=True)
+                    labels = labels_cpu.to(self.device, non_blocking=True)
             else:
                 input_ids = input_ids_cpu.to(self.device)
                 position_ids = position_ids_cpu.to(self.device)
+                labels = labels_cpu.to(self.device)
 
             for micro_step in range(cfg.gradient_accumulation_steps):
                 # Wait for current batch transfer to complete
@@ -300,13 +328,15 @@ class Trainer:
                     # and biases the gradient (worst case: ~+0.6 nats val gap).
                     input_ids.record_stream(torch.cuda.current_stream())
                     position_ids.record_stream(torch.cuda.current_stream())
+                    labels.record_stream(torch.cuda.current_stream())
 
                 # Start prefetching next batch while computing
                 if micro_step < cfg.gradient_accumulation_steps - 1:
                     next_batch_cpu, train_iter = self._next_batch(train_iter)
-                    next_input_ids_cpu, next_position_ids_cpu = (
+                    next_input_ids_cpu, next_position_ids_cpu, next_labels_cpu = (
                         next_batch_cpu[0],
                         next_batch_cpu[1],
+                        next_batch_cpu[2],
                     )
                     if prefetch_stream is not None:
                         with torch.cuda.stream(prefetch_stream):
@@ -316,18 +346,17 @@ class Trainer:
                             next_position_ids = next_position_ids_cpu.to(
                                 self.device, non_blocking=True
                             )
+                            next_labels = next_labels_cpu.to(
+                                self.device, non_blocking=True
+                            )
                     else:
                         next_input_ids = next_input_ids_cpu.to(self.device)
                         next_position_ids = next_position_ids_cpu.to(self.device)
+                        next_labels = next_labels_cpu.to(self.device)
 
                 with torch.amp.autocast(
                     self.device, dtype=self.amp_dtype, enabled=self.use_amp
                 ):
-                    x, y = next_token_targets(input_ids)
-                    # packing=False: position_ids < 0 marks padding — derive loss mask
-                    loss_mask = (
-                        None if self.config.data.packing else (position_ids >= 0)
-                    )
                     if self.config.training.intra_doc_masking:
                         mask_dtype = self.amp_dtype if self.use_amp else torch.float32
                         attn_mask = build_intra_doc_attention_mask(
@@ -345,20 +374,29 @@ class Trainer:
                             attn_implementation=self.config.model.attn_implementation,
                         )
                     logits, aux_loss = self.model(
-                        x, position_ids=position_ids, attn_mask=attn_mask
+                        input_ids, position_ids=position_ids, attn_mask=attn_mask
                     )
-                    loss = compute_loss(logits, y, loss_mask, self._loss_fn)
+                    loss = compute_loss(
+                        logits,
+                        labels,
+                        self.config.training.loss_fn,
+                        label_smoothing=self.config.training.label_smoothing,
+                    )
                     if aux_loss is not None:
                         loss = loss + self.config.model.moe_aux_loss_coef * aux_loss
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
                 accum_loss_tensor += loss.detach()
-                tokens_since_log += x.numel()
+                tokens_since_log += input_ids.numel()
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
-                    input_ids, position_ids = next_input_ids, next_position_ids
+                    input_ids, position_ids, labels = (
+                        next_input_ids,
+                        next_position_ids,
+                        next_labels,
+                    )
 
             # Gradient clipping
             self.scaler.unscale_(self.optimizer)
@@ -369,10 +407,27 @@ class Trainer:
                 grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             )
 
+            # Optimizer step diagnostics: snapshot params before the step so
+            # we can measure ||Δθ|| after. ||Δθ|| proves Lion step is bounded
+            # regardless of ||g||; ||m|| is the first-moment EMA (AdamW + Lion);
+            # ||v|| is AdamW's second moment (None for Lion).
+            param_step_norm = None
+            momentum_norm = None
+            variance_norm = None
+            if self.config.logging.log_optimizer_step_norms:
+                param_snapshot = MetricsTracker.snapshot_params(self.model)
+
             # Optimizer step
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
+            if self.config.logging.log_optimizer_step_norms:
+                param_step_norm = MetricsTracker.compute_param_step_norm(
+                    self.model, param_snapshot
+                )
+                momentum_norm = MetricsTracker.compute_momentum_norm(self.optimizer)
+                variance_norm = MetricsTracker.compute_variance_norm(self.optimizer)
             self.metrics.on_step(
                 accum_loss,
                 self.step,
@@ -406,6 +461,9 @@ class Trainer:
                     model=self.model,
                     scaler=self.scaler,
                     aux_loss=aux_loss.item() if aux_loss is not None else None,
+                    param_step_norm=param_step_norm,
+                    momentum_norm=momentum_norm,
+                    variance_norm=variance_norm,
                 )
                 self.logger.log(log_dict, step=self.step)
                 pbar.set_postfix(
@@ -430,7 +488,9 @@ class Trainer:
 
             # Evaluation
             if self.step % cfg.eval_every == 0:
+                self.model.eval()
                 self._evaluate()
+                self.model.train()
 
             # Checkpoint
             if self.step % cfg.checkpoint_every == 0:
@@ -439,56 +499,80 @@ class Trainer:
         pbar.close()
         self.logger.finish()
 
+    def _forward_batch(self, batch):
+        """Move a (input_ids, position_ids, labels) batch to device, build the
+        attention mask, and run a forward pass under autocast. Returns
+        (logits, labels, aux_loss). Loss is left to the caller — wrap it in
+        the same autocast context to match training-time numerics."""
+        input_ids = batch[0].to(self.device)
+        position_ids = batch[1].to(self.device)
+        labels = batch[2].to(self.device)
+        with torch.amp.autocast(
+            self.device, dtype=self.amp_dtype, enabled=self.use_amp
+        ):
+            if self.config.training.intra_doc_masking:
+                mask_dtype = self.amp_dtype if self.use_amp else torch.float32
+                attn_mask = build_intra_doc_attention_mask(
+                    position_ids,
+                    self.device,
+                    mask_dtype,
+                    attn_implementation=self.config.model.attn_implementation,
+                )
+            else:
+                B, S = position_ids.shape
+                attn_mask = build_causal_attention_mask(
+                    B,
+                    S,
+                    self.device,
+                    attn_implementation=self.config.model.attn_implementation,
+                )
+            logits, aux_loss = self.model(
+                input_ids, position_ids=position_ids, attn_mask=attn_mask
+            )
+        return logits, labels, aux_loss
+
+    @staticmethod
+    def _calc_accuracy(logits, labels, eot_token_id):
+        """Count answer-token positions where argmax(logits) == labels.
+        Returns (correct, total) as python ints."""
+        preds = logits.argmax(dim=-1)
+        mask = (labels != -100) & (labels != eot_token_id)
+        correct = (preds[mask] == labels[mask]).sum().item()
+        total = int(mask.sum().item())
+        return correct, total
+
     @torch.no_grad()
     def _evaluate(self):
-        self.model.eval()
         total_loss = 0.0
         total_aux_loss = 0.0
         n_batches = 0
         bpb_tokens = 0
         bpb_bytes = 0
+        acc_correct = 0
+        acc_total = 0
 
         for i, batch in enumerate(self.val_loader):
-            if i >= self.config.training.eval_steps:
+            if (
+                self.config.training.eval_steps > 0
+                and i >= self.config.training.eval_steps
+            ):
                 break
-            input_ids = batch[0].to(self.device)
-            position_ids = batch[1].to(self.device)
+            logits, labels, aux_loss = self._forward_batch(batch)
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                x, y = next_token_targets(input_ids)
-                loss_mask = None if self.config.data.packing else (position_ids >= 0)
-                if self.config.training.intra_doc_masking:
-                    mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                    attn_mask = build_intra_doc_attention_mask(
-                        position_ids,
-                        self.device,
-                        mask_dtype,
-                        attn_implementation=self.config.model.attn_implementation,
-                    )
-                else:
-                    B, S = position_ids.shape
-                    attn_mask = build_causal_attention_mask(
-                        B,
-                        S,
-                        self.device,
-                        attn_implementation=self.config.model.attn_implementation,
-                    )
-                logits, aux_loss = self.model(
-                    x, position_ids=position_ids, attn_mask=attn_mask
-                )
-                loss = compute_loss(logits, y, loss_mask, self._loss_fn)
+                loss = compute_loss(logits, labels, self.config.training.loss_fn)
             total_loss += loss.item()
             if aux_loss is not None:
                 total_aux_loss += aux_loss.item()
-            if self.tokenizer is not None:
+            if self.config.task == "sft":
+                c, t = self._calc_accuracy(logits, labels, self.eot_token_id)
+                acc_correct += c
+                acc_total += t
+            if self.tokenizer is not None and self.config.task == "pretrain":
                 # Count loss-contributing tokens; decode them and count UTF-8 bytes.
-                # loss_mask is shape (B, S) aligned with y.
-                if loss_mask is None:
-                    target_ids = y.reshape(-1).tolist()
-                else:
-                    keep = loss_mask.reshape(-1).bool()
-                    target_ids = y.reshape(-1)[keep].tolist()
+                keep = labels.reshape(-1) != -100
+                target_ids = labels.reshape(-1)[keep].tolist()
                 bpb_tokens += len(target_ids)
                 bpb_bytes += len(
                     self.tokenizer.decode(target_ids, skip_special_tokens=True).encode(
@@ -502,28 +586,64 @@ class Trainer:
             (total_aux_loss / max(n_batches, 1)) if total_aux_loss > 0 else None
         )
         tokens_per_byte = bpb_tokens / bpb_bytes if bpb_bytes > 0 else None
+        avg_acc = (
+            (acc_correct / acc_total)
+            if (self.config.task == "sft" and acc_total > 0)
+            else None
+        )
+        train_avg_acc = None
+        if self.config.task == "sft" and self.config.training.eval_train:
+            train_avg_acc = self._evaluate_train_acc()
+
         log_dict = self.metrics.build_eval_log_dict(
             avg_loss=avg_loss,
             avg_aux_loss=avg_aux_loss,
             tokens_per_byte=tokens_per_byte,
+            avg_acc=avg_acc,
+            train_avg_acc=train_avg_acc,
         )
         self.logger.log(log_dict, step=self.step)
-        eval_msg = f"\n[eval] val_loss={avg_loss:.4f} | val_ppl={log_dict['val/perplexity']:.2f}"
+        eval_msg = f"\n[eval] val_loss={avg_loss:.4f}"
+        if "val/perplexity" in log_dict:
+            eval_msg += f" | val_ppl={log_dict['val/perplexity']:.2f}"
         if "val/bpb" in log_dict:
             eval_msg += f" | val_bpb={log_dict['val/bpb']:.4f}"
+        if "val/val_acc" in log_dict:
+            eval_msg += f" | val_acc={log_dict['val/val_acc']:.4f}"
+        if "val/train_acc" in log_dict:
+            eval_msg += f" | train_acc={log_dict['val/train_acc']:.4f}"
         if "val/aux_loss" in log_dict:
             eval_msg += f" | val_aux_loss={log_dict['val/aux_loss']:.4f}"
         print(eval_msg)
 
-        self._generate_sample()
-        self.model.train()
+        if self.config.task == "pretrain":
+            self._generate_sample()
+
+    @torch.no_grad()
+    def _evaluate_train_acc(self) -> float:
+        """Run a single pass over the train loader and return overall accuracy.
+
+        Only used in SFT mode (`config.task == "sft"`) when `training.eval_train`
+        is true. Cheap because grokking train sets are small (~3k samples).
+        Caller is responsible for setting the model to eval mode.
+        """
+        correct = 0
+        total = 0
+        for batch in self.train_loader:
+            logits, labels, _ = self._forward_batch(batch)
+            c, t = self._calc_accuracy(logits, labels, self.eot_token_id)
+            correct += c
+            total += t
+        return correct / total if total > 0 else 0.0
 
     @torch.no_grad()
     def _generate_sample(self, max_new_tokens: int = 50):
-        """Generate a short text sample for qualitative monitoring."""
+        """Generate a short text sample for qualitative monitoring.
+
+        Caller is responsible for setting the model to eval mode.
+        """
         if self.tokenizer is None:
             return
-        self.model.eval()
         # <|endoftext|> (token 0) acts as BOS, prompting the model to start a new document
         idx = torch.zeros((1, 1), dtype=torch.long, device=self.device)
         for _ in range(max_new_tokens):

@@ -227,3 +227,28 @@ data:
         "transition_size": 80000,
         "max_superword_words": 4,
     }
+
+
+# ==================== task and eval_train fields ====================
+
+
+def test_default_task_is_pretrain():
+    from src.utils.config import TrainConfig
+
+    cfg = TrainConfig()
+    assert cfg.task == "pretrain"
+
+
+def test_task_accepts_sft():
+    from src.utils.config import TrainConfig
+
+    cfg = TrainConfig()
+    cfg.task = "sft"
+    assert cfg.task == "sft"
+
+
+def test_default_eval_train_is_false():
+    from src.utils.config import TrainingConfig
+
+    cfg = TrainingConfig()
+    assert cfg.eval_train is False
