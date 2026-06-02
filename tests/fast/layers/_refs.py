@@ -73,6 +73,27 @@ def silu_ref(x: torch.Tensor) -> torch.Tensor:
     return x * torch.sigmoid(x)
 
 
+def leaky_relu_ref(x: torch.Tensor) -> torch.Tensor:
+    """leaky_relu(x, 0.01) = x if x > 0 else 0.01 * x."""
+    return torch.where(x > 0, x, 0.01 * x)
+
+
+def relu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return relu_ref(x) ** 2
+
+
+def gelu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return gelu_ref(x) ** 2
+
+
+def silu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return silu_ref(x) ** 2
+
+
+def leaky_relu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return leaky_relu_ref(x) ** 2
+
+
 # --- Gated (GLU family): (gate, up) → act(gate) * up ---
 
 
@@ -88,11 +109,75 @@ def silu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return silu_ref(gate) * up
 
 
-UNGATED_ACTIVATIONS_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref}
+def leaky_relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return leaky_relu_ref(gate) * up
+
+
+def relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return (relu_ref(gate) ** 2) * up
+
+
+def gelu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return (gelu_ref(gate) ** 2) * up
+
+
+def silu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return (silu_ref(gate) ** 2) * up
+
+
+def leaky_relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return (leaky_relu_ref(gate) ** 2) * up
+
+
+def bilinear_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Bilinear GLU: gate * up (no unary activation). From Shazeer 2020."""
+    return gate * up
+
+
+def bilinear2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Squared Bilinear GLU: gate² * up (squared identity activation on gate)."""
+    return (gate**2) * up
+
+
+def powlu_ref(x: torch.Tensor) -> torch.Tensor:
+    """PowLU helper (unary part of the gated activation). arXiv:2605.25704, m=3.
+    Pos branch: x · x^(m/(sqrt(x)+1)) · sigmoid(x).
+    Neg branch: x² · sigmoid(x)  (equals x · silu(x))."""
+    m = 3.0
+    safe_x = torch.where(x > 0, x, torch.ones_like(x))
+    exponent = m / (torch.sqrt(safe_x) + 1.0)
+    pos = x * (safe_x**exponent) * torch.sigmoid(x)
+    neg = x * x * torch.sigmoid(x)
+    return torch.where(x > 0, pos, neg)
+
+
+def powlu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """PowLU GLU: powlu(gate) * up. The gated form from arXiv:2605.25704."""
+    return powlu_ref(gate) * up
+
+
+UNGATED_ACTIVATIONS_REFS = {
+    "relu": relu_ref,
+    "gelu": gelu_ref,
+    "silu": silu_ref,
+    "leaky_relu": leaky_relu_ref,
+    "relu2": relu2_ref,
+    "gelu2": gelu2_ref,
+    "silu2": silu2_ref,
+    "leaky_relu2": leaky_relu2_ref,
+}
 GATED_ACTIVATIONS_REFS = {
     "relu": relu_glu_ref,
     "gelu": gelu_glu_ref,
     "silu": silu_glu_ref,
+    "leaky_relu": leaky_relu_glu_ref,
+    "relu2": relu2_glu_ref,
+    "gelu2": gelu2_glu_ref,
+    "silu2": silu2_glu_ref,
+    "leaky_relu2": leaky_relu2_glu_ref,
+    "bilinear": bilinear_ref,
+    "bilinear2": bilinear2_ref,
+    "powlu": powlu_glu_ref,
 }
 
 
