@@ -1,6 +1,6 @@
+import math
 import os
 import random
-import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -12,11 +12,11 @@ from src.model.registry import build_model
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
 from src.training.optimizer import build_optimizer, build_scheduler
-from src.training.logger import WandbLogger
-from src.training.debug import SpikeDebugger
 from src.training.metrics import MetricsTracker
-from src.utils.config import TrainConfig
 from src.training.loss import LOSS_REGISTRY, compute_loss
+from src.utils.config import TrainConfig
+from src.utils.metric_utils import count_correct
+from src.utils.tracking_utils import WandbLogger
 from src.utils.masking_utils import (
     build_causal_attention_mask,
     build_intra_doc_attention_mask,
@@ -67,50 +67,6 @@ class Trainer:
         # Model
         self.model = build_model(config).to(self.device)
         self.is_moe = config.model.arch == "qwen3_moe"
-        n_params = sum(p.numel() for p in self.model.parameters())
-        self.n_non_emb_params = n_params - sum(
-            p.numel() for name, p in self.model.named_parameters() if "emb" in name
-        )
-        # For MoE, the startup print shows active params (k experts activated) not total.
-        # Replace total expert FFN params with the k-active subset in the count.
-        if self.is_moe:
-            mc = config.model
-            expert_ffn_per_layer = (
-                mc.moe_n_experts * 3 * mc.moe_intermediate_size * mc.d_model
-            )
-            active_ffn_per_layer = (
-                mc.moe_n_experts_per_token * 3 * mc.moe_intermediate_size * mc.d_model
-            )
-            if mc.mlp_bias:
-                expert_ffn_per_layer += mc.moe_n_experts * (
-                    2 * mc.moe_intermediate_size + mc.d_model
-                )
-                active_ffn_per_layer += mc.moe_n_experts_per_token * (
-                    2 * mc.moe_intermediate_size + mc.d_model
-                )
-            self.n_active_non_emb_params = (
-                self.n_non_emb_params
-                - mc.n_layers * expert_ffn_per_layer
-                + mc.n_layers * active_ffn_per_layer
-            )
-        else:
-            self.n_active_non_emb_params = self.n_non_emb_params
-        self.tokens_per_step = (
-            config.training.batch_size
-            * config.training.gradient_accumulation_steps
-            * config.max_seq_len
-        )
-        self.total_tokens = 0
-        if self.is_moe:
-            print(
-                f"Model: {config.model.arch} | {n_params / 1e6:.1f}M total params "
-                f"({self.n_active_non_emb_params / 1e6:.1f}M active non-embedding) | device={self.device}"
-            )
-        else:
-            print(
-                f"Model: {config.model.arch} | {n_params / 1e6:.1f}M params "
-                f"({self.n_non_emb_params / 1e6:.1f}M non-embedding) | device={self.device}"
-            )
 
         # Data
         if config.task == "pretrain":
@@ -150,17 +106,17 @@ class Trainer:
                 f"unknown task: {config.task!r}; expected 'pretrain' or 'sft'"
             )
 
-        nw = config.data.num_workers
+        n_worker = config.data.num_workers
         g = torch.Generator()
         g.manual_seed(config.training.seed)
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=config.training.batch_size,
             shuffle=True,
-            num_workers=nw,
+            num_workers=n_worker,
             pin_memory=True,
-            persistent_workers=nw > 0,
-            prefetch_factor=1 if nw > 0 else None,
+            persistent_workers=n_worker > 0,
+            prefetch_factor=1 if n_worker > 0 else None,
             generator=g,
             worker_init_fn=Trainer._worker_init_fn,
         )
@@ -168,10 +124,10 @@ class Trainer:
             self.val_dataset,
             batch_size=config.training.batch_size,
             shuffle=False,
-            num_workers=nw,
+            num_workers=n_worker,
             pin_memory=True,
-            persistent_workers=nw > 0,
-            prefetch_factor=1 if nw > 0 else None,
+            persistent_workers=n_worker > 0,
+            prefetch_factor=1 if n_worker > 0 else None,
             generator=g,
             worker_init_fn=Trainer._worker_init_fn,
         )
@@ -226,16 +182,10 @@ class Trainer:
 
                     block.forward = make_ckpt_forward(block)
 
-        # Metrics
-        self.metrics = MetricsTracker(config, self.device)
-
-        # Logger
+        # Metrics and Logging
         self.logger = WandbLogger(config, enabled=wandb_enabled)
-
-        # Debug
-        self.spike_debugger = SpikeDebugger(
-            config.debug.spike, config.training.checkpoint_dir
-        )
+        self.metrics = MetricsTracker(config, self.device, logger=self.logger)
+        self.metrics.print_model_summary(self.model)
 
         # Checkpoint dir
         os.makedirs(config.training.checkpoint_dir, exist_ok=True)
@@ -270,8 +220,7 @@ class Trainer:
 
         train_iter = iter(self.train_loader)
         accum_loss = 0.0
-        t_last_log = time.time()
-        tokens_since_log = 0
+        self.metrics.train_begin()
 
         # Data prefetch stream for overlapping H2D transfer with compute
         prefetch_stream = torch.cuda.Stream() if self.device == "cuda" else None
@@ -388,7 +337,6 @@ class Trainer:
 
                 self.scaler.scale(loss).backward()
                 accum_loss_tensor += loss.detach()
-                tokens_since_log += input_ids.numel()
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
@@ -398,7 +346,6 @@ class Trainer:
                         next_labels,
                     )
 
-            # Gradient clipping
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), cfg.grad_clip
@@ -407,35 +354,23 @@ class Trainer:
                 grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             )
 
-            # Optimizer step diagnostics: snapshot params before the step so
-            # we can measure ||Δθ|| after. ||Δθ|| proves Lion step is bounded
-            # regardless of ||g||; ||m|| is the first-moment EMA (AdamW + Lion);
-            # ||v|| is AdamW's second moment (None for Lion).
-            param_step_norm = None
-            momentum_norm = None
-            variance_norm = None
-            if self.config.logging.log_optimizer_step_norms:
-                param_snapshot = MetricsTracker.snapshot_params(self.model)
+            if not math.isfinite(accum_loss):
+                raise RuntimeError(
+                    f"Loss is {accum_loss} at step {self.step}, stopping training"
+                )
 
-            # Optimizer step
+            self.metrics.snapshot_pre_step(self.model, self.step)
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
-
-            if self.config.logging.log_optimizer_step_norms:
-                param_step_norm = MetricsTracker.compute_param_step_norm(
-                    self.model, param_snapshot
-                )
-                momentum_norm = MetricsTracker.compute_momentum_norm(self.optimizer)
-                variance_norm = MetricsTracker.compute_variance_norm(self.optimizer)
             self.metrics.on_step(
-                accum_loss,
-                self.step,
-                grad_norm_val,
-                cfg.grad_clip,
-                self.scaler.is_enabled(),
-                scale_before,
-                self.scaler.get_scale(),
+                loss=accum_loss,
+                grad_norm=grad_norm_val,
+                model=self.model,
+                optimizer=self.optimizer,
+                scaler=self.scaler,
+                scale_before=scale_before,
+                aux_loss=aux_loss,
             )
             self.scheduler.step()
 
@@ -443,47 +378,18 @@ class Trainer:
             prev_loss_tensor = accum_loss_tensor
 
             self.step += 1
-            self.total_tokens += self.tokens_per_step
             pbar.update(1)
 
-            # Logging (uses accum_loss from *previous* step — 1-step delay, no impact on training)
-            if self.step % self.config.logging.log_every == 0:
-                elapsed = time.time() - t_last_log
-                tokens_per_sec = tokens_since_log / elapsed if elapsed > 0 else 0
-                lr = self.optimizer.param_groups[0]["lr"]
-                log_dict = self.metrics.build_train_log_dict(
-                    loss=accum_loss,
-                    total_tokens=self.total_tokens,
-                    lr=lr,
-                    grad_norm=grad_norm_val,
-                    tokens_per_sec=tokens_per_sec,
-                    elapsed=elapsed,
-                    model=self.model,
-                    scaler=self.scaler,
-                    aux_loss=aux_loss.item() if aux_loss is not None else None,
-                    param_step_norm=param_step_norm,
-                    momentum_norm=momentum_norm,
-                    variance_norm=variance_norm,
-                )
-                self.logger.log(log_dict, step=self.step)
+            log_dict = self.metrics.log_train(
+                step=self.step,
+                model=self.model,
+                optimizer=self.optimizer,
+            )
+            if log_dict is not None:
                 pbar.set_postfix(
-                    loss=f"{accum_loss:.4f}",
-                    lr=f"{lr:.2e}",
-                    tok_s=f"{tokens_per_sec:.0f}",
-                )
-                t_last_log = time.time()
-                tokens_since_log = 0
-
-            # Debug: spike detection
-            if self.config.debug.spike.enabled:
-                self.spike_debugger.on_step(
-                    grad_norm,
-                    self.step,
-                    self.model,
-                    save_checkpoint_fn=lambda extra=None: self._save_checkpoint(
-                        suffix="spike", extra=extra
-                    ),
-                    clip_value=cfg.grad_clip,
+                    loss=f"{log_dict['train/loss']:.4f}",
+                    lr=f"{log_dict['optim/lr']:.2e}",
+                    tok_s=f"{log_dict['perf/tokens_per_sec']:.0f}",
                 )
 
             # Evaluation
@@ -531,26 +437,9 @@ class Trainer:
             )
         return logits, labels, aux_loss
 
-    @staticmethod
-    def _calc_accuracy(logits, labels, eot_token_id):
-        """Count answer-token positions where argmax(logits) == labels.
-        Returns (correct, total) as python ints."""
-        preds = logits.argmax(dim=-1)
-        mask = (labels != -100) & (labels != eot_token_id)
-        correct = (preds[mask] == labels[mask]).sum().item()
-        total = int(mask.sum().item())
-        return correct, total
-
     @torch.no_grad()
     def _evaluate(self):
-        total_loss = 0.0
-        total_aux_loss = 0.0
-        n_batches = 0
-        bpb_tokens = 0
-        bpb_bytes = 0
-        acc_correct = 0
-        acc_total = 0
-
+        self.metrics.eval_begin()
         for i, batch in enumerate(self.val_loader):
             if (
                 self.config.training.eval_steps > 0
@@ -562,59 +451,21 @@ class Trainer:
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
                 loss = compute_loss(logits, labels, self.config.training.loss_fn)
-            total_loss += loss.item()
-            if aux_loss is not None:
-                total_aux_loss += aux_loss.item()
-            if self.config.task == "sft":
-                c, t = self._calc_accuracy(logits, labels, self.eot_token_id)
-                acc_correct += c
-                acc_total += t
-            if self.tokenizer is not None and self.config.task == "pretrain":
-                # Count loss-contributing tokens; decode them and count UTF-8 bytes.
-                keep = labels.reshape(-1) != -100
-                target_ids = labels.reshape(-1)[keep].tolist()
-                bpb_tokens += len(target_ids)
-                bpb_bytes += len(
-                    self.tokenizer.decode(target_ids, skip_special_tokens=True).encode(
-                        "utf-8"
-                    )
-                )
-            n_batches += 1
+            self.metrics.eval_step(
+                loss=loss.item(),
+                logits=logits,
+                labels=labels,
+                aux_loss=aux_loss.item() if aux_loss is not None else None,
+                tokenizer=self.tokenizer,
+                eot_token_id=self.eot_token_id,
+            )
 
-        avg_loss = total_loss / max(n_batches, 1)
-        avg_aux_loss = (
-            (total_aux_loss / max(n_batches, 1)) if total_aux_loss > 0 else None
-        )
-        tokens_per_byte = bpb_tokens / bpb_bytes if bpb_bytes > 0 else None
-        avg_acc = (
-            (acc_correct / acc_total)
-            if (self.config.task == "sft" and acc_total > 0)
-            else None
-        )
         train_avg_acc = None
         if self.config.task == "sft" and self.config.training.eval_train:
             train_avg_acc = self._evaluate_train_acc()
 
-        log_dict = self.metrics.build_eval_log_dict(
-            avg_loss=avg_loss,
-            avg_aux_loss=avg_aux_loss,
-            tokens_per_byte=tokens_per_byte,
-            avg_acc=avg_acc,
-            train_avg_acc=train_avg_acc,
-        )
-        self.logger.log(log_dict, step=self.step)
-        eval_msg = f"\n[eval] val_loss={avg_loss:.4f}"
-        if "val/perplexity" in log_dict:
-            eval_msg += f" | val_ppl={log_dict['val/perplexity']:.2f}"
-        if "val/bpb" in log_dict:
-            eval_msg += f" | val_bpb={log_dict['val/bpb']:.4f}"
-        if "val/val_acc" in log_dict:
-            eval_msg += f" | val_acc={log_dict['val/val_acc']:.4f}"
-        if "val/train_acc" in log_dict:
-            eval_msg += f" | train_acc={log_dict['val/train_acc']:.4f}"
-        if "val/aux_loss" in log_dict:
-            eval_msg += f" | val_aux_loss={log_dict['val/aux_loss']:.4f}"
-        print(eval_msg)
+        # Assembly + dispatch + the printed summary line all live in MetricsTracker.
+        self.metrics.log_eval(step=self.step, train_avg_acc=train_avg_acc)
 
         if self.config.task == "pretrain":
             self._generate_sample()
@@ -631,9 +482,11 @@ class Trainer:
         total = 0
         for batch in self.train_loader:
             logits, labels, _ = self._forward_batch(batch)
-            c, t = self._calc_accuracy(logits, labels, self.eot_token_id)
-            correct += c
-            total += t
+            _correct, _total = count_correct(
+                logits, labels, exclude_id=self.eot_token_id
+            )
+            correct += _correct
+            total += _total
         return correct / total if total > 0 else 0.0
 
     @torch.no_grad()
@@ -668,8 +521,8 @@ class Trainer:
         generated_text = self.tokenizer.decode(token_ids)
         self.logger.log_text("val-sample/generations", generated_text, step=self.step)
 
-    def _save_checkpoint(self, suffix: str = "", extra: dict = None):
-        name = f"step_{self.step}_{suffix}.pt" if suffix else f"step_{self.step}.pt"
+    def _save_checkpoint(self):
+        name = f"step_{self.step}.pt"
         path = os.path.join(self.config.training.checkpoint_dir, name)
         checkpoint = {
             "model": self.model.state_dict(),
@@ -677,7 +530,7 @@ class Trainer:
             "scheduler": self.scheduler.state_dict(),
             "grad_scaler": self.scaler.state_dict(),
             "step": self.step,
-            "total_tokens": self.total_tokens,
+            "total_tokens": self.metrics.total_tokens,
             "config": self.config.to_dict(),
             "rng_states": {
                 "python": random.getstate(),
@@ -688,8 +541,6 @@ class Trainer:
                 else None,
             },
         }
-        if extra:
-            checkpoint.update(extra)
         torch.save(checkpoint, path)
         print(f"[ckpt] saved to {path}")
         return path
@@ -702,10 +553,8 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.scaler.load_state_dict(checkpoint["grad_scaler"])
         self.step = checkpoint["step"]
-        # Prefer the saved token count so resumes with a different batch_size or ga
-        # don't silently corrupt the running total. Fall back for old checkpoints.
-        self.total_tokens = checkpoint.get(
-            "total_tokens", self.step * self.tokens_per_step
+        self.metrics.total_tokens = checkpoint.get(
+            "total_tokens", self.step * self.metrics.tokens_per_step
         )
 
         rng = checkpoint.get("rng_states", {})
