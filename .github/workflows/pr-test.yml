@@ -58,16 +58,18 @@ jobs:
             //   src/data      -> tests/fast/data
             //   src/layers    -> tests/fast/layers
             //   src/model     -> tests/fast/model
-            //   src/training  -> tests/fast/training + tests/e2e
             //   src/utils     -> tests/fast/utils
+            // has_training (tests/fast/training + tests/e2e) is the integration
+            // catch-all: any src/ change runs it, since the end-to-end training
+            // path can break from a change anywhere in the stack.
             const has_data = matchAny([/^src\/data\//]);
             const has_layers = matchAny([/^src\/layers\//]);
             const has_model = matchAny([/^src\/model\//]);
+            const has_utils = matchAny([/^src\/utils\//]);
             const has_training = matchAny([
-              /^src\/training\//,
+              /^src\//,
               /^scripts\/train\.py$/,
             ]);
-            const has_utils = matchAny([/^src\/utils\//]);
 
             core.setOutput('has_data', String(has_data));
             core.setOutput('has_layers', String(has_layers));
