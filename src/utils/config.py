@@ -123,23 +123,11 @@ class LoggingConfig:
     wandb_group: str = ""  # group name for comparing runs in W&B (e.g. "dtype-sweep")
     log_every: int = 10
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
-    log_optimizer_step_norms: bool = (
-        True  # log ||Δθ|| and ||m||; opt-in (extra 1x param memory)
-    )
-
-
-@dataclass
-class SpikeConfig:
-    enabled: bool = False
-    grad_norm_threshold: float = (
-        0.0  # save a full checkpoint when grad_norm exceeds this
-    )
-    max_checkpoints: int = 10  # keep only top-N spikes by grad norm
+    log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
 
 
 @dataclass
 class DebugConfig:
-    spike: SpikeConfig = field(default_factory=SpikeConfig)
     max_steps: int = 0  # if > 0, stop training at this step (overrides training.max_steps without affecting the LR schedule)
 
 
@@ -235,9 +223,6 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         ),
         logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
         debug=DebugConfig(
-            spike=SpikeConfig(
-                **_coerce_types(SpikeConfig, raw.get("debug", {}).get("spike", {}))
-            ),
             max_steps=raw.get("debug", {}).get("max_steps", 0),
         ),
     )
