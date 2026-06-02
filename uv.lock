@@ -1107,6 +1107,7 @@ source = { editable = "." }
 dependencies = [
     { name = "datasets" },
     { name = "numpy" },
+    { name = "pyarrow" },
     { name = "pyyaml" },
     { name = "regex" },
     { name = "tokenizers" },
@@ -1128,6 +1129,7 @@ dev = [
 requires-dist = [
     { name = "datasets", specifier = ">=4.5" },
     { name = "numpy", specifier = ">=2.4" },
+    { name = "pyarrow", specifier = ">=17.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "regex", specifier = ">=2024.0" },
     { name = "tokenizers", specifier = ">=0.22" },

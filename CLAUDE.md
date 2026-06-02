@@ -92,3 +92,5 @@ Training duration and warmup:
 - `total_tokens` = model params x 20-40 (Chinchilla range, 30x is a good default)
 - `max_steps` = `total_tokens` / (`batch_size` x `gradient_accumulation_steps` x `max_seq_len`)
 - `warmup_steps` = 2%-5% of `max_steps`
+
+In experiment `run.sh` scripts, build sweep config lists with nested `for` loops over the swept axes (e.g., `lrs`, `wds`) appending to a `configs` array, rather than enumerating every `lr × wd` combination by hand. Keeps the grid auditable and easy to extend.

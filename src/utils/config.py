@@ -81,6 +81,8 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 16
     max_steps: int = 50000
     mixed_precision: str = "bf16"
+    loss_fn: str = "cross_entropy"
+    label_smoothing: float = 0.0  # for CE loss only
     activation_checkpointing: bool = False
     use_deterministic_algo: bool = False
     seed: int = 42
@@ -89,6 +91,9 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 100
     eval_steps: int = 25
+    eval_train: bool = (
+        False  # run eval pass over train set (logs val/train_acc for SFT)
+    )
     intra_doc_masking: bool = True
 
 
@@ -118,6 +123,9 @@ class LoggingConfig:
     wandb_group: str = ""  # group name for comparing runs in W&B (e.g. "dtype-sweep")
     log_every: int = 10
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
+    log_optimizer_step_norms: bool = (
+        True  # log ||Δθ|| and ||m||; opt-in (extra 1x param memory)
+    )
 
 
 @dataclass
@@ -137,6 +145,7 @@ class DebugConfig:
 
 @dataclass
 class TrainConfig:
+    task: str = "pretrain"  # "pretrain" | "sft"
     max_seq_len: int = 1024
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
@@ -211,6 +220,7 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         raw = yaml.safe_load(f)
 
     config = TrainConfig(
+        task=raw.get("task", "pretrain"),
         max_seq_len=raw.get("max_seq_len", 1024),
         model=ModelConfig(**_coerce_types(ModelConfig, raw.get("model", {}))),
         data=DataConfig(**_coerce_types(DataConfig, raw.get("data", {}))),
