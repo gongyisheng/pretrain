@@ -1,29 +1,31 @@
 #!/bin/bash
 # Monitor GPU utilization and email when the GPU goes idle. Intended as a cronjob.
 #
-# Idle = every GPU stays at/below UTIL_THRESHOLD across all samples (sustained,
-# so brief between-step dips during training don't trigger a false alarm).
+# Idle = every GPU stays at/below UTIL_THRESHOLD across all samples (sustained
+# over ~10 min by default, so between-step dips and checkpoint saves during
+# training don't trigger a false alarm).
 #
 # To avoid spamming on every cron tick, a state file debounces: an email is sent
 # once on the busy -> idle transition and re-armed once the GPU is busy again.
 #
 # Config via env vars (defaults in parens):
 #   GPU_IDLE_UTIL_THRESHOLD  utilization % at/below which a GPU counts as idle (5)
-#   GPU_IDLE_SAMPLES         number of samples that must all be idle (6)
-#   GPU_IDLE_INTERVAL        seconds between samples (5)
+#   GPU_IDLE_SAMPLES         number of samples that must all be idle (60)
+#   GPU_IDLE_INTERVAL        seconds between samples (10)
 #   GPU_IDLE_STATE_FILE      debounce state file (/tmp/gpu_idle_alert.state)
 #   GPU_IDLE_NOTIFY_BUSY     if "1", also email when GPU returns to busy (0)
 #
-# Cron example (check every 10 min, log output):
-#   */10 * * * * /home/yisheng/Documents/pretrain/scripts/gpu_idle_alert.sh >> /tmp/gpu_idle_alert.log 2>&1
+# Cron example (every 15 min so an idle run's ~10 min sampling window can't
+# overlap the next tick; logs output):
+#   */15 * * * * /home/yisheng/Documents/pretrain/scripts/gpu_idle_alert.sh >> /tmp/gpu_idle_alert.log 2>&1
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 UTIL_THRESHOLD=${GPU_IDLE_UTIL_THRESHOLD:-5}
-SAMPLES=${GPU_IDLE_SAMPLES:-6}
-INTERVAL=${GPU_IDLE_INTERVAL:-5}
+SAMPLES=${GPU_IDLE_SAMPLES:-60}
+INTERVAL=${GPU_IDLE_INTERVAL:-10}
 STATE_FILE=${GPU_IDLE_STATE_FILE:-/tmp/gpu_idle_alert.state}
 NOTIFY_BUSY=${GPU_IDLE_NOTIFY_BUSY:-0}
 
