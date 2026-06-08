@@ -99,14 +99,19 @@ class TrainingConfig:
 
 @dataclass
 class OptimizerConfig:
-    name: str = "adamw"
+    name: str = "adamw"  # "adamw" | "lion" | "muon"
     lr: float = 6e-4
-    lr_mult: Dict[str, float] = field(
-        default_factory=lambda: {"lm_head": 1.0}
-    )  # per-pattern LR multipliers. Keys are regexes matched against parameter names via re.search; first key (in insertion order) to match wins. Effective LR for a matched param = lr * lr_mult[key]. In tied mode `lm_head.weight is token_emb.weight`, so the param is enumerated only under `token_emb.weight` and an `lm_head` entry is a no-op.
+    lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = True
+    muon_ns_coefficients: List[float] = field(
+        default_factory=lambda: [3.4445, -4.775, 2.0315]
+    )
+    muon_ns_steps: int = 5
+    muon_adjust_lr_fn: str = "match_rms_adamw"
 
 
 @dataclass

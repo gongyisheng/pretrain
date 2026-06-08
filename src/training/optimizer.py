@@ -103,67 +103,145 @@ class LionOptimizer(torch.optim.Optimizer):
         return loss
 
 
-def build_optimizer(
-    model: torch.nn.Module, config: TrainConfig
-) -> torch.optim.Optimizer:
+def _is_muon_param(name: str, param: torch.nn.Parameter) -> bool:
+    """Muon orthogonalizes 2D hidden-layer weights. Embeddings, the output head,
+    and 1D params (norms, biases) fall back to AdamW (torch.optim.Muon is 2D-only).
+    """
+    return param.ndim == 2 and "emb" not in name and "lm_head" not in name
+
+
+class MuonAdamWOptimizer:
+    """Hybrid optimizer: Muon for 2D hidden weights, AdamW for embeddings, the
+    output head, and 1D params. Composes `torch.optim.Muon` + `torch.optim.AdamW`
+    and exposes a single optimizer-like surface (param_groups, state, step,
+    state_dict) so the scheduler, metrics, and checkpointing treat it uniformly.
+
+    Muon uses `adjust_lr_fn="match_rms_adamw"` by default, rescaling the shared
+    AdamW-tuned base lr so both subsystems run off one lr the scheduler drives.
+    """
+
+    def __init__(self, muon_groups, adamw_groups, config: TrainConfig):
+        opt = config.optimizer
+        self.muon = torch.optim.Muon(
+            muon_groups,
+            lr=opt.lr,
+            weight_decay=opt.weight_decay,
+            momentum=opt.muon_momentum,
+            nesterov=opt.muon_nesterov,
+            ns_coefficients=tuple(opt.muon_ns_coefficients),
+            eps=opt.eps,
+            ns_steps=opt.muon_ns_steps,
+            adjust_lr_fn=opt.muon_adjust_lr_fn,
+        )
+        self.adamw = AdamWOptimizer(
+            adamw_groups,
+            lr=opt.lr,
+            betas=tuple(opt.betas),
+            eps=opt.eps,
+            fused=True,
+        )
+        self._optimizers = [self.muon, self.adamw]
+
+    @property
+    def param_groups(self):
+        return self.muon.param_groups + self.adamw.param_groups
+
+    @property
+    def state(self):
+        merged = {}
+        for opt in self._optimizers:
+            merged.update(opt.state)
+        return merged
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = closure() if closure is not None else None
+        for opt in self._optimizers:
+            opt.step()
+        return loss
+
+    def zero_grad(self, set_to_none: bool = True):
+        for opt in self._optimizers:
+            opt.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self):
+        return {"muon": self.muon.state_dict(), "adamw": self.adamw.state_dict()}
+
+    def load_state_dict(self, state_dict):
+        self.muon.load_state_dict(state_dict["muon"])
+        self.adamw.load_state_dict(state_dict["adamw"])
+
+
+def build_optimizer(model: torch.nn.Module, config: TrainConfig):
     """Build optimizer with weight decay applied only to non-bias, non-layernorm params.
 
     Each key in `config.optimizer.lr_mult` is a regular expression. A parameter
     is assigned to the first pattern (in dict insertion order) that
-    `re.search`-matches its name; matched params go into their own AdamW group
-    with that multiplier. Params matching no pattern fall into the default
-    groups with `lr_mult=1.0`. Within every group, weight decay still follows
-    the standard rule (`ndim >= 2` and no `"ln"`/`"bias"` in the name → decay).
+    `re.search`-matches its name; matched params go into their own group with
+    that multiplier. Params matching no pattern fall into the default groups
+    with `lr_mult=1.0`. Within every group, weight decay still follows the
+    standard rule (`ndim >= 2` and no `"ln"`/`"bias"` in the name → decay).
+
+    For `name == "muon"`, params are additionally split on `use_muon` (2D hidden
+    weights → Muon; everything else → AdamW), so the two subsystems get disjoint
+    param groups.
 
     Tied mode: `lm_head.weight is token_emb.weight`, so the param is enumerated
     only under `token_emb.weight` — an `lm_head` pattern in `lr_mult` is a
     silent no-op.
     """
+    name = config.optimizer.name
+    split_muon = name == "muon"
     patterns = [(re.compile(k), k) for k in config.optimizer.lr_mult.keys()]
     wd = config.optimizer.weight_decay
-    groups: dict = {}  # (matched_pattern_key_or_None, is_no_decay) -> [params]
+    groups: dict = {}  # (matched_pattern_key_or_None, is_no_decay, use_muon) -> [params]
 
-    for name, param in model.named_parameters():
+    for param_name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         matched = None
         for rx, key in patterns:
-            if rx.search(name):
+            if rx.search(param_name):
                 matched = key
                 break
-        is_no_decay = param.ndim < 2 or "ln" in name or "bias" in name
-        groups.setdefault((matched, is_no_decay), []).append(param)
+        is_no_decay = param.ndim < 2 or "ln" in param_name or "bias" in param_name
+        use_muon = split_muon and _is_muon_param(param_name, param)
+        groups.setdefault((matched, is_no_decay, use_muon), []).append(param)
 
     param_groups = []
-    for (matched, is_no_decay), params in groups.items():
+    for (matched, is_no_decay, use_muon), params in groups.items():
         mult = config.optimizer.lr_mult.get(matched, 1.0) if matched else 1.0
         param_groups.append(
             {
                 "params": params,
                 "weight_decay": 0.0 if is_no_decay else wd,
                 "lr_mult": mult,
+                "use_muon": use_muon,
             }
         )
 
-    name = config.optimizer.name
     if name == "adamw":
-        optimizer = AdamWOptimizer(
+        return AdamWOptimizer(
             param_groups,
             lr=config.optimizer.lr,
             betas=tuple(config.optimizer.betas),
             eps=config.optimizer.eps,
             fused=True,
         )
-    elif name == "lion":
-        # Lion has no `eps`; the field in OptimizerConfig is ignored.
-        optimizer = LionOptimizer(
+    if name == "lion":
+        # Lion has no `eps`; the shared field is ignored.
+        return LionOptimizer(
             param_groups,
             lr=config.optimizer.lr,
             betas=tuple(config.optimizer.betas),
         )
-    else:
-        raise ValueError(f"unknown optimizer: {name!r}; expected 'adamw' or 'lion'")
-    return optimizer
+    if name == "muon":
+        muon_groups = [g for g in param_groups if g["use_muon"]]
+        adamw_groups = [g for g in param_groups if not g["use_muon"]]
+        return MuonAdamWOptimizer(muon_groups, adamw_groups, config)
+    raise ValueError(
+        f"unknown optimizer: {name!r}; expected 'adamw', 'lion', or 'muon'"
+    )
 
 
 class CosineWarmupScheduler:
