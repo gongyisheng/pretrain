@@ -55,7 +55,6 @@ def maybe_convert_to_fp8(model: nn.Module, config: TrainConfig) -> nn.Module:
             "(Hopper or Blackwell). Disable training.fp8 or run on supported hardware."
         )
 
-
     from torchao.float8 import Float8LinearConfig, convert_to_float8_training
 
     recipe = config.training.fp8_recipe
