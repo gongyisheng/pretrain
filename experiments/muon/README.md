@@ -25,7 +25,8 @@ Muon orthogonalizes each 2D weight's momentum via Newton–Schulz, equalizing th
 ## Run
 
 ```bash
-nohup bash experiments/muon/run.sh > logs/muon.log 2>&1 &
+nohup bash experiments/muon/run_57m.sh > logs/muon_57m.log 2>&1 &
+nohup bash experiments/muon/run_0.5b.sh > logs/muon_0.5b.log 2>&1 &
 ```
 
 ## Results
