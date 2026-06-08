@@ -19,4 +19,4 @@ for config in "${configs[@]}"; do
     echo ""
 done
 
-echo "=== All muon 0.5b runs complete ==="
+echo "=== All muon qwen3 0.5b runs complete ==="
