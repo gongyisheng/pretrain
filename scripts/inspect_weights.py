@@ -16,7 +16,7 @@ import torch
 PCTL_TENSOR = torch.tensor([0.01, 0.10, 0.50, 0.90, 0.99])
 PCTL_KEYS = ["p1", "p10", "p50", "p90", "p99"]
 BASIC_KEYS = ["min"] + PCTL_KEYS + ["max", "mean", "std", "rms"]
-SVD_KEYS = ["smax", "smin", "cond", "srank", "erank", "enrg90"]
+SVD_KEYS = ["smax", "smin", "srank", "erank", "enrg90"]
 
 
 def load(path: str) -> dict:
@@ -28,7 +28,9 @@ def basic_stats(t: torch.Tensor) -> dict:
     nan_mask = torch.isnan(f)
     valid = f[~nan_mask]
     nan_count = nan_mask.sum().item()
-    out = {"nans": nan_count, "numel": f.numel()}
+    shape_str = "x".join(str(d) for d in t.shape)
+    nan_flag = " !" if nan_count > 0 else ""
+    out = {"nans": nan_count, "trailing": f"{nan_count:>5} {shape_str:>11}{nan_flag}"}
     if valid.numel() == 0:
         for k in BASIC_KEYS:
             out[k] = float("nan")
@@ -47,7 +49,8 @@ def basic_stats(t: torch.Tensor) -> dict:
 def svd_stats(t: torch.Tensor) -> dict:
     s = torch.linalg.svdvals(t.float())  # descending singular values
     s = s[s > 0]
-    out = {"nans": 0, "numel": t.numel()}
+    shape_str = "x".join(str(d) for d in t.shape)
+    out = {"trailing": f"{shape_str:>11}"}
     if s.numel() == 0:
         for k in SVD_KEYS:
             out[k] = float("nan")
@@ -57,11 +60,17 @@ def svd_stats(t: torch.Tensor) -> dict:
     p = energy / total
     out["smax"] = s[0].item()
     out["smin"] = s[-1].item()
-    out["cond"] = (s[0] / s[-1]).item()
     out["srank"] = (total / energy[0]).item()                  # stable rank
     out["erank"] = torch.exp(-(p * p.log()).sum()).item()      # entropy-based effective rank
     out["enrg90"] = int((energy.cumsum(0) / total < 0.90).sum().item()) + 1
     return out
+
+
+def fmt_num(x: float) -> str:
+    a = abs(x)
+    if a != 0 and (a < 1e-1 or a >= 1e5):  # avoid long leading-zero / huge fixed strings
+        return f"{x:.2e}"
+    return f"{x:.5g}"  # 5 significant figures
 
 
 def main():
@@ -73,14 +82,18 @@ def main():
                         help="Sort by this stat or 'name' (default: name)")
     parser.add_argument("--top",  type=int, default=0,
                         help="Show only top N rows (default: 0 = all)")
+    parser.add_argument("--filter", default="",
+                        help="Keep only parameters whose name contains this substring")
     args = parser.parse_args()
 
     if args.mode == "svd":
-        keys, stat_fn = SVD_KEYS, svd_stats
-        qualifies = lambda t: t.is_floating_point() and t.ndim == 2
+        keys, stat_fn, val_fmt = SVD_KEYS, svd_stats, fmt_num  # cond/smin span many orders
+        trailing_hdr = f"{'shape':>11}"
+        qualifies = lambda name, t: t.is_floating_point() and t.ndim == 2 and not name.startswith("rope.")
     else:
-        keys, stat_fn = BASIC_KEYS, basic_stats
-        qualifies = lambda t: t.is_floating_point()
+        keys, stat_fn, val_fmt = BASIC_KEYS, basic_stats, lambda x: f"{x:.5f}"
+        trailing_hdr = f"{'nans':>5} {'shape':>11}"
+        qualifies = lambda name, t: t.is_floating_point()
     if args.sort not in keys + ["nans", "name"]:
         parser.error(f"--sort must be one of {keys + ['nans', 'name']} for mode {args.mode}")
 
@@ -91,9 +104,11 @@ def main():
 
     rows = []
     for name, tensor in model_sd.items():
-        if not isinstance(tensor, torch.Tensor) or not qualifies(tensor):
-            continue
         name = name.removeprefix("_orig_mod.")  # strip torch.compile wrapper prefix
+        if not isinstance(tensor, torch.Tensor) or not qualifies(name, tensor):
+            continue
+        if args.filter and args.filter not in name:
+            continue
         rows.append((name, stat_fn(tensor)))
 
     if args.sort == "name":
@@ -105,13 +120,12 @@ def main():
 
     print(f"\nStep: {step}  |  {len(rows)} tensors  |  mode {args.mode}  |  sorted by {args.sort}\n")
     hdr_stats = " ".join(f"{c:>9}" for c in keys)
-    hdr = f"  {'parameter':<50} {hdr_stats}  {'nans':>5}  {'numel':>8}"
+    hdr = f"  {'parameter':<50} {hdr_stats} {trailing_hdr}"
     print(hdr)
-    print("  " + "-" * (50 + len(keys) * 10 + 18))
+    print("  " + "-" * (len(hdr) - 2))
     for name, s in display:
-        nan_flag = "  !" if s["nans"] > 0 else ""
-        stat_vals = " ".join(f"{s[c]:9.5f}" for c in keys)
-        print(f"  {name:<50} {stat_vals}  {s['nans']:>5}{nan_flag}  {s['numel']:>8,}")
+        stat_vals = " ".join(f"{val_fmt(s[c]):>9}" for c in keys)
+        print(f"  {name:<50} {stat_vals} {s['trailing']}")
 
     if args.top > 0 and args.top < len(rows):
         print(f"\n  ... ({len(rows) - args.top} more rows hidden, use --top 0 to show all)")
