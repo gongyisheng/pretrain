@@ -1,11 +1,12 @@
 """Per-weight statistics for a single checkpoint.
 
 Usage:
-    python scripts/debug_weight_stats.py --ckpt <checkpoint.pt>
-    python scripts/debug_weight_stats.py --ckpt checkpoints/attn_res/gpt2_d512_l12/step_10000.pt
-    python scripts/debug_weight_stats.py --ckpt checkpoints/attn_res/gpt2_d512_l12/step_10000.pt --sort max --top 30
+    python scripts/inspect_weights.py --ckpt <checkpoint.pt>
+    python scripts/inspect_weights.py --ckpt checkpoints/grokking/qwen3_1m_sub_wd0.5_ce_fp64_lion_ls1e-5/30000.pt
+    python scripts/inspect_weights.py --ckpt checkpoints/grokking/qwen3_1m_sub_wd0.5_ce_fp64_lion_ls1e-5/40000.pt
+    python scripts/inspect_weights.py --ckpt checkpoints/grokking/qwen3_1m_sub_wd0.5_ce_fp64_lion_ls1e-5/50000.pt
 
-Outputs max / min / mean / std / p1 / p10 / p50 / p90 / p99 for every weight tensor, sortable by any stat.
+Outputs max / min / mean / std / rms / p1 / p10 / p50 / p90 / p99 for every weight tensor, sortable by any stat.
 """
 import argparse
 import torch
@@ -13,7 +14,7 @@ import torch
 
 PCTL_TENSOR = torch.tensor([0.01, 0.10, 0.50, 0.90, 0.99])
 PCTL_KEYS = ["p1", "p10", "p50", "p90", "p99"]
-STAT_KEYS = ["min"] + PCTL_KEYS + ["max", "mean", "std"]
+STAT_KEYS = ["min"] + PCTL_KEYS + ["max", "mean", "std", "rms"]
 
 
 def load(path: str) -> dict:
@@ -34,6 +35,7 @@ def tensor_stats(t: torch.Tensor) -> dict:
     out["min"] = valid.min().item()
     out["mean"] = valid.mean().item()
     out["std"] = valid.std().item()
+    out["rms"] = valid.pow(2).mean().sqrt().item()
     q = torch.quantile(valid, PCTL_TENSOR.to(valid.dtype))
     for k, v in zip(PCTL_KEYS, q.tolist()):
         out[k] = v

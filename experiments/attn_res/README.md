@@ -69,7 +69,7 @@ python scripts/train.py --config experiments/attn_res/qwen3_d512_l12.yaml \
     --debug.spike.grad_norm_threshold=5.0
 
 # Inspect per-weight stats of a checkpoint
-python scripts/debug_weight_stats.py --ckpt checkpoints/attn_res/qwen3_d512_l4/step_10000.pt
+python scripts/inspect_weights.py --ckpt checkpoints/attn_res/qwen3_d512_l4/step_10000.pt
 
 # Inspect optimizer state (grad_norm, noise, snr, eff_step) of a checkpoint
 python scripts/debug_optim.py --ckpt checkpoints/attn_res/qwen3_d512_l4/step_10000.pt
