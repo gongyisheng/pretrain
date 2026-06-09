@@ -48,6 +48,6 @@ scheduler:
   min_lr: 5e-5
 
 logging:
-  wandb_project: "pretrain-muon"
+  wandb_project: "pretrain-muon-optm"
   wandb_run_name: "qwen3-57m-muon"
   log_every: 10
