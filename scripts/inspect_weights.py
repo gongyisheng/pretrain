@@ -4,19 +4,21 @@ Usage:
     uv run python scripts/inspect_weights.py --ckpt <checkpoint.pt>
     uv run python scripts/inspect_weights.py --ckpt <checkpoint.pt> --mode svd --sort srank
     uv run python scripts/inspect_weights.py --ckpt checkpoints/grokking/qwen3_1m_sub_wd0.5_ce_fp64_lion_ls1e-5/step_30000.pt
+    uv run python scripts/inspect_weights.py --ckpt checkpoints/gqa/qwen3_57m_kv8/step_5000.pt --mode svd
 
 Modes:
     basic  max / min / mean / std / rms / p1 / p10 / p50 / p90 / p99 for every float tensor.
     svd    smax / smin / cond / srank / erank / enrg90 for every 2D float tensor.
 """
 import argparse
+import math
 import torch
 
 
 PCTL_TENSOR = torch.tensor([0.01, 0.10, 0.50, 0.90, 0.99])
 PCTL_KEYS = ["p1", "p10", "p50", "p90", "p99"]
 BASIC_KEYS = ["min"] + PCTL_KEYS + ["max", "mean", "std", "rms"]
-SVD_KEYS = ["smax", "smin", "srank", "erank", "enrg90"]
+SVD_KEYS = ["smax", "smin", "srank", "erank", "enrg90", "entropy"]
 
 
 def load(path: str) -> dict:
@@ -60,9 +62,12 @@ def svd_stats(t: torch.Tensor) -> dict:
     p = energy / total
     out["smax"] = s[0].item()
     out["smin"] = s[-1].item()
+    entropy = -(p * p.log()).sum()                             # Shannon entropy of σ² spectrum (nats)
+    n = s.numel()
     out["srank"] = (total / energy[0]).item()                  # stable rank
-    out["erank"] = torch.exp(-(p * p.log()).sum()).item()      # entropy-based effective rank
+    out["erank"] = torch.exp(entropy).item()                   # entropy-based effective rank = exp(entropy)
     out["enrg90"] = int((energy.cumsum(0) / total < 0.90).sum().item()) + 1
+    out["entropy"] = (entropy.item() / math.log(n)) if n > 1 else 0.0  # normalized to [0,1]
     return out
 
 
