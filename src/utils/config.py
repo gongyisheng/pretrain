@@ -130,7 +130,7 @@ class LoggingConfig:
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
     log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
     log_optimizer_svd_metrics: bool = (
-        False  # log per-2D-weight srank/pr (costly: SVD per weight)
+        True  # log per-2D-weight srank/pr; costly, SVD per weight
     )
 
 
