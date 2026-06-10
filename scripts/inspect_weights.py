@@ -8,7 +8,7 @@ Usage:
 
 Modes:
     basic  max / min / mean / std / rms / p1 / p10 / p50 / p90 / p99 for every float tensor.
-    svd    smax / smin / cond / srank / erank / enrg90 for every 2D float tensor.
+    svd    smax / smin / srank / pr / erank / enrg90 for every 2D float tensor.
 """
 import argparse
 import math
@@ -18,7 +18,7 @@ import torch
 PCTL_TENSOR = torch.tensor([0.01, 0.10, 0.50, 0.90, 0.99])
 PCTL_KEYS = ["p1", "p10", "p50", "p90", "p99"]
 BASIC_KEYS = ["min"] + PCTL_KEYS + ["max", "mean", "std", "rms"]
-SVD_KEYS = ["smax", "smin", "srank", "erank", "enrg90", "entropy"]
+SVD_KEYS = ["smax", "smin", "srank", "pr", "erank", "enrg90", "entropy"]
 
 
 def load(path: str) -> dict:
@@ -64,7 +64,8 @@ def svd_stats(t: torch.Tensor) -> dict:
     out["smin"] = s[-1].item()
     entropy = -(p * p.log()).sum()                             # Shannon entropy of σ² spectrum (nats)
     n = s.numel()
-    out["srank"] = (total / energy[0]).item()                  # stable rank
+    out["srank"] = (total / energy[0]).item()                  # stable rank (top-heavy, rank-1 canary)
+    out["pr"] = (total.pow(2) / energy.pow(2).sum()).item()    # participation ratio = (Σσ²)²/Σσ⁴ (bulk effective dim)
     out["erank"] = torch.exp(entropy).item()                   # entropy-based effective rank = exp(entropy)
     out["enrg90"] = int((energy.cumsum(0) / total < 0.90).sum().item()) + 1
     out["entropy"] = (entropy.item() / math.log(n)) if n > 1 else 0.0  # normalized to [0,1]

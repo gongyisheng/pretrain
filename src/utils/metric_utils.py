@@ -41,27 +41,23 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """srank / erank / enrg90 / svd_entropy of a 2D weight's σ² spectrum.
+    """srank / pr of a 2D weight's σ² spectrum, both effective-rank measures.
 
-    srank = stable rank (‖W‖_F² / σ_max²), erank = exp(Shannon entropy of the
-    σ² distribution), enrg90 = #singular values to reach 90% energy,
-    svd_entropy = that entropy normalized to [0,1]. Mirrors svd_stats in
-    scripts/inspect_weights.py.
+    srank = stable rank (‖W‖_F² / σ_max²), top-heavy — a rank-1 collapse canary.
+    pr = participation ratio ((Σσ²)² / Σσ⁴ = 1/Σpᵢ²), the bulk effective
+    dimension; squaring suppresses the noise floor for a cleaner collapse trend.
+
+    srank for monitoring rank-1 collapse
+    pr for monitoring graded collapse
     """
     s = torch.linalg.svdvals(weight.float())
     s = s[s > 0]
     if s.numel() == 0:
-        return {"srank": 0.0, "erank": 0.0, "enrg90": 0.0, "svd_entropy": 0.0}
+        return {"srank": 0.0, "pr": 0.0}
     energy = s.pow(2)
-    total = energy.sum()
-    p = energy / total
-    entropy = -(p * p.log()).sum()
-    n = s.numel()
     return {
-        "srank": (total / energy[0]).item(),
-        "erank": torch.exp(entropy).item(),
-        "enrg90": float(int((energy.cumsum(0) / total < 0.90).sum().item()) + 1),
-        "svd_entropy": (entropy.item() / math.log(n)) if n > 1 else 0.0,
+        "srank": (energy.sum() / energy[0]).item(),
+        "pr": (energy.sum().pow(2) / energy.pow(2).sum()).item(),
     }
 
 

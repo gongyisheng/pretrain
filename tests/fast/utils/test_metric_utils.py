@@ -273,34 +273,27 @@ def _expected_svd_keys(model: torch.nn.Module) -> set[str]:
 
 
 def test_svd_metrics_orthogonal_is_full_rank():
-    """Orthogonal matrix: all σ equal → srank=erank=n, svd_entropy=1."""
+    """Orthogonal matrix: all σ equal → srank=pr=n."""
     torch.manual_seed(0)
     q, _ = torch.linalg.qr(torch.randn(8, 8))  # σ all == 1
     m = metric_utils._svd_metrics(q)
     assert m["srank"] == pytest.approx(8.0, rel=1e-4)
-    assert m["erank"] == pytest.approx(8.0, rel=1e-4)
-    assert m["svd_entropy"] == pytest.approx(1.0, rel=1e-4)
-    # equal energy 1/8 each: 7 partial sums < 0.9, +1 → 8
-    assert m["enrg90"] == 8.0
+    assert m["pr"] == pytest.approx(8.0, rel=1e-4)
 
 
 def test_svd_metrics_rank_one_is_minimal():
-    """Rank-1 matrix: one σ dominates → srank≈erank≈1, enrg90=1."""
+    """Rank-1 matrix: one σ dominates → srank≈pr≈1."""
     w = torch.outer(torch.arange(1.0, 6.0), torch.arange(1.0, 4.0))
     m = metric_utils._svd_metrics(w)
     assert m["srank"] == pytest.approx(1.0, abs=1e-4)
-    assert m["erank"] == pytest.approx(1.0, abs=1e-4)
-    assert m["enrg90"] == 1.0
-    assert m["svd_entropy"] == pytest.approx(0.0, abs=1e-4)
+    assert m["pr"] == pytest.approx(1.0, abs=1e-4)
 
 
 def test_svd_metrics_zero_matrix():
     """All-zero weight (no positive σ) → every metric 0."""
     assert metric_utils._svd_metrics(torch.zeros(4, 4)) == {
         "srank": 0.0,
-        "erank": 0.0,
-        "enrg90": 0.0,
-        "svd_entropy": 0.0,
+        "pr": 0.0,
     }
 
 
@@ -317,9 +310,7 @@ def test_layer_svd_metrics_keys_and_bounds(arch_id):
     for name, m in result.items():
         n = min(shapes[name])
         assert 1.0 - 1e-4 <= m["srank"] <= n + 1e-4
-        assert 1.0 - 1e-4 <= m["erank"] <= n + 1e-4
-        assert 1.0 <= m["enrg90"] <= n
-        assert 0.0 <= m["svd_entropy"] <= 1.0 + 1e-6
+        assert 1.0 - 1e-4 <= m["pr"] <= n + 1e-4
 
 
 def test_layer_svd_metrics_compiled_model_strips_prefix():

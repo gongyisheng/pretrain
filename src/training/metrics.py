@@ -250,7 +250,7 @@ class MetricsTracker:
             for name, norm in metric_utils.compute_layer_grad_norms(model).items():
                 d[f"grad_norm/{name}"] = norm
 
-        # Per-2D-weight spectral metrics (srank/erank/enrg90/svd_entropy)
+        # Per-2D-weight spectral metrics (srank/pr)
         if self.config.logging.log_optimizer_svd_metrics:
             for name, m in metric_utils.compute_layer_svd_metrics(model).items():
                 for metric, val in m.items():
