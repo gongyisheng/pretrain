@@ -43,4 +43,5 @@ scheduler:
 logging:
   wandb_project: "pretrain-lion-optm"
   wandb_run_name: "qwen3-57m-lion-lr2e-4-wd0.5"
-  log_every: 10
+  log_every: 100
+  log_optimizer_svd_metrics: true

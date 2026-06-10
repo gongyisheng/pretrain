@@ -50,4 +50,5 @@ scheduler:
 logging:
   wandb_project: "pretrain-muon-optm"
   wandb_run_name: "qwen3-0.5b-muon"
-  log_every: 10
+  log_every: 100
+  log_optimizer_svd_metrics: true

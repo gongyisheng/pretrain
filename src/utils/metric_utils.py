@@ -36,6 +36,57 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# Weight spectral metrics (SVD)
+# ---------------------------------------------------------------------------
+
+
+def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
+    """srank / erank / enrg90 / svd_entropy of a 2D weight's σ² spectrum.
+
+    srank = stable rank (‖W‖_F² / σ_max²), erank = exp(Shannon entropy of the
+    σ² distribution), enrg90 = #singular values to reach 90% energy,
+    svd_entropy = that entropy normalized to [0,1]. Mirrors svd_stats in
+    scripts/inspect_weights.py.
+    """
+    s = torch.linalg.svdvals(weight.float())
+    s = s[s > 0]
+    if s.numel() == 0:
+        return {"srank": 0.0, "erank": 0.0, "enrg90": 0.0, "svd_entropy": 0.0}
+    energy = s.pow(2)
+    total = energy.sum()
+    p = energy / total
+    entropy = -(p * p.log()).sum()
+    n = s.numel()
+    return {
+        "srank": (total / energy[0]).item(),
+        "erank": torch.exp(entropy).item(),
+        "enrg90": float(int((energy.cumsum(0) / total < 0.90).sum().item()) + 1),
+        "svd_entropy": (entropy.item() / math.log(n)) if n > 1 else 0.0,
+    }
+
+
+def compute_layer_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
+    """Per-2D-weight spectral metrics, keyed by parameter name.
+
+    Covers every floating-point 2D parameter except rope buffers and
+    embeddings (names containing "emb"). The caller
+    applies the logging namespace (e.g. an "optim/" prefix). The "_orig_mod."
+    prefix added by torch.compile is stripped. SVD on every weight is costly,
+    so this is gated behind config.logging.log_optimizer_svd_metrics and only
+    runs on log-cadence steps.
+    """
+    metrics: dict[str, dict[str, float]] = {}
+    for name, param in model.named_parameters():
+        if param.ndim != 2 or not param.is_floating_point():
+            continue
+        name = name.removeprefix("_orig_mod.")
+        if name.startswith("rope.") or "emb" in name:
+            continue
+        metrics[name] = _svd_metrics(param.detach())
+    return metrics
+
+
+# ---------------------------------------------------------------------------
 # Optimizer step diagnostics (||Δθ||, ||m||, ||v||)
 # ---------------------------------------------------------------------------
 

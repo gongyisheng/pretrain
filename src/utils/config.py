@@ -129,6 +129,7 @@ class LoggingConfig:
     log_every: int = 10
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
     log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
+    log_optimizer_svd_metrics: bool = False  # log per-2D-weight srank/erank/enrg90/svd_entropy (costly: SVD per weight)
 
 
 @dataclass
