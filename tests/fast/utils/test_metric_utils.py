@@ -23,69 +23,69 @@ from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsu
 
 def _gpt2_cfg(impl):
     return ModelConfig(
-        arch="gpt2",
         n_layers=2,
-        n_heads=2,
         d_model=64,
         vocab_size=256,
-        attn_implementation=impl,
+        attn_cls="mha",
+        attn_kwargs={"n_heads": 2, "attn_implementation": impl},
+        mlp_cls="dense",
+        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
     )
 
 
 def _qwen3_cfg(impl):
     return ModelConfig(
-        arch="qwen3",
         n_layers=2,
-        n_heads=2,
-        n_kv_heads=1,
         d_model=64,
         vocab_size=256,
-        qk_norm=True,
-        attn_implementation=impl,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True, "attn_implementation": impl},
+        mlp_cls="dense",
+        mlp_kwargs={},
     )
 
 
 def _qwen3_moe_cfg(impl):
     return ModelConfig(
-        arch="qwen3_moe",
         n_layers=2,
-        n_heads=2,
-        n_kv_heads=1,
         d_model=64,
         vocab_size=256,
-        qk_norm=True,
-        moe_n_experts=4,
-        moe_n_experts_per_token=2,
-        moe_intermediate_size=128,
-        attn_implementation=impl,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True, "attn_implementation": impl},
+        mlp_cls="moe",
+        mlp_kwargs={
+            "n_experts": 4,
+            "n_experts_per_token": 2,
+            "intermediate_size": 128,
+        },
     )
 
 
 def _gpt2_attn_res_cfg(impl):
     return ModelConfig(
-        arch="gpt2",
         n_layers=4,
-        n_heads=2,
         d_model=64,
         vocab_size=256,
+        attn_cls="mha",
+        attn_kwargs={"n_heads": 2, "attn_implementation": impl},
+        mlp_cls="dense",
+        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
         residual_cls="attn_res",
         residual_kwargs={"seal_block_size": 2},
-        attn_implementation=impl,
     )
 
 
 def _qwen3_attn_res_cfg(impl):
     return ModelConfig(
-        arch="qwen3",
         n_layers=4,
-        n_heads=2,
-        n_kv_heads=1,
         d_model=64,
         vocab_size=256,
-        qk_norm=True,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True, "attn_implementation": impl},
+        mlp_cls="dense",
+        mlp_kwargs={},
         residual_cls="attn_res",
         residual_kwargs={"seal_block_size": 2},
-        attn_implementation=impl,
     )
 
 
@@ -270,7 +270,11 @@ def test_count_parameters_dense():
 
 
 def test_count_parameters_moe_active_below_total_non_emb():
-    """MoE: active_non_emb uses k experts, so it's below full non-embedding."""
+    """MoE: active_non_emb uses k experts, so it's below full non-embedding.
+
+    Note: unified TransformerLM pads MoE vocab to multiple of 128, so we
+    don't assert exact unpadded counts — just the ordering invariant.
+    """
     cfg = TrainConfig(max_seq_len=128, model=_qwen3_moe_cfg("sdpa"))
     model = build_model(cfg)
     c = metric_utils.count_parameters(model, cfg)
@@ -340,16 +344,13 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
     """GPT-2 style: MHA, ungated FFN with biases. Hand-computed expected values."""
     cfg = TrainConfig(max_seq_len=128)
     cfg.model = ModelConfig(
-        arch="gpt2",
         n_layers=2,
-        n_heads=2,
         d_model=64,
         vocab_size=256,
-        intermediate_size=256,
-        mlp_activation="gelu",
-        mlp_gated=False,
-        attn_bias=True,
-        mlp_bias=True,
+        attn_cls="mha",
+        attn_kwargs={"n_heads": 2, "bias": True},
+        mlp_cls="dense",
+        mlp_kwargs={"intermediate_size": 256, "activation": "gelu", "gated": False, "bias": True},
     )
     f = metric_utils.compute_flops_per_token(cfg)
     # head_dim=32, n_kv_heads=n_heads=2 (MHA), L=2, T=128
@@ -359,8 +360,8 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
     assert f["o_proj"] == 2 * 8256
     # attn_matmul per layer (full T, PaLM): 4 * n_heads*head_dim*seq_len = 4*2*32*128
     assert f["attn_matmul"] == 2 * 32768
-    # ffn ungated per layer: 4*64*256 + (256+64) = 65856
-    assert f["ffn"] == 2 * 65856
+    # mlp ungated per layer: 4*64*256 + (256+64) = 65856
+    assert f["mlp"] == 2 * 65856
     # lm_head: 2*64*256 = 32768 (no bias by default)
     assert f["lm_head"] == 32768
     # norm: per-layer (2 RMSNorms) = 2*3*64 = 384; final = 3*64 = 192
@@ -375,23 +376,19 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
     """GQA halves KV proj vs MHA; gated FFN is 6*d*d_ff (vs 4 ungated)."""
     cfg = TrainConfig(max_seq_len=128)
     cfg.model = ModelConfig(
-        arch="qwen3",
         n_layers=2,
-        n_heads=4,
-        n_kv_heads=2,
         d_model=64,
         vocab_size=256,
-        intermediate_size=256,
-        mlp_activation="silu",
-        mlp_gated=True,
-        attn_bias=False,
-        mlp_bias=False,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "bias": False},
+        mlp_cls="dense",
+        mlp_kwargs={"intermediate_size": 256, "activation": "silu", "gated": True, "bias": False},
     )
     f = metric_utils.compute_flops_per_token(cfg)
     assert f["qkv_proj"] == 2 * 16384
     assert f["o_proj"] == 2 * 8192
     assert f["attn_matmul"] == 2 * 32768
-    assert f["ffn"] == 2 * 98304
+    assert f["mlp"] == 2 * 98304
     assert f["lm_head"] == 2 * 64 * 256
     # GQA invariant: with n_kv_heads = n_heads/2, qkv = 2 * Q-only proj
     q_only = 2 * 64 * 4 * 16
@@ -399,38 +396,40 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
 
 
 def test_compute_flops_per_token_moe_uses_k_active():
-    """MoE ffn cost = router + k active experts, NOT all N experts."""
+    """MoE mlp cost = router + k active experts, NOT all N experts."""
     cfg = TrainConfig(max_seq_len=128)
     cfg.model = ModelConfig(
-        arch="qwen3_moe",
         n_layers=2,
-        n_heads=4,
-        n_kv_heads=2,
         d_model=64,
         vocab_size=256,
-        intermediate_size=256,
-        moe_n_experts=8,
-        moe_n_experts_per_token=2,
-        moe_intermediate_size=128,
-        mlp_gated=True,
-        mlp_bias=False,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        mlp_cls="moe",
+        mlp_kwargs={
+            "n_experts": 8,
+            "n_experts_per_token": 2,
+            "intermediate_size": 128,
+            "gated": True,
+            "bias": False,
+        },
     )
     f = metric_utils.compute_flops_per_token(cfg)
-    expected_ffn_per_layer = 1024 + 98304  # router + k=2 gated experts
-    assert f["ffn"] == 2 * expected_ffn_per_layer
-    full_expert_ffn = 1024 + 8 * 6 * 64 * 128
-    assert f["ffn"] < 2 * full_expert_ffn // 3
+    expected_mlp_per_layer = 1024 + 98304  # router + k=2 gated experts
+    assert f["mlp"] == 2 * expected_mlp_per_layer
+    full_expert_mlp = 1024 + 8 * 6 * 64 * 128
+    assert f["mlp"] < 2 * full_expert_mlp // 3
 
 
 def test_compute_flops_per_token_ckpt_multiplier():
     """activation_checkpointing flips backward multiplier 3 -> 4."""
     base_kwargs = dict(
-        arch="qwen3",
         n_layers=2,
-        n_heads=4,
-        n_kv_heads=2,
         d_model=64,
         vocab_size=256,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        mlp_cls="dense",
+        mlp_kwargs={},
     )
     cfg_off = TrainConfig(
         max_seq_len=128,
@@ -451,7 +450,15 @@ def test_compute_flops_per_token_ckpt_multiplier():
 
 def test_compute_flops_per_token_lm_head_bias():
     """LM head bias adds vocab_size FLOPs when lm_head_bias=True."""
-    base = dict(arch="qwen3", n_layers=1, n_heads=2, d_model=32, vocab_size=128)
+    base = dict(
+        n_layers=1,
+        d_model=32,
+        vocab_size=128,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 2},
+        mlp_cls="dense",
+        mlp_kwargs={},
+    )
     cfg_off = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=False))
     cfg_on = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=True))
     f_off = metric_utils.compute_flops_per_token(cfg_off)
@@ -462,10 +469,21 @@ def test_compute_flops_per_token_lm_head_bias():
 def test_compute_flops_per_token_qk_norm():
     """qk_norm adds 3 * (n_heads + n_kv_heads) * head_dim per layer."""
     base = dict(
-        arch="qwen3", n_layers=2, n_heads=4, n_kv_heads=2, d_model=64, vocab_size=256
+        n_layers=2,
+        d_model=64,
+        vocab_size=256,
+        attn_cls="gqa",
+        mlp_cls="dense",
+        mlp_kwargs={},
     )
-    cfg_off = TrainConfig(max_seq_len=128, model=ModelConfig(**base, qk_norm=False))
-    cfg_on = TrainConfig(max_seq_len=128, model=ModelConfig(**base, qk_norm=True))
+    cfg_off = TrainConfig(
+        max_seq_len=128,
+        model=ModelConfig(**base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": False}),
+    )
+    cfg_on = TrainConfig(
+        max_seq_len=128,
+        model=ModelConfig(**base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": True}),
+    )
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
     expected_delta = 2 * 3 * (4 + 2) * 16

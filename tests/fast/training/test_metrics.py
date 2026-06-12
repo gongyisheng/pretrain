@@ -36,7 +36,13 @@ class FakeLogger:
 def _cfg(task="pretrain", log_every=2, **logging):
     cfg = TrainConfig(
         model=ModelConfig(
-            arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256
+            n_layers=2,
+            d_model=64,
+            vocab_size=256,
+            attn_cls="mha",
+            attn_kwargs={"n_heads": 2},
+            mlp_cls="dense",
+            mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
         )
     )
     cfg.task = task
@@ -274,16 +280,17 @@ def test_eval_sft_train_acc_passthrough():
 def test_eval_moe_aux_loss_subtracts_floor():
     cfg = TrainConfig(
         model=ModelConfig(
-            arch="qwen3_moe",
             n_layers=2,
-            n_heads=2,
-            n_kv_heads=1,
             d_model=64,
             vocab_size=256,
-            qk_norm=True,
-            moe_n_experts=4,
-            moe_n_experts_per_token=2,
-            moe_intermediate_size=128,
+            attn_cls="gqa",
+            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+            mlp_cls="moe",
+            mlp_kwargs={
+                "n_experts": 4,
+                "n_experts_per_token": 2,
+                "intermediate_size": 128,
+            },
         )
     )
     cfg.task = "pretrain"
@@ -308,23 +315,24 @@ def test_print_model_summary_dense(capsys):
     model = build_model(cfg)
     assert tracker.print_model_summary(model) is None
     out = capsys.readouterr().out
-    assert "Model: gpt2" in out and "non-embedding" in out and "device=cpu" in out
+    assert "Model: mha+dense" in out and "non-embedding" in out and "device=cpu" in out
 
 
 def test_print_model_summary_moe(capsys):
     cfg = TrainConfig(
         max_seq_len=128,
         model=ModelConfig(
-            arch="qwen3_moe",
             n_layers=2,
-            n_heads=2,
-            n_kv_heads=1,
             d_model=64,
             vocab_size=256,
-            qk_norm=True,
-            moe_n_experts=4,
-            moe_n_experts_per_token=2,
-            moe_intermediate_size=128,
+            attn_cls="gqa",
+            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+            mlp_cls="moe",
+            mlp_kwargs={
+                "n_experts": 4,
+                "n_experts_per_token": 2,
+                "intermediate_size": 128,
+            },
         ),
     )
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())

@@ -68,7 +68,7 @@ def run_benchmark(config_path, steps=10, warmup=5):
 
     results = {
         "config": config_path,
-        "arch": config.model.arch,
+        "model": f"{config.model.attn_cls}+{config.model.mlp_cls}",
         "params_M": round(sum(p.numel() for p in trainer.model.parameters()) / 1e6, 1),
         "batch_size": config.training.batch_size,
         "grad_accum": config.training.gradient_accumulation_steps,
@@ -85,7 +85,7 @@ def run_benchmark(config_path, steps=10, warmup=5):
     }
 
     print(f"\n{'=' * 60}")
-    print(f"  {results['arch']} | {results['params_M']}M")
+    print(f"  {results['model']} | {results['params_M']}M")
     print(f"  GPU: {results['gpu']}")
     print(f"  {results['measured_steps']} steps in {results['elapsed_sec']:.1f}s (after {warmup} warmup)")
     print(f"  Tokens/sec: {results['tok_per_sec']:,}")
@@ -118,7 +118,7 @@ def run_all_benchmarks(steps=10, warmup=5):
     print(f"{'Model':<12} {'Params':>8} {'tok/s':>12} {'elapsed':>10}")
     print(f"{'-' * 60}")
     for r in all_results:
-        print(f"{r['arch']:<12} {r['params_M']:>7.1f}M {r['tok_per_sec']:>12,} {r['elapsed_sec']:>9.1f}s")
+        print(f"{r['model']:<12} {r['params_M']:>7.1f}M {r['tok_per_sec']:>12,} {r['elapsed_sec']:>9.1f}s")
     print(f"{'=' * 60}")
 
     # Save results

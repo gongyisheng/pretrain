@@ -48,10 +48,10 @@ class MetricsTracker:
         self.device = device
         self.logger = logger
 
-        self.is_moe = config.model.arch == "qwen3_moe"
+        self.is_moe = config.model.mlp_cls == "moe"
         if self.is_moe:
             self._aux_floor = (
-                config.model.n_layers * config.model.moe_n_experts_per_token
+                config.model.n_layers * config.model.mlp_kwargs["n_experts_per_token"]
             )
 
         self.flops_per_token = metric_utils.compute_flops_per_token(config)
@@ -102,16 +102,16 @@ class MetricsTracker:
         dense models report total + non-embedding.
         """
         counts = metric_utils.count_parameters(model, self.config)
-        arch = self.config.model.arch
+        label = f"{self.config.model.attn_cls}+{self.config.model.mlp_cls}"
         if self.is_moe:
             msg = (
-                f"Model: {arch} | {counts['total'] / 1e6:.1f}M total params "
+                f"Model: {label} | {counts['total'] / 1e6:.1f}M total params "
                 f"({counts['active_non_emb'] / 1e6:.1f}M active non-embedding) "
                 f"| device={self.device}"
             )
         else:
             msg = (
-                f"Model: {arch} | {counts['total'] / 1e6:.1f}M params "
+                f"Model: {label} | {counts['total'] / 1e6:.1f}M params "
                 f"({counts['non_emb'] / 1e6:.1f}M non-embedding) | device={self.device}"
             )
         print(msg)
