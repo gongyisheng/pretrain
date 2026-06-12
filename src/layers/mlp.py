@@ -143,7 +143,7 @@ class DenseMLPBlock(nn.Module):
         else:
             matmul = 4 * d_model * d_ff
             b = (d_ff + d_model) if bias else 0
-        return {"mlp": matmul + b}
+        return matmul + b
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +461,7 @@ class SparseMoEBlock(nn.Module):
         else:
             expert = 4 * d_model * d_ff
             b = (d_ff + d_model) if bias else 0
-        return {"mlp": router + n_experts_per_token * (expert + b)}
+        return router + n_experts_per_token * (expert + b)
 
 
 MLP_REGISTRY = {"dense": DenseMLPBlock, "moe": SparseMoEBlock}

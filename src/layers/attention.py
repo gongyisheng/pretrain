@@ -81,7 +81,7 @@ class MultiHeadAttention(nn.Module):
         o = 2 * d_model * d_model + (d_model if bias else 0)
         attn_matmul = 4 * n_heads * head_dim * max_seq_len
         qk = (3 * (n_heads + n_kv) * head_dim) if qk_norm else 0
-        return {"qkv_proj": qkv, "o_proj": o, "attn_matmul": attn_matmul, "qk_norm": qk}
+        return qkv + o + attn_matmul + qk
 
     def forward(
         self,
@@ -170,7 +170,7 @@ class GroupedQueryAttention(nn.Module):
         o = 2 * d_model * d_model + (d_model if bias else 0)
         attn_matmul = 4 * n_heads * head_dim * max_seq_len
         qk = (3 * (n_heads + n_kv) * head_dim) if qk_norm else 0
-        return {"qkv_proj": qkv, "o_proj": o, "attn_matmul": attn_matmul, "qk_norm": qk}
+        return qkv + o + attn_matmul + qk
 
     def forward(
         self,

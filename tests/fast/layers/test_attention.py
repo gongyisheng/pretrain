@@ -358,13 +358,15 @@ def test_attn_registry_keys():
     assert ATTN_REGISTRY["gqa"] is GroupedQueryAttention
 
 
-def test_mha_compute_flops_shape():
+def test_mha_compute_flops_value():
+    # single int: qkv(24576) + o(8192) + attn_matmul(32768) + qk_norm(0)
     f = MultiHeadAttention.compute_flops(64, 128, n_heads=2, bias=False, qk_norm=False)
-    assert f == {"qkv_proj": 24576, "o_proj": 8192, "attn_matmul": 32768, "qk_norm": 0}
+    assert f == 24576 + 8192 + 32768
 
 
 def test_gqa_compute_flops_qk_norm():
-    f = GroupedQueryAttention.compute_flops(
+    off = GroupedQueryAttention.compute_flops(64, 128, n_heads=2, n_kv_heads=1)
+    on = GroupedQueryAttention.compute_flops(
         64, 128, n_heads=2, n_kv_heads=1, qk_norm=True
     )
-    assert f["qk_norm"] == 3 * (2 + 1) * 32
+    assert on - off == 3 * (2 + 1) * 32

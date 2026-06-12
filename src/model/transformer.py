@@ -80,6 +80,28 @@ class TransformerLM(nn.Module):
             nn.init.normal_(w1, mean=0.0, std=0.02)
             nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
+    @staticmethod
+    def compute_flops(config: ModelConfig, max_seq_len: int) -> int:
+        """Forward FLOPs per token, summed from each component's `compute_flops`
+        plus block norms, final norm, and lm_head. The backward multiplier is
+        applied by the caller. Attention matmul uses full `max_seq_len`
+        (PaLM/nanoGPT convention); norms cost ~3 FLOPs/element; embedding lookup
+        and RoPE are 0 FLOPs.
+        """
+        attn = ATTN_REGISTRY[config.attn_cls].compute_flops(
+            config.d_model, max_seq_len, **config.attn_kwargs
+        )
+        mlp = MLP_REGISTRY[config.mlp_cls].compute_flops(
+            config.d_model, max_seq_len, **config.mlp_kwargs
+        )
+        norm_per_layer = 2 * 3 * config.d_model  # pre-attn + pre-mlp norms
+        per_layer = attn + mlp + norm_per_layer
+        final_norm = 3 * config.d_model
+        lm_head = 2 * config.d_model * config.vocab_size + (
+            config.vocab_size if config.lm_head_bias else 0
+        )
+        return config.n_layers * per_layer + final_norm + lm_head
+
     def forward(self, idx, position_ids, attn_mask=None, return_logits=True):
         x = self.token_emb(idx)
         if self.pos_emb is not None:

@@ -112,22 +112,22 @@ def test_dense_gated_only_activation_rejected_when_ungated(name):
 
 def test_dense_compute_flops_gated():
     f = DenseMLPBlock.compute_flops(64, intermediate_size=128, gated=True, bias=False)
-    assert f == {"mlp": 6 * 64 * 128}
+    assert f == 6 * 64 * 128
 
 
 def test_dense_compute_flops_ungated():
     f = DenseMLPBlock.compute_flops(64, intermediate_size=128, gated=False, bias=False)
-    assert f == {"mlp": 4 * 64 * 128}
+    assert f == 4 * 64 * 128
 
 
 def test_dense_compute_flops_gated_bias():
     f = DenseMLPBlock.compute_flops(64, intermediate_size=128, gated=True, bias=True)
-    assert f == {"mlp": 6 * 64 * 128 + 2 * 128 + 64}
+    assert f == 6 * 64 * 128 + 2 * 128 + 64
 
 
 def test_dense_compute_flops_default_intermediate():
     f = DenseMLPBlock.compute_flops(32, gated=True, bias=False)
-    assert f == {"mlp": 6 * 32 * (4 * 32)}
+    assert f == 6 * 32 * (4 * 32)
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +317,7 @@ def test_sparse_moe_compute_flops_gated():
     )
     router = 2 * 64 * 4
     expert = 6 * 64 * 128
-    assert f == {"mlp": router + 2 * expert}
+    assert f == router + 2 * expert
 
 
 def test_sparse_moe_compute_flops_ungated():
@@ -331,7 +331,7 @@ def test_sparse_moe_compute_flops_ungated():
     )
     router = 2 * 64 * 4
     expert = 4 * 64 * 128
-    assert f == {"mlp": router + 2 * expert}
+    assert f == router + 2 * expert
 
 
 # ---------------------------------------------------------------------------

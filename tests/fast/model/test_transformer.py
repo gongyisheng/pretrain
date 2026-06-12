@@ -1,6 +1,8 @@
 import pytest
 import torch
 
+from src.layers.attention import GroupedQueryAttention
+from src.layers.mlp import DenseMLPBlock
 from src.model.registry import build_model
 from src.model.transformer import TransformerLM
 from src.utils.config import ModelConfig, TrainConfig
@@ -22,6 +24,18 @@ def _cfg(max_seq_len=32, **model_over):
     )
     base.update(model_over)
     return TrainConfig(max_seq_len=max_seq_len, model=ModelConfig(**base))
+
+
+def test_compute_flops_sums_components():
+    cfg = (
+        _cfg()
+    )  # gqa(n_heads=4,n_kv=2) + dense gated, d_model=64, L=2, T=32, vocab=256
+    m = cfg.model
+    attn = GroupedQueryAttention.compute_flops(64, 32, **m.attn_kwargs)
+    mlp = DenseMLPBlock.compute_flops(64, 32, **m.mlp_kwargs)
+    per_layer = attn + mlp + 2 * 3 * 64  # + two RMSNorms
+    expected = 2 * per_layer + 3 * 64 + 2 * 64 * 256  # final norm + lm_head
+    assert TransformerLM.compute_flops(m, cfg.max_seq_len) == expected
 
 
 def _gpt2_cfg(impl):

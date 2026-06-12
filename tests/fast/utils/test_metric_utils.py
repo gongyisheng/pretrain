@@ -373,20 +373,15 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
         },
     )
     f = metric_utils.compute_flops_per_token(cfg)
-    # head_dim=32, n_kv_heads=n_heads=2 (MHA), L=2, T=128
-    # qkv_proj per layer: 2*64*(2+2*2)*32 + (2+2*2)*32 = 24576+192 = 24768
-    assert f["qkv_proj"] == 2 * 24768
-    # o_proj per layer: 2*64*64 + 64 = 8256
-    assert f["o_proj"] == 2 * 8256
-    # attn_matmul per layer (full T, PaLM): 4 * n_heads*head_dim*seq_len = 4*2*32*128
-    assert f["attn_matmul"] == 2 * 32768
-    # mlp ungated per layer: 4*64*256 + (256+64) = 65856
-    assert f["mlp"] == 2 * 65856
-    # lm_head: 2*64*256 = 32768 (no bias by default)
-    assert f["lm_head"] == 32768
-    # norm: per-layer (2 RMSNorms) = 2*3*64 = 384; final = 3*64 = 192
-    assert f["norm"] == 2 * 384 + 192
-    expected_fwd = 2 * 24768 + 2 * 8256 + 2 * 32768 + 2 * 65856 + 960 + 32768
+    # head_dim=32, n_kv_heads=n_heads=2 (MHA), L=2, T=128. Per-layer components:
+    #   attn = qkv + o + matmul = 24768 + 8256 + 32768   (qkv has bias +192, o +64)
+    #   mlp (ungated, bias) = 4*64*256 + (256+64) = 65856
+    #   norm (2 LayerNorms) = 2*3*64 = 384
+    # final norm = 3*64 = 192; lm_head = 2*64*256 = 32768 (no bias by default)
+    attn = 24768 + 8256 + 32768
+    mlp = 65856
+    norm_per_layer = 384
+    expected_fwd = 2 * (attn + mlp + norm_per_layer) + 192 + 32768
     assert f["fwd_total"] == expected_fwd
     # default activation_checkpointing=False -> 3x
     assert f["total"] == 3 * expected_fwd
@@ -410,14 +405,13 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
         },
     )
     f = metric_utils.compute_flops_per_token(cfg)
-    assert f["qkv_proj"] == 2 * 16384
-    assert f["o_proj"] == 2 * 8192
-    assert f["attn_matmul"] == 2 * 32768
-    assert f["mlp"] == 2 * 98304
-    assert f["lm_head"] == 2 * 64 * 256
-    # GQA invariant: with n_kv_heads = n_heads/2, qkv = 2 * Q-only proj
-    q_only = 2 * 64 * 4 * 16
-    assert f["qkv_proj"] // cfg.model.n_layers == 2 * q_only
+    # head_dim=16. Per-layer: attn = qkv(16384) + o(8192) + matmul(32768);
+    # gated mlp = 6*64*256 = 98304; norm = 2*3*64 = 384.
+    attn = 16384 + 8192 + 32768
+    mlp = 98304
+    norm_per_layer = 384
+    expected_fwd = 2 * (attn + mlp + norm_per_layer) + 192 + 2 * 64 * 256
+    assert f["fwd_total"] == expected_fwd
 
 
 def test_compute_flops_per_token_moe_uses_k_active():
@@ -439,10 +433,15 @@ def test_compute_flops_per_token_moe_uses_k_active():
         },
     )
     f = metric_utils.compute_flops_per_token(cfg)
-    expected_mlp_per_layer = 1024 + 98304  # router + k=2 gated experts
-    assert f["mlp"] == 2 * expected_mlp_per_layer
-    full_expert_mlp = 1024 + 8 * 6 * 64 * 128
-    assert f["mlp"] < 2 * full_expert_mlp // 3
+    # head_dim=16. attn = 16384 + 8192 + 32768; norm = 384.
+    # moe mlp = router(2*64*8=1024) + k=2 gated experts (2*6*64*128=98304) = 99328.
+    attn = 16384 + 8192 + 32768
+    mlp_k_active = 1024 + 98304
+    expected_fwd = 2 * (attn + mlp_k_active + 384) + 192 + 2 * 64 * 256
+    assert f["fwd_total"] == expected_fwd
+    # k-active is far cheaper than activating all N=8 experts
+    mlp_all_experts = 1024 + 8 * 6 * 64 * 128
+    assert mlp_k_active < mlp_all_experts // 3
 
 
 def test_compute_flops_per_token_ckpt_multiplier():
@@ -488,7 +487,8 @@ def test_compute_flops_per_token_lm_head_bias():
     cfg_on = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=True))
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
-    assert f_on["lm_head"] - f_off["lm_head"] == 128
+    # lm_head bias adds vocab_size (128) FLOPs to the forward total
+    assert f_on["fwd_total"] - f_off["fwd_total"] == 128
 
 
 def test_compute_flops_per_token_qk_norm():
@@ -515,6 +515,6 @@ def test_compute_flops_per_token_qk_norm():
     )
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
+    # qk_norm adds 3*(n_heads+n_kv_heads)*head_dim per layer to the forward total
     expected_delta = 2 * 3 * (4 + 2) * 16
-    assert f_on["norm"] - f_off["norm"] == expected_delta
     assert f_on["fwd_total"] - f_off["fwd_total"] == expected_delta

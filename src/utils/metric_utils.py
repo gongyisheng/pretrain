@@ -11,8 +11,7 @@ import statistics
 
 import torch
 
-from src.layers.attention import ATTN_REGISTRY
-from src.layers.mlp import MLP_REGISTRY
+from src.model.transformer import TransformerLM
 from src.utils.config import TrainConfig
 
 # ---------------------------------------------------------------------------
@@ -221,49 +220,13 @@ def count_parameters(model: torch.nn.Module, config: TrainConfig) -> dict[str, i
 
 
 def compute_flops_per_token(config: TrainConfig) -> dict[str, int]:
-    """Per-token training FLOPs broken down by component.
-
-    Returns dict with: qkv_proj, o_proj, attn_matmul, mlp, norm, lm_head
-    (each summed across n_layers where applicable), fwd_total, total. The
-    total applies a backward multiplier of 4 if activation_checkpointing
-    else 3. Attention matmul uses full max_seq_len (PaLM/nanoGPT convention,
-    ignores causal masking and intra-doc masking; comparable to literature
-    MFU numbers). Norms (pre-attn, pre-MLP, optional qk_norm, final
-    pre-lm_head) are counted at ~3 FLOPs per element. Embedding lookup and
-    RoPE are 0 FLOPs.
+    """Per-token training FLOPs: ``fwd_total`` (from the model's own
+    ``compute_flops``) and ``total`` (fwd × backward multiplier, 4 if
+    activation_checkpointing else 3).
     """
-    m = config.model
-    a = ATTN_REGISTRY[m.attn_cls].compute_flops(
-        m.d_model, config.max_seq_len, **m.attn_kwargs
-    )
-    mlp = MLP_REGISTRY[m.mlp_cls].compute_flops(
-        m.d_model, config.max_seq_len, **m.mlp_kwargs
-    )
-
-    qkv_proj = m.n_layers * a["qkv_proj"]
-    o_proj = m.n_layers * a["o_proj"]
-    attn_matmul = m.n_layers * a["attn_matmul"]
-    mlp_flops = m.n_layers * mlp["mlp"]
-
-    norm_ops = 3
-    norm_per_layer = 2 * norm_ops * m.d_model
-    final_norm = norm_ops * m.d_model
-    norm = m.n_layers * norm_per_layer + final_norm + m.n_layers * a["qk_norm"]
-
-    lm_head = 2 * m.d_model * m.vocab_size + (m.vocab_size if m.lm_head_bias else 0)
-    fwd_total = qkv_proj + o_proj + attn_matmul + mlp_flops + norm + lm_head
+    fwd_total = TransformerLM.compute_flops(config.model, config.max_seq_len)
     backward_mult = 4 if config.training.activation_checkpointing else 3
-
-    return {
-        "qkv_proj": qkv_proj,
-        "o_proj": o_proj,
-        "attn_matmul": attn_matmul,
-        "mlp": mlp_flops,
-        "norm": norm,
-        "lm_head": lm_head,
-        "fwd_total": fwd_total,
-        "total": fwd_total * backward_mult,
-    }
+    return {"fwd_total": fwd_total, "total": fwd_total * backward_mult}
 
 
 # ---------------------------------------------------------------------------
