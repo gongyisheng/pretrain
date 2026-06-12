@@ -46,7 +46,7 @@ class MultiHeadAttention(nn.Module):
         self,
         d_model: int,
         n_heads: int,
-        dropout_attn: float = 0.0,
+        dropout: float = 0.0,
         qk_norm: bool = False,
         bias: bool = False,
         attn_implementation: str = "flex_attention",
@@ -61,13 +61,25 @@ class MultiHeadAttention(nn.Module):
         self.k_proj = nn.Linear(d_model, d_model, bias=bias)
         self.v_proj = nn.Linear(d_model, d_model, bias=bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.attn_dropout = nn.Dropout(dropout_attn)
+        self.attn_dropout = nn.Dropout(dropout)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
         self._attn_fn = _ATTN_IMPL[attn_implementation]
+
+    @classmethod
+    def compute_flops(cls, d_model, max_seq_len, *, n_heads, bias=False, qk_norm=False, **_):
+        head_dim = d_model // n_heads
+        n_kv = n_heads
+        qkv = 2 * d_model * (n_heads + 2 * n_kv) * head_dim
+        if bias:
+            qkv += (n_heads + 2 * n_kv) * head_dim
+        o = 2 * d_model * d_model + (d_model if bias else 0)
+        attn_matmul = 4 * n_heads * head_dim * max_seq_len
+        qk = (3 * (n_heads + n_kv) * head_dim) if qk_norm else 0
+        return {"qkv_proj": qkv, "o_proj": o, "attn_matmul": attn_matmul, "qk_norm": qk}
 
     def forward(
         self,
@@ -108,13 +120,14 @@ class GroupedQueryAttention(nn.Module):
         self,
         d_model: int,
         n_heads: int,
-        n_kv_heads: int,
-        dropout_attn: float = 0.0,
+        n_kv_heads: int = None,
+        dropout: float = 0.0,
         qk_norm: bool = False,
         bias: bool = False,
         attn_implementation: str = "flex_attention",
     ):
         super().__init__()
+        n_kv_heads = n_kv_heads or n_heads
         assert d_model % n_heads == 0
         assert n_heads % n_kv_heads == 0
         self.n_heads = n_heads
@@ -127,13 +140,25 @@ class GroupedQueryAttention(nn.Module):
         self.k_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=bias)
         self.v_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.attn_dropout = nn.Dropout(dropout_attn)
+        self.attn_dropout = nn.Dropout(dropout)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
         self._attn_fn = _ATTN_IMPL[attn_implementation]
+
+    @classmethod
+    def compute_flops(cls, d_model, max_seq_len, *, n_heads, n_kv_heads=None, bias=False, qk_norm=False, **_):
+        n_kv = n_kv_heads or n_heads
+        head_dim = d_model // n_heads
+        qkv = 2 * d_model * (n_heads + 2 * n_kv) * head_dim
+        if bias:
+            qkv += (n_heads + 2 * n_kv) * head_dim
+        o = 2 * d_model * d_model + (d_model if bias else 0)
+        attn_matmul = 4 * n_heads * head_dim * max_seq_len
+        qk = (3 * (n_heads + n_kv) * head_dim) if qk_norm else 0
+        return {"qkv_proj": qkv, "o_proj": o, "attn_matmul": attn_matmul, "qk_norm": qk}
 
     def forward(
         self,
@@ -184,3 +209,9 @@ class GroupedQueryAttention(nn.Module):
         out = self._attn_fn(q, k, v, attn_mask)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
+
+
+ATTN_REGISTRY = {
+    "mha": MultiHeadAttention,
+    "gqa": GroupedQueryAttention,
+}
