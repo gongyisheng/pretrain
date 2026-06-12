@@ -8,7 +8,12 @@ from src.data.tokenizer_trainer import (
     TokenizerTrainer,
 )
 from src.eval.tokenizer import _bytes_per_token, evaluate
-from src.utils.config import DataConfig, LoggingConfig, ModelConfig, TrainConfig
+from src.utils.config import (
+    LoggingConfig,
+    ModelConfig,
+    TokenizerTrainingConfig,
+    TrainConfig,
+)
 
 
 # ---- Shared fixtures ----
@@ -45,11 +50,11 @@ def _trainer(
     """Build a TokenizerTrainer with a minimal TrainConfig."""
     config = TrainConfig(
         model=ModelConfig(vocab_size=vocab_size),
-        data=DataConfig(
-            tokenizer_path=str(save_path),
-            tokenizer_train_method=method,
-            tokenizer_train_method_kwargs=method_kwargs,
-            tokenizer_train_eval_every=eval_every,
+        tokenizer_training=TokenizerTrainingConfig(
+            method=method,
+            method_kwargs=method_kwargs,
+            checkpoint_dir=str(save_path),
+            checkpoint_every=eval_every,
         ),
         logging=LoggingConfig(**(logging_kwargs or {})),
     )

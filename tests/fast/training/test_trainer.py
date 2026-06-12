@@ -19,7 +19,7 @@ from src.utils.config import (
     OptimizerConfig,
     SchedulerConfig,
     TrainConfig,
-    TrainingConfig,
+    ModelTrainingConfig,
 )
 
 
@@ -64,7 +64,7 @@ def _tiny_config(tmp_dir):
             val_split=0.01,
             num_workers=0,
         ),
-        training=TrainingConfig(
+        training=ModelTrainingConfig(
             batch_size=4,
             gradient_accumulation_steps=1,
             max_steps=5,
@@ -108,7 +108,7 @@ def _tiny_moe_config(tmp_dir):
             val_split=0.01,
             num_workers=0,
         ),
-        training=TrainingConfig(
+        training=ModelTrainingConfig(
             batch_size=4,
             gradient_accumulation_steps=1,
             max_steps=5,

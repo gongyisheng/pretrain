@@ -12,7 +12,7 @@ import torch
 from src.model.registry import build_model
 from src.training.optimizer import AdamWOptimizer, LionOptimizer
 from src.utils import metric_utils
-from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+from src.utils.config import ModelConfig, TrainConfig, ModelTrainingConfig
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 # ---------------------------------------------------------------------------
@@ -459,12 +459,12 @@ def test_compute_flops_per_token_ckpt_multiplier():
     cfg_off = TrainConfig(
         max_seq_len=128,
         model=ModelConfig(**base_kwargs),
-        training=TrainingConfig(activation_checkpointing=False),
+        training=ModelTrainingConfig(activation_checkpointing=False),
     )
     cfg_on = TrainConfig(
         max_seq_len=128,
         model=ModelConfig(**base_kwargs),
-        training=TrainingConfig(activation_checkpointing=True),
+        training=ModelTrainingConfig(activation_checkpointing=True),
     )
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)

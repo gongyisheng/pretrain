@@ -33,15 +33,22 @@ class DataConfig:
     num_workers: int = 4
     packing: bool = True
     tokenizer_path: str = "tokenizers/custom_bpe"
-    tokenizer_train_method: str = "bpe"
-    tokenizer_train_method_kwargs: dict = field(default_factory=dict)
-    tokenizer_train_num_samples: int = 1_000_000
-    # SuperBPE-only: interval (in merges) at which to log/evaluate curve points.
-    tokenizer_train_eval_every: int = 5000
 
 
 @dataclass
-class TrainingConfig:
+class TokenizerTrainingConfig:
+    method: str = "bpe"  # "bpe" | "superbpe"
+    method_kwargs: dict = field(default_factory=dict)
+    num_samples: int = 1_000_000
+    checkpoint_dir: str = (
+        "tokenizers/custom_bpe"  # where the trained tokenizer is saved
+    )
+    # SuperBPE-only: interval (in merges) at which to log/evaluate/checkpoint curve points.
+    checkpoint_every: int = 5000
+
+
+@dataclass
+class ModelTrainingConfig:
     batch_size: int = 16
     gradient_accumulation_steps: int = 16
     max_steps: int = 50000
@@ -66,9 +73,7 @@ class TrainingConfig:
 class OptimizerConfig:
     name: str = "adamw"
     lr: float = 6e-4
-    lr_mult: Dict[str, float] = field(
-        default_factory=lambda: {"lm_head": 1.0}
-    )
+    lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
@@ -102,7 +107,10 @@ class TrainConfig:
     max_seq_len: int = 1024
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
-    training: TrainingConfig = field(default_factory=TrainingConfig)
+    tokenizer_training: TokenizerTrainingConfig = field(
+        default_factory=TokenizerTrainingConfig
+    )
+    training: ModelTrainingConfig = field(default_factory=ModelTrainingConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -189,8 +197,11 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         max_seq_len=raw.get("max_seq_len", 1024),
         model=ModelConfig(**_coerce_types(ModelConfig, raw.get("model", {}))),
         data=DataConfig(**_coerce_types(DataConfig, raw.get("data", {}))),
-        training=TrainingConfig(
-            **_coerce_types(TrainingConfig, raw.get("training", {}))
+        tokenizer_training=TokenizerTrainingConfig(
+            **_coerce_types(TokenizerTrainingConfig, raw.get("tokenizer_training", {}))
+        ),
+        training=ModelTrainingConfig(
+            **_coerce_types(ModelTrainingConfig, raw.get("training", {}))
         ),
         optimizer=OptimizerConfig(
             **_coerce_types(OptimizerConfig, raw.get("optimizer", {}))
@@ -210,6 +221,7 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         config.model.norm_kwargs,
         config.model.pos_emb_kwargs,
         config.model.residual_kwargs,
+        config.tokenizer_training.method_kwargs,
     ):
         _coerce_kwargs(kw)
 

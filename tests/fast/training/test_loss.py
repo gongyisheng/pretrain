@@ -11,7 +11,7 @@ from src.training.loss import (
     _mse_loss_fp64,
     compute_loss,
 )
-from src.utils.config import TrainingConfig
+from src.utils.config import ModelTrainingConfig
 
 
 def test_compute_loss_no_minus_100_matches_plain_ce():
@@ -45,7 +45,7 @@ def test_compute_loss_all_minus_100_returns_nan_safe():
 
 
 def test_loss_fn_default_is_fp32_ce():
-    assert TrainingConfig().loss_fn == "cross_entropy"
+    assert ModelTrainingConfig().loss_fn == "cross_entropy"
 
 
 def test_loss_registry_contains_all_variants():
@@ -111,7 +111,7 @@ def test_mse_fp64_retains_precision_at_saturated_logits():
 
 
 def test_training_config_default_label_smoothing_is_zero():
-    assert TrainingConfig().label_smoothing == 0.0
+    assert ModelTrainingConfig().label_smoothing == 0.0
 
 
 def test_compute_loss_label_smoothing_matches_F_cross_entropy():

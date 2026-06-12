@@ -23,7 +23,7 @@ def main():
     print(f"Loading dataset: {data.dataset}")
     ds = load_dataset(data.dataset, split="train", streaming=True)
 
-    num_samples = data.tokenizer_train_num_samples
+    num_samples = config.tokenizer_training.num_samples
 
     def text_iter():
         for i, sample in enumerate(ds):

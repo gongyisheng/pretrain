@@ -1,7 +1,7 @@
 import tempfile
 import os
 import yaml
-from src.utils.config import ModelConfig, load_config, TrainingConfig, DataConfig
+from src.utils.config import ModelConfig, load_config, ModelTrainingConfig, DataConfig
 
 
 def _write_yaml(tmp_dir, data):
@@ -136,11 +136,11 @@ def test_load_config_coerces_nested_kwargs(tmp_path):
     assert cfg.model.pos_emb_kwargs["rope_theta"] == 10000.0
 
 
-# ==================== TrainingConfig / DataConfig ====================
+# ==================== ModelTrainingConfig / DataConfig ====================
 
 
 def test_training_config_intra_doc_masking_default():
-    cfg = TrainingConfig()
+    cfg = ModelTrainingConfig()
     assert cfg.intra_doc_masking is True
 
 
@@ -176,35 +176,44 @@ data:
     assert cfg.max_seq_len == 128
 
 
-# ==================== tokenizer-training fields on DataConfig ====================
+# ==================== TokenizerTrainingConfig ====================
 
 
-def test_dataconfig_tokenizer_train_defaults():
-    dc = DataConfig()
-    assert dc.tokenizer_train_method == "bpe"
-    assert dc.tokenizer_train_method_kwargs == {}
+def test_tokenizer_training_defaults():
+    from src.utils.config import TokenizerTrainingConfig
+
+    tc = TokenizerTrainingConfig()
+    assert tc.method == "bpe"
+    assert tc.method_kwargs == {}
+    assert tc.num_samples == 1_000_000
+    assert tc.checkpoint_every == 5000
 
 
-def test_dataconfig_loads_superbpe_yaml(tmp_path):
+def test_loads_superbpe_tokenizer_training_yaml(tmp_path):
     yaml_content = """
 model:
   vocab_size: 200000
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/superbpe_200k_t80k
-  tokenizer_train_method: superbpe
-  tokenizer_train_method_kwargs:
+tokenizer_training:
+  method: superbpe
+  method_kwargs:
     transition_size: 80000
     max_superword_words: 4
+  checkpoint_dir: tokenizers/superbpe_200k_t80k
+  checkpoint_every: 5000
 """
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml_content)
     cfg = load_config(str(p))
-    assert cfg.data.tokenizer_train_method == "superbpe"
-    assert cfg.data.tokenizer_train_method_kwargs == {
+    assert cfg.data.tokenizer_path == "tokenizers/superbpe_200k_t80k"
+    assert cfg.tokenizer_training.method == "superbpe"
+    assert cfg.tokenizer_training.method_kwargs == {
         "transition_size": 80000,
         "max_superword_words": 4,
     }
+    assert cfg.tokenizer_training.checkpoint_dir == "tokenizers/superbpe_200k_t80k"
 
 
 # ==================== task and eval_train fields ====================
@@ -226,9 +235,9 @@ def test_task_accepts_sft():
 
 
 def test_default_eval_train_is_false():
-    from src.utils.config import TrainingConfig
+    from src.utils.config import ModelTrainingConfig
 
-    cfg = TrainingConfig()
+    cfg = ModelTrainingConfig()
     assert cfg.eval_train is False
 
 

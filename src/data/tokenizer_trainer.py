@@ -86,9 +86,9 @@ class TokenizerMetricsTracker:
 
 
 class TokenizerTrainer:
-    """Train a tokenizer from a text iterable. Dispatches by `config.data.tokenizer_train_method`.
+    """Train a tokenizer from a text iterable. Dispatches by `config.tokenizer_training.method`.
 
-    Method-specific kwargs live in `config.data.tokenizer_train_method_kwargs` and are
+    Method-specific kwargs live in `config.tokenizer_training.method_kwargs` and are
     consumed by the matching `_train_*` method (e.g. `transition_size`,
     `max_superword_words`, `eval_num_docs` for "superbpe"). W&B identity comes
     from `config.logging`; the `wandb_enabled` flag is constructor-controlled
@@ -105,10 +105,10 @@ class TokenizerTrainer:
         self.config = config
         self.wandb_enabled = wandb_enabled
         self.vocab_size = config.model.vocab_size
-        self.save_path = config.data.tokenizer_path
-        self.train_method = config.data.tokenizer_train_method
-        self.train_method_kwargs = dict(config.data.tokenizer_train_method_kwargs)
-        self.eval_every = config.data.tokenizer_train_eval_every
+        self.save_path = config.tokenizer_training.checkpoint_dir
+        self.train_method = config.tokenizer_training.method
+        self.train_method_kwargs = dict(config.tokenizer_training.method_kwargs)
+        self.eval_every = config.tokenizer_training.checkpoint_every
         self.eval_num_docs = self.train_method_kwargs.get("eval_num_docs", 1000)
 
         if self.train_method not in ("bpe", "superbpe"):
