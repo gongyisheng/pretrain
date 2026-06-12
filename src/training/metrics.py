@@ -50,11 +50,11 @@ class MetricsTracker:
 
         self.is_moe = config.model.mlp_cls == "moe"
         if self.is_moe:
-            self._aux_floor = config.model.n_layers * config.model.mlp_kwargs.get(
-                "n_experts_per_token", 2
+            self._aux_floor = (
+                config.model.n_layers * config.model.mlp_kwargs["n_experts_per_token"]
             )
 
-        self.flops_per_token = metric_utils.compute_flops_per_token(config)
+        self._flops_per_token = metric_utils.compute_flops_per_token(config)
         self._gpu_peak_flops = metric_utils.estimate_gpu_peak_flops(device)
         self.tokens_per_step = (
             config.training.batch_size
@@ -205,7 +205,7 @@ class MetricsTracker:
         d: dict[str, float] = {
             # train
             "train/loss": loss,
-            "train/flops": self.flops_per_token["total"] * self.total_tokens,
+            "train/flops": self._flops_per_token * self.total_tokens,
             "train/total_tokens": self.total_tokens,
             # optim
             "optim/lr": lr,
@@ -229,7 +229,7 @@ class MetricsTracker:
 
         # MFU
         if self._gpu_peak_flops and tokens_per_sec > 0:
-            flops_per_sec = self.flops_per_token["total"] * tokens_per_sec
+            flops_per_sec = self._flops_per_token * tokens_per_sec
             d["perf/mfu"] = flops_per_sec / self._gpu_peak_flops
 
         # GPU memory

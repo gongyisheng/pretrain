@@ -196,8 +196,8 @@ def count_parameters(model: torch.nn.Module, config: TrainConfig) -> dict[str, i
         mk = mc.mlp_kwargs
         n_exp = mk["n_experts"]
         k = mk["n_experts_per_token"]
-        d_ff = mk.get("intermediate_size") or 4 * mc.d_model
-        bias = mk.get("bias", False)
+        d_ff = mk["intermediate_size"]
+        bias = mk["bias"]
         expert_ffn_per_layer = n_exp * 3 * d_ff * mc.d_model
         active_ffn_per_layer = k * 3 * d_ff * mc.d_model
         if bias:
@@ -219,14 +219,14 @@ def count_parameters(model: torch.nn.Module, config: TrainConfig) -> dict[str, i
 # ---------------------------------------------------------------------------
 
 
-def compute_flops_per_token(config: TrainConfig) -> dict[str, int]:
-    """Per-token training FLOPs: ``fwd_total`` (from the model's own
-    ``compute_flops``) and ``total`` (fwd × backward multiplier, 4 if
-    activation_checkpointing else 3).
+def compute_flops_per_token(config: TrainConfig) -> int:
+    """Total training FLOPs per token: the model's forward FLOPs (from
+    ``TransformerLM.compute_flops``) times a backward multiplier of 4 if
+    activation_checkpointing else 3.
     """
     fwd_total = TransformerLM.compute_flops(config.model, config.max_seq_len)
     backward_mult = 4 if config.training.activation_checkpointing else 3
-    return {"fwd_total": fwd_total, "total": fwd_total * backward_mult}
+    return fwd_total * backward_mult
 
 
 # ---------------------------------------------------------------------------

@@ -152,7 +152,7 @@ def test_tokens_per_step_from_config_and_total_accumulates():
     assert tracker.total_tokens == 2 * tracker.tokens_per_step
     d = tracker.log_train(step=2, model=model, optimizer=opt)
     assert d["train/total_tokens"] == tracker.total_tokens
-    assert d["train/flops"] == tracker.flops_per_token["total"] * tracker.total_tokens
+    assert d["train/flops"] == tracker._flops_per_token * tracker.total_tokens
 
 
 # ---------------------------------------------------------------------------

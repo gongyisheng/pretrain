@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from src.model.registry import build_model
+from src.model.transformer import TransformerLM
 from src.training.optimizer import AdamWOptimizer, LionOptimizer
 from src.utils import metric_utils
 from src.utils.config import ModelConfig, TrainConfig, ModelTrainingConfig
@@ -382,9 +383,8 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
     mlp = 65856
     norm_per_layer = 384
     expected_fwd = 2 * (attn + mlp + norm_per_layer) + 192 + 32768
-    assert f["fwd_total"] == expected_fwd
-    # default activation_checkpointing=False -> 3x
-    assert f["total"] == 3 * expected_fwd
+    # compute_flops_per_token returns the total (fwd × 3 by default)
+    assert f == 3 * expected_fwd
 
 
 def test_compute_flops_per_token_gqa_gated_qwen3():
@@ -411,7 +411,7 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
     mlp = 98304
     norm_per_layer = 384
     expected_fwd = 2 * (attn + mlp + norm_per_layer) + 192 + 2 * 64 * 256
-    assert f["fwd_total"] == expected_fwd
+    assert f == 3 * expected_fwd
 
 
 def test_compute_flops_per_token_moe_uses_k_active():
@@ -438,7 +438,7 @@ def test_compute_flops_per_token_moe_uses_k_active():
     attn = 16384 + 8192 + 32768
     mlp_k_active = 1024 + 98304
     expected_fwd = 2 * (attn + mlp_k_active + 384) + 192 + 2 * 64 * 256
-    assert f["fwd_total"] == expected_fwd
+    assert f == 3 * expected_fwd
     # k-active is far cheaper than activating all N=8 experts
     mlp_all_experts = 1024 + 8 * 6 * 64 * 128
     assert mlp_k_active < mlp_all_experts // 3
@@ -465,11 +465,11 @@ def test_compute_flops_per_token_ckpt_multiplier():
         model=ModelConfig(**base_kwargs),
         training=ModelTrainingConfig(activation_checkpointing=True),
     )
+    fwd = TransformerLM.compute_flops(cfg_off.model, cfg_off.max_seq_len)
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
-    assert f_off["fwd_total"] == f_on["fwd_total"]
-    assert f_off["total"] == 3 * f_off["fwd_total"]
-    assert f_on["total"] == 4 * f_on["fwd_total"]
+    assert f_off == 3 * fwd
+    assert f_on == 4 * fwd
 
 
 def test_compute_flops_per_token_lm_head_bias():
@@ -487,8 +487,8 @@ def test_compute_flops_per_token_lm_head_bias():
     cfg_on = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=True))
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
-    # lm_head bias adds vocab_size (128) FLOPs to the forward total
-    assert f_on["fwd_total"] - f_off["fwd_total"] == 128
+    # lm_head bias adds vocab_size (128) FLOPs to fwd; total is ×3
+    assert f_on - f_off == 3 * 128
 
 
 def test_compute_flops_per_token_qk_norm():
@@ -515,6 +515,6 @@ def test_compute_flops_per_token_qk_norm():
     )
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
-    # qk_norm adds 3*(n_heads+n_kv_heads)*head_dim per layer to the forward total
+    # qk_norm adds 3*(n_heads+n_kv_heads)*head_dim per layer to fwd; total is ×3
     expected_delta = 2 * 3 * (4 + 2) * 16
-    assert f_on["fwd_total"] - f_off["fwd_total"] == expected_delta
+    assert f_on - f_off == 3 * expected_delta

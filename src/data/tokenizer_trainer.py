@@ -109,7 +109,7 @@ class TokenizerTrainer:
         self.train_method = config.tokenizer_training.method
         self.train_method_kwargs = dict(config.tokenizer_training.method_kwargs)
         self.eval_every = config.tokenizer_training.eval_every
-        self.eval_num_docs = self.train_method_kwargs.get("eval_num_docs", 1000)
+        self.eval_num_docs = self.train_method_kwargs["eval_num_docs"]
 
         if self.train_method not in ("bpe", "superbpe"):
             raise ValueError(
@@ -243,7 +243,7 @@ class TokenizerTrainer:
         self, make_train_iter: Callable[[], Iterable[str]]
     ) -> Tokenizer:
         transition_size = self.train_method_kwargs["transition_size"]
-        max_superword_words = self.train_method_kwargs.get("max_superword_words", 4)
+        max_superword_words = self.train_method_kwargs["max_superword_words"]
 
         # ---- Subword pass: standard BPE with paper-default whitespace pretokenization ----
         t0 = time.perf_counter()

@@ -24,6 +24,19 @@ class ModelConfig:
     tie_word_embeddings: bool = True
     lm_head_bias: bool = False
 
+    def __post_init__(self):
+        # Fill defaults for kwargs that are read OUTSIDE the component (trainer,
+        # metrics, param/FLOPs counters) so those call sites use plain `[key]`
+        # access instead of `.get(key, default)`. Component constructors keep
+        # their own matching defaults for direct instantiation.
+        self.attn_kwargs.setdefault("attn_implementation", "flex_attention")
+        if self.mlp_cls == "moe":
+            self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
+            self.mlp_kwargs.setdefault("n_experts_per_token", 2)
+            self.mlp_kwargs.setdefault("aux_loss_coef", 0.01)
+            self.mlp_kwargs.setdefault("expert_capacity_factor", None)
+            self.mlp_kwargs.setdefault("bias", False)
+
 
 @dataclass
 class DataConfig:
@@ -46,6 +59,13 @@ class TokenizerTrainingConfig:
     checkpoint_every: int = 5000  # interval (in merges) at which to save the tokenizer
     # SuperBPE-only: interval (in merges) at which to log/evaluate curve points.
     eval_every: int = 5000
+
+    def __post_init__(self):
+        # Defaults for method_kwargs read by TokenizerTrainer (so it uses plain
+        # `[key]` access). `transition_size` is required for superbpe (no default).
+        self.method_kwargs.setdefault("eval_num_docs", 1000)
+        if self.method == "superbpe":
+            self.method_kwargs.setdefault("max_superword_words", 4)
 
 
 @dataclass

@@ -68,8 +68,9 @@ def test_model_config_defaults():
     assert cfg.norm_cls == "rmsnorm"
     assert cfg.pos_emb_cls == "rope"
     assert cfg.residual_cls == "standard"
-    assert cfg.attn_kwargs == {}
-    assert cfg.mlp_kwargs == {}
+    # attn_implementation default is filled by __post_init__ for all models
+    assert cfg.attn_kwargs == {"attn_implementation": "flex_attention"}
+    assert cfg.mlp_kwargs == {}  # dense: no moe defaults added
     assert cfg.norm_kwargs == {}
     assert cfg.pos_emb_kwargs == {}
     assert cfg.residual_kwargs == {}
@@ -184,7 +185,8 @@ def test_tokenizer_training_defaults():
 
     tc = TokenizerTrainingConfig()
     assert tc.method == "bpe"
-    assert tc.method_kwargs == {}
+    # eval_num_docs default is filled by __post_init__
+    assert tc.method_kwargs == {"eval_num_docs": 1000}
     assert tc.num_samples == 1_000_000
     assert tc.checkpoint_every == 5000
     assert tc.eval_every == 5000
@@ -213,6 +215,7 @@ tokenizer_training:
     assert cfg.tokenizer_training.method_kwargs == {
         "transition_size": 80000,
         "max_superword_words": 4,
+        "eval_num_docs": 1000,  # filled by __post_init__
     }
     assert cfg.tokenizer_training.checkpoint_dir == "tokenizers/superbpe_200k_t80k"
 
@@ -253,8 +256,8 @@ def test_attn_cls_defaults():
 
 
 def test_attn_kwargs_preserved():
-    # attn_kwargs defaults to empty; explicit values are preserved
-    assert ModelConfig().attn_kwargs == {}
+    # attn_implementation default is filled; explicit values are preserved
+    assert ModelConfig().attn_kwargs == {"attn_implementation": "flex_attention"}
     assert ModelConfig(attn_kwargs={"n_heads": 8}).attn_kwargs["n_heads"] == 8
 
 
