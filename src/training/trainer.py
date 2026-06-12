@@ -611,7 +611,6 @@ class TokenizerTrainer:
         self.config = config
         self.wandb_enabled = wandb_enabled
         self.vocab_size = config.model.vocab_size
-        self.save_path = config.tokenizer_training.checkpoint_dir
         self.train_method = config.tokenizer_training.method
         self.train_method_kwargs = dict(config.tokenizer_training.method_kwargs)
         self.eval_every = config.tokenizer_training.eval_every
@@ -633,7 +632,7 @@ class TokenizerTrainer:
                     f"got transition_size={ts}, vocab_size={self.vocab_size}"
                 )
 
-        os.makedirs(self.save_path, exist_ok=True)
+        os.makedirs(config.tokenizer_training.checkpoint_dir, exist_ok=True)
 
         self.logger = WandbLogger(config, enabled=wandb_enabled)
         self.metrics = TokenizerMetricsTracker(self.logger)
@@ -693,8 +692,11 @@ class TokenizerTrainer:
         return _callback
 
     def _save_checkpoint(self, tokenizer: Tokenizer) -> None:
-        """Save the tokenizer to `save_path/tokenizer.json` (the checkpoint)."""
-        tokenizer.save(os.path.join(self.save_path, "tokenizer.json"))
+        """Save the tokenizer to `checkpoint_dir/tokenizer.json`."""
+        path = os.path.join(
+            self.config.tokenizer_training.checkpoint_dir, "tokenizer.json"
+        )
+        tokenizer.save(path)
 
     def train(self, dataset_iter: Callable[[], Iterable[str]]) -> Tokenizer:
         """Train and save a tokenizer.
@@ -720,7 +722,8 @@ class TokenizerTrainer:
 
         self._save_checkpoint(tokenizer)
         print(
-            f"{self.train_method.upper()} tokenizer saved to {self.save_path}/ "
+            f"{self.train_method.upper()} tokenizer saved to "
+            f"{self.config.tokenizer_training.checkpoint_dir}/ "
             f"(vocab_size={tokenizer.get_vocab_size()})"
         )
         self.logger.finish()
@@ -771,7 +774,11 @@ class TokenizerTrainer:
             add_prefix_space=False, use_regex=False
         )
         subword_tok.decoder = decoders.ByteLevel()
-        subword_tok.save(os.path.join(self.save_path, "subword_tokenizer.json"))
+        subword_tok.save(
+            os.path.join(
+                self.config.tokenizer_training.checkpoint_dir, "subword_tokenizer.json"
+            )
+        )
         print(
             f"SuperBPE subword pass done: vocab_size={len(subword_vocab)} "
             f"({time.perf_counter() - t0:.2f}s)"
