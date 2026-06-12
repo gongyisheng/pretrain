@@ -1,5 +1,6 @@
 import tempfile
 import os
+import pytest
 import yaml
 from src.utils.config import ModelConfig, load_config, ModelTrainingConfig, DataConfig
 
@@ -68,9 +69,10 @@ def test_model_config_defaults():
     assert cfg.norm_cls == "rmsnorm"
     assert cfg.pos_emb_cls == "rope"
     assert cfg.residual_cls == "standard"
-    # attn_implementation default is filled by __post_init__ for all models
+    # __post_init__ fills component defaults: attn_implementation for attn,
+    # intermediate_size (4*d_model) for mlp.
     assert cfg.attn_kwargs == {"attn_implementation": "flex_attention"}
-    assert cfg.mlp_kwargs == {}  # dense: no moe defaults added
+    assert cfg.mlp_kwargs == {"intermediate_size": 4 * 768}
     assert cfg.norm_kwargs == {}
     assert cfg.pos_emb_kwargs == {}
     assert cfg.residual_kwargs == {}
@@ -279,3 +281,54 @@ model:
     assert cfg.model.attn_kwargs["kv_lora_rank"] == 32
     assert cfg.model.attn_kwargs["qk_rope_head_dim"] == 16
     assert cfg.model.attn_kwargs["n_heads"] == 8
+
+
+# ==================== component defaults + validation (moved into config) ====================
+
+
+@pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
+def test_modelconfig_resolves_intermediate_size(mlp_cls):
+    extra = {"n_experts": 4} if mlp_cls == "moe" else {}
+    cfg = ModelConfig(d_model=128, mlp_cls=mlp_cls, mlp_kwargs=dict(extra))
+    assert cfg.mlp_kwargs["intermediate_size"] == 4 * 128
+    # explicit value preserved
+    cfg2 = ModelConfig(
+        d_model=128, mlp_cls=mlp_cls, mlp_kwargs={"intermediate_size": 256, **extra}
+    )
+    assert cfg2.mlp_kwargs["intermediate_size"] == 256
+
+
+def test_modelconfig_unknown_activation_raises():
+    with pytest.raises(ValueError, match="Unknown activation"):
+        ModelConfig(mlp_kwargs={"activation": "mish"})
+
+
+def test_modelconfig_gated_only_activation_rejected_when_ungated():
+    # bilinear is gated-only; rejected for an ungated mlp
+    with pytest.raises(ValueError, match="Unknown activation"):
+        ModelConfig(mlp_kwargs={"activation": "bilinear", "gated": False})
+    # accepted when gated
+    ModelConfig(mlp_kwargs={"activation": "bilinear", "gated": True})
+
+
+def test_modelconfig_validates_attn_dims():
+    with pytest.raises(ValueError, match="divisible by n_heads"):
+        ModelConfig(d_model=100, attn_kwargs={"n_heads": 3})
+    with pytest.raises(ValueError, match="divisible by\\s+n_kv_heads"):
+        ModelConfig(
+            d_model=64, attn_cls="gqa", attn_kwargs={"n_heads": 4, "n_kv_heads": 3}
+        )
+
+
+def test_modelconfig_gqa_defaults_n_kv_heads():
+    cfg = ModelConfig(d_model=64, attn_cls="gqa", attn_kwargs={"n_heads": 8})
+    assert cfg.attn_kwargs["n_kv_heads"] == 8  # defaults to n_heads
+
+
+def test_activation_name_sets_in_sync_with_registries():
+    """config's plain-literal activation names must match the layer registries."""
+    from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+    from src.utils.config import _GATED_ACTIVATIONS, _UNGATED_ACTIVATIONS
+
+    assert _UNGATED_ACTIVATIONS == set(UNGATED_ACTIVATIONS)
+    assert _GATED_ACTIVATIONS == set(GATED_ACTIVATIONS)

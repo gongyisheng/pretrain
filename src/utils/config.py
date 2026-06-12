@@ -2,6 +2,14 @@ from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 import yaml
 
+# Valid activation names, mirroring the registries in src/layers/activation.py.
+# Duplicated here (as plain literals) so config validation stays import-light —
+# config.py never imports torch/layer modules. test_config guards them in sync.
+_UNGATED_ACTIVATIONS = frozenset(
+    {"relu", "gelu", "silu", "leaky_relu", "relu2", "gelu2", "silu2", "leaky_relu2"}
+)
+_GATED_ACTIVATIONS = _UNGATED_ACTIVATIONS | {"bilinear", "bilinear2", "powlu"}
+
 
 @dataclass
 class ModelConfig:
@@ -25,13 +33,35 @@ class ModelConfig:
     lm_head_bias: bool = False
 
     def __post_init__(self):
-        # Fill defaults for kwargs that are read OUTSIDE the component (trainer,
-        # metrics, param/FLOPs counters) so those call sites use plain `[key]`
-        # access instead of `.get(key, default)`. Component constructors keep
-        # their own matching defaults for direct instantiation.
+        # config.py is the single place for component defaults + validation, so
+        # layer/model code can assume fully-resolved, valid kwargs and call sites
+        # use plain `[key]` access (no `.get(key, default)`).
+
+        # --- Attention: implementation default, dim validation, GQA kv default ---
         self.attn_kwargs.setdefault("attn_implementation", "flex_attention")
+        n_heads = self.attn_kwargs.get("n_heads")
+        if n_heads is not None:
+            if self.d_model % n_heads != 0:
+                raise ValueError(
+                    f"d_model ({self.d_model}) must be divisible by n_heads ({n_heads})"
+                )
+            if self.attn_cls == "gqa":
+                n_kv = self.attn_kwargs.setdefault("n_kv_heads", n_heads)
+                if n_heads % n_kv != 0:
+                    raise ValueError(
+                        f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv})"
+                    )
+
+        # --- MLP: intermediate_size default, activation validation ---
+        self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
+        gated = self.mlp_kwargs.get("gated", True)
+        activation = self.mlp_kwargs.get("activation", "silu")
+        valid = _GATED_ACTIVATIONS if gated else _UNGATED_ACTIVATIONS
+        if activation not in valid:
+            raise ValueError(
+                f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
+            )
         if self.mlp_cls == "moe":
-            self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
             self.mlp_kwargs.setdefault("n_experts_per_token", 2)
             self.mlp_kwargs.setdefault("aux_loss_coef", 0.01)
             self.mlp_kwargs.setdefault("expert_capacity_factor", None)

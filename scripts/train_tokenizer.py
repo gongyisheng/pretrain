@@ -7,7 +7,7 @@ sys.path.insert(0, ".")
 
 from datasets import load_dataset
 
-from src.data.tokenizer_trainer import TokenizerTrainer
+from src.training.trainer import TokenizerTrainer
 from src.utils.config import load_config
 
 

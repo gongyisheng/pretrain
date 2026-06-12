@@ -1,4 +1,4 @@
-"""Tokenizer runtime loading. Training lives in src/data/tokenizer_trainer.py."""
+"""Tokenizer runtime loading. Training lives in src/training/trainer.py."""
 
 import os
 

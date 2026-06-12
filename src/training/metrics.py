@@ -29,7 +29,9 @@ Eval:
 import time
 
 import torch
+from tokenizers import Tokenizer
 
+from src.eval.tokenizer import _bytes_per_token
 from src.utils import metric_utils
 from src.utils.config import TrainConfig
 from src.utils.tracking_utils import WandbLogger
@@ -362,3 +364,36 @@ class MetricsTracker:
         if "val/aux_loss" in d:
             msg += f" | val_aux_loss={d['val/aux_loss']:.4f}"
         return msg
+
+
+class TokenizerMetricsTracker:
+    """Builds W&B log dicts for tokenizer training. Pure compute — never talks
+    to W&B; the trainer feeds outputs to the logger.
+
+    `eval_texts` is set by the trainer after pulling the held-out slice from the
+    dataset, so the tracker can be constructed before the corpus is consumed.
+    """
+
+    def __init__(self, eval_texts: list[str] | None = None):
+        self.eval_texts: list[str] = eval_texts if eval_texts is not None else []
+
+    def build_train_log_dict(
+        self, tokenizer: Tokenizer, vocab_size: int
+    ) -> dict[str, float]:
+        """Assemble a per-step W&B log dict for a (partial or full) tokenizer."""
+        return {
+            "vocab_size": vocab_size,
+            "bytes_per_token": _bytes_per_token(tokenizer, self.eval_texts),
+        }
+
+    def build_eval_log_dict(
+        self, tokenizer: Tokenizer, vocab_size: int
+    ) -> dict[str, float]:
+        """Assemble a per-eval W&B log dict. Identical to build_train_log_dict
+        for now; kept separate so the two can diverge as eval-only metrics
+        (e.g. coverage, OOV rate) are added.
+        """
+        return {
+            "vocab_size": vocab_size,
+            "bytes_per_token": _bytes_per_token(tokenizer, self.eval_texts),
+        }

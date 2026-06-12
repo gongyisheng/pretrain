@@ -81,20 +81,15 @@ class DenseMLPBlock(nn.Module):
         self,
         d_model: int,
         *,
-        intermediate_size: int = 0,
+        intermediate_size: int,
         activation: str = "silu",
         gated: bool = True,
         bias: bool = False,
         dropout: float = 0.0,
     ):
         super().__init__()
-        if intermediate_size == 0:
-            intermediate_size = 4 * d_model
+        # Defaults/validation (intermediate_size, activation) live in ModelConfig.
         registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
-        if activation not in registry:
-            raise ValueError(
-                f"Unknown activation: {activation!r}; expected one of {sorted(registry)}"
-            )
         self.gated = gated
         self.act_fn = registry[activation]
         if gated:
@@ -300,7 +295,7 @@ class SparseMoEBlock(nn.Module):
         self,
         d_model: int,
         *,
-        intermediate_size: int = 0,
+        intermediate_size: int,
         n_experts: int,
         n_experts_per_token: int = 2,
         aux_loss_coef: float = 0.01,
@@ -311,13 +306,8 @@ class SparseMoEBlock(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
-        if intermediate_size == 0:
-            intermediate_size = 4 * d_model
+        # Defaults/validation (intermediate_size, activation) live in ModelConfig.
         registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
-        if activation not in registry:
-            raise ValueError(
-                f"Unknown activation: {activation!r}; expected one of {sorted(registry)}"
-            )
         self.n_experts = n_experts
         self.n_experts_per_token = n_experts_per_token
         self.aux_loss_coef = aux_loss_coef

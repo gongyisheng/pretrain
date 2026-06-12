@@ -52,7 +52,7 @@ class MultiHeadAttention(nn.Module):
         attn_implementation: str = "flex_attention",
     ):
         super().__init__()
-        assert d_model % n_heads == 0
+        # Dim validation lives in ModelConfig.
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.qk_norm = qk_norm
@@ -122,16 +122,14 @@ class GroupedQueryAttention(nn.Module):
         self,
         d_model: int,
         n_heads: int,
-        n_kv_heads: int = None,
+        n_kv_heads: int,
         dropout: float = 0.0,
         qk_norm: bool = False,
         bias: bool = False,
         attn_implementation: str = "flex_attention",
     ):
         super().__init__()
-        n_kv_heads = n_kv_heads or n_heads
-        assert d_model % n_heads == 0
-        assert n_heads % n_kv_heads == 0
+        # Dim validation + n_kv_heads default live in ModelConfig.
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.n_groups = n_heads // n_kv_heads

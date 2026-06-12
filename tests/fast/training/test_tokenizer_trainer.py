@@ -1,12 +1,11 @@
-"""Behavior tests for src/data/tokenizer_trainer.py — BPE and SuperBPE paths."""
+"""Behavior tests for the TokenizerTrainer in src/training/trainer.py — BPE and
+SuperBPE paths."""
 
 import pytest
 from tokenizers import Tokenizer
 
 from src.data.tokenizer import load_tokenizer
-from src.data.tokenizer_trainer import (
-    TokenizerTrainer,
-)
+from src.training.trainer import TokenizerTrainer
 from src.eval.tokenizer import _bytes_per_token, evaluate
 from src.utils.config import (
     LoggingConfig,
@@ -43,6 +42,7 @@ def _trainer(
     method: str,
     *,
     eval_every: int = 5000,
+    checkpoint_every: int = 5000,
     wandb_enabled: bool = False,
     logging_kwargs: dict | None = None,
     **method_kwargs,
@@ -55,10 +55,20 @@ def _trainer(
             method_kwargs=method_kwargs,
             checkpoint_dir=str(save_path),
             eval_every=eval_every,
+            checkpoint_every=checkpoint_every,
         ),
         logging=LoggingConfig(**(logging_kwargs or {})),
     )
     return TokenizerTrainer(config, wandb_enabled=wandb_enabled)
+
+
+def test_periodic_checkpoint_save_runs_and_is_loadable(tmp_path, text_iter):
+    # checkpoint_every (280) is hit mid-training (vocab grows ~256 -> 320),
+    # exercising the periodic-save branch; the final tokenizer stays valid.
+    save = tmp_path / "bpe_ckpt"
+    _trainer(save, 320, "bpe", checkpoint_every=280).train(text_iter)
+    assert (save / "tokenizer.json").exists()
+    assert load_tokenizer(str(save)).encode("hello world").ids
 
 
 # ---- BPE ----

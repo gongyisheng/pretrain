@@ -57,19 +57,6 @@ def test_dense_returns_none_aux():
 
 
 @pytest.mark.parametrize("gated", [False, True])
-def test_dense_default_intermediate_size(gated):
-    blk = DenseMLPBlock(d_model=32, gated=gated, activation="silu")
-    x = torch.randn(1, 4, 32)
-    out, _ = blk(x)
-    assert out.shape == (1, 4, 32)
-    # 4*d_model default
-    if gated:
-        assert blk.gate_up_proj.out_features == 2 * 4 * 32
-    else:
-        assert blk.up_proj.out_features == 4 * 32
-
-
-@pytest.mark.parametrize("gated", [False, True])
 def test_dense_default_bias_is_false(gated):
     blk = DenseMLPBlock(
         d_model=64, intermediate_size=128, activation="silu", gated=gated
@@ -87,22 +74,6 @@ def test_dense_bias_true_adds_biases(gated):
     w1 = blk.gate_up_proj if gated else blk.up_proj
     assert w1.bias is not None
     assert blk.down_proj.bias is not None
-
-
-def test_dense_unknown_activation_raises():
-    with pytest.raises(ValueError, match="Unknown activation"):
-        DenseMLPBlock(d_model=64, intermediate_size=128, activation="mish")
-
-
-def test_dense_unknown_activation_in_gated_raises():
-    with pytest.raises(ValueError, match="Unknown activation"):
-        DenseMLPBlock(d_model=64, intermediate_size=128, activation="mish", gated=True)
-
-
-@pytest.mark.parametrize("name", ["bilinear", "bilinear2"])
-def test_dense_gated_only_activation_rejected_when_ungated(name):
-    with pytest.raises(ValueError, match="Unknown activation"):
-        DenseMLPBlock(d_model=64, intermediate_size=128, activation=name, gated=False)
 
 
 # ---------------------------------------------------------------------------
@@ -294,11 +265,6 @@ def test_sparse_moe_block_aux_loss_coef_stored():
         d_model=64, intermediate_size=128, n_experts=4, aux_loss_coef=0.05
     )
     assert block.aux_loss_coef == 0.05
-
-
-def test_sparse_moe_block_default_intermediate_size():
-    block = SparseMoEBlock(d_model=32, n_experts=4)
-    assert block.expert_gate_up.shape == (4, 2 * 4 * 32, 32)
 
 
 # ---------------------------------------------------------------------------
