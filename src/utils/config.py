@@ -99,7 +99,7 @@ class TokenizerTrainingConfig:
 
 
 @dataclass
-class ModelTrainingConfig:
+class TrainingConfig:
     batch_size: int = 16
     gradient_accumulation_steps: int = 16
     max_steps: int = 50000
@@ -161,7 +161,7 @@ class TrainConfig:
     tokenizer_training: TokenizerTrainingConfig = field(
         default_factory=TokenizerTrainingConfig
     )
-    training: ModelTrainingConfig = field(default_factory=ModelTrainingConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -251,8 +251,8 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         tokenizer_training=TokenizerTrainingConfig(
             **_coerce_types(TokenizerTrainingConfig, raw.get("tokenizer_training", {}))
         ),
-        training=ModelTrainingConfig(
-            **_coerce_types(ModelTrainingConfig, raw.get("training", {}))
+        training=TrainingConfig(
+            **_coerce_types(TrainingConfig, raw.get("training", {}))
         ),
         optimizer=OptimizerConfig(
             **_coerce_types(OptimizerConfig, raw.get("optimizer", {}))

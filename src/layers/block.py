@@ -14,8 +14,8 @@ class BaseTransformerBlock(nn.Module):
     `layer_idx` to it. Residual classes that don't care about those args
     accept them via `**_`.
 
-    mlp_sublayer() returns (out, aux); aux is None for dense MLP and a
-    load-balancing loss for MoE. Forward always returns (x, ctx, aux); ctx
+    mlp_sublayer() returns (out, aux_loss); aux_loss is None for dense MLP and a
+    load-balancing loss for MoE. Forward always returns (x, ctx, aux_loss); ctx
     is None when using StandardResidual.
     """
 
@@ -43,8 +43,8 @@ class BaseTransformerBlock(nn.Module):
         h = self.attn_res_layer.pre(x, ctx)
         attn_out = self.attn_sublayer(h, **kwargs)
         x, ctx = self.attn_res_layer(x, attn_out, ctx)
-        # MLP slot: pre → sublayer (returns aux) → combine.
+        # MLP slot: pre → sublayer (returns aux_loss) → combine.
         h = self.mlp_res_layer.pre(x, ctx)
-        mlp_out, aux = self.mlp_sublayer(h)
+        mlp_out, aux_loss = self.mlp_sublayer(h)
         x, ctx = self.mlp_res_layer(x, mlp_out, ctx)
-        return x, ctx, aux
+        return x, ctx, aux_loss

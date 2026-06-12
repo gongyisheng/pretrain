@@ -636,7 +636,8 @@ class TokenizerTrainer:
         os.makedirs(self.save_path, exist_ok=True)
 
         self.logger = WandbLogger(config, enabled=wandb_enabled)
-        self.metrics = TokenizerMetricsTracker()
+        self.metrics = TokenizerMetricsTracker(self.logger)
+        self.eval_texts: list[str] = []
 
     # ---- Shared helpers ----
 
@@ -685,10 +686,7 @@ class TokenizerTrainer:
             )
             tok.decoder = decoders.ByteLevel()
             if do_log:
-                self.logger.log(
-                    self.metrics.build_train_log_dict(tok, vocab_size),
-                    step=vocab_size,
-                )
+                self.metrics.log_train(tok, vocab_size, self.eval_texts)
             if do_ckpt:
                 tok.save(os.path.join(self.save_path, "tokenizer.json"))
 
@@ -707,7 +705,7 @@ class TokenizerTrainer:
         eval_texts = list(itertools.islice(dataset_iter(), self.eval_num_docs))
         if not eval_texts:
             raise ValueError("dataset_iter produced no text")
-        self.metrics.eval_texts = eval_texts
+        self.eval_texts = eval_texts
 
         make_train_iter = self._make_train_iter(dataset_iter, eval_texts)
 

@@ -111,11 +111,11 @@ class TransformerLM(nn.Module):
         aux_total = None
         ctx = []
         for block in self.blocks:
-            x, ctx, aux = block(
+            x, ctx, aux_loss = block(
                 x, ctx, rope=self.rope, position_ids=position_ids, attn_mask=attn_mask
             )
-            if aux is not None:
-                aux_total = aux if aux_total is None else aux_total + aux
+            if aux_loss is not None:
+                aux_total = aux_loss if aux_total is None else aux_total + aux_loss
 
         x = self.ln_f(x)
         if not return_logits:

@@ -13,7 +13,7 @@ from src.model.registry import build_model
 from src.model.transformer import TransformerLM
 from src.training.optimizer import AdamWOptimizer, LionOptimizer
 from src.utils import metric_utils
-from src.utils.config import ModelConfig, TrainConfig, ModelTrainingConfig
+from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 # ---------------------------------------------------------------------------
@@ -458,12 +458,12 @@ def test_compute_flops_per_token_ckpt_multiplier():
     cfg_off = TrainConfig(
         max_seq_len=128,
         model=ModelConfig(**base_kwargs),
-        training=ModelTrainingConfig(activation_checkpointing=False),
+        training=TrainingConfig(activation_checkpointing=False),
     )
     cfg_on = TrainConfig(
         max_seq_len=128,
         model=ModelConfig(**base_kwargs),
-        training=ModelTrainingConfig(activation_checkpointing=True),
+        training=TrainingConfig(activation_checkpointing=True),
     )
     fwd = TransformerLM.compute_flops(cfg_off.model, cfg_off.max_seq_len)
     f_off = metric_utils.compute_flops_per_token(cfg_off)

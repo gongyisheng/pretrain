@@ -2,7 +2,7 @@ import tempfile
 import os
 import pytest
 import yaml
-from src.utils.config import ModelConfig, load_config, ModelTrainingConfig, DataConfig
+from src.utils.config import ModelConfig, load_config, TrainingConfig, DataConfig
 
 
 def _write_yaml(tmp_dir, data):
@@ -139,11 +139,11 @@ def test_load_config_coerces_nested_kwargs(tmp_path):
     assert cfg.model.pos_emb_kwargs["rope_theta"] == 10000.0
 
 
-# ==================== ModelTrainingConfig / DataConfig ====================
+# ==================== TrainingConfig / DataConfig ====================
 
 
 def test_training_config_intra_doc_masking_default():
-    cfg = ModelTrainingConfig()
+    cfg = TrainingConfig()
     assert cfg.intra_doc_masking is True
 
 
@@ -241,9 +241,9 @@ def test_task_accepts_sft():
 
 
 def test_default_eval_train_is_false():
-    from src.utils.config import ModelTrainingConfig
+    from src.utils.config import TrainingConfig
 
-    cfg = ModelTrainingConfig()
+    cfg = TrainingConfig()
     assert cfg.eval_train is False
 
 
