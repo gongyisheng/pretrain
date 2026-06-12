@@ -45,7 +45,7 @@ class TransformerBlock(nn.Module):
             config.d_model, max_seq_len, **config.attn_kwargs
         )
         mlp = MLP_REGISTRY[config.mlp_cls].compute_flops(
-            config.d_model, max_seq_len, **config.mlp_kwargs
+            config.d_model, **config.mlp_kwargs
         )
         norm = 2 * 3 * config.d_model
         residual = 2 * RESIDUAL_REGISTRY[config.residual_cls].compute_flops(

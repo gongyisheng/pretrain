@@ -32,7 +32,9 @@ def test_compute_flops_sums_components():
     )  # gqa(n_heads=4,n_kv=2) + dense gated, d_model=64, L=2, T=32, vocab=256
     m = cfg.model
     attn = GroupedQueryAttention.compute_flops(64, 32, **m.attn_kwargs)
-    mlp = DenseMLPBlock.compute_flops(64, 32, **m.mlp_kwargs)
+    mlp = DenseMLPBlock.compute_flops(
+        64, **m.mlp_kwargs
+    )  # mlp flops are seq-len-independent
     per_layer = attn + mlp + 2 * 3 * 64  # + two RMSNorms
     expected = 2 * per_layer + 3 * 64 + 2 * 64 * 256  # final norm + lm_head
     assert TransformerLM.compute_flops(m, cfg.max_seq_len) == expected

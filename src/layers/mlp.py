@@ -121,16 +121,7 @@ class DenseMLPBlock(nn.Module):
         return self.dropout(out), None
 
     @classmethod
-    def compute_flops(
-        cls,
-        d_model,
-        max_seq_len=None,
-        *,
-        intermediate_size,
-        gated=True,
-        bias=False,
-        **_,
-    ):
+    def compute_flops(cls, d_model, *, intermediate_size, gated=True, bias=False, **_):
         d_ff = intermediate_size
         if gated:
             matmul = 6 * d_model * d_ff
@@ -434,7 +425,6 @@ class SparseMoEBlock(nn.Module):
     def compute_flops(
         cls,
         d_model,
-        max_seq_len=None,
         *,
         intermediate_size,
         n_experts,
@@ -443,7 +433,7 @@ class SparseMoEBlock(nn.Module):
         bias=False,
         **_,
     ):
-        d_ff = intermediate_size  # resolved (0 → 4*d_model) in ModelConfig
+        d_ff = intermediate_size
         router = 2 * d_model * n_experts
         if gated:
             expert = 6 * d_model * d_ff
