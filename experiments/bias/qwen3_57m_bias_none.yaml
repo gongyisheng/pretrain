@@ -1,45 +1,47 @@
 max_seq_len: 1024
-
 model:
-  arch: "qwen3"
-  n_layers: 8
-  n_heads: 8
-  n_kv_heads: 4
   d_model: 512
+  n_layers: 8
   vocab_size: 50257
-  rope_theta: 10000.0
-  qk_norm: true
-
+  attn_cls: gqa
+  mlp_cls: dense
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  attn_kwargs:
+    n_heads: 8
+    n_kv_heads: 4
+    qk_norm: true
+  mlp_kwargs: {}
+  pos_emb_kwargs:
+    rope_theta: 10000.0
 data:
-  dataset: "openwebtext"
-  tokenizer_path: "tokenizers/custom_bpe_50k"
-  data_dir: "data/"
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
   val_split: 0.01
   num_workers: 4
-
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
-  mixed_precision: "bf16"
+  mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/bias/qwen3_57m_bias_none/"
+  checkpoint_dir: checkpoints/bias/qwen3_57m_bias_none/
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
-
 optimizer:
-  name: "adamw"
+  name: adamw
   lr: 6e-4
   weight_decay: 0.1
-  betas: [0.9, 0.95]
-
+  betas:
+  - 0.9
+  - 0.95
 scheduler:
-  name: "cosine"
+  name: cosine
   warmup_steps: 1500
   min_lr: 6e-5
-
 logging:
-  wandb_project: "pretrain-bias"
-  wandb_run_name: "qwen3-57m-bias-none"
+  wandb_project: pretrain-bias
+  wandb_run_name: qwen3-57m-bias-none
   log_every: 10

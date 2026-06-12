@@ -1,52 +1,53 @@
 max_seq_len: 1024
-
 model:
-  arch: "qwen3"
-  n_layers: 8
-  n_heads: 8
-  n_kv_heads: 4
   d_model: 512
+  n_layers: 8
   vocab_size: 50257
   dropout_embd: 0.02
-  dropout_attn: 0.02
-  dropout_ffn: 0.02
-  rope_theta: 10000.0
-  qk_norm: true
-
+  attn_cls: gqa
+  mlp_cls: dense
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  attn_kwargs:
+    n_heads: 8
+    n_kv_heads: 4
+    qk_norm: true
+    dropout: 0.02
+  mlp_kwargs:
+    dropout: 0.02
+  pos_emb_kwargs:
+    rope_theta: 10000.0
 data:
-  dataset: "openwebtext"
-  tokenizer_path: "tokenizers/custom_bpe_50k"
-  data_dir: "data/"
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
   val_split: 0.01
   num_workers: 4
-
 training:
   batch_size: 8
   gradient_accumulation_steps: 32
   max_steps: 5000
-  mixed_precision: "bf16"
+  mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/dropout/dropout_all/qwen3_drop_all0.02/"
+  checkpoint_dir: checkpoints/dropout/dropout_all/qwen3_drop_all0.02/
   checkpoint_every: 500
   eval_every: 100
   eval_steps: 25
-
 optimizer:
-  name: "adamw"
+  name: adamw
   lr: 6e-4
   weight_decay: 0.1
-  betas: [0.9, 0.95]
-
+  betas:
+  - 0.9
+  - 0.95
 scheduler:
-  name: "cosine"
+  name: cosine
   warmup_steps: 100
   min_lr: 6e-5
-
 logging:
-  wandb_project: "pretrain-dropout"
-  wandb_run_name: "qwen3-57m-drop-all0.02"
+  wandb_project: pretrain-dropout
+  wandb_run_name: qwen3-57m-drop-all0.02
   log_every: 10
-
 debug:
   max_steps: 1000
