@@ -34,6 +34,19 @@ class TransformerBlock(nn.Module):
         self.norm2 = norm_cls(config.d_model, **config.norm_kwargs)
         self.mlp = mlp_cls(config.d_model, **config.mlp_kwargs)
 
+    @staticmethod
+    def compute_flops(config: ModelConfig, max_seq_len: int) -> int:
+        """Forward FLOPs per token for one block: attn + mlp + the two pre-norms
+        (~3 FLOPs/element each)."""
+        attn = ATTN_REGISTRY[config.attn_cls].compute_flops(
+            config.d_model, max_seq_len, **config.attn_kwargs
+        )
+        mlp = MLP_REGISTRY[config.mlp_cls].compute_flops(
+            config.d_model, max_seq_len, **config.mlp_kwargs
+        )
+        norm = 2 * 3 * config.d_model
+        return attn + mlp + norm
+
     def forward(self, x, ctx=None, rope=None, position_ids=None, attn_mask=None):
         h = self.attn_res_layer.pre(x, ctx)
         attn_out = self.attn(
