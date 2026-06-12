@@ -1,4 +1,3 @@
-import pytest
 import tempfile
 import os
 import yaml
@@ -19,7 +18,11 @@ MINIMAL_CONFIG = {
         "n_layers": 2,
         "vocab_size": 256,
         "attn_cls": "gqa",
-        "attn_kwargs": {"n_heads": 4, "dropout": 0.0, "attn_implementation": "flex_attention"},
+        "attn_kwargs": {
+            "n_heads": 4,
+            "dropout": 0.0,
+            "attn_implementation": "flex_attention",
+        },
         "mlp_cls": "dense",
         "mlp_kwargs": {"activation": "silu", "gated": True, "intermediate_size": 0},
         "pos_emb_cls": "rope",
@@ -227,3 +230,39 @@ def test_default_eval_train_is_false():
 
     cfg = TrainingConfig()
     assert cfg.eval_train is False
+
+
+# ==================== attn_cls / attn_kwargs ====================
+
+
+def test_attn_cls_defaults():
+    # Default attn_cls is gqa
+    assert ModelConfig().attn_cls == "gqa"
+    assert ModelConfig(attn_cls="mha").attn_cls == "mha"
+    assert ModelConfig(attn_cls="mla").attn_cls == "mla"
+
+
+def test_attn_kwargs_preserved():
+    # attn_kwargs defaults to empty; explicit values are preserved
+    assert ModelConfig().attn_kwargs == {}
+    assert ModelConfig(attn_kwargs={"n_heads": 8}).attn_kwargs["n_heads"] == 8
+
+
+def test_attn_kwargs_round_trip_from_yaml(tmp_path):
+    yaml_content = """
+model:
+  arch: qwen3
+  attn_cls: mla
+  d_model: 64
+  attn_kwargs:
+    n_heads: 8
+    kv_lora_rank: 32
+    qk_rope_head_dim: 16
+"""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(yaml_content)
+    cfg = load_config(str(p))
+    assert cfg.model.attn_cls == "mla"
+    assert cfg.model.attn_kwargs["kv_lora_rank"] == 32
+    assert cfg.model.attn_kwargs["qk_rope_head_dim"] == 16
+    assert cfg.model.attn_kwargs["n_heads"] == 8

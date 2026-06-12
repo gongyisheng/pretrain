@@ -203,9 +203,13 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         ),
     )
 
-    for kw in (config.model.attn_kwargs, config.model.mlp_kwargs,
-               config.model.norm_kwargs, config.model.pos_emb_kwargs,
-               config.model.residual_kwargs):
+    for kw in (
+        config.model.attn_kwargs,
+        config.model.mlp_kwargs,
+        config.model.norm_kwargs,
+        config.model.pos_emb_kwargs,
+        config.model.residual_kwargs,
+    ):
         _coerce_kwargs(kw)
 
     if overrides:

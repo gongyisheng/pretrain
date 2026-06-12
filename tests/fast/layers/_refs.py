@@ -330,6 +330,50 @@ def gqa_ref(
     return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
 
 
+def mla_ref(
+    m,
+    x: torch.Tensor,
+    rope: nn.Module | None = None,
+    position_ids: torch.Tensor | None = None,
+    attn_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Eager MLA: latent Q/KV compression → decoupled rope → sdpa_ref → o_proj.
+
+    `m` is a MultiHeadLatentAttention module; its projections/norms are reused so
+    this pins the attention math (fused SDPA vs eager fp32 sdpa_ref) through the
+    MLA assembly. Scale defaults to 1/sqrt(qk_head_dim) inside sdpa_ref.
+    """
+    B, S, _ = x.shape
+    H, nope, rdim, vdim = (
+        m.n_heads,
+        m.qk_nope_head_dim,
+        m.qk_rope_head_dim,
+        m.v_head_dim,
+    )
+
+    if m.q_lora_rank > 0:
+        q = m.q_b_proj(m.q_a_norm(m.q_a_proj(x)))
+    else:
+        q = m.q_proj(x)
+    q = q.view(B, S, H, nope + rdim).transpose(1, 2)
+    q_nope, q_rope = q.split([nope, rdim], dim=-1)
+
+    compressed = m.kv_a_proj(x)
+    c_kv, k_rope = compressed.split([m.kv_lora_rank, rdim], dim=-1)
+    k_rope = k_rope.view(B, S, 1, rdim).transpose(1, 2)
+    kv = m.kv_b_proj(m.kv_a_norm(c_kv)).view(B, S, H, nope + vdim).transpose(1, 2)
+    k_nope, v = kv.split([nope, vdim], dim=-1)
+
+    if rope is not None:
+        q_rope = rope(q_rope, position_ids=position_ids)
+        k_rope = rope(k_rope, position_ids=position_ids)
+
+    q = torch.cat([q_nope, q_rope], dim=-1)
+    k = torch.cat([k_nope, k_rope.expand(B, H, S, rdim)], dim=-1)
+    attn = sdpa_ref(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
+    return m.o_proj(attn.transpose(1, 2).reshape(B, S, H * vdim))
+
+
 # ---------------------------- FFN ----------------------------
 
 

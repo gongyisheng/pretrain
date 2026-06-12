@@ -7,7 +7,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.layers.attention import ATTN_REGISTRY, GroupedQueryAttention, MultiHeadAttention
+from src.layers.attention import (
+    ATTN_REGISTRY,
+    GroupedQueryAttention,
+    MultiHeadAttention,
+)
 from src.layers.pos_emb import RoPE
 from src.utils.masking_utils import build_intra_doc_attention_mask
 from tests.fast.helpers import (
@@ -360,5 +364,7 @@ def test_mha_compute_flops_shape():
 
 
 def test_gqa_compute_flops_qk_norm():
-    f = GroupedQueryAttention.compute_flops(64, 128, n_heads=2, n_kv_heads=1, qk_norm=True)
+    f = GroupedQueryAttention.compute_flops(
+        64, 128, n_heads=2, n_kv_heads=1, qk_norm=True
+    )
     assert f["qk_norm"] == 3 * (2 + 1) * 32

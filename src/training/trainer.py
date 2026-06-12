@@ -155,7 +155,10 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
-        if self.is_moe and config.model.mlp_kwargs.get("expert_capacity_factor") is None:
+        if (
+            self.is_moe
+            and config.model.mlp_kwargs.get("expert_capacity_factor") is None
+        ):
             # Dynamic capacity uses .item() — can't compile the full model
             for block in self.model.blocks:
                 block.attn = torch.compile(block.attn)
@@ -312,7 +315,9 @@ class Trainer:
                             position_ids,
                             self.device,
                             mask_dtype,
-                            attn_implementation=self.config.model.attn_kwargs.get("attn_implementation", "flex_attention"),
+                            attn_implementation=self.config.model.attn_kwargs.get(
+                                "attn_implementation", "flex_attention"
+                            ),
                         )
                     else:
                         B, S = position_ids.shape
@@ -320,7 +325,9 @@ class Trainer:
                             B,
                             S,
                             self.device,
-                            attn_implementation=self.config.model.attn_kwargs.get("attn_implementation", "flex_attention"),
+                            attn_implementation=self.config.model.attn_kwargs.get(
+                                "attn_implementation", "flex_attention"
+                            ),
                         )
                     logits, aux_loss = self.model(
                         input_ids, position_ids=position_ids, attn_mask=attn_mask
@@ -332,7 +339,10 @@ class Trainer:
                         label_smoothing=self.config.training.label_smoothing,
                     )
                     if aux_loss is not None:
-                        loss = loss + self.config.model.mlp_kwargs["aux_loss_coef"] * aux_loss
+                        loss = (
+                            loss
+                            + self.config.model.mlp_kwargs["aux_loss_coef"] * aux_loss
+                        )
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
@@ -422,7 +432,9 @@ class Trainer:
                     position_ids,
                     self.device,
                     mask_dtype,
-                    attn_implementation=self.config.model.attn_kwargs.get("attn_implementation", "flex_attention"),
+                    attn_implementation=self.config.model.attn_kwargs.get(
+                        "attn_implementation", "flex_attention"
+                    ),
                 )
             else:
                 B, S = position_ids.shape
@@ -430,7 +442,9 @@ class Trainer:
                     B,
                     S,
                     self.device,
-                    attn_implementation=self.config.model.attn_kwargs.get("attn_implementation", "flex_attention"),
+                    attn_implementation=self.config.model.attn_kwargs.get(
+                        "attn_implementation", "flex_attention"
+                    ),
                 )
             logits, aux_loss = self.model(
                 input_ids, position_ids=position_ids, attn_mask=attn_mask
@@ -508,7 +522,9 @@ class Trainer:
                 B,
                 S,
                 self.device,
-                attn_implementation=self.config.model.attn_kwargs.get("attn_implementation", "flex_attention"),
+                attn_implementation=self.config.model.attn_kwargs.get(
+                    "attn_implementation", "flex_attention"
+                ),
             )
             logits, _ = self.model(idx_cond, position_ids=pos_ids, attn_mask=attn_mask)
             logits = logits[:, -1, :]  # take last token's logits

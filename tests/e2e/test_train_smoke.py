@@ -1,6 +1,9 @@
 """Dry-run training tests for GPT-2 and Qwen3 using real configs and data."""
 
+import os
 import sys
+
+import pytest
 
 sys.path.insert(0, ".")
 
@@ -9,6 +12,12 @@ from src.training.trainer import Trainer
 
 
 STEPS = 1
+
+_TOKENIZER_PATH = "tokenizers/custom_bpe_50k/tokenizer.json"
+_needs_tokenizer = pytest.mark.skipif(
+    not os.path.exists(_TOKENIZER_PATH),
+    reason=f"tokenizer not found at {_TOKENIZER_PATH}; run preprocess_data first",
+)
 
 
 def _run_dry_run(config_path):
@@ -30,9 +39,11 @@ def _run_dry_run(config_path):
     assert all(loss > 0 for loss in losses[1:])
 
 
+@_needs_tokenizer
 def test_gpt2_dry_run():
     _run_dry_run("configs/gpt2_124m.yaml")
 
 
+@_needs_tokenizer
 def test_qwen3_dry_run():
     _run_dry_run("configs/qwen3_57m.yaml")

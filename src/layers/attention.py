@@ -70,7 +70,9 @@ class MultiHeadAttention(nn.Module):
         self._attn_fn = _ATTN_IMPL[attn_implementation]
 
     @classmethod
-    def compute_flops(cls, d_model, max_seq_len, *, n_heads, bias=False, qk_norm=False, **_):
+    def compute_flops(
+        cls, d_model, max_seq_len, *, n_heads, bias=False, qk_norm=False, **_
+    ):
         head_dim = d_model // n_heads
         n_kv = n_heads
         qkv = 2 * d_model * (n_heads + 2 * n_kv) * head_dim
@@ -149,7 +151,17 @@ class GroupedQueryAttention(nn.Module):
         self._attn_fn = _ATTN_IMPL[attn_implementation]
 
     @classmethod
-    def compute_flops(cls, d_model, max_seq_len, *, n_heads, n_kv_heads=None, bias=False, qk_norm=False, **_):
+    def compute_flops(
+        cls,
+        d_model,
+        max_seq_len,
+        *,
+        n_heads,
+        n_kv_heads=None,
+        bias=False,
+        qk_norm=False,
+        **_,
+    ):
         n_kv = n_kv_heads or n_heads
         head_dim = d_model // n_heads
         qkv = 2 * d_model * (n_heads + 2 * n_kv) * head_dim

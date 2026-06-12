@@ -1,9 +1,11 @@
 """Evaluate a pretrained model checkpoint."""
+
 import argparse
 import sys
 import os
 import torch
 import torch.nn.functional as F
+
 sys.path.insert(0, ".")
 
 from src.utils.config import load_config
@@ -31,7 +33,9 @@ def main():
     # Load val data
     val_path = os.path.join(config.data.data_dir, "val.bin")
     val_dataset = PretrainDataset(val_path, config.max_seq_len)
-    val_loader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=False)
+    val_loader = DataLoader(
+        val_dataset, batch_size=config.training.batch_size, shuffle=False
+    )
 
     eval_steps = args.eval_steps or config.training.eval_steps
     total_loss = 0.0

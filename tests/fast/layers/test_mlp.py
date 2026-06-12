@@ -9,8 +9,6 @@ from src.layers.mlp import (
     MLP_REGISTRY,
     MoERouter,
     SparseMoEBlock,
-    gated_mlp,
-    ungated_mlp,
 )
 from tests.fast.layers._refs import (
     COMPOUND_DTYPES,
@@ -42,14 +40,18 @@ def test_mlp_registry():
 
 @pytest.mark.parametrize("gated", [False, True])
 def test_dense_output_shape(gated):
-    blk = DenseMLPBlock(d_model=64, intermediate_size=128, activation="silu", gated=gated, dropout=0.0)
+    blk = DenseMLPBlock(
+        d_model=64, intermediate_size=128, activation="silu", gated=gated, dropout=0.0
+    )
     x = torch.randn(2, 16, 64)
     out, aux = blk(x)
     assert out.shape == (2, 16, 64)
 
 
 def test_dense_returns_none_aux():
-    blk = DenseMLPBlock(d_model=64, intermediate_size=128, activation="silu", gated=True)
+    blk = DenseMLPBlock(
+        d_model=64, intermediate_size=128, activation="silu", gated=True
+    )
     out, aux = blk(torch.randn(2, 8, 64))
     assert out.shape == (2, 8, 64) and aux is None
 
@@ -69,7 +71,9 @@ def test_dense_default_intermediate_size(gated):
 
 @pytest.mark.parametrize("gated", [False, True])
 def test_dense_default_bias_is_false(gated):
-    blk = DenseMLPBlock(d_model=64, intermediate_size=128, activation="silu", gated=gated)
+    blk = DenseMLPBlock(
+        d_model=64, intermediate_size=128, activation="silu", gated=gated
+    )
     w1 = blk.gate_up_proj if gated else blk.up_proj
     assert w1.bias is None
     assert blk.down_proj.bias is None
@@ -77,7 +81,9 @@ def test_dense_default_bias_is_false(gated):
 
 @pytest.mark.parametrize("gated", [False, True])
 def test_dense_bias_true_adds_biases(gated):
-    blk = DenseMLPBlock(d_model=64, intermediate_size=128, activation="silu", gated=gated, bias=True)
+    blk = DenseMLPBlock(
+        d_model=64, intermediate_size=128, activation="silu", gated=gated, bias=True
+    )
     w1 = blk.gate_up_proj if gated else blk.up_proj
     assert w1.bias is not None
     assert blk.down_proj.bias is not None
@@ -134,7 +140,11 @@ def test_dense_compute_flops_default_intermediate():
 def test_dense_ungated_matches_ref(activation, dtype, atol):
     torch.manual_seed(0)
     blk = DenseMLPBlock(
-        d_model=64, intermediate_size=256, activation=activation, gated=False, dropout=0.0
+        d_model=64,
+        intermediate_size=256,
+        activation=activation,
+        gated=False,
+        dropout=0.0,
     ).to(dtype)
     blk.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)
@@ -149,12 +159,18 @@ def test_dense_ungated_matches_ref(activation, dtype, atol):
 def test_dense_gated_matches_ref(activation, dtype, atol):
     torch.manual_seed(0)
     blk = DenseMLPBlock(
-        d_model=64, intermediate_size=128, activation=activation, gated=True, dropout=0.0
+        d_model=64,
+        intermediate_size=128,
+        activation=activation,
+        gated=True,
+        dropout=0.0,
     ).to(dtype)
     blk.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)
     out, _ = blk(x)
-    out_ref = ffn_ref(x, blk.down_proj, activation=activation, gate_up_proj=blk.gate_up_proj)
+    out_ref = ffn_ref(
+        x, blk.down_proj, activation=activation, gate_up_proj=blk.gate_up_proj
+    )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
@@ -245,14 +261,18 @@ def test_moe_router_runs_in_fp32_under_autocast(amp_dtype):
 
 
 def test_sparse_moe_block_output_shape():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+    )
     x = torch.randn(2, 8, 64)
     out, _ = block(x)
     assert out.shape == (2, 8, 64)
 
 
 def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+    )
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
     assert aux_loss.ndim == 0
@@ -260,7 +280,9 @@ def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
 
 
 def test_sparse_moe_block_aux_loss_has_grad():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2)
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+    )
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
     aux_loss.backward()
@@ -268,7 +290,9 @@ def test_sparse_moe_block_aux_loss_has_grad():
 
 
 def test_sparse_moe_block_aux_loss_coef_stored():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_experts=4, aux_loss_coef=0.05)
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, aux_loss_coef=0.05
+    )
     assert block.aux_loss_coef == 0.05
 
 
@@ -283,14 +307,28 @@ def test_sparse_moe_block_default_intermediate_size():
 
 
 def test_sparse_moe_compute_flops_gated():
-    f = SparseMoEBlock.compute_flops(64, intermediate_size=128, n_experts=4, n_experts_per_token=2, gated=True, bias=False)
+    f = SparseMoEBlock.compute_flops(
+        64,
+        intermediate_size=128,
+        n_experts=4,
+        n_experts_per_token=2,
+        gated=True,
+        bias=False,
+    )
     router = 2 * 64 * 4
     expert = 6 * 64 * 128
     assert f == {"mlp": router + 2 * expert}
 
 
 def test_sparse_moe_compute_flops_ungated():
-    f = SparseMoEBlock.compute_flops(64, intermediate_size=128, n_experts=4, n_experts_per_token=2, gated=False, bias=False)
+    f = SparseMoEBlock.compute_flops(
+        64,
+        intermediate_size=128,
+        n_experts=4,
+        n_experts_per_token=2,
+        gated=False,
+        bias=False,
+    )
     router = 2 * 64 * 4
     expert = 4 * 64 * 128
     assert f == {"mlp": router + 2 * expert}

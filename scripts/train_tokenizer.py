@@ -1,4 +1,5 @@
 """Train a custom BPE or SuperBPE tokenizer on a HuggingFace dataset."""
+
 import argparse
 import sys
 

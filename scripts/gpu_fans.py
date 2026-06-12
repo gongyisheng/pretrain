@@ -8,6 +8,7 @@ sudo python3 scripts/gpu_fans.py 70 --gpu 0   # GPU 0 only
 sudo python3 scripts/gpu_fans.py 70 --gpu 0,1 # GPUs 0 and 1
 sudo python3 scripts/gpu_fans.py auto         # hand control back to driver
 """
+
 import argparse
 import sys
 from pynvml import (
@@ -46,7 +47,9 @@ def parse_gpus(arg: str | None, total: int) -> list[int]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Set NVIDIA GPU fan speed via NVML.")
-    parser.add_argument("speed", help="0-100 percent, or 'auto' to restore driver control")
+    parser.add_argument(
+        "speed", help="0-100 percent, or 'auto' to restore driver control"
+    )
     parser.add_argument(
         "--gpu",
         help="comma-separated GPU indices (e.g. 0 or 0,1). Defaults to all GPUs.",

@@ -204,7 +204,11 @@ def count_parameters(model: torch.nn.Module, config: TrainConfig) -> dict[str, i
         if bias:
             expert_ffn_per_layer += n_exp * (2 * d_ff + mc.d_model)
             active_ffn_per_layer += k * (2 * d_ff + mc.d_model)
-        active_non_emb = non_emb - mc.n_layers * expert_ffn_per_layer + mc.n_layers * active_ffn_per_layer
+        active_non_emb = (
+            non_emb
+            - mc.n_layers * expert_ffn_per_layer
+            + mc.n_layers * active_ffn_per_layer
+        )
     else:
         active_non_emb = non_emb
 
@@ -229,8 +233,12 @@ def compute_flops_per_token(config: TrainConfig) -> dict[str, int]:
     RoPE are 0 FLOPs.
     """
     m = config.model
-    a = ATTN_REGISTRY[m.attn_cls].compute_flops(m.d_model, config.max_seq_len, **m.attn_kwargs)
-    mlp = MLP_REGISTRY[m.mlp_cls].compute_flops(m.d_model, config.max_seq_len, **m.mlp_kwargs)
+    a = ATTN_REGISTRY[m.attn_cls].compute_flops(
+        m.d_model, config.max_seq_len, **m.attn_kwargs
+    )
+    mlp = MLP_REGISTRY[m.mlp_cls].compute_flops(
+        m.d_model, config.max_seq_len, **m.mlp_kwargs
+    )
 
     qkv_proj = m.n_layers * a["qkv_proj"]
     o_proj = m.n_layers * a["o_proj"]

@@ -40,7 +40,9 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
 class RoPE(nn.Module):
     rotary = True
 
-    def __init__(self, d_head: int, max_seq_len: int = 4096, rope_theta: float = 10000.0):
+    def __init__(
+        self, d_head: int, max_seq_len: int = 4096, rope_theta: float = 10000.0
+    ):
         super().__init__()
         self.d_head = d_head
         self.rope_theta = rope_theta
@@ -48,7 +50,9 @@ class RoPE(nn.Module):
         self._build_buffers()
 
     def _build_buffers(self):
-        freqs = 1.0 / (self.rope_theta ** (torch.arange(0, self.d_head, 2) / self.d_head))
+        freqs = 1.0 / (
+            self.rope_theta ** (torch.arange(0, self.d_head, 2) / self.d_head)
+        )
         positions = torch.arange(self.max_seq_len)
         angles = positions[:, None] * freqs[None, :]  # (max_seq_len, d_head//2)
         angles = torch.cat([angles, angles], dim=-1)  # (max_seq_len, d_head)

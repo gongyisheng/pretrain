@@ -9,6 +9,7 @@ Then analyze:
     nsys stats logs/profiles/gpt2.nsys-rep
     nsys stats --report cuda_gpu_kern_sum logs/profiles/qwen3.nsys-rep
 """
+
 import argparse
 import sys
 

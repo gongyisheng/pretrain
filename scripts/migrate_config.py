@@ -3,6 +3,7 @@ to the new cls+kwargs schema. Run on each config file you want to migrate.
 
 Usage: python scripts/migrate_config.py <path> [<path>...]
 """
+
 import sys
 import yaml
 
@@ -20,7 +21,14 @@ def migrate_model_block(old: dict) -> dict:
     new = {}
 
     # Scalar top-level fields (only emit if present in source)
-    for key in ("d_model", "n_layers", "vocab_size", "dropout_embd", "tie_word_embeddings", "lm_head_bias"):
+    for key in (
+        "d_model",
+        "n_layers",
+        "vocab_size",
+        "dropout_embd",
+        "tie_word_embeddings",
+        "lm_head_bias",
+    ):
         if key in old:
             new[key] = old[key]
 
@@ -114,7 +122,10 @@ def migrate_file(path: str) -> None:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python scripts/migrate_config.py <path> [<path>...]", file=sys.stderr)
+        print(
+            "Usage: python scripts/migrate_config.py <path> [<path>...]",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     for path in sys.argv[1:]:

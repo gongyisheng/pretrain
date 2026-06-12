@@ -39,7 +39,12 @@ def _qwen3_cfg(impl):
         d_model=64,
         vocab_size=256,
         attn_cls="gqa",
-        attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True, "attn_implementation": impl},
+        attn_kwargs={
+            "n_heads": 2,
+            "n_kv_heads": 1,
+            "qk_norm": True,
+            "attn_implementation": impl,
+        },
         mlp_cls="dense",
         mlp_kwargs={},
     )
@@ -51,7 +56,12 @@ def _qwen3_moe_cfg(impl):
         d_model=64,
         vocab_size=256,
         attn_cls="gqa",
-        attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True, "attn_implementation": impl},
+        attn_kwargs={
+            "n_heads": 2,
+            "n_kv_heads": 1,
+            "qk_norm": True,
+            "attn_implementation": impl,
+        },
         mlp_cls="moe",
         mlp_kwargs={
             "n_experts": 4,
@@ -81,7 +91,12 @@ def _qwen3_attn_res_cfg(impl):
         d_model=64,
         vocab_size=256,
         attn_cls="gqa",
-        attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True, "attn_implementation": impl},
+        attn_kwargs={
+            "n_heads": 2,
+            "n_kv_heads": 1,
+            "qk_norm": True,
+            "attn_implementation": impl,
+        },
         mlp_cls="dense",
         mlp_kwargs={},
         residual_cls="attn_res",
@@ -350,7 +365,12 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
         attn_cls="mha",
         attn_kwargs={"n_heads": 2, "bias": True},
         mlp_cls="dense",
-        mlp_kwargs={"intermediate_size": 256, "activation": "gelu", "gated": False, "bias": True},
+        mlp_kwargs={
+            "intermediate_size": 256,
+            "activation": "gelu",
+            "gated": False,
+            "bias": True,
+        },
     )
     f = metric_utils.compute_flops_per_token(cfg)
     # head_dim=32, n_kv_heads=n_heads=2 (MHA), L=2, T=128
@@ -382,7 +402,12 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
         attn_cls="gqa",
         attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "bias": False},
         mlp_cls="dense",
-        mlp_kwargs={"intermediate_size": 256, "activation": "silu", "gated": True, "bias": False},
+        mlp_kwargs={
+            "intermediate_size": 256,
+            "activation": "silu",
+            "gated": True,
+            "bias": False,
+        },
     )
     f = metric_utils.compute_flops_per_token(cfg)
     assert f["qkv_proj"] == 2 * 16384
@@ -478,11 +503,15 @@ def test_compute_flops_per_token_qk_norm():
     )
     cfg_off = TrainConfig(
         max_seq_len=128,
-        model=ModelConfig(**base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": False}),
+        model=ModelConfig(
+            **base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": False}
+        ),
     )
     cfg_on = TrainConfig(
         max_seq_len=128,
-        model=ModelConfig(**base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": True}),
+        model=ModelConfig(
+            **base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": True}
+        ),
     )
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)

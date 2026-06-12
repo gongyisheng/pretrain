@@ -1,4 +1,5 @@
 """Evaluate a trained tokenizer's encoding efficiency (bytes per token)."""
+
 import argparse
 import json
 import sys
