@@ -22,7 +22,7 @@ _needs_tokenizer = pytest.mark.skipif(
 
 def _run_dry_run(config_path):
     overrides = [
-        f"debug.max_steps={STEPS}",
+        f"training.early_stop={STEPS}",
         f"training.eval_every={STEPS + 1}",
         f"training.checkpoint_every={STEPS + 1}",
         "logging.log_every=1",

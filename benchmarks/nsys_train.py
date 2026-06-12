@@ -30,7 +30,7 @@ def main():
 
     total = args.warmup + args.steps
     overrides = [
-        f"debug.max_steps={args.warmup}",
+        f"training.early_stop={args.warmup}",
         f"training.eval_every={total + 1}",
         f"training.checkpoint_every={total + 1}",
         "logging.log_every=1",
@@ -42,7 +42,7 @@ def main():
     trainer.train()
 
     # Profiled steps — nsys captures this range via NVTX or just wall time
-    trainer.config.debug.max_steps = total
+    trainer.config.training.early_stop = total
     torch.cuda.cudart().cudaProfilerStart()
     trainer.train()
     torch.cuda.cudart().cudaProfilerStop()

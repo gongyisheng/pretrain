@@ -25,6 +25,7 @@ training:
   batch_size: 8
   gradient_accumulation_steps: 32
   max_steps: 50000
+  early_stop: 12000
   mixed_precision: bf16
   activation_checkpointing: false
   seed: 42
@@ -52,5 +53,3 @@ logging:
   wandb_run_name: qwen3-57m-mult1-xt0-25
   wandb_group: mult1
   log_every: 10
-debug:
-  max_steps: 12000

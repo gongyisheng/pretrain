@@ -234,11 +234,7 @@ class Trainer:
         # Deferred loss: keep previous step's loss tensor to read while next step runs
         prev_loss_tensor = None
 
-        stop_at = (
-            self.config.debug.max_steps
-            if self.config.debug.max_steps > 0
-            else cfg.max_steps
-        )
+        stop_at = cfg.early_stop if cfg.early_stop > 0 else cfg.max_steps
         pbar = tqdm(
             total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True
         )

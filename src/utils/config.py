@@ -103,6 +103,7 @@ class TrainingConfig:
     batch_size: int = 16
     gradient_accumulation_steps: int = 16
     max_steps: int = 50000
+    early_stop: int = 0  # if > 0, stop at this step (overrides max_steps without affecting the LR schedule)
     mixed_precision: str = "bf16"
     loss_fn: str = "cross_entropy"
     label_smoothing: float = 0.0  # for CE loss only
@@ -141,15 +142,10 @@ class SchedulerConfig:
 class LoggingConfig:
     wandb_project: str = "pretrain"
     wandb_run_name: str = ""
-    wandb_group: str = ""  # group name for comparing runs in W&B (e.g. "dtype-sweep")
+    wandb_group: str = ""
     log_every: int = 10
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
     log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
-
-
-@dataclass
-class DebugConfig:
-    max_steps: int = 0  # if > 0, stop training at this step (overrides training.max_steps without affecting the LR schedule)
 
 
 @dataclass
@@ -158,14 +154,13 @@ class TrainConfig:
     max_seq_len: int = 1024
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
     tokenizer_training: TokenizerTrainingConfig = field(
         default_factory=TokenizerTrainingConfig
     )
-    training: TrainingConfig = field(default_factory=TrainingConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    debug: DebugConfig = field(default_factory=DebugConfig)
 
     def to_dict(self):
         return asdict(self)
@@ -261,9 +256,6 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
             **_coerce_types(SchedulerConfig, raw.get("scheduler", {}))
         ),
         logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
-        debug=DebugConfig(
-            max_steps=raw.get("debug", {}).get("max_steps", 0),
-        ),
     )
 
     for kw in (

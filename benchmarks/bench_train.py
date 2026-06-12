@@ -40,7 +40,7 @@ def run_benchmark(config_path, steps=10, warmup=5):
     """
     total_steps = warmup + steps
     overrides = [
-        f"debug.max_steps={total_steps}",
+        f"training.early_stop={total_steps}",
         # disable eval/checkpoint during benchmark
         f"training.eval_every={total_steps + 1}",
         f"training.checkpoint_every={total_steps + 1}",

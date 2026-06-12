@@ -27,6 +27,7 @@ training:
   batch_size: 8
   gradient_accumulation_steps: 32
   max_steps: 5000
+  early_stop: 1000
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
@@ -49,5 +50,3 @@ logging:
   wandb_project: pretrain-dropout
   wandb_run_name: qwen3-57m-drop-ffn0.0
   log_every: 10
-debug:
-  max_steps: 1000
