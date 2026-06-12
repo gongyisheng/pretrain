@@ -54,7 +54,7 @@ def _trainer(
             method=method,
             method_kwargs=method_kwargs,
             checkpoint_dir=str(save_path),
-            checkpoint_every=eval_every,
+            eval_every=eval_every,
         ),
         logging=LoggingConfig(**(logging_kwargs or {})),
     )

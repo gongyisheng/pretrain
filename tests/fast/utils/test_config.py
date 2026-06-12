@@ -187,6 +187,7 @@ def test_tokenizer_training_defaults():
     assert tc.method_kwargs == {}
     assert tc.num_samples == 1_000_000
     assert tc.checkpoint_every == 5000
+    assert tc.eval_every == 5000
 
 
 def test_loads_superbpe_tokenizer_training_yaml(tmp_path):

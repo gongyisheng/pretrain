@@ -12,6 +12,7 @@ tokenizer_training:
   num_samples: 100000
   checkpoint_dir: tokenizers/experiments/superbpe_v200k_t120k_m6
   checkpoint_every: 5000
+  eval_every: 5000
 logging:
   wandb_project: tokenizer-superbpe
   wandb_run_name: superbpe_v200k_t120k_m6

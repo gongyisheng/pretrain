@@ -43,8 +43,9 @@ class TokenizerTrainingConfig:
     checkpoint_dir: str = (
         "tokenizers/custom_bpe"  # where the trained tokenizer is saved
     )
-    # SuperBPE-only: interval (in merges) at which to log/evaluate/checkpoint curve points.
-    checkpoint_every: int = 5000
+    checkpoint_every: int = 5000  # interval (in merges) at which to save the tokenizer
+    # SuperBPE-only: interval (in merges) at which to log/evaluate curve points.
+    eval_every: int = 5000
 
 
 @dataclass

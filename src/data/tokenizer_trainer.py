@@ -108,7 +108,7 @@ class TokenizerTrainer:
         self.save_path = config.tokenizer_training.checkpoint_dir
         self.train_method = config.tokenizer_training.method
         self.train_method_kwargs = dict(config.tokenizer_training.method_kwargs)
-        self.eval_every = config.tokenizer_training.checkpoint_every
+        self.eval_every = config.tokenizer_training.eval_every
         self.eval_num_docs = self.train_method_kwargs.get("eval_num_docs", 1000)
 
         if self.train_method not in ("bpe", "superbpe"):
