@@ -1,9 +1,9 @@
 """Residual strategies for transformer blocks.
 
 `BaseResidual` defines the uniform interface; concrete strategies extend it.
-Block constructs any residual subclass via the same factory call, so adding
-a new variant (gated residual, learned scalar, etc.) requires no changes
-in block.py.
+TransformerBlock constructs any residual subclass via the same factory call,
+so adding a new variant (gated residual, learned scalar, etc.) requires no
+changes in the block.
 """
 
 import torch
@@ -27,7 +27,7 @@ def _aggregate(V: torch.Tensor, K: torch.Tensor, w_proj: torch.Tensor) -> torch.
 
 
 class BaseResidual(nn.Module):
-    """Abstract base for residual strategies used by BaseTransformerBlock.
+    """Abstract base for residual strategies used by TransformerBlock.
 
     Factory signature: (d_model, layer_idx, slot, **kwargs) — all three
     required, no defaults.
@@ -35,7 +35,7 @@ class BaseResidual(nn.Module):
       pre(x, ctx) -> h         # transform x into what the sublayer sees
       forward(x, r, ctx)       # combine the base x with the sublayer's output r,
                                # returning (new_x, new_ctx)
-    The sublayer call itself lives in block.py — residual only does
+    The sublayer call itself lives in TransformerBlock — residual only does
     residual-specific work (pre-transform and combine).
 
     Stores `d_model`, `layer_idx`, and `slot` as instance attributes so
