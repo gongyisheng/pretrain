@@ -688,9 +688,13 @@ class TokenizerTrainer:
             if do_log:
                 self.metrics.log_train(tok, vocab_size, self.eval_texts)
             if do_ckpt:
-                tok.save(os.path.join(self.save_path, "tokenizer.json"))
+                self._save_checkpoint(tok)
 
         return _callback
+
+    def _save_checkpoint(self, tokenizer: Tokenizer) -> None:
+        """Save the tokenizer to `save_path/tokenizer.json` (the checkpoint)."""
+        tokenizer.save(os.path.join(self.save_path, "tokenizer.json"))
 
     def train(self, dataset_iter: Callable[[], Iterable[str]]) -> Tokenizer:
         """Train and save a tokenizer.
@@ -714,7 +718,7 @@ class TokenizerTrainer:
         else:
             tokenizer = self._train_superbpe(make_train_iter)
 
-        tokenizer.save(os.path.join(self.save_path, "tokenizer.json"))
+        self._save_checkpoint(tokenizer)
         print(
             f"{self.train_method.upper()} tokenizer saved to {self.save_path}/ "
             f"(vocab_size={tokenizer.get_vocab_size()})"
