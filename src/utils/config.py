@@ -5,59 +5,23 @@ import yaml
 
 @dataclass
 class ModelConfig:
-    arch: str = "gpt2"
-    n_layers: int = 12
-    n_heads: int = 12
     d_model: int = 768
-    intermediate_size: int = 0  # 0 means 4 * d_model, set in post_init
+    n_layers: int = 12
     vocab_size: int = 50257
     dropout_embd: float = 0.0
-    dropout_attn: float = 0.0
-    dropout_ffn: float = 0.0
-    n_kv_heads: int = 0  # 0 means same as n_heads (MHA); set >0 for GQA
-    rope_theta: float = 10000.0  # RoPE base frequency; only used by qwen3, L_max ~62800
-    qk_norm: bool = False  # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
-    tie_word_embeddings: bool = True  # tie lm_head.weight to token_emb.weight
-    attn_bias: bool = False  # bias in attention Q/K/V/O projections
-    mlp_bias: bool = False  # bias in MLP layers (up_proj/down_proj/gate_proj)
-    mlp_activation: str = (
-        "silu"  # "relu" | "gelu" | "silu" (modern default; GPT-2 sets "gelu")
-    )
-    mlp_gated: bool = True  # True = GLU-family FFN. silu+gated=SwiGLU; GPT-2 sets False
-    lm_head_bias: bool = False  # bias in lm_head output projection
-    moe_n_experts: int = 0  # 0 = dense; N > 0 = MoE with N total experts
-    moe_n_experts_per_token: int = 2  # top-k experts activated per token
-    moe_intermediate_size: int = (
-        0  # per-expert FFN hidden dim; 0 = same as intermediate_size
-    )
-    moe_aux_loss_coef: float = (
-        0.01  # Switch Transformer load-balancing loss coefficient
-    )
-    moe_expert_capacity_factor: Optional[float] = (
-        None  # None = dynamic (no dropping); float = fixed capacity, enables torch.compile
-    )
-    residual_cls: str = (
-        "standard"  # residual strategy name; see src.layers.residual.RESIDUAL_REGISTRY
-    )
-    residual_kwargs: dict = field(
-        default_factory=dict
-    )  # kwargs passed to the residual class constructor
-    attn_implementation: str = "flex_attention"  # "flex_attention" | "sdpa"
+    tie_word_embeddings: bool = True
+    lm_head_bias: bool = False
 
-    _ATTN_IMPLEMENTATIONS = ("flex_attention", "sdpa")
-
-    def __post_init__(self):
-        if self.intermediate_size == 0:
-            self.intermediate_size = 4 * self.d_model
-        if self.n_kv_heads == 0:
-            self.n_kv_heads = self.n_heads
-        if self.moe_intermediate_size == 0:
-            self.moe_intermediate_size = self.intermediate_size
-        if self.attn_implementation not in self._ATTN_IMPLEMENTATIONS:
-            raise ValueError(
-                f"unknown attn_implementation: {self.attn_implementation!r}; "
-                f"expected one of {self._ATTN_IMPLEMENTATIONS}"
-            )
+    attn_cls: str = "gqa"
+    attn_kwargs: dict = field(default_factory=dict)
+    mlp_cls: str = "dense"
+    mlp_kwargs: dict = field(default_factory=dict)
+    norm_cls: str = "rmsnorm"
+    norm_kwargs: dict = field(default_factory=dict)
+    pos_emb_cls: str = "rope"
+    pos_emb_kwargs: dict = field(default_factory=dict)
+    residual_cls: str = "standard"
+    residual_kwargs: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -203,6 +167,18 @@ def _coerce_types(dc_class, raw_dict: dict) -> dict:
     return coerced
 
 
+def _coerce_kwargs(d: dict) -> None:
+    for k, v in d.items():
+        if isinstance(v, str):
+            try:
+                d[k] = int(v)
+            except ValueError:
+                try:
+                    d[k] = float(v)
+                except ValueError:
+                    pass
+
+
 def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig:
     with open(path) as f:
         raw = yaml.safe_load(f)
@@ -226,6 +202,11 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
             max_steps=raw.get("debug", {}).get("max_steps", 0),
         ),
     )
+
+    for kw in (config.model.attn_kwargs, config.model.mlp_kwargs,
+               config.model.norm_kwargs, config.model.pos_emb_kwargs,
+               config.model.residual_kwargs):
+        _coerce_kwargs(kw)
 
     if overrides:
         _apply_overrides(config, overrides)
