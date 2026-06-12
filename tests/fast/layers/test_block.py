@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from src.layers.attention import MultiHeadAttention
 from src.layers.block import BaseTransformerBlock
-from src.layers.ffn import FFN
+from src.layers.mlp import DenseMLPBlock
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 
@@ -26,15 +26,19 @@ class _MinimalTransformerBlock(BaseTransformerBlock):
             d_model, n_heads, dropout_attn, attn_implementation=attn_implementation
         )
         self.ln2 = nn.LayerNorm(d_model)
-        self.ffn = FFN(
-            d_model, intermediate_size, activation="gelu", dropout=dropout_ffn
+        self.mlp = DenseMLPBlock(
+            d_model,
+            intermediate_size=intermediate_size,
+            activation="gelu",
+            gated=False,
+            dropout=dropout_ffn,
         )
 
     def attn_sublayer(self, x: torch.Tensor, attn_mask=None, **kwargs) -> torch.Tensor:  # noqa: ARG002
         return self.attn(self.ln1(x), attn_mask=attn_mask)
 
-    def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
-        return self.ffn(self.ln2(x))
+    def mlp_sublayer(self, x: torch.Tensor) -> tuple:
+        return self.mlp(self.ln2(x))
 
 
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
@@ -50,8 +54,9 @@ def test_transformer_block_output_shape(impl, device):
     x = torch.randn(2, 16, 64)
     pos = torch.arange(16).unsqueeze(0).expand(2, -1)
     attn_mask, _ = make_attn_mask("causal", impl, pos, x.dtype)
-    out, _ = block(x, attn_mask=attn_mask)
+    out, _, aux = block(x, attn_mask=attn_mask)
     assert out.shape == (2, 16, 64)
+    assert aux is None
 
 
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
@@ -67,5 +72,5 @@ def test_transformer_block_residual(impl, device):
     x = torch.randn(2, 16, 64)
     pos = torch.arange(16).unsqueeze(0).expand(2, -1)
     attn_mask, _ = make_attn_mask("causal", impl, pos, x.dtype)
-    out, _ = block(x, attn_mask=attn_mask)
+    out, _, _ = block(x, attn_mask=attn_mask)
     assert not torch.allclose(out, x)

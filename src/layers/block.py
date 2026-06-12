@@ -7,14 +7,16 @@ from src.layers.residual import BaseResidual, StandardResidual
 class BaseTransformerBlock(nn.Module):
     """Base transformer block.
 
-    Subclasses implement attn_sublayer() and ffn_sublayer(); the residual
+    Subclasses implement attn_sublayer() and mlp_sublayer(); the residual
     strategy is selected at __init__ by passing a `residual_cls` (and
     optional `residual_kwargs`). The same class instantiates both slots —
     block.py just forwards `slot="attn"` / `slot="mlp"` plus `d_model` and
     `layer_idx` to it. Residual classes that don't care about those args
     accept them via `**_`.
 
-    Forward always returns (x, ctx); ctx is None when using StandardResidual.
+    mlp_sublayer() returns (out, aux); aux is None for dense MLP and a
+    load-balancing loss for MoE. Forward always returns (x, ctx, aux); ctx
+    is None when using StandardResidual.
     """
 
     def __init__(
@@ -33,7 +35,7 @@ class BaseTransformerBlock(nn.Module):
     def attn_sublayer(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         raise NotImplementedError
 
-    def ffn_sublayer(self, x: torch.Tensor) -> torch.Tensor:
+    def mlp_sublayer(self, x: torch.Tensor) -> tuple:
         raise NotImplementedError
 
     def forward(self, x: torch.Tensor, ctx=None, **kwargs) -> tuple:
@@ -41,8 +43,8 @@ class BaseTransformerBlock(nn.Module):
         h = self.attn_res_layer.pre(x, ctx)
         attn_out = self.attn_sublayer(h, **kwargs)
         x, ctx = self.attn_res_layer(x, attn_out, ctx)
-        # MLP slot
+        # MLP slot: pre → sublayer (returns aux) → combine.
         h = self.mlp_res_layer.pre(x, ctx)
-        mlp_out = self.ffn_sublayer(h)
+        mlp_out, aux = self.mlp_sublayer(h)
         x, ctx = self.mlp_res_layer(x, mlp_out, ctx)
-        return x, ctx
+        return x, ctx, aux
