@@ -518,3 +518,34 @@ def test_compute_flops_per_token_qk_norm():
     # qk_norm adds 3*(n_heads+n_kv_heads)*head_dim per layer to fwd; total is ×3
     expected_delta = 2 * 3 * (4 + 2) * 16
     assert f_on - f_off == 3 * expected_delta
+
+
+def test_compute_flops_per_token_counts_attn_res_residual():
+    """attn_res adds depth-dependent residual FLOPs; standard residual adds 0."""
+    from src.layers.residual import AttnResidual, StandardResidual
+
+    base = dict(
+        n_layers=4,
+        d_model=64,
+        vocab_size=256,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        mlp_cls="dense",
+        mlp_kwargs={},
+    )
+    std = TrainConfig(max_seq_len=64, model=ModelConfig(**base))
+    ar = TrainConfig(
+        max_seq_len=64,
+        model=ModelConfig(
+            **base, residual_cls="attn_res", residual_kwargs={"seal_block_size": 2}
+        ),
+    )
+    # per-slot residual cost: 0 for standard, 7 * n_ctx * d_model for attn_res
+    assert StandardResidual.compute_flops(std.model, 64, layer_idx=3) == 0
+    assert (
+        AttnResidual.compute_flops(ar.model, 64, layer_idx=3) == 7 * (3 // 2 + 1) * 64
+    )
+    # model-level: attn_res strictly higher than standard residual
+    assert metric_utils.compute_flops_per_token(
+        ar
+    ) > metric_utils.compute_flops_per_token(std)

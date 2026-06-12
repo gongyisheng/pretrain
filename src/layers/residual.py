@@ -57,6 +57,13 @@ class BaseResidual(nn.Module):
     def forward(self, x: torch.Tensor, r: torch.Tensor, ctx) -> tuple:
         raise NotImplementedError
 
+    @classmethod
+    def compute_flops(cls, config, max_seq_len: int, layer_idx: int) -> int:
+        """Forward FLOPs per token for ONE residual slot. Default 0: the `x + r`
+        combine is an elementwise add, ignored under the PaLM/nanoGPT convention.
+        """
+        return 0
+
 
 class StandardResidual(BaseResidual):
     """Standard residual: out = x + r. Ctx passes through unchanged."""
@@ -104,6 +111,18 @@ class AttnResidual(BaseResidual):
         if self.slot == "attn" and (self.layer_idx % self.seal_block_size == 0):
             return r, ctx + [x]
         return x + r, ctx
+
+    @classmethod
+    def compute_flops(cls, config, max_seq_len: int, layer_idx: int) -> int:
+        """Per-slot aggregation cost: pre() norms and soft-attends over the N
+        stacked tensors (sealed prior blocks + current), so cost grows with
+        depth. N ≈ layer_idx // seal_block_size + 1; per N·d_model element this
+        is ~7 FLOPs (norm 3 + dot-product logits 2 + weighted sum 2; the softmax
+        over N is negligible).
+        """
+        seal = config.residual_kwargs.get("seal_block_size", 1)
+        n_ctx = layer_idx // seal + 1
+        return 7 * n_ctx * config.d_model
 
 
 # Name → class registry for YAML/config lookup.

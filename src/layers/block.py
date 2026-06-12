@@ -35,9 +35,12 @@ class TransformerBlock(nn.Module):
         self.mlp = mlp_cls(config.d_model, **config.mlp_kwargs)
 
     @staticmethod
-    def compute_flops(config: ModelConfig, max_seq_len: int) -> int:
+    def compute_flops(config: ModelConfig, max_seq_len: int, layer_idx: int) -> int:
         """Forward FLOPs per token for one block: attn + mlp + the two pre-norms
-        (~3 FLOPs/element each)."""
+        (~3 FLOPs/element each) + the residual combine for both slots. The
+        residual term is depth-dependent for some strategies (e.g. attn_res),
+        hence `layer_idx`.
+        """
         attn = ATTN_REGISTRY[config.attn_cls].compute_flops(
             config.d_model, max_seq_len, **config.attn_kwargs
         )
@@ -45,7 +48,10 @@ class TransformerBlock(nn.Module):
             config.d_model, max_seq_len, **config.mlp_kwargs
         )
         norm = 2 * 3 * config.d_model
-        return attn + mlp + norm
+        residual = 2 * RESIDUAL_REGISTRY[config.residual_cls].compute_flops(
+            config, max_seq_len, layer_idx
+        )
+        return attn + mlp + norm + residual
 
     def forward(self, x, ctx=None, rope=None, position_ids=None, attn_mask=None):
         h = self.attn_res_layer.pre(x, ctx)

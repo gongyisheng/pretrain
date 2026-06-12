@@ -55,16 +55,20 @@ class TransformerLM(nn.Module):
 
     @staticmethod
     def compute_flops(config: ModelConfig, max_seq_len: int) -> int:
-        """Forward FLOPs per token: n_layers × the block's `compute_flops` plus
-        the final norm and lm_head. The backward multiplier is applied by the
-        caller. Embedding lookup and RoPE are 0 FLOPs.
+        """Forward FLOPs per token: the sum of each block's `compute_flops` plus
+        the final norm and lm_head. Summed per-layer (not n_layers × one block)
+        because some residual strategies are depth-dependent. The backward
+        multiplier is applied by the caller. Embedding lookup and RoPE are 0.
         """
-        per_layer = TransformerBlock.compute_flops(config, max_seq_len)
+        blocks = sum(
+            TransformerBlock.compute_flops(config, max_seq_len, i)
+            for i in range(config.n_layers)
+        )
         final_norm = 3 * config.d_model
         lm_head = 2 * config.d_model * config.vocab_size + (
             config.vocab_size if config.lm_head_bias else 0
         )
-        return config.n_layers * per_layer + final_norm + lm_head
+        return blocks + final_norm + lm_head
 
     def forward(self, idx, position_ids, attn_mask=None, return_logits=True):
         x = self.token_emb(idx)
