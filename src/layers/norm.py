@@ -13,3 +13,9 @@ class RMSNorm(nn.RMSNorm):
 class LayerNorm(nn.LayerNorm):
     def __init__(self, d_model: int, eps: float = 1e-5, bias: bool = True):
         super().__init__(d_model, eps=eps, elementwise_affine=True, bias=bias)
+
+
+NORM_REGISTRY = {
+    "rmsnorm": RMSNorm,
+    "layernorm": LayerNorm,
+}
