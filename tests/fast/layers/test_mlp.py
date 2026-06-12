@@ -96,11 +96,6 @@ def test_dense_compute_flops_gated_bias():
     assert f == 6 * 64 * 128 + 2 * 128 + 64
 
 
-def test_dense_compute_flops_default_intermediate():
-    f = DenseMLPBlock.compute_flops(32, gated=True, bias=False)
-    assert f == 6 * 32 * (4 * 32)
-
-
 # ---------------------------------------------------------------------------
 # DenseMLPBlock — numerical parity vs ffn_ref
 # ---------------------------------------------------------------------------

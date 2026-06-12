@@ -126,12 +126,12 @@ class DenseMLPBlock(nn.Module):
         d_model,
         max_seq_len=None,
         *,
-        intermediate_size=0,
+        intermediate_size,
         gated=True,
         bias=False,
         **_,
     ):
-        d_ff = intermediate_size or 4 * d_model
+        d_ff = intermediate_size
         if gated:
             matmul = 6 * d_model * d_ff
             b = (2 * d_ff + d_model) if bias else 0
@@ -436,14 +436,14 @@ class SparseMoEBlock(nn.Module):
         d_model,
         max_seq_len=None,
         *,
-        intermediate_size=0,
+        intermediate_size,
         n_experts,
         n_experts_per_token=2,
         gated=True,
         bias=False,
         **_,
     ):
-        d_ff = intermediate_size or 4 * d_model
+        d_ff = intermediate_size  # resolved (0 → 4*d_model) in ModelConfig
         router = 2 * d_model * n_experts
         if gated:
             expert = 6 * d_model * d_ff
