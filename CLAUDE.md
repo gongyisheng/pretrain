@@ -14,8 +14,8 @@ uv sync
 
 # Tests
 uv run pytest                          # all tests
-uv run pytest tests/test_gpt2.py       # single file
-uv run pytest tests/test_gpt2.py -k "test_forward"  # single test
+uv run pytest tests/fast/model/test_transformer.py       # single file
+uv run pytest tests/fast/model/test_transformer.py -k "test_forward"  # single test
 
 # Lint
 uv run ruff check src/ tests/
@@ -40,7 +40,7 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 ### Layers vs. models
 
-Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA + MLA, `ATTN_REGISTRY`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `block.py` (BaseTransformerBlock + AttnRes helpers). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/registry.py` constructs it from the config. Fused `@torch.compile` ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Cross-entropy is inlined at the top of `src/training/trainer.py`.
+Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA, `ATTN_REGISTRY`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `block.py` (BaseTransformerBlock + AttnRes helpers). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/registry.py` constructs it from the config. Fused `@torch.compile` ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Cross-entropy is inlined at the top of `src/training/trainer.py`.
 
 GPT-2-style configs use `attn_cls: mha`, `mlp_cls: dense`, `norm_cls: layernorm`, `pos_emb_cls: learned`, with `mlp_kwargs: {activation: gelu, gated: false, bias: true}`. Qwen3-style configs use `attn_cls: gqa`, `mlp_cls: dense`, `norm_cls: rmsnorm`, `pos_emb_cls: rope`. MoE configs use `mlp_cls: moe`.
 

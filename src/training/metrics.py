@@ -50,8 +50,8 @@ class MetricsTracker:
 
         self.is_moe = config.model.mlp_cls == "moe"
         if self.is_moe:
-            self._aux_floor = (
-                config.model.n_layers * config.model.mlp_kwargs["n_experts_per_token"]
+            self._aux_floor = config.model.n_layers * config.model.mlp_kwargs.get(
+                "n_experts_per_token", 2
             )
 
         self.flops_per_token = metric_utils.compute_flops_per_token(config)

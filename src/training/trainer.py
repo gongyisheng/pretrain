@@ -341,7 +341,8 @@ class Trainer:
                     if aux_loss is not None:
                         loss = (
                             loss
-                            + self.config.model.mlp_kwargs["aux_loss_coef"] * aux_loss
+                            + self.config.model.mlp_kwargs.get("aux_loss_coef", 0.01)
+                            * aux_loss
                         )
                     loss = loss / cfg.gradient_accumulation_steps
 
