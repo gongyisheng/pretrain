@@ -4,14 +4,14 @@ model:
   n_layers: 28
   vocab_size: 50257
   attn_cls: gqa
-  mlp_cls: dense
-  norm_cls: rmsnorm
-  pos_emb_cls: rope
   attn_kwargs:
     n_heads: 16
     n_kv_heads: 16
     qk_norm: true
+  mlp_cls: dense
   mlp_kwargs: {}
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
 data:

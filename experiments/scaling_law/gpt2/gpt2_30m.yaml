@@ -4,14 +4,14 @@ model:
   n_layers: 6
   vocab_size: 50257
   attn_cls: mha
-  mlp_cls: dense
-  norm_cls: layernorm
-  pos_emb_cls: learned
   attn_kwargs:
     n_heads: 6
     bias: true
+  mlp_cls: dense
   mlp_kwargs:
     bias: true
+  norm_cls: layernorm
+  pos_emb_cls: learned
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

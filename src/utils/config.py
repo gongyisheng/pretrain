@@ -8,9 +8,6 @@ class ModelConfig:
     d_model: int = 768
     n_layers: int = 12
     vocab_size: int = 50257
-    dropout_embd: float = 0.0
-    tie_word_embeddings: bool = True
-    lm_head_bias: bool = False
 
     attn_cls: str = "gqa"
     attn_kwargs: dict = field(default_factory=dict)
@@ -22,6 +19,10 @@ class ModelConfig:
     pos_emb_kwargs: dict = field(default_factory=dict)
     residual_cls: str = "standard"
     residual_kwargs: dict = field(default_factory=dict)
+
+    dropout_embd: float = 0.0
+    tie_word_embeddings: bool = True
+    lm_head_bias: bool = False
 
 
 @dataclass
@@ -67,7 +68,7 @@ class OptimizerConfig:
     lr: float = 6e-4
     lr_mult: Dict[str, float] = field(
         default_factory=lambda: {"lm_head": 1.0}
-    )  # per-pattern LR multipliers. Keys are regexes matched against parameter names via re.search; first key (in insertion order) to match wins. Effective LR for a matched param = lr * lr_mult[key]. In tied mode `lm_head.weight is token_emb.weight`, so the param is enumerated only under `token_emb.weight` and an `lm_head` entry is a no-op.
+    )
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8

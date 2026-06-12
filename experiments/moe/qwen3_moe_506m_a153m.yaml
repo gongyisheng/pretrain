@@ -4,19 +4,19 @@ model:
   n_layers: 16
   vocab_size: 50257
   attn_cls: gqa
-  mlp_cls: moe
-  norm_cls: rmsnorm
-  pos_emb_cls: rope
   attn_kwargs:
     n_heads: 16
     n_kv_heads: 8
     qk_norm: true
+  mlp_cls: moe
   mlp_kwargs:
     intermediate_size: 128
     n_experts: 64
     n_experts_per_token: 8
     aux_loss_coef: 0.01
     expert_capacity_factor: 1.25
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
 data:

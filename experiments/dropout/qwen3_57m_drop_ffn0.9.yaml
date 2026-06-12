@@ -3,20 +3,20 @@ model:
   d_model: 512
   n_layers: 8
   vocab_size: 50257
-  dropout_embd: 0.0
   attn_cls: gqa
-  mlp_cls: dense
-  norm_cls: rmsnorm
-  pos_emb_cls: rope
   attn_kwargs:
     n_heads: 8
     n_kv_heads: 4
     qk_norm: true
     dropout: 0.0
+  mlp_cls: dense
   mlp_kwargs:
     dropout: 0.9
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
+  dropout_embd: 0.0
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k
