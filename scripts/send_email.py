@@ -84,14 +84,10 @@ def send_email(subject: str, body: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Send an email notification via SMTP.")
-    parser.add_argument(
-        "--subject", help="Email subject (overrides --status/--experiment)."
-    )
-    parser.add_argument("--body", default="", help="Email body.")
-    parser.add_argument("--status", help="Run status, e.g. FINISHED or FAILED.")
-    parser.add_argument(
-        "--experiment", help="Experiment name, included in default subject/body."
-    )
+    parser.add_argument("--subject", help="Email subject")
+    parser.add_argument("--body", default="", help="Email body")
+    parser.add_argument("--status", help="Run status")
+    parser.add_argument("--experiment", help="Experiment name")
     args = parser.parse_args()
 
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")

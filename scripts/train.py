@@ -11,11 +11,15 @@ from src.training.trainer import Trainer
 
 def main():
     parser = argparse.ArgumentParser(description="Pretrain an LLM")
-    parser.add_argument("--config", required=True, help="Path to config YAML")
+    parser.add_argument(
+        "--config", required=True, help="Path to config YAML"
+    )
     parser.add_argument(
         "--resume", type=str, default=None, help="Path to checkpoint to resume from"
     )
-    parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
+    parser.add_argument(
+        "--no-wandb", action="store_true", help="Disable W&B logging"
+    )
     args, remaining = parser.parse_known_args()
 
     # Parse CLI overrides (e.g. --optimizer.lr=3e-4)

@@ -48,7 +48,8 @@ def parse_gpus(arg: str | None, total: int) -> list[int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Set NVIDIA GPU fan speed via NVML.")
     parser.add_argument(
-        "speed", help="0-100 percent, or 'auto' to restore driver control"
+        "speed",
+        help="0-100 percent, or 'auto' to restore driver control"
     )
     parser.add_argument(
         "--gpu",

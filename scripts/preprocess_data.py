@@ -22,12 +22,15 @@ BATCH_SIZE = 1024  # documents per encode_batch call (uses all CPUs)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--config",
+        required=True
+    )
     parser.add_argument(
         "--max_samples",
         type=int,
         default=None,
-        help="Max samples to process (None = all)",
+        help="Max samples to process (None = all)"
     )
     args = parser.parse_args()
 

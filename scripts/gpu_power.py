@@ -48,11 +48,12 @@ def parse_gpus(arg: str | None, total: int) -> list[int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Set NVIDIA GPU power limit via NVML.")
     parser.add_argument(
-        "watts", help="power limit in watts (e.g. 300), or 'default' to restore"
+        "watts",
+        help="power limit in watts (e.g. 300), or 'default' to restore"
     )
     parser.add_argument(
         "--gpu",
-        help="comma-separated GPU indices (e.g. 0 or 0,1). Defaults to all GPUs.",
+        help="comma-separated GPU indices (e.g. 0 or 0,1). Defaults to all GPUs."
     )
     args = parser.parse_args()
 

@@ -45,7 +45,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Per-weight max/min/mean/std/percentiles for a checkpoint"
     )
-    parser.add_argument("--ckpt", required=True, help="Checkpoint file (.pt)")
+    parser.add_argument(
+        "--ckpt",
+        required=True,
+        help="Checkpoint file (.pt)"
+    )
     parser.add_argument(
         "--sort",
         default="name",
@@ -53,10 +57,15 @@ def main():
         help="Sort by this stat (default: name)",
     )
     parser.add_argument(
-        "--top", type=int, default=0, help="Show only top N rows (default: 0 = all)"
+        "--top",
+        type=int,
+        default=0,
+        help="Show only top N rows (default: 0 = all)"
     )
     parser.add_argument(
-        "--abs", action="store_true", help="Sort by absolute value of the stat"
+        "--abs",
+        action="store_true",
+        help="Sort by absolute value of the stat"
     )
     args = parser.parse_args()
 

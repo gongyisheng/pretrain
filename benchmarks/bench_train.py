@@ -140,9 +140,16 @@ def run_all_benchmarks(steps=10, warmup=5):
 
 def main():
     parser = argparse.ArgumentParser(description="Training throughput benchmark")
-    parser.add_argument("--config", type=str, help="Path to config YAML")
     parser.add_argument(
-        "--steps", type=int, default=10, help="Measured steps to run (default: 10)"
+        "--config",
+        type=str, 
+        help="Path to config YAML"
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=10,
+        help="Measured steps to run (default: 10)"
     )
     parser.add_argument(
         "--warmup",
@@ -150,9 +157,16 @@ def main():
         default=5,
         help="Warmup steps excluded from measurement (default: 5)",
     )
-    parser.add_argument("--all", action="store_true", help="Run all model configs")
     parser.add_argument(
-        "--save", type=str, default=None, help="Save results JSON to this path"
+        "--all",
+        action="store_true",
+        help="Run all model configs"
+    )
+    parser.add_argument(
+        "--save",
+        type=str,
+        default=None,
+        help="Save results JSON to this path"
     )
     args = parser.parse_args()
 

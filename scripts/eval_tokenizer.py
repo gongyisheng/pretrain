@@ -31,9 +31,19 @@ def main():
         default=None,
         help="Optional path to a second tokenizer for head-to-head ratio",
     )
-    parser.add_argument("--dataset", default="openwebtext")
-    parser.add_argument("--split", default="train")
-    parser.add_argument("--num_samples", type=int, default=10000)
+    parser.add_argument(
+        "--dataset",
+        default="openwebtext"
+    )
+    parser.add_argument(
+        "--split",
+        default="train"
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=10000
+    )
     args = parser.parse_args()
 
     # Note: confounders documented in
