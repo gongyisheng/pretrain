@@ -332,3 +332,32 @@ def test_activation_name_sets_in_sync_with_registries():
 
     assert _UNGATED_ACTIVATIONS == set(UNGATED_ACTIVATIONS)
     assert _GATED_ACTIVATIONS == set(GATED_ACTIVATIONS)
+
+
+# ==================== string-field validation ====================
+
+
+def test_scheduler_unknown_name_raises():
+    from src.utils.config import SchedulerConfig
+
+    with pytest.raises(ValueError, match="unknown scheduler"):
+        SchedulerConfig(name="step")
+    SchedulerConfig(name="cosine")
+    SchedulerConfig(name="constant")
+
+
+def test_training_unknown_mixed_precision_raises():
+    with pytest.raises(ValueError, match="unknown mixed_precision"):
+        TrainingConfig(mixed_precision="fp8")
+
+
+def test_training_unknown_loss_fn_raises():
+    with pytest.raises(ValueError, match="unknown loss_fn"):
+        TrainingConfig(loss_fn="huber")
+
+
+def test_loss_fn_names_in_sync_with_registry():
+    from src.training.loss import LOSS_REGISTRY
+    from src.utils.config import _LOSS_FNS
+
+    assert _LOSS_FNS == set(LOSS_REGISTRY)

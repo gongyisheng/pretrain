@@ -2,13 +2,13 @@ from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 import yaml
 
-# Valid activation names, mirroring the registries in src/layers/activation.py.
-# Duplicated here (as plain literals) so config validation stays import-light —
-# config.py never imports torch/layer modules. test_config guards them in sync.
 _UNGATED_ACTIVATIONS = frozenset(
     {"relu", "gelu", "silu", "leaky_relu", "relu2", "gelu2", "silu2", "leaky_relu2"}
 )
 _GATED_ACTIVATIONS = _UNGATED_ACTIVATIONS | {"bilinear", "bilinear2", "powlu"}
+_MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
+_LOSS_FNS = frozenset({"cross_entropy", "cross_entropy_fp64", "mse", "mse_fp64"})
+_SCHEDULERS = frozenset({"cosine", "constant"})
 
 
 @dataclass
@@ -120,6 +120,18 @@ class TrainingConfig:
     )
     intra_doc_masking: bool = True
 
+    def __post_init__(self):
+        if self.mixed_precision not in _MIXED_PRECISION:
+            raise ValueError(
+                f"unknown mixed_precision: {self.mixed_precision!r}; "
+                f"expected one of {sorted(_MIXED_PRECISION)}"
+            )
+        if self.loss_fn not in _LOSS_FNS:
+            raise ValueError(
+                f"unknown loss_fn: {self.loss_fn!r}; "
+                f"expected one of {sorted(_LOSS_FNS)}"
+            )
+
 
 @dataclass
 class OptimizerConfig:
@@ -136,6 +148,13 @@ class SchedulerConfig:
     name: str = "cosine"
     warmup_steps: int = 100
     min_lr: float = 6e-5
+
+    def __post_init__(self):
+        if self.name not in _SCHEDULERS:
+            raise ValueError(
+                f"unknown scheduler: {self.name!r}; "
+                f"expected one of {sorted(_SCHEDULERS)}"
+            )
 
 
 @dataclass
