@@ -75,6 +75,11 @@ class Trainer:
         self.is_moe = config.model.mlp_cls == "moe"
 
         # Data
+        if not os.path.isdir(config.data.data_dir):
+            raise FileNotFoundError(
+                f"data_dir not found: {config.data.data_dir!r}; "
+                f"run scripts/preprocess_data.py first"
+            )
         if config.task == "pretrain":
             train_path = os.path.join(config.data.data_dir, "train.bin")
             val_path = os.path.join(config.data.data_dir, "val.bin")
