@@ -68,11 +68,7 @@ def main():
     parser.add_argument("--p", type=int, default=97)
     parser.add_argument("--train_frac", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--out_dir",
-        default=None,
-        help="Output dir (defaults to data/grokking_<op>_p<p>_f<frac>/)",
-    )
+    parser.add_argument("--out_dir", default=None, help="Output dir")
     args = parser.parse_args()
 
     out_dir = args.out_dir or f"data/grokking_{args.op}_p{args.p}_f{args.train_frac}"

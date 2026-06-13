@@ -1,46 +1,48 @@
 max_seq_len: 1024
-
 model:
-  arch: "qwen3"
-  n_layers: 8
-  n_heads: 8
-  n_kv_heads: 4
   d_model: 512
+  n_layers: 8
   vocab_size: 50257
-  rope_theta: 10000.0
-  qk_norm: true
-
+  attn_cls: gqa
+  attn_kwargs:
+    n_heads: 8
+    n_kv_heads: 4
+    qk_norm: true
+  mlp_cls: dense
+  mlp_kwargs: {}
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs:
+    rope_theta: 10000.0
 data:
-  dataset: "openwebtext"
-  tokenizer_path: "tokenizers/custom_bpe_50k"
-  data_dir: "data/"
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
   val_split: 0.01
   num_workers: 4
-
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
-  mixed_precision: "bf16"
+  mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/lion_optm/qwen3_57m_lion_lr5e-5_wd0.5/"
+  checkpoint_dir: checkpoints/lion_optm/qwen3_57m_lion_lr5e-5_wd0.5/
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
-
 optimizer:
-  name: "lion"
+  name: lion
   lr: 5e-5
   weight_decay: 0.5
-  betas: [0.9, 0.99]
-
+  betas:
+  - 0.9
+  - 0.99
 scheduler:
-  name: "cosine"
+  name: cosine
   warmup_steps: 1000
   min_lr: 5e-6
-
 logging:
-  wandb_project: "pretrain-lion-optm"
-  wandb_run_name: "qwen3-57m-lion-lr5e-5-wd0.5"
+  wandb_project: pretrain-lion-optm
+  wandb_run_name: qwen3-57m-lion-lr5e-5-wd0.5
   log_every: 10

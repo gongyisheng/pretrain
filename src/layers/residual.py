@@ -1,9 +1,9 @@
 """Residual strategies for transformer blocks.
 
 `BaseResidual` defines the uniform interface; concrete strategies extend it.
-Block constructs any residual subclass via the same factory call, so adding
-a new variant (gated residual, learned scalar, etc.) requires no changes
-in block.py.
+TransformerBlock constructs any residual subclass via the same factory call,
+so adding a new variant (gated residual, learned scalar, etc.) requires no
+changes in the block.
 """
 
 import torch
@@ -27,7 +27,7 @@ def _aggregate(V: torch.Tensor, K: torch.Tensor, w_proj: torch.Tensor) -> torch.
 
 
 class BaseResidual(nn.Module):
-    """Abstract base for residual strategies used by BaseTransformerBlock.
+    """Abstract base for residual strategies used by TransformerBlock.
 
     Factory signature: (d_model, layer_idx, slot, **kwargs) — all three
     required, no defaults.
@@ -35,7 +35,7 @@ class BaseResidual(nn.Module):
       pre(x, ctx) -> h         # transform x into what the sublayer sees
       forward(x, r, ctx)       # combine the base x with the sublayer's output r,
                                # returning (new_x, new_ctx)
-    The sublayer call itself lives in block.py — residual only does
+    The sublayer call itself lives in TransformerBlock — residual only does
     residual-specific work (pre-transform and combine).
 
     Stores `d_model`, `layer_idx`, and `slot` as instance attributes so
@@ -56,6 +56,18 @@ class BaseResidual(nn.Module):
 
     def forward(self, x: torch.Tensor, r: torch.Tensor, ctx) -> tuple:
         raise NotImplementedError
+
+    @classmethod
+    def compute_flops(cls, config, max_seq_len: int, layer_idx: int) -> int:
+        """Forward FLOPs per token for ONE residual slot. Default 0: the `x + r`
+        combine is an elementwise add, ignored under the PaLM/nanoGPT convention.
+        """
+        return 0
+
+    @classmethod
+    def compute_parameters(cls, config) -> int:
+        """Trainable params for ONE residual slot. Default 0: a plain add has none."""
+        return 0
 
 
 class StandardResidual(BaseResidual):
@@ -104,6 +116,26 @@ class AttnResidual(BaseResidual):
         if self.slot == "attn" and (self.layer_idx % self.seal_block_size == 0):
             return r, ctx + [x]
         return x + r, ctx
+
+    @classmethod
+    def compute_flops(cls, config, max_seq_len: int, layer_idx: int) -> int:
+        """Per-slot aggregation cost: pre() norms and soft-attends over the N
+        stacked tensors (sealed prior blocks + current), so cost grows with
+        depth. N ≈ layer_idx // seal_block_size + 1; per N·d_model element this
+        is ~7 FLOPs (norm 3 + dot-product logits 2 + weighted sum 2; the softmax
+        over N is negligible).
+        """
+        seal = config.residual_kwargs.get("seal_block_size", 1)
+        n_ctx = layer_idx // seal + 1
+        return 7 * n_ctx * config.d_model
+
+    @classmethod
+    def compute_parameters(cls, config) -> int:
+        """proj (d_model x 1, no bias) + norm, matching __init__."""
+        d = config.d_model
+        norm = config.residual_kwargs.get("norm", "rmsnorm")
+        norm_cls = LayerNorm if norm == "layernorm" else RMSNorm
+        return d + norm_cls.compute_parameters(d)
 
 
 # Name → class registry for YAML/config lookup.

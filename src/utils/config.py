@@ -2,62 +2,62 @@ from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 import yaml
 
+from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.training.loss import LOSS_REGISTRY
+from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
+
+_MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
+
 
 @dataclass
 class ModelConfig:
-    arch: str = "gpt2"
-    n_layers: int = 12
-    n_heads: int = 12
     d_model: int = 768
-    intermediate_size: int = 0  # 0 means 4 * d_model, set in post_init
+    n_layers: int = 12
     vocab_size: int = 50257
-    dropout_embd: float = 0.0
-    dropout_attn: float = 0.0
-    dropout_ffn: float = 0.0
-    n_kv_heads: int = 0  # 0 means same as n_heads (MHA); set >0 for GQA
-    rope_theta: float = 10000.0  # RoPE base frequency; only used by qwen3, L_max ~62800
-    qk_norm: bool = False  # apply RMSNorm to Q and K per head before RoPE (Qwen3-style)
-    tie_word_embeddings: bool = True  # tie lm_head.weight to token_emb.weight
-    attn_bias: bool = False  # bias in attention Q/K/V/O projections
-    mlp_bias: bool = False  # bias in MLP layers (up_proj/down_proj/gate_proj)
-    mlp_activation: str = (
-        "silu"  # "relu" | "gelu" | "silu" (modern default; GPT-2 sets "gelu")
-    )
-    mlp_gated: bool = True  # True = GLU-family FFN. silu+gated=SwiGLU; GPT-2 sets False
-    lm_head_bias: bool = False  # bias in lm_head output projection
-    moe_n_experts: int = 0  # 0 = dense; N > 0 = MoE with N total experts
-    moe_n_experts_per_token: int = 2  # top-k experts activated per token
-    moe_intermediate_size: int = (
-        0  # per-expert FFN hidden dim; 0 = same as intermediate_size
-    )
-    moe_aux_loss_coef: float = (
-        0.01  # Switch Transformer load-balancing loss coefficient
-    )
-    moe_expert_capacity_factor: Optional[float] = (
-        None  # None = dynamic (no dropping); float = fixed capacity, enables torch.compile
-    )
-    residual_cls: str = (
-        "standard"  # residual strategy name; see src.layers.residual.RESIDUAL_REGISTRY
-    )
-    residual_kwargs: dict = field(
-        default_factory=dict
-    )  # kwargs passed to the residual class constructor
-    attn_implementation: str = "flex_attention"  # "flex_attention" | "sdpa"
 
-    _ATTN_IMPLEMENTATIONS = ("flex_attention", "sdpa")
+    attn_cls: str = "gqa"
+    attn_kwargs: dict = field(default_factory=dict)
+    mlp_cls: str = "dense"
+    mlp_kwargs: dict = field(default_factory=dict)
+    norm_cls: str = "rmsnorm"
+    norm_kwargs: dict = field(default_factory=dict)
+    pos_emb_cls: str = "rope"
+    pos_emb_kwargs: dict = field(default_factory=dict)
+    residual_cls: str = "standard"
+    residual_kwargs: dict = field(default_factory=dict)
+
+    dropout_embd: float = 0.0
+    tie_word_embeddings: bool = True
+    lm_head_bias: bool = False
 
     def __post_init__(self):
-        if self.intermediate_size == 0:
-            self.intermediate_size = 4 * self.d_model
-        if self.n_kv_heads == 0:
-            self.n_kv_heads = self.n_heads
-        if self.moe_intermediate_size == 0:
-            self.moe_intermediate_size = self.intermediate_size
-        if self.attn_implementation not in self._ATTN_IMPLEMENTATIONS:
+        self.attn_kwargs.setdefault("attn_implementation", "flex_attention")
+        n_heads = self.attn_kwargs.get("n_heads")
+        if n_heads is not None:
+            if self.d_model % n_heads != 0:
+                raise ValueError(
+                    f"d_model ({self.d_model}) must be divisible by n_heads ({n_heads})"
+                )
+            if self.attn_cls == "gqa":
+                n_kv = self.attn_kwargs.setdefault("n_kv_heads", n_heads)
+                if n_heads % n_kv != 0:
+                    raise ValueError(
+                        f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv})"
+                    )
+
+        self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
+        gated = self.mlp_kwargs.get("gated", True)
+        activation = self.mlp_kwargs.get("activation", "silu")
+        valid = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
+        if activation not in valid:
             raise ValueError(
-                f"unknown attn_implementation: {self.attn_implementation!r}; "
-                f"expected one of {self._ATTN_IMPLEMENTATIONS}"
+                f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
             )
+        if self.mlp_cls == "moe":
+            self.mlp_kwargs.setdefault("n_experts_per_token", 2)
+            self.mlp_kwargs.setdefault("aux_loss_coef", 0.01)
+            self.mlp_kwargs.setdefault("expert_capacity_factor", None)
+            self.mlp_kwargs.setdefault("bias", False)
 
 
 @dataclass
@@ -68,11 +68,21 @@ class DataConfig:
     num_workers: int = 4
     packing: bool = True
     tokenizer_path: str = "tokenizers/custom_bpe"
-    tokenizer_train_method: str = "bpe"
-    tokenizer_train_method_kwargs: dict = field(default_factory=dict)
-    tokenizer_train_num_samples: int = 1_000_000
-    # SuperBPE-only: interval (in merges) at which to log/evaluate curve points.
-    tokenizer_train_eval_every: int = 5000
+
+
+@dataclass
+class TokenizerTrainingConfig:
+    method: str = "bpe"  # "bpe" | "superbpe"
+    method_kwargs: dict = field(default_factory=dict)
+    num_samples: int = 1_000_000
+    checkpoint_dir: str = "tokenizers/custom_bpe"
+    checkpoint_every: int = 5000
+    eval_every: int = 5000
+
+    def __post_init__(self):
+        self.method_kwargs.setdefault("eval_num_docs", 1000)
+        if self.method == "superbpe":
+            self.method_kwargs.setdefault("max_superword_words", 4)
 
 
 @dataclass
@@ -80,6 +90,7 @@ class TrainingConfig:
     batch_size: int = 16
     gradient_accumulation_steps: int = 16
     max_steps: int = 50000
+    early_stop: int = 0
     mixed_precision: str = "bf16"
     loss_fn: str = "cross_entropy"
     label_smoothing: float = 0.0  # for CE loss only
@@ -91,22 +102,37 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 100
     eval_steps: int = 25
-    eval_train: bool = (
-        False  # run eval pass over train set (logs val/train_acc for SFT)
-    )
+    eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
+
+    def __post_init__(self):
+        if self.mixed_precision not in _MIXED_PRECISION:
+            raise ValueError(
+                f"unknown mixed_precision: {self.mixed_precision!r}; "
+                f"expected one of {sorted(_MIXED_PRECISION)}"
+            )
+        if self.loss_fn not in LOSS_REGISTRY:
+            raise ValueError(
+                f"unknown loss_fn: {self.loss_fn!r}; "
+                f"expected one of {sorted(LOSS_REGISTRY)}"
+            )
 
 
 @dataclass
 class OptimizerConfig:
     name: str = "adamw"
     lr: float = 6e-4
-    lr_mult: Dict[str, float] = field(
-        default_factory=lambda: {"lm_head": 1.0}
-    )  # per-pattern LR multipliers. Keys are regexes matched against parameter names via re.search; first key (in insertion order) to match wins. Effective LR for a matched param = lr * lr_mult[key]. In tied mode `lm_head.weight is token_emb.weight`, so the param is enumerated only under `token_emb.weight` and an `lm_head` entry is a no-op.
+    lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
+
+    def __post_init__(self):
+        if self.name not in OPTIMIZER_REGISTRY:
+            raise ValueError(
+                f"unknown optimizer: {self.name!r}; "
+                f"expected one of {sorted(OPTIMIZER_REGISTRY)}"
+            )
 
 
 @dataclass
@@ -115,20 +141,22 @@ class SchedulerConfig:
     warmup_steps: int = 100
     min_lr: float = 6e-5
 
+    def __post_init__(self):
+        if self.name not in SCHEDULER_REGISTRY:
+            raise ValueError(
+                f"unknown scheduler: {self.name!r}; "
+                f"expected one of {sorted(SCHEDULER_REGISTRY)}"
+            )
+
 
 @dataclass
 class LoggingConfig:
     wandb_project: str = "pretrain"
     wandb_run_name: str = ""
-    wandb_group: str = ""  # group name for comparing runs in W&B (e.g. "dtype-sweep")
+    wandb_group: str = ""
     log_every: int = 10
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
     log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
-
-
-@dataclass
-class DebugConfig:
-    max_steps: int = 0  # if > 0, stop training at this step (overrides training.max_steps without affecting the LR schedule)
 
 
 @dataclass
@@ -138,10 +166,12 @@ class TrainConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    tokenizer_training: TokenizerTrainingConfig = field(
+        default_factory=TokenizerTrainingConfig
+    )
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    debug: DebugConfig = field(default_factory=DebugConfig)
 
     def to_dict(self):
         return asdict(self)
@@ -203,6 +233,18 @@ def _coerce_types(dc_class, raw_dict: dict) -> dict:
     return coerced
 
 
+def _coerce_kwargs(d: dict) -> None:
+    for k, v in d.items():
+        if isinstance(v, str):
+            try:
+                d[k] = int(v)
+            except ValueError:
+                try:
+                    d[k] = float(v)
+                except ValueError:
+                    pass
+
+
 def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig:
     with open(path) as f:
         raw = yaml.safe_load(f)
@@ -212,6 +254,9 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         max_seq_len=raw.get("max_seq_len", 1024),
         model=ModelConfig(**_coerce_types(ModelConfig, raw.get("model", {}))),
         data=DataConfig(**_coerce_types(DataConfig, raw.get("data", {}))),
+        tokenizer_training=TokenizerTrainingConfig(
+            **_coerce_types(TokenizerTrainingConfig, raw.get("tokenizer_training", {}))
+        ),
         training=TrainingConfig(
             **_coerce_types(TrainingConfig, raw.get("training", {}))
         ),
@@ -222,10 +267,17 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
             **_coerce_types(SchedulerConfig, raw.get("scheduler", {}))
         ),
         logging=LoggingConfig(**_coerce_types(LoggingConfig, raw.get("logging", {}))),
-        debug=DebugConfig(
-            max_steps=raw.get("debug", {}).get("max_steps", 0),
-        ),
     )
+
+    for kw in (
+        config.model.attn_kwargs,
+        config.model.mlp_kwargs,
+        config.model.norm_kwargs,
+        config.model.pos_emb_kwargs,
+        config.model.residual_kwargs,
+        config.tokenizer_training.method_kwargs,
+    ):
+        _coerce_kwargs(kw)
 
     if overrides:
         _apply_overrides(config, overrides)

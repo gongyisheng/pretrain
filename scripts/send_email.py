@@ -14,6 +14,7 @@ Chain after training:
     uv run python scripts/send_email.py --status FINISHED --experiment gpt2_124m || \
     uv run python scripts/send_email.py --status FAILED --experiment gpt2_124m
 """
+
 import argparse
 import os
 import smtplib
@@ -44,10 +45,16 @@ def send_email(subject: str, body: str) -> bool:
     to_addr = os.environ.get("SMTP_TO")
     from_addr = os.environ.get("SMTP_FROM", user)
 
-    missing = [k for k, v in {
-        "SMTP_HOST": host, "SMTP_USER": user,
-        "SMTP_PASSWORD": password, "SMTP_TO": to_addr,
-    }.items() if not v]
+    missing = [
+        k
+        for k, v in {
+            "SMTP_HOST": host,
+            "SMTP_USER": user,
+            "SMTP_PASSWORD": password,
+            "SMTP_TO": to_addr,
+        }.items()
+        if not v
+    ]
     if missing:
         print(f"[send_email] Missing env vars: {', '.join(missing)}", file=sys.stderr)
         return False
@@ -77,10 +84,10 @@ def send_email(subject: str, body: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Send an email notification via SMTP.")
-    parser.add_argument("--subject", help="Email subject (overrides --status/--experiment).")
-    parser.add_argument("--body", default="", help="Email body.")
-    parser.add_argument("--status", help="Run status, e.g. FINISHED or FAILED.")
-    parser.add_argument("--experiment", help="Experiment name, included in default subject/body.")
+    parser.add_argument("--subject", help="Email subject")
+    parser.add_argument("--body", default="", help="Email body")
+    parser.add_argument("--status", help="Run status")
+    parser.add_argument("--experiment", help="Experiment name")
     args = parser.parse_args()
 
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")

@@ -1,46 +1,48 @@
 max_seq_len: 1024
-
 model:
-  arch: "qwen3"
-  n_layers: 28
-  n_heads: 16
-  n_kv_heads: 1
   d_model: 1024
+  n_layers: 28
   vocab_size: 50257
-  rope_theta: 10000.0
-  qk_norm: true
-
+  attn_cls: gqa
+  attn_kwargs:
+    n_heads: 16
+    n_kv_heads: 1
+    qk_norm: true
+  mlp_cls: dense
+  mlp_kwargs: {}
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs:
+    rope_theta: 10000.0
 data:
-  dataset: "openwebtext"
-  tokenizer_path: "tokenizers/custom_bpe_50k"
-  data_dir: "data/"
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
   val_split: 0.01
   num_workers: 4
-
 training:
   batch_size: 8
   gradient_accumulation_steps: 32
   max_steps: 50000
-  mixed_precision: "bf16"
+  mixed_precision: bf16
   grad_clip: 1.0
   activation_checkpointing: false
-  checkpoint_dir: "checkpoints/gqa/qwen3_0.5b_kv1/"
+  checkpoint_dir: checkpoints/gqa/qwen3_0.5b_kv1/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
-
 optimizer:
-  name: "adamw"
+  name: adamw
   lr: 2e-4
   weight_decay: 0.1
-  betas: [0.9, 0.95]
-
+  betas:
+  - 0.9
+  - 0.95
 scheduler:
-  name: "cosine"
+  name: cosine
   warmup_steps: 1500
   min_lr: 2e-5
-
 logging:
-  wandb_project: "pretrain-gqa"
-  wandb_run_name: "qwen3-0.5b-kv1"
+  wandb_project: pretrain-gqa
+  wandb_run_name: qwen3-0.5b-kv1
   log_every: 10

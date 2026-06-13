@@ -1,46 +1,48 @@
 max_seq_len: 1024
-
 model:
-  arch: "qwen3"
-  n_layers: 6
-  n_heads: 6
-  n_kv_heads: 3
   d_model: 384
+  n_layers: 6
   vocab_size: 50257
-  rope_theta: 10000.0
-  qk_norm: true
-
+  attn_cls: gqa
+  attn_kwargs:
+    n_heads: 6
+    n_kv_heads: 3
+    qk_norm: true
+  mlp_cls: dense
+  mlp_kwargs: {}
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs:
+    rope_theta: 10000.0
 data:
-  dataset: "openwebtext"
-  tokenizer_path: "tokenizers/custom_bpe_50k"
-  data_dir: "data/"
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
   val_split: 0.01
   num_workers: 4
-
 training:
   batch_size: 4
   gradient_accumulation_steps: 8
   max_steps: 40000
-  mixed_precision: "bf16"
+  mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/scaling_law/qwen3_33m/"
+  checkpoint_dir: checkpoints/scaling_law/qwen3_33m/
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
-
 optimizer:
-  name: "adamw"
+  name: adamw
   lr: 8e-4
   weight_decay: 0.1
-  betas: [0.9, 0.95]
-
+  betas:
+  - 0.9
+  - 0.95
 scheduler:
-  name: "cosine"
+  name: cosine
   warmup_steps: 1000
   min_lr: 8e-5
-
 logging:
-  wandb_project: "pretrain-scaling-law"
-  wandb_run_name: "qwen3-33m"
+  wandb_project: pretrain-scaling-law
+  wandb_run_name: qwen3-33m
   log_every: 10

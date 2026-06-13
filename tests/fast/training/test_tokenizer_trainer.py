@@ -1,14 +1,18 @@
-"""Behavior tests for src/data/tokenizer_trainer.py — BPE and SuperBPE paths."""
+"""Behavior tests for the TokenizerTrainer in src/training/trainer.py — BPE and
+SuperBPE paths."""
 
 import pytest
 from tokenizers import Tokenizer
 
 from src.data.tokenizer import load_tokenizer
-from src.data.tokenizer_trainer import (
-    TokenizerTrainer,
+from src.training.trainer import TokenizerTrainer
+from src.utils.metric_utils import compute_bytes_per_token
+from src.utils.config import (
+    LoggingConfig,
+    ModelConfig,
+    TokenizerTrainingConfig,
+    TrainConfig,
 )
-from src.eval.tokenizer import _bytes_per_token, evaluate
-from src.utils.config import DataConfig, LoggingConfig, ModelConfig, TrainConfig
 
 
 # ---- Shared fixtures ----
@@ -38,6 +42,7 @@ def _trainer(
     method: str,
     *,
     eval_every: int = 5000,
+    checkpoint_every: int = 5000,
     wandb_enabled: bool = False,
     logging_kwargs: dict | None = None,
     **method_kwargs,
@@ -45,15 +50,25 @@ def _trainer(
     """Build a TokenizerTrainer with a minimal TrainConfig."""
     config = TrainConfig(
         model=ModelConfig(vocab_size=vocab_size),
-        data=DataConfig(
-            tokenizer_path=str(save_path),
-            tokenizer_train_method=method,
-            tokenizer_train_method_kwargs=method_kwargs,
-            tokenizer_train_eval_every=eval_every,
+        tokenizer_training=TokenizerTrainingConfig(
+            method=method,
+            method_kwargs=method_kwargs,
+            checkpoint_dir=str(save_path),
+            eval_every=eval_every,
+            checkpoint_every=checkpoint_every,
         ),
         logging=LoggingConfig(**(logging_kwargs or {})),
     )
     return TokenizerTrainer(config, wandb_enabled=wandb_enabled)
+
+
+def test_periodic_checkpoint_save_runs_and_is_loadable(tmp_path, text_iter):
+    # checkpoint_every (280) is hit mid-training (vocab grows ~256 -> 320),
+    # exercising the periodic-save branch; the final tokenizer stays valid.
+    save = tmp_path / "bpe_ckpt"
+    _trainer(save, 320, "bpe", checkpoint_every=280).train(text_iter)
+    assert (save / "tokenizer.json").exists()
+    assert load_tokenizer(str(save)).encode("hello world").ids
 
 
 # ---- BPE ----
@@ -109,7 +124,7 @@ def test_superbpe_invalid_transition_size_raises(tmp_path, text_iter, ts):
 def test_bytes_per_token_sensible(tmp_path, text_iter):
     save = tmp_path / "bpe_500"
     tok = _trainer(save, 500, "bpe").train(text_iter)
-    bpt = _bytes_per_token(tok, SAMPLE_TEXTS[:20])
+    bpt = compute_bytes_per_token(tok, SAMPLE_TEXTS[:20])
     assert bpt > 1.0, f"expected >1 byte per token, got {bpt}"
     assert bpt < 20.0, f"absurdly high bytes/token: {bpt}"
 
@@ -117,7 +132,7 @@ def test_bytes_per_token_sensible(tmp_path, text_iter):
 def test_evaluate_returns_expected_keys(tmp_path, text_iter):
     save = tmp_path / "bpe_500"
     _trainer(save, 500, "bpe").train(text_iter)
-    result = evaluate(str(save), iter(SAMPLE_TEXTS[:20]))
+    result = TokenizerTrainer.evaluate(str(save), iter(SAMPLE_TEXTS[:20]))
     assert set(result.keys()) >= {
         "n_docs",
         "n_bytes",

@@ -7,6 +7,7 @@ Usage:
 
 Outputs max / min / mean / std / p1 / p10 / p50 / p90 / p99 for every weight tensor, sortable by any stat.
 """
+
 import argparse
 import torch
 
@@ -41,14 +42,31 @@ def tensor_stats(t: torch.Tensor) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Per-weight max/min/mean/std/percentiles for a checkpoint")
-    parser.add_argument("--ckpt", required=True, help="Checkpoint file (.pt)")
-    parser.add_argument("--sort", default="name", choices=STAT_KEYS + ["nans", "name"],
-                        help="Sort by this stat (default: name)")
-    parser.add_argument("--top",  type=int, default=0,
-                        help="Show only top N rows (default: 0 = all)")
-    parser.add_argument("--abs",  action="store_true",
-                        help="Sort by absolute value of the stat")
+    parser = argparse.ArgumentParser(
+        description="Per-weight max/min/mean/std/percentiles for a checkpoint"
+    )
+    parser.add_argument(
+        "--ckpt",
+        required=True,
+        help="Checkpoint file (.pt)"
+    )
+    parser.add_argument(
+        "--sort",
+        default="name",
+        choices=STAT_KEYS + ["nans", "name"],
+        help="Sort by this stat (default: name)",
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=0,
+        help="Show only top N rows (default: 0 = all)"
+    )
+    parser.add_argument(
+        "--abs",
+        action="store_true",
+        help="Sort by absolute value of the stat"
+    )
     args = parser.parse_args()
 
     print(f"Loading {args.ckpt} ...")
@@ -66,12 +84,18 @@ def main():
     if args.sort == "name":
         rows.sort(key=lambda r: r[0])
     else:
-        key_fn = (lambda r: abs(r[1][args.sort])) if args.abs else (lambda r: r[1][args.sort])
+        key_fn = (
+            (lambda r: abs(r[1][args.sort]))
+            if args.abs
+            else (lambda r: r[1][args.sort])
+        )
         rows.sort(key=key_fn, reverse=(args.sort != "min"))
 
-    display = rows[:args.top] if args.top > 0 else rows
+    display = rows[: args.top] if args.top > 0 else rows
 
-    print(f"\nStep: {step}  |  {len(rows)} float tensors  |  sorted by {'|' + args.sort + '|' if args.abs else args.sort}\n")
+    print(
+        f"\nStep: {step}  |  {len(rows)} float tensors  |  sorted by {'|' + args.sort + '|' if args.abs else args.sort}\n"
+    )
     cols = STAT_KEYS
     hdr_stats = " ".join(f"{c:>9}" for c in cols)
     hdr = f"  {'parameter':<50} {hdr_stats}  {'nans':>5}  {'numel':>8}"
@@ -83,7 +107,9 @@ def main():
         print(f"  {name:<50} {stat_vals}  {s['nans']:>5}{nan_flag}  {s['numel']:>8,}")
 
     if args.top > 0 and args.top < len(rows):
-        print(f"\n  ... ({len(rows) - args.top} more rows hidden, use --top 0 to show all)")
+        print(
+            f"\n  ... ({len(rows) - args.top} more rows hidden, use --top 0 to show all)"
+        )
 
     print()
 

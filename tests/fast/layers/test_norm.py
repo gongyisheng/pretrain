@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.layers.norm import LayerNorm, RMSNorm
+from src.layers.norm import NORM_REGISTRY, LayerNorm, RMSNorm
 from tests.fast.layers._refs import SIMPLE_DTYPES, layernorm_ref, rmsnorm_ref
 
 
@@ -143,3 +143,8 @@ def test_layernorm_zero_input(dtype):
     out = layer(x)
     assert torch.isfinite(out).all()
     assert torch.allclose(out, layer.bias.expand_as(out), atol=1e-5)
+
+
+def test_norm_registry():
+    assert NORM_REGISTRY["rmsnorm"] is RMSNorm
+    assert NORM_REGISTRY["layernorm"] is LayerNorm

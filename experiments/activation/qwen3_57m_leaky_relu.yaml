@@ -1,48 +1,50 @@
 max_seq_len: 1024
-
 model:
-  arch: "qwen3"
-  n_layers: 8
-  n_heads: 8
-  n_kv_heads: 4
   d_model: 512
-  intermediate_size: 3072  # 6 * d_model (ungated; matches gated FFN params)
+  n_layers: 8
   vocab_size: 50257
-  rope_theta: 10000.0
-  qk_norm: true
-  mlp_activation: "leaky_relu"
-  mlp_gated: false
-
+  attn_cls: gqa
+  attn_kwargs:
+    n_heads: 8
+    n_kv_heads: 4
+    qk_norm: true
+  mlp_cls: dense
+  mlp_kwargs:
+    intermediate_size: 3072
+    activation: leaky_relu
+    gated: false
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs:
+    rope_theta: 10000.0
 data:
-  dataset: "openwebtext"
-  tokenizer_path: "tokenizers/custom_bpe_50k"
-  data_dir: "data/"
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
   val_split: 0.01
   num_workers: 4
-
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
-  mixed_precision: "bf16"
+  mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/activation/qwen3_57m_leaky_relu/"
+  checkpoint_dir: checkpoints/activation/qwen3_57m_leaky_relu/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
-
 optimizer:
-  name: "adamw"
+  name: adamw
   lr: 6e-4
   weight_decay: 0.1
-  betas: [0.9, 0.95]
-
+  betas:
+  - 0.9
+  - 0.95
 scheduler:
-  name: "cosine"
+  name: cosine
   warmup_steps: 1500
   min_lr: 6e-5
-
 logging:
-  wandb_project: "pretrain-activation"
-  wandb_run_name: "qwen3-57m-leaky-relu"
+  wandb_project: pretrain-activation
+  wandb_run_name: qwen3-57m-leaky-relu
   log_every: 10

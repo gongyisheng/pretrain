@@ -7,7 +7,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.layers.attention import GroupedQueryAttention, MultiHeadAttention
+from src.layers.attention import (
+    ATTN_REGISTRY,
+    GroupedQueryAttention,
+    MultiHeadAttention,
+)
 from src.layers.pos_emb import RoPE
 from src.utils.masking_utils import build_intra_doc_attention_mask
 from tests.fast.helpers import (
@@ -106,7 +110,7 @@ def test_sdpa_softmax_fp32_no_overflow(dtype, atol):
 def test_mha_attn_mask_output_shape(kind, impl, device):
     skip_if_unsupported(impl, device)
     mha = MultiHeadAttention(
-        d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, dropout=0.0, attn_implementation=impl
     )
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
@@ -121,7 +125,7 @@ def test_mha_intra_doc_mask_blocks_cross_doc_attention(impl, device):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     mha = MultiHeadAttention(
-        d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, dropout=0.0, attn_implementation=impl
     )
     mha.eval()
 
@@ -145,7 +149,7 @@ def test_mha_causal_mask_blocks_future(impl, device):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     mha = MultiHeadAttention(
-        d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, dropout=0.0, attn_implementation=impl
     )
     mha.eval()
 
@@ -168,7 +172,7 @@ def test_mha_causal_mask_blocks_future(impl, device):
 def test_gqa_attn_mask_output_shape(kind, impl, device):
     skip_if_unsupported(impl, device)
     gqa = GroupedQueryAttention(
-        d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, n_kv_heads=2, dropout=0.0, attn_implementation=impl
     )
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
@@ -181,7 +185,7 @@ def test_gqa_intra_doc_mask_blocks_cross_doc_attention(impl, device):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     gqa = GroupedQueryAttention(
-        d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, n_kv_heads=2, dropout=0.0, attn_implementation=impl
     )
     gqa.eval()
 
@@ -204,7 +208,7 @@ def test_gqa_causal_mask_blocks_future(impl, device):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     gqa = GroupedQueryAttention(
-        d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, n_kv_heads=2, dropout=0.0, attn_implementation=impl
     )
     gqa.eval()
 
@@ -224,7 +228,7 @@ def test_gqa_with_rope_output_shape(impl, device):
     skip_if_unsupported(impl, device)
     rope = RoPE(d_head=16, max_seq_len=32)
     gqa = GroupedQueryAttention(
-        d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, n_kv_heads=2, dropout=0.0, attn_implementation=impl
     )
     x = torch.randn(2, 8, 64)
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
@@ -274,7 +278,7 @@ def test_mha_matches_ref_attn_mask(kind, impl, device, dtype, atol):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     mha = MultiHeadAttention(
-        d_model=64, n_heads=4, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, dropout=0.0, attn_implementation=impl
     ).to(dtype)
     mha.eval()
     x = torch.randn(1, 4, 64, dtype=dtype)
@@ -293,7 +297,7 @@ def test_gqa_matches_ref_attn_mask(kind, impl, device, dtype, atol):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     gqa = GroupedQueryAttention(
-        d_model=64, n_heads=4, n_kv_heads=2, dropout_attn=0.0, attn_implementation=impl
+        d_model=64, n_heads=4, n_kv_heads=2, dropout=0.0, attn_implementation=impl
     ).to(dtype)
     gqa.eval()
     x = torch.randn(1, 4, 64, dtype=dtype)
@@ -314,7 +318,7 @@ def test_mha_qk_norm_matches_ref(impl, device, dtype, atol):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
     mha = MultiHeadAttention(
-        d_model=64, n_heads=4, dropout_attn=0.0, qk_norm=True, attn_implementation=impl
+        d_model=64, n_heads=4, dropout=0.0, qk_norm=True, attn_implementation=impl
     ).to(dtype)
     mha.eval()
     x = torch.randn(2, 8, 64, dtype=dtype)
@@ -335,7 +339,7 @@ def test_gqa_qk_norm_matches_ref(impl, device, dtype, atol):
         d_model=64,
         n_heads=4,
         n_kv_heads=2,
-        dropout_attn=0.0,
+        dropout=0.0,
         qk_norm=True,
         attn_implementation=impl,
     ).to(dtype)
@@ -347,3 +351,38 @@ def test_gqa_qk_norm_matches_ref(impl, device, dtype, atol):
     out_ref = _gqa_ref_call(gqa, x, attn_mask=ref_mask)
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
+
+
+def test_attn_registry_keys():
+    assert ATTN_REGISTRY["mha"] is MultiHeadAttention
+    assert ATTN_REGISTRY["gqa"] is GroupedQueryAttention
+
+
+def test_mha_compute_flops_value():
+    # single int: qkv(24576) + o(8192) + attn_matmul(32768) + qk_norm(0)
+    f = MultiHeadAttention.compute_flops(64, 128, n_heads=2, bias=False, qk_norm=False)
+    assert f == 24576 + 8192 + 32768
+
+
+def test_gqa_compute_flops_qk_norm():
+    off = GroupedQueryAttention.compute_flops(64, 128, n_heads=2, n_kv_heads=1)
+    on = GroupedQueryAttention.compute_flops(
+        64, 128, n_heads=2, n_kv_heads=1, qk_norm=True
+    )
+    assert on - off == 3 * (2 + 1) * 32
+
+
+@pytest.mark.parametrize(
+    "cls, kwargs",
+    [
+        (MultiHeadAttention, dict(n_heads=2)),
+        (MultiHeadAttention, dict(n_heads=2, bias=True, qk_norm=True)),
+        (GroupedQueryAttention, dict(n_heads=4, n_kv_heads=2)),
+        (GroupedQueryAttention, dict(n_heads=4, n_kv_heads=2, bias=True, qk_norm=True)),
+    ],
+)
+def test_compute_parameters_matches_module(cls, kwargs):
+    d_model = 64
+    module = cls(d_model, **kwargs)
+    actual = sum(p.numel() for p in module.parameters())
+    assert cls.compute_parameters(d_model, **kwargs) == actual

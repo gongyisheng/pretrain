@@ -1,7 +1,11 @@
 import math
 import re
+from typing import TYPE_CHECKING
+
 import torch
-from src.utils.config import TrainConfig
+
+if TYPE_CHECKING:
+    from src.utils.config import TrainConfig
 
 
 AdamWOptimizer = torch.optim.AdamW
@@ -103,8 +107,14 @@ class LionOptimizer(torch.optim.Optimizer):
         return loss
 
 
+OPTIMIZER_REGISTRY = {
+    "adamw": AdamWOptimizer,
+    "lion": LionOptimizer,
+}
+
+
 def build_optimizer(
-    model: torch.nn.Module, config: TrainConfig
+    model: torch.nn.Module, config: "TrainConfig"
 ) -> torch.optim.Optimizer:
     """Build optimizer with weight decay applied only to non-bias, non-layernorm params.
 
@@ -162,7 +172,9 @@ def build_optimizer(
             betas=tuple(config.optimizer.betas),
         )
     else:
-        raise ValueError(f"unknown optimizer: {name!r}; expected 'adamw' or 'lion'")
+        raise ValueError(
+            f"unknown optimizer: {name!r}; expected one of {sorted(OPTIMIZER_REGISTRY)}"
+        )
     return optimizer
 
 
@@ -247,9 +259,20 @@ class ConstantWarmupScheduler:
         self.max_lr = state_dict.get("max_lr", self.max_lr)
 
 
-def build_scheduler(optimizer, config: TrainConfig):
-    """Build LR scheduler from config. Dispatches on config.scheduler.name."""
+SCHEDULER_REGISTRY = {
+    "cosine": CosineWarmupScheduler,
+    "constant": ConstantWarmupScheduler,
+}
+
+
+def build_scheduler(optimizer, config: "TrainConfig"):
+    """Build LR scheduler from config. Dispatches on config.scheduler.name
+    (also validated against SCHEDULER_REGISTRY in SchedulerConfig)."""
     name = config.scheduler.name
+    if name not in SCHEDULER_REGISTRY:
+        raise ValueError(
+            f"unknown scheduler: {name!r}; expected one of {sorted(SCHEDULER_REGISTRY)}"
+        )
     if name == "cosine":
         return CosineWarmupScheduler(
             optimizer=optimizer,
@@ -258,10 +281,8 @@ def build_scheduler(optimizer, config: TrainConfig):
             min_lr=config.scheduler.min_lr,
             max_lr=config.optimizer.lr,
         )
-    if name == "constant":
-        return ConstantWarmupScheduler(
-            optimizer=optimizer,
-            warmup_steps=config.scheduler.warmup_steps,
-            max_lr=config.optimizer.lr,
-        )
-    raise ValueError(f"unknown scheduler: {name!r}; expected 'cosine' or 'constant'")
+    return ConstantWarmupScheduler(
+        optimizer=optimizer,
+        warmup_steps=config.scheduler.warmup_steps,
+        max_lr=config.optimizer.lr,
+    )
