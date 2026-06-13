@@ -19,11 +19,8 @@ from src.utils.config import TrainConfig
 
 
 def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-    """Per-parameter L2 gradient norms, keyed by parameter name.
-
-    Keys are the raw parameter names (e.g. blocks.0.attn.q_proj.weight); the
-    caller applies any logging namespace (e.g. a "grad_norm/" prefix). The
-    "_orig_mod." prefix added by torch.compile is stripped.
+    """
+    Per-parameter L2 gradient norms, keyed by parameter name.
     """
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
@@ -41,7 +38,8 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 
 
 def snapshot_params(model: torch.nn.Module) -> list[torch.Tensor]:
-    """Detached clone of every trainable parameter, ordered by model.parameters().
+    """
+    Detached clone of every trainable parameter, ordered by model.parameters().
 
     Use with compute_param_step_norm to measure ||θ_after - θ_before||.
     """
@@ -51,10 +49,8 @@ def snapshot_params(model: torch.nn.Module) -> list[torch.Tensor]:
 def compute_param_step_norm(
     model: torch.nn.Module, snapshot: list[torch.Tensor]
 ) -> float:
-    """L2 norm of the parameter delta vs. an earlier snapshot.
-
-    Accumulates the squared deltas in a single device tensor and syncs once
-    (one .item()), rather than per parameter.
+    """
+    L2 norm of the parameter delta vs. an earlier snapshot.
     """
     total_sq: torch.Tensor | None = None
     params = (p for p in model.parameters() if p.requires_grad)
@@ -67,9 +63,8 @@ def compute_param_step_norm(
 def _aggregate_state_norm(
     optimizer: torch.optim.Optimizer, *, key: str
 ) -> float | None:
-    """L2 norm across all `state[p][key]` buffers, or None if no buffer exists.
-
-    Accumulates in a single device tensor and syncs once, not per buffer.
+    """
+    L2 norm across all `state[p][key]` buffers, or None if no buffer exists.
     """
     total_sq: torch.Tensor | None = None
     for state in optimizer.state.values():
@@ -82,22 +77,15 @@ def _aggregate_state_norm(
 
 
 def compute_momentum_norm(optimizer: torch.optim.Optimizer) -> float | None:
-    """L2 norm across optimizer first-moment buffers.
-
-    Reads `state[p]["exp_avg"]` for every param with state. Works for both
-    Lion (single momentum buffer) and AdamW (first moment). Returns None if no
-    such buffer exists (e.g. before the first optimizer.step()), so the caller
-    can skip logging the metric.
+    """
+    L2 norm across optimizer first-moment buffers.
     """
     return _aggregate_state_norm(optimizer, key="exp_avg")
 
 
 def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
-    """L2 norm across optimizer second-moment buffers.
-
-    Reads `state[p]["exp_avg_sq"]` for every param with state — AdamW's running
-    average of squared gradients. Returns None for Lion (no second moment) and
-    before the first optimizer.step(), so the caller can skip logging it.
+    """
+    L2 norm across optimizer second-moment buffers.
     """
     return _aggregate_state_norm(optimizer, key="exp_avg_sq")
 
@@ -108,10 +96,8 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 
 
 def compute_statistics(values: list[float]) -> dict[str, float]:
-    """{mean, median, max, min} over a non-empty list of scalars.
-
-    Generic reducer for probes that summarize a population (e.g. per-sample
-    p_correct -> min/mean/max). Returns an empty dict for empty input.
+    """
+    {mean, median, max, min} over a non-empty list of scalars.
     """
     if not values:
         return {}
@@ -135,11 +121,8 @@ def count_correct(
     ignore_index: int = -100,
     exclude_id: int | None = None,
 ) -> tuple[int, int]:
-    """Count positions where argmax(logits) == labels.
-
-    Masks out `ignore_index` (loss-ignored positions) and, when given,
-    `exclude_id` (e.g. the EOT token, which is trivially predictable in SFT).
-    Returns (correct, total) as python ints.
+    """
+    Count positions where argmax(logits) == labels.
     """
     preds = logits.argmax(dim=-1)
     mask = labels != ignore_index
@@ -151,19 +134,15 @@ def count_correct(
 
 
 def compute_decoded_byte_len(tokenizer, token_ids: list[int]) -> int:
-    """UTF-8 byte length of `token_ids` decoded back to text.
-
-    Used to convert a token-space loss to bits-per-byte: counting the bytes the
-    target tokens decode to gives the tokens/byte ratio for that conversion.
-    Special tokens are dropped (skip_special_tokens=True).
+    """
+    UTF-8 byte length of `token_ids` decoded back to text.
     """
     return len(tokenizer.decode(token_ids, skip_special_tokens=True).encode("utf-8"))
 
 
 def compute_bytes_per_token(tokenizer, texts: list[str]) -> float:
-    """Bytes/token over `texts` using `tokenizer` (special tokens excluded).
-
-    Higher = more efficient encoding. Raises if no tokens are produced.
+    """
+    Bytes/token over `texts` using `tokenizer` (special tokens excluded).
     """
     n_bytes = 0
     n_tokens = 0
@@ -194,11 +173,8 @@ def compute_bits_per_byte(loss: float, tokens_per_byte: float) -> float:
 
 
 def count_parameters(config: TrainConfig) -> dict[str, int]:
-    """Total, non-embedding, and active-non-embedding parameter counts.
-
-    Thin wrapper over ``TransformerLM.compute_parameters`` (analytic from config,
-    summed up from each layer component). For dense models active_non_emb ==
-    non_emb; for MoE active_non_emb counts only the k routed experts per layer.
+    """
+    Total, non-embedding, and active-non-embedding parameter counts.
     """
     return TransformerLM.compute_parameters(config.model, config.max_seq_len)
 
@@ -209,9 +185,8 @@ def count_parameters(config: TrainConfig) -> dict[str, int]:
 
 
 def compute_flops_per_token(config: TrainConfig) -> int:
-    """Total training FLOPs per token: the model's forward FLOPs (from
-    ``TransformerLM.compute_flops``) times a backward multiplier of 4 if
-    activation_checkpointing else 3.
+    """
+    Total training FLOPs per token
     """
     fwd_total = TransformerLM.compute_flops(config.model, config.max_seq_len)
     backward_mult = 4 if config.training.activation_checkpointing else 3
