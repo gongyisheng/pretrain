@@ -31,7 +31,6 @@ import time
 import torch
 from tokenizers import Tokenizer
 
-from src.eval.tokenizer import _bytes_per_token
 from src.utils import metric_utils
 from src.utils.config import TrainConfig
 from src.utils.tracking_utils import WandbLogger
@@ -385,7 +384,9 @@ class TokenizerMetricsTracker:
         self.logger.log(
             {
                 "vocab_size": vocab_size,
-                "bytes_per_token": _bytes_per_token(tokenizer, eval_texts),
+                "bytes_per_token": metric_utils.compute_bytes_per_token(
+                    tokenizer, eval_texts
+                ),
             },
             step=vocab_size,
         )
@@ -399,7 +400,9 @@ class TokenizerMetricsTracker:
         self.logger.log(
             {
                 "vocab_size": vocab_size,
-                "bytes_per_token": _bytes_per_token(tokenizer, eval_texts),
+                "bytes_per_token": metric_utils.compute_bytes_per_token(
+                    tokenizer, eval_texts
+                ),
             },
             step=vocab_size,
         )

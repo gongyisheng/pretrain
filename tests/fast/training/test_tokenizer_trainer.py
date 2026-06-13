@@ -6,7 +6,7 @@ from tokenizers import Tokenizer
 
 from src.data.tokenizer import load_tokenizer
 from src.training.trainer import TokenizerTrainer
-from src.eval.tokenizer import _bytes_per_token, evaluate
+from src.utils.metric_utils import compute_bytes_per_token
 from src.utils.config import (
     LoggingConfig,
     ModelConfig,
@@ -124,7 +124,7 @@ def test_superbpe_invalid_transition_size_raises(tmp_path, text_iter, ts):
 def test_bytes_per_token_sensible(tmp_path, text_iter):
     save = tmp_path / "bpe_500"
     tok = _trainer(save, 500, "bpe").train(text_iter)
-    bpt = _bytes_per_token(tok, SAMPLE_TEXTS[:20])
+    bpt = compute_bytes_per_token(tok, SAMPLE_TEXTS[:20])
     assert bpt > 1.0, f"expected >1 byte per token, got {bpt}"
     assert bpt < 20.0, f"absurdly high bytes/token: {bpt}"
 
@@ -132,7 +132,7 @@ def test_bytes_per_token_sensible(tmp_path, text_iter):
 def test_evaluate_returns_expected_keys(tmp_path, text_iter):
     save = tmp_path / "bpe_500"
     _trainer(save, 500, "bpe").train(text_iter)
-    result = evaluate(str(save), iter(SAMPLE_TEXTS[:20]))
+    result = TokenizerTrainer.evaluate(str(save), iter(SAMPLE_TEXTS[:20]))
     assert set(result.keys()) >= {
         "n_docs",
         "n_bytes",

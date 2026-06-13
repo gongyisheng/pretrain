@@ -9,7 +9,7 @@ import torch.nn.functional as F
 sys.path.insert(0, ".")
 
 from src.utils.config import load_config
-from src.model.registry import build_model
+from src.model import build_model
 from src.data.dataset import PretrainDataset
 from torch.utils.data import DataLoader
 

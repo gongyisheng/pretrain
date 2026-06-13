@@ -8,7 +8,7 @@ sys.path.insert(0, ".")
 
 from datasets import load_dataset
 
-from src.eval.tokenizer import evaluate
+from src.training.trainer import TokenizerTrainer
 
 
 def _stream_texts(dataset: str, split: str, num_samples: int):
@@ -54,14 +54,14 @@ def main():
     print(
         f"Evaluating {args.tokenizer} on {args.dataset}:{args.split} ({args.num_samples} docs)"
     )
-    result_a = evaluate(
+    result_a = TokenizerTrainer.evaluate(
         args.tokenizer, _stream_texts(args.dataset, args.split, args.num_samples)
     )
     print(json.dumps({"tokenizer": args.tokenizer, **result_a}, indent=2))
 
     if args.compare:
         print(f"Evaluating {args.compare} on the same stream")
-        result_b = evaluate(
+        result_b = TokenizerTrainer.evaluate(
             args.compare, _stream_texts(args.dataset, args.split, args.num_samples)
         )
         print(json.dumps({"tokenizer": args.compare, **result_b}, indent=2))

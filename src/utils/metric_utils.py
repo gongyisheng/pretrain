@@ -2,8 +2,7 @@
 
 The bottom layer of the metrics stack. Everything here takes numbers/tensors
 in and returns numbers/dicts out; it never touches W&B or the training loop.
-`MetricsTracker` (the stateful assembler) and `src/eval/` offline evaluators
-both build on these primitives.
+`MetricsTracker` (the stateful assembler) builds on these primitives.
 """
 
 import math
@@ -159,6 +158,21 @@ def compute_decoded_byte_len(tokenizer, token_ids: list[int]) -> int:
     Special tokens are dropped (skip_special_tokens=True).
     """
     return len(tokenizer.decode(token_ids, skip_special_tokens=True).encode("utf-8"))
+
+
+def compute_bytes_per_token(tokenizer, texts: list[str]) -> float:
+    """Bytes/token over `texts` using `tokenizer` (special tokens excluded).
+
+    Higher = more efficient encoding. Raises if no tokens are produced.
+    """
+    n_bytes = 0
+    n_tokens = 0
+    for t in texts:
+        n_bytes += len(t.encode("utf-8"))
+        n_tokens += len(tokenizer.encode(t, add_special_tokens=False).ids)
+    if n_tokens == 0:
+        raise ValueError("no tokens produced; corpus may be empty")
+    return n_bytes / n_tokens
 
 
 def compute_perplexity(loss: float, cap: float = 1e6) -> float:

@@ -11,7 +11,7 @@ import math
 import pytest
 import torch
 
-from src.model.registry import build_model
+from src.model import build_model
 from src.training.metrics import MetricsTracker
 from src.utils.config import ModelConfig, TrainConfig
 

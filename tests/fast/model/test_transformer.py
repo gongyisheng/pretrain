@@ -3,7 +3,7 @@ import torch
 
 from src.layers.attention import GroupedQueryAttention
 from src.layers.mlp import DenseMLPBlock
-from src.model.registry import build_model
+from src.model import build_model
 from src.model.transformer import TransformerLM
 from src.utils.config import ModelConfig, TrainConfig
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported

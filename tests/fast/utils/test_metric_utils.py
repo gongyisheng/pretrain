@@ -9,7 +9,7 @@ import math
 import pytest
 import torch
 
-from src.model.registry import build_model
+from src.model import build_model
 from src.model.transformer import TransformerLM
 from src.training.optimizer import AdamWOptimizer, LionOptimizer
 from src.utils import metric_utils

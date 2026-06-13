@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, SchedulerConfig
-from src.model.registry import build_model
+from src.model import build_model
 from src.training.optimizer import (
     LionOptimizer,
     build_optimizer,
