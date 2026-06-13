@@ -37,7 +37,8 @@ Hardware requirement: SM 9.0+ (Hopper or Blackwell). On the dev box (RTX PRO 600
 ## Run
 
 ```bash
-nohup bash experiments/fp8/run.sh > logs/fp8.log 2>&1 &
+nohup bash experiments/fp8/run_57m.sh > logs/fp8_57m.log 2>&1 &
+nohup bash experiments/fp8/run_0.6b.sh > logs/fp8_0.6b.log 2>&1 &
 ```
 
 ## Results
