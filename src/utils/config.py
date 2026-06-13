@@ -5,6 +5,7 @@ import yaml
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
+from src.training.fp8 import FP8_RECIPES
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 
@@ -104,11 +105,8 @@ class TrainingConfig:
     eval_steps: int = 25
     eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
-    # FP8 training via torchao.float8 module swap. Requires SM 9.0+ (H100/Blackwell).
-    # Wraps nn.Linear layers in Float8Linear; dispatches matmuls to cuBLASLt FP8 GEMM.
-    # MoE expert paths are not eligible (they use raw nn.Parameter + bmm).
     fp8: bool = False
-    fp8_recipe: str = "tensorwise"  # "tensorwise" | "rowwise" | "rowwise_with_gw_hp"
+    fp8_recipe: str = "tensorwise"
     fp8_exclude_lm_head: bool = (
         True  # numerically sensitive, especially with tied embeddings
     )
@@ -123,6 +121,11 @@ class TrainingConfig:
             raise ValueError(
                 f"unknown loss_fn: {self.loss_fn!r}; "
                 f"expected one of {sorted(LOSS_REGISTRY)}"
+            )
+        if self.fp8 and self.fp8_recipe not in FP8_RECIPES:
+            raise ValueError(
+                f"unknown fp8_recipe: {self.fp8_recipe!r}; "
+                f"expected one of {sorted(FP8_RECIPES)}"
             )
 
 

@@ -50,13 +50,19 @@ class _TinyModel(nn.Module):
 
 
 def _make_config(
-    arch: str = "gpt2",
+    mlp_cls: str = "dense",
     fp8: bool = True,
     fp8_recipe: str = "tensorwise",
     fp8_exclude_lm_head: bool = True,
 ) -> TrainConfig:
     return TrainConfig(
-        model=ModelConfig(arch=arch, d_model=32, n_layers=1, n_heads=2, vocab_size=64),
+        model=ModelConfig(
+            d_model=32,
+            n_layers=1,
+            vocab_size=64,
+            attn_kwargs={"n_heads": 2},
+            mlp_cls=mlp_cls,
+        ),
         training=TrainingConfig(
             fp8=fp8,
             fp8_recipe=fp8_recipe,
@@ -79,20 +85,15 @@ def test_disabled_is_noop():
 
 def test_moe_arch_raises():
     model = _TinyModel()
-    cfg = _make_config(arch="qwen3_moe", fp8=True)
-    with pytest.raises(ValueError, match="qwen3_moe"):
+    cfg = _make_config(mlp_cls="moe", fp8=True)
+    with pytest.raises(ValueError, match="moe"):
         maybe_convert_to_fp8(model, cfg)
 
 
 def test_unknown_recipe_raises():
-    model = _TinyModel()
-    cfg = _make_config(fp8=True, fp8_recipe="not_a_real_recipe")
-    if not _fp8_capable():
-        with pytest.raises(RuntimeError, match="compute capability"):
-            maybe_convert_to_fp8(model, cfg)
-    else:
-        with pytest.raises(ValueError, match="fp8_recipe"):
-            maybe_convert_to_fp8(model, cfg)
+    # Recipe is validated at config construction (hardware-independent).
+    with pytest.raises(ValueError, match="fp8_recipe"):
+        _make_config(fp8=True, fp8_recipe="not_a_real_recipe")
 
 
 @pytest.mark.skipif(_fp8_capable(), reason="testing non-FP8-capable branch")

@@ -101,24 +101,11 @@ class DenseMLPBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple:
         if self.gated:
-            out = gated_mlp(
-                x,
-                self.gate_up_proj.weight,
-                self.down_proj.weight,
-                self.act_fn,
-                self.gate_up_proj.bias,
-                self.down_proj.bias,
-            )
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+            hidden = self.act_fn(gate, up)
         else:
-            out = ungated_mlp(
-                x,
-                self.up_proj.weight,
-                self.down_proj.weight,
-                self.act_fn,
-                self.up_proj.bias,
-                self.down_proj.bias,
-            )
-        return self.dropout(out), None
+            hidden = self.act_fn(self.up_proj(x))
+        return self.dropout(self.down_proj(hidden)), None
 
     @classmethod
     def compute_flops(cls, d_model, *, intermediate_size, gated=True, bias=False, **_):

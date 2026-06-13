@@ -19,10 +19,16 @@ architecture rather than silently leaving most of the FLOPs in bf16.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 
-from src.utils.config import TrainConfig
+if TYPE_CHECKING:
+    from src.utils.config import TrainConfig
+
+# Recipe names accepted by torchao's Float8LinearConfig.from_recipe_name.
+FP8_RECIPES = frozenset({"tensorwise", "rowwise", "rowwise_with_gw_hp"})
 
 
 def _fp8_supported() -> bool:
@@ -42,11 +48,11 @@ def maybe_convert_to_fp8(model: nn.Module, config: TrainConfig) -> nn.Module:
     if not config.training.fp8:
         return model
 
-    if config.model.arch == "qwen3_moe":
+    if config.model.mlp_cls == "moe":
         raise ValueError(
-            "training.fp8=true is not supported for qwen3_moe: expert FFN weights "
+            "training.fp8=true is not supported for mlp_cls='moe': expert FFN weights "
             "are raw nn.Parameter tensors and are not eligible for the module swap. "
-            "Set training.fp8=false or use a dense architecture."
+            "Set training.fp8=false or use a dense MLP."
         )
 
     if not _fp8_supported():
