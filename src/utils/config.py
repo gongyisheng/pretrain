@@ -2,13 +2,11 @@ from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 import yaml
 
-_UNGATED_ACTIVATIONS = frozenset(
-    {"relu", "gelu", "silu", "leaky_relu", "relu2", "gelu2", "silu2", "leaky_relu2"}
-)
-_GATED_ACTIVATIONS = _UNGATED_ACTIVATIONS | {"bilinear", "bilinear2", "powlu"}
+from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.training.loss import LOSS_REGISTRY
+from src.training.optimizer import SCHEDULER_REGISTRY
+
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
-_LOSS_FNS = frozenset({"cross_entropy", "cross_entropy_fp64", "mse", "mse_fp64"})
-_SCHEDULERS = frozenset({"cosine", "constant"})
 
 
 @dataclass
@@ -56,7 +54,7 @@ class ModelConfig:
         self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
         gated = self.mlp_kwargs.get("gated", True)
         activation = self.mlp_kwargs.get("activation", "silu")
-        valid = _GATED_ACTIVATIONS if gated else _UNGATED_ACTIVATIONS
+        valid = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
         if activation not in valid:
             raise ValueError(
                 f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
@@ -126,10 +124,10 @@ class TrainingConfig:
                 f"unknown mixed_precision: {self.mixed_precision!r}; "
                 f"expected one of {sorted(_MIXED_PRECISION)}"
             )
-        if self.loss_fn not in _LOSS_FNS:
+        if self.loss_fn not in LOSS_REGISTRY:
             raise ValueError(
                 f"unknown loss_fn: {self.loss_fn!r}; "
-                f"expected one of {sorted(_LOSS_FNS)}"
+                f"expected one of {sorted(LOSS_REGISTRY)}"
             )
 
 
@@ -150,10 +148,10 @@ class SchedulerConfig:
     min_lr: float = 6e-5
 
     def __post_init__(self):
-        if self.name not in _SCHEDULERS:
+        if self.name not in SCHEDULER_REGISTRY:
             raise ValueError(
                 f"unknown scheduler: {self.name!r}; "
-                f"expected one of {sorted(_SCHEDULERS)}"
+                f"expected one of {sorted(SCHEDULER_REGISTRY)}"
             )
 
 

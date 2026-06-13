@@ -325,15 +325,6 @@ def test_modelconfig_gqa_defaults_n_kv_heads():
     assert cfg.attn_kwargs["n_kv_heads"] == 8  # defaults to n_heads
 
 
-def test_activation_name_sets_in_sync_with_registries():
-    """config's plain-literal activation names must match the layer registries."""
-    from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
-    from src.utils.config import _GATED_ACTIVATIONS, _UNGATED_ACTIVATIONS
-
-    assert _UNGATED_ACTIVATIONS == set(UNGATED_ACTIVATIONS)
-    assert _GATED_ACTIVATIONS == set(GATED_ACTIVATIONS)
-
-
 # ==================== string-field validation ====================
 
 
@@ -354,10 +345,3 @@ def test_training_unknown_mixed_precision_raises():
 def test_training_unknown_loss_fn_raises():
     with pytest.raises(ValueError, match="unknown loss_fn"):
         TrainingConfig(loss_fn="huber")
-
-
-def test_loss_fn_names_in_sync_with_registry():
-    from src.training.loss import LOSS_REGISTRY
-    from src.utils.config import _LOSS_FNS
-
-    assert _LOSS_FNS == set(LOSS_REGISTRY)
