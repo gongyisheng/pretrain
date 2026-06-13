@@ -17,9 +17,9 @@ model:
     rope_theta: 10000.0
 
 data:
-  dataset: "openwebtext"
-  tokenizer_path: "tokenizers/custom_bpe_50k"
-  data_dir: "data/"
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
   val_split: 0.01
   num_workers: 4
 
@@ -27,31 +27,31 @@ training:
   batch_size: 8
   gradient_accumulation_steps: 32
   max_steps: 50000
-  mixed_precision: "bf16"
+  mixed_precision: bf16
   activation_checkpointing: false
   seed: 42
   grad_clip: 1.0
-  checkpoint_dir: "checkpoints/muon/qwen3_0.5b_muon/"
+  checkpoint_dir: checkpoints/muon/qwen3_0.5b_muon/
   checkpoint_every: 5000
   eval_every: 1000
   eval_steps: 200
 
 optimizer:
-  name: "muon"
+  name: muon
   lr: 2e-4
   weight_decay: 0.1
   betas: [0.9, 0.95]  # used by the AdamW sub-optimizer (embeddings, lm_head, 1D params)
   muon_momentum: 0.95
   muon_nesterov: true
-  muon_adjust_lr_fn: "match_rms_adamw"  # reuse the AdamW-tuned lr/wd
+  muon_adjust_lr_fn: match_rms_adamw  # reuse the AdamW-tuned lr/wd
 
 scheduler:
-  name: "cosine"
+  name: cosine
   warmup_steps: 1500
   min_lr: 2e-5
 
 logging:
-  wandb_project: "pretrain-muon-optm"
-  wandb_run_name: "qwen3-0.5b-muon"
+  wandb_project: pretrain-muon-optm
+  wandb_run_name: qwen3-0.5b-muon
   log_every: 100
   log_optimizer_svd_metrics: true
