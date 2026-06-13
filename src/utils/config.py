@@ -4,7 +4,7 @@ import yaml
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.training.loss import LOSS_REGISTRY
-from src.training.optimizer import SCHEDULER_REGISTRY
+from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 
@@ -31,11 +31,6 @@ class ModelConfig:
     lm_head_bias: bool = False
 
     def __post_init__(self):
-        # config.py is the single place for component defaults + validation, so
-        # layer/model code can assume fully-resolved, valid kwargs and call sites
-        # use plain `[key]` access (no `.get(key, default)`).
-
-        # --- Attention: implementation default, dim validation, GQA kv default ---
         self.attn_kwargs.setdefault("attn_implementation", "flex_attention")
         n_heads = self.attn_kwargs.get("n_heads")
         if n_heads is not None:
@@ -50,7 +45,6 @@ class ModelConfig:
                         f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv})"
                     )
 
-        # --- MLP: intermediate_size default, activation validation ---
         self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
         gated = self.mlp_kwargs.get("gated", True)
         activation = self.mlp_kwargs.get("activation", "silu")
@@ -81,16 +75,11 @@ class TokenizerTrainingConfig:
     method: str = "bpe"  # "bpe" | "superbpe"
     method_kwargs: dict = field(default_factory=dict)
     num_samples: int = 1_000_000
-    checkpoint_dir: str = (
-        "tokenizers/custom_bpe"  # where the trained tokenizer is saved
-    )
-    checkpoint_every: int = 5000  # interval (in merges) at which to save the tokenizer
-    # SuperBPE-only: interval (in merges) at which to log/evaluate curve points.
+    checkpoint_dir: str = "tokenizers/custom_bpe"
+    checkpoint_every: int = 5000
     eval_every: int = 5000
 
     def __post_init__(self):
-        # Defaults for method_kwargs read by TokenizerTrainer (so it uses plain
-        # `[key]` access). `transition_size` is required for superbpe (no default).
         self.method_kwargs.setdefault("eval_num_docs", 1000)
         if self.method == "superbpe":
             self.method_kwargs.setdefault("max_superword_words", 4)
@@ -101,7 +90,7 @@ class TrainingConfig:
     batch_size: int = 16
     gradient_accumulation_steps: int = 16
     max_steps: int = 50000
-    early_stop: int = 0  # if > 0, stop at this step (overrides max_steps without affecting the LR schedule)
+    early_stop: int = 0
     mixed_precision: str = "bf16"
     loss_fn: str = "cross_entropy"
     label_smoothing: float = 0.0  # for CE loss only
@@ -113,9 +102,7 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 100
     eval_steps: int = 25
-    eval_train: bool = (
-        False  # run eval pass over train set (logs val/train_acc for SFT)
-    )
+    eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
 
     def __post_init__(self):
@@ -139,6 +126,13 @@ class OptimizerConfig:
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
+
+    def __post_init__(self):
+        if self.name not in OPTIMIZER_REGISTRY:
+            raise ValueError(
+                f"unknown optimizer: {self.name!r}; "
+                f"expected one of {sorted(OPTIMIZER_REGISTRY)}"
+            )
 
 
 @dataclass

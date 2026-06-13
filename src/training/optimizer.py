@@ -107,6 +107,12 @@ class LionOptimizer(torch.optim.Optimizer):
         return loss
 
 
+OPTIMIZER_REGISTRY = {
+    "adamw": AdamWOptimizer,
+    "lion": LionOptimizer,
+}
+
+
 def build_optimizer(
     model: torch.nn.Module, config: "TrainConfig"
 ) -> torch.optim.Optimizer:
@@ -166,7 +172,9 @@ def build_optimizer(
             betas=tuple(config.optimizer.betas),
         )
     else:
-        raise ValueError(f"unknown optimizer: {name!r}; expected 'adamw' or 'lion'")
+        raise ValueError(
+            f"unknown optimizer: {name!r}; expected one of {sorted(OPTIMIZER_REGISTRY)}"
+        )
     return optimizer
 
 

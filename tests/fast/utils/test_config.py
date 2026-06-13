@@ -337,6 +337,15 @@ def test_scheduler_unknown_name_raises():
     SchedulerConfig(name="constant")
 
 
+def test_optimizer_unknown_name_raises():
+    from src.utils.config import OptimizerConfig
+
+    with pytest.raises(ValueError, match="unknown optimizer"):
+        OptimizerConfig(name="sgd")
+    OptimizerConfig(name="adamw")
+    OptimizerConfig(name="lion")
+
+
 def test_training_unknown_mixed_precision_raises():
     with pytest.raises(ValueError, match="unknown mixed_precision"):
         TrainingConfig(mixed_precision="fp8")
