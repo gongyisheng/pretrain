@@ -92,14 +92,19 @@ def main():
                         help="Keep only parameters whose name contains this substring")
     args = parser.parse_args()
 
+    def qualifies(name, t):
+        if not t.is_floating_point():
+            return False
+        if args.mode == "svd":
+            return t.ndim == 2 and not name.startswith("rope.")
+        return True
+
     if args.mode == "svd":
         keys, stat_fn, val_fmt = SVD_KEYS, svd_stats, fmt_num  # cond/smin span many orders
         trailing_hdr = f"{'shape':>11}"
-        qualifies = lambda name, t: t.is_floating_point() and t.ndim == 2 and not name.startswith("rope.")
     else:
         keys, stat_fn, val_fmt = BASIC_KEYS, basic_stats, lambda x: f"{x:.5f}"
         trailing_hdr = f"{'nans':>5} {'shape':>11}"
-        qualifies = lambda name, t: t.is_floating_point()
     if args.sort not in keys + ["nans", "name"]:
         parser.error(f"--sort must be one of {keys + ['nans', 'name']} for mode {args.mode}")
 
