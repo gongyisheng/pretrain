@@ -1,95 +1,236 @@
-"""Training metrics: per-step tracking, log_dict assembly, per-layer grad norms."""
+"""MetricsTracker — the stateful assembly layer between pure metric math
+(`src/utils/metric_utils.py`) and dispatch (`src/utils/tracking_utils.py`).
 
-import math
+It owns everything that has state across a training run: per-window counters,
+log-cadence timing, cached optimizer step-norms, running token totals
+(tokens_per_step / total_tokens), and the eval accumulators. It calls
+`metric_utils` for arithmetic and a logger (WandbLogger) for dispatch; the
+trainer feeds it raw numbers and never assembles a log_dict itself.
+
+Setup (once):
+    print_model_summary()                 # startup banner: param counts + device
+    train_begin()                         # reset the log-window timer
+
+Lifecycle per optimizer step:
+    snapshot_pre_step(model, step)        # before optimizer.step() (snapshots
+                                          #   only on pre-log steps)
+    ...scaler.step / update...
+    on_step(loss=, grad_norm=, ...)       # update counters + total_tokens,
+                                          #   cache step-norms
+    log_train(step=, model=, optimizer=)  # on cadence: assemble + dispatch,
+                                          #   else None
+
+Eval:
+    eval_begin()
+    eval_step(loss=, logits=, labels=, ...)   # per batch
+    log_eval(step=)                            # finalize + dispatch + print
+"""
+
+import time
+
 import torch
+from tokenizers import Tokenizer
 
+from src.utils import metric_utils
 from src.utils.config import TrainConfig
+from src.utils.tracking_utils import WandbLogger
 
 
 class MetricsTracker:
-    """Tracks and assembles training metrics for W&B logging."""
+    """Tracks and assembles training/eval metrics, then dispatches to W&B."""
 
-    def __init__(self, config: TrainConfig, n_active_non_emb_params: int, device: str):
+    def __init__(
+        self,
+        config: TrainConfig,
+        device: str,
+        logger: WandbLogger,
+    ):
         self.config = config
-        self.n_active_non_emb_params = n_active_non_emb_params
         self.device = device
-        self.is_moe = config.model.arch == "qwen3_moe"
+        self.logger = logger
+
+        self.is_moe = config.model.mlp_cls == "moe"
         if self.is_moe:
             self._aux_floor = (
-                config.model.n_layers * config.model.moe_n_experts_per_token
+                config.model.n_layers * config.model.mlp_kwargs["n_experts_per_token"]
             )
 
+        self._flops_per_token = metric_utils.compute_flops_per_token(config)
+        self._gpu_peak_flops = metric_utils.estimate_gpu_peak_flops(device)
+        self.tokens_per_step = (
+            config.training.batch_size
+            * config.training.gradient_accumulation_steps
+            * config.max_seq_len
+        )
+
+        # Per-window counters (reset every log_every steps).
         self._grad_clip_steps = 0
         self._steps_since_log = 0
+        self._tokens_since_log = 0
+        # Cumulative across the run (intentionally not reset).
+        # total_tokens is public:
+        # the trainer persists/restores it via the checkpoint.
         self._skipped_steps = 0
-        self._gpu_peak_flops = self._estimate_gpu_peak_flops()
+        self.total_tokens = 0
+        self._t_last_log = time.time()
+
+        self._last_loss = 0.0
+        self._last_grad_norm = 0.0
+        self._loss_scale = 1.0
+        self._last_aux_loss: float | None = None
+        self._param_snapshot: list[torch.Tensor] | None = None
+        self._param_step_norm: float | None = None
+        self._momentum_norm: float | None = None
+        self._variance_norm: float | None = None
+
+        # Eval accumulators (initialized by eval_begin).
+        self._eval_loss_sum = 0.0
+        self._eval_aux_sum = 0.0
+        self._eval_n_batches = 0
+        self._eval_bpb_tokens = 0
+        self._eval_bpb_bytes = 0
+        self._eval_acc_correct = 0
+        self._eval_acc_total = 0
 
     # ------------------------------------------------------------------
-    # Per-step tracking
+    # Model summary
     # ------------------------------------------------------------------
+
+    def print_model_summary(self) -> None:
+        """Print the one-line startup banner (param counts + device).
+
+        MoE models report total params + active (k-expert) non-embedding params;
+        dense models report total + non-embedding.
+        """
+        counts = metric_utils.count_parameters(self.config)
+        label = f"{self.config.model.attn_cls}+{self.config.model.mlp_cls}"
+        if self.is_moe:
+            msg = (
+                f"Model: {label} | {counts['total'] / 1e6:.1f}M total params "
+                f"({counts['active_non_emb'] / 1e6:.1f}M active non-embedding) "
+                f"| device={self.device}"
+            )
+        else:
+            msg = (
+                f"Model: {label} | {counts['total'] / 1e6:.1f}M params "
+                f"({counts['non_emb'] / 1e6:.1f}M non-embedding) | device={self.device}"
+            )
+        print(msg)
+
+    def train_begin(self) -> None:
+        """Reset the log-window timer/counter. Call at the top of train() so
+        the first window's tokens/sec excludes construction (and resume) time.
+        """
+        self._t_last_log = time.time()
+        self._tokens_since_log = 0
+
+    def snapshot_pre_step(self, model: torch.nn.Module, step: int) -> None:
+        """Cache θ before optimizer.step() so on_step can compute ||Δθ||.
+
+        Only snapshots on the step whose update will be logged next
+        (``(step + 1) % log_every == 0``): the step-norm logged at a cadence
+        boundary reflects only that final pre-log update, so snapshotting +
+        diffing on every step would clone the whole model and sync per-param
+        for a value that is then overwritten and discarded. No-op when
+        config.logging.log_optimizer_step_norms is False.
+        """
+        log_every = self.config.logging.log_every
+        if self.config.logging.log_optimizer_step_norms and (step + 1) % log_every == 0:
+            self._param_snapshot = metric_utils.snapshot_params(model)
+        else:
+            self._param_snapshot = None
 
     def on_step(
         self,
-        loss: float,
-        step: int,
-        grad_norm_val: float,
-        grad_clip: float,
-        scaler_enabled: bool,
-        scale_before: float,
-        scale_after: float,
-    ):
-        """Call after grad clip + scaler.step/update on every training step."""
-        if not math.isfinite(loss):
-            raise RuntimeError(f"Loss is {loss} at step {step}, stopping training")
-        if grad_norm_val > grad_clip:
-            self._grad_clip_steps += 1
-        self._steps_since_log += 1
-        if scaler_enabled and scale_after < scale_before:
-            self._skipped_steps += 1
-
-    # ------------------------------------------------------------------
-    # Log dict assembly
-    # ------------------------------------------------------------------
-
-    def build_train_log_dict(
-        self,
         *,
         loss: float,
-        total_tokens: int,
-        lr: float,
         grad_norm: float,
-        tokens_per_sec: float,
-        elapsed: float,
         model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
         scaler: torch.amp.GradScaler,
-        aux_loss: float | None = None,
-    ) -> dict[str, float]:
-        """Assemble full metrics dict for logging. Resets per-window counters."""
-        log_every = self.config.logging.log_every
-        step_time_ms = elapsed / log_every * 1000 if elapsed > 0 else 0
+        scale_before: float,
+        aux_loss: torch.Tensor | None = None,
+    ) -> None:
+        """
+        Update window counters and cache the values log_train needs.
+        """
+        self._last_loss = loss
+        self._last_grad_norm = grad_norm
+        self._loss_scale = scaler.get_scale() if scaler.is_enabled() else 1.0
+        self._last_aux_loss = aux_loss.item() if aux_loss is not None else None
 
+        if grad_norm > self.config.training.grad_clip:
+            self._grad_clip_steps += 1
+        self._steps_since_log += 1
+        self._tokens_since_log += self.tokens_per_step
+        self.total_tokens += self.tokens_per_step
+        if scaler.is_enabled() and scaler.get_scale() < scale_before:
+            self._skipped_steps += 1
+
+        if self._param_snapshot is not None:
+            self._param_step_norm = metric_utils.compute_param_step_norm(
+                model, self._param_snapshot
+            )
+            self._momentum_norm = metric_utils.compute_momentum_norm(optimizer)
+            self._variance_norm = metric_utils.compute_variance_norm(optimizer)
+            self._param_snapshot = None
+        else:
+            self._param_step_norm = None
+            self._momentum_norm = None
+            self._variance_norm = None
+
+    def log_train(
+        self,
+        *,
+        step: int,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+    ) -> dict[str, float] | None:
+        """On a log-cadence step: assemble the train log_dict, dispatch it to
+        the logger, reset window counters, and return the dict (for the pbar).
+        Off cadence: return None and do nothing. LR is read from the
+        optimizer's first param group.
+        """
+        if step % self.config.logging.log_every != 0:
+            return None
+
+        lr = optimizer.param_groups[0]["lr"]
+        now = time.time()
+        elapsed = now - self._t_last_log
+        tokens_per_sec = self._tokens_since_log / elapsed if elapsed > 0 else 0.0
+        step_time_ms = (
+            elapsed / self.config.logging.log_every * 1000 if elapsed > 0 else 0.0
+        )
+
+        loss = self._last_loss
         d: dict[str, float] = {
             # train
             "train/loss": loss,
-            "train/perplexity": min(float(torch.exp(torch.tensor(loss))), 1e6),
-            "train/flops": 6 * self.n_active_non_emb_params * total_tokens,
-            "train/total_tokens": total_tokens,
+            "train/flops": self._flops_per_token * self.total_tokens,
+            "train/total_tokens": self.total_tokens,
             # optim
             "optim/lr": lr,
             "optim/grad_clip_ratio": self._grad_clip_steps
             / max(self._steps_since_log, 1),
-            "optim/loss_scale": scaler.get_scale() if scaler.is_enabled() else 1.0,
+            "optim/loss_scale": self._loss_scale,
             "optim/skipped_steps": self._skipped_steps,
             # perf
             "perf/tokens_per_sec": tokens_per_sec,
             "perf/step_time_ms": step_time_ms,
             # grad norm
-            "grad_norm/total": grad_norm,
+            "grad_norm/total": self._last_grad_norm,
         }
+
+        # MoE aux loss (cached as a float in on_step)
+        if self.is_moe and self._last_aux_loss is not None:
+            d["train/aux_loss"] = self._last_aux_loss - self._aux_floor
+
+        if self.config.task == "pretrain":
+            d["train/perplexity"] = metric_utils.compute_perplexity(loss)
 
         # MFU
         if self._gpu_peak_flops and tokens_per_sec > 0:
-            flops_per_sec = 6 * self.n_active_non_emb_params * tokens_per_sec
+            flops_per_sec = self._flops_per_token * tokens_per_sec
             d["perf/mfu"] = flops_per_sec / self._gpu_peak_flops
 
         # GPU memory
@@ -97,88 +238,171 @@ class MetricsTracker:
             d["perf/gpu_mem_allocated_gb"] = torch.cuda.memory_allocated() / 1e9
             d["perf/gpu_mem_reserved_gb"] = torch.cuda.memory_reserved() / 1e9
 
-        # MoE aux loss
-        if self.is_moe and aux_loss is not None:
-            d["train/aux_loss"] = aux_loss - self._aux_floor
+        # Optimizer step diagnostics (||Δθ||, ||m||, ||v||)
+        if self._param_step_norm is not None:
+            d["optim/param_step_norm"] = self._param_step_norm
+        if self._momentum_norm is not None:
+            d["optim/momentum_norm"] = self._momentum_norm
+        if self._variance_norm is not None:
+            d["optim/variance_norm"] = self._variance_norm
 
-        # Per-layer gradient norms
+        # Per-layer gradient norms (grads still live: zero_grad runs next step)
         if self.config.logging.log_layer_grad_norms:
-            d.update(self.compute_layer_grad_norms(model))
+            for name, norm in metric_utils.compute_layer_grad_norms(model).items():
+                d[f"grad_norm/{name}"] = norm
 
-        # Reset per-window counters
+        self.logger.log(d, step=step)
+
+        # Reset per-window counters/timer.
         self._grad_clip_steps = 0
         self._steps_since_log = 0
+        self._tokens_since_log = 0
+        self._t_last_log = now
 
         return d
 
-    def build_eval_log_dict(
+    def eval_begin(self) -> None:
+        """Reset eval accumulators before iterating the val loader."""
+        self._eval_loss_sum = 0.0
+        self._eval_aux_sum = 0.0
+        self._eval_n_batches = 0
+        self._eval_bpb_tokens = 0
+        self._eval_bpb_bytes = 0
+        self._eval_acc_correct = 0
+        self._eval_acc_total = 0
+
+    def eval_step(
         self,
         *,
-        avg_loss: float,
-        avg_aux_loss: float | None = None,
-        tokens_per_byte: float | None = None,
+        loss: float,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        aux_loss: float | None = None,
+        tokenizer=None,
+        eot_token_id: int | None = None,
+    ) -> None:
+        """Accumulate one eval batch's contributions (loss, accuracy, bpb).
+
+        tokenizer (for bpb byte-counting) and eot_token_id (excluded from SFT
+        accuracy) are passed per call rather than held on the tracker.
+        """
+        self._eval_loss_sum += loss
+        self._eval_n_batches += 1
+        if aux_loss is not None:
+            self._eval_aux_sum += aux_loss
+
+        if self.config.task == "sft":
+            c, t = metric_utils.count_correct(logits, labels, exclude_id=eot_token_id)
+            self._eval_acc_correct += c
+            self._eval_acc_total += t
+
+        if tokenizer is not None and self.config.task == "pretrain":
+            # Count loss-contributing tokens; decode them and count UTF-8 bytes.
+            keep = labels.reshape(-1) != -100
+            target_ids = labels.reshape(-1)[keep].tolist()
+            self._eval_bpb_tokens += len(target_ids)
+            self._eval_bpb_bytes += metric_utils.compute_decoded_byte_len(
+                tokenizer, target_ids
+            )
+
+    def log_eval(
+        self, *, step: int, train_avg_acc: float | None = None
     ) -> dict[str, float]:
-        """Assemble validation metrics dict for logging."""
-        d: dict[str, float] = {
-            "val/loss": avg_loss,
-            "val/perplexity": min(float(torch.exp(torch.tensor(avg_loss))), 1e6),
-        }
-        if tokens_per_byte is not None:
-            d["val/bpb"] = avg_loss * tokens_per_byte / math.log(2)
+        """Finalize accumulators into the eval log_dict, dispatch it, print the
+        human-readable summary line, and return the dict.
+
+        Routing by config.task ('pretrain' vs 'sft') matches train-time keys:
+        - "pretrain": val/loss, val/perplexity, val/bpb (when tokenizer present)
+        - "sft": val/loss, val/val_acc, val/train_acc (when provided)
+        """
+        n = max(self._eval_n_batches, 1)
+        avg_loss = self._eval_loss_sum / n
+        avg_aux_loss = (self._eval_aux_sum / n) if self._eval_aux_sum > 0 else None
+        tokens_per_byte = (
+            self._eval_bpb_tokens / self._eval_bpb_bytes
+            if self._eval_bpb_bytes > 0
+            else None
+        )
+        avg_acc = (
+            (self._eval_acc_correct / self._eval_acc_total)
+            if (self.config.task == "sft" and self._eval_acc_total > 0)
+            else None
+        )
+
+        d: dict[str, float] = {"val/loss": avg_loss}
+        if self.config.task == "pretrain":
+            d["val/perplexity"] = metric_utils.compute_perplexity(avg_loss)
+            if tokens_per_byte is not None:
+                d["val/bpb"] = metric_utils.compute_bits_per_byte(
+                    avg_loss, tokens_per_byte
+                )
+        elif self.config.task == "sft":
+            if avg_acc is not None:
+                d["val/val_acc"] = avg_acc
+            if train_avg_acc is not None:
+                d["val/train_acc"] = train_avg_acc
         if self.is_moe and avg_aux_loss is not None:
             d["val/aux_loss"] = avg_aux_loss - self._aux_floor
+
+        self.logger.log(d, step=step)
+        print(self._format_eval_msg(d, avg_loss))
         return d
 
-    # ------------------------------------------------------------------
-    # Per-layer gradient norms
-    # ------------------------------------------------------------------
-
     @staticmethod
-    def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-        """Compute per-parameter L2 gradient norms.
+    def _format_eval_msg(d: dict[str, float], avg_loss: float) -> str:
+        """Build the human-readable eval summary line from the log_dict."""
+        msg = f"\n[eval] val_loss={avg_loss:.4f}"
+        if "val/perplexity" in d:
+            msg += f" | val_ppl={d['val/perplexity']:.2f}"
+        if "val/bpb" in d:
+            msg += f" | val_bpb={d['val/bpb']:.4f}"
+        if "val/val_acc" in d:
+            msg += f" | val_acc={d['val/val_acc']:.4f}"
+        if "val/train_acc" in d:
+            msg += f" | train_acc={d['val/train_acc']:.4f}"
+        if "val/aux_loss" in d:
+            msg += f" | val_aux_loss={d['val/aux_loss']:.4f}"
+        return msg
 
-        Each parameter (e.g. blocks.0.attn.q_proj.weight) gets its own key
-        under grad_norm/. Automatically handles the _orig_mod. prefix added
-        by torch.compile.
+
+class TokenizerMetricsTracker:
+    """Assembles tokenizer-training metrics and dispatches them via its logger.
+
+    `eval_texts` (the held-out slice used to measure bytes/token) is passed per
+    call rather than held on the tracker. Logs are keyed by vocab_size as the
+    W&B step so curves plot against vocabulary growth.
+    """
+
+    def __init__(self, logger: WandbLogger):
+        self.logger = logger
+
+    def log_train(
+        self, tokenizer: Tokenizer, vocab_size: int, eval_texts: list[str]
+    ) -> None:
+        """Log a per-step point (vocab_size, bytes_per_token) for a (partial or
+        full) tokenizer."""
+        self.logger.log(
+            {
+                "vocab_size": vocab_size,
+                "bytes_per_token": metric_utils.compute_bytes_per_token(
+                    tokenizer, eval_texts
+                ),
+            },
+            step=vocab_size,
+        )
+
+    def log_eval(
+        self, tokenizer: Tokenizer, vocab_size: int, eval_texts: list[str]
+    ) -> None:
+        """Log an eval point. Identical to log_train for now; kept separate so
+        the two can diverge as eval-only metrics (coverage, OOV rate) are added.
         """
-        norms: dict[str, float] = {}
-
-        for name, param in model.named_parameters():
-            if param.grad is None:
-                continue
-            # torch.compile wraps model in OptimizedModule, prepending "_orig_mod."
-            name = name.removeprefix("_orig_mod.")
-            norms[f"grad_norm/{name}"] = param.grad.data.norm(2.0).item()
-
-        return norms
-
-    # ------------------------------------------------------------------
-    # GPU peak FLOPS estimation
-    # ------------------------------------------------------------------
-
-    def _estimate_gpu_peak_flops(self) -> float | None:
-        """Estimate GPU peak bf16/fp16 FLOPS for MFU calculation."""
-        if self.device != "cuda":
-            return None
-        name = torch.cuda.get_device_properties(0).name.lower()
-        # bf16/fp16 tensor-core peak TFLOPS for common GPUs
-        gpu_tflops = [
-            ("h100-sxm", 990),
-            ("h100", 756),
-            ("a100-sxm", 312),
-            ("a100-pcie", 250),
-            ("a100", 312),
-            ("l40s", 362),
-            ("l40", 181),
-            ("5090", 104.8),
-            ("5080", 56.28),
-            ("5060 ti", 23.7),
-            ("4090", 165),
-            ("4080", 97),
-            ("3090", 71),
-            ("3080", 47),
-        ]
-        for key, tflops in gpu_tflops:
-            if key in name:
-                return tflops * 1e12 * torch.cuda.device_count()
-        return None
+        self.logger.log(
+            {
+                "vocab_size": vocab_size,
+                "bytes_per_token": metric_utils.compute_bytes_per_token(
+                    tokenizer, eval_texts
+                ),
+            },
+            step=vocab_size,
+        )

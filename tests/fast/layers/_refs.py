@@ -73,6 +73,27 @@ def silu_ref(x: torch.Tensor) -> torch.Tensor:
     return x * torch.sigmoid(x)
 
 
+def leaky_relu_ref(x: torch.Tensor) -> torch.Tensor:
+    """leaky_relu(x, 0.01) = x if x > 0 else 0.01 * x."""
+    return torch.where(x > 0, x, 0.01 * x)
+
+
+def relu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return relu_ref(x) ** 2
+
+
+def gelu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return gelu_ref(x) ** 2
+
+
+def silu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return silu_ref(x) ** 2
+
+
+def leaky_relu2_ref(x: torch.Tensor) -> torch.Tensor:
+    return leaky_relu_ref(x) ** 2
+
+
 # --- Gated (GLU family): (gate, up) → act(gate) * up ---
 
 
@@ -88,11 +109,75 @@ def silu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return silu_ref(gate) * up
 
 
-UNGATED_ACTIVATIONS_REFS = {"relu": relu_ref, "gelu": gelu_ref, "silu": silu_ref}
+def leaky_relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return leaky_relu_ref(gate) * up
+
+
+def relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return (relu_ref(gate) ** 2) * up
+
+
+def gelu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return (gelu_ref(gate) ** 2) * up
+
+
+def silu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return (silu_ref(gate) ** 2) * up
+
+
+def leaky_relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return (leaky_relu_ref(gate) ** 2) * up
+
+
+def bilinear_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Bilinear GLU: gate * up (no unary activation). From Shazeer 2020."""
+    return gate * up
+
+
+def bilinear2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Squared Bilinear GLU: gate² * up (squared identity activation on gate)."""
+    return (gate**2) * up
+
+
+def powlu_ref(x: torch.Tensor) -> torch.Tensor:
+    """PowLU helper (unary part of the gated activation). arXiv:2605.25704, m=3.
+    Pos branch: x · x^(m/(sqrt(x)+1)) · sigmoid(x).
+    Neg branch: x² · sigmoid(x)  (equals x · silu(x))."""
+    m = 3.0
+    safe_x = torch.where(x > 0, x, torch.ones_like(x))
+    exponent = m / (torch.sqrt(safe_x) + 1.0)
+    pos = x * (safe_x**exponent) * torch.sigmoid(x)
+    neg = x * x * torch.sigmoid(x)
+    return torch.where(x > 0, pos, neg)
+
+
+def powlu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """PowLU GLU: powlu(gate) * up. The gated form from arXiv:2605.25704."""
+    return powlu_ref(gate) * up
+
+
+UNGATED_ACTIVATIONS_REFS = {
+    "relu": relu_ref,
+    "gelu": gelu_ref,
+    "silu": silu_ref,
+    "leaky_relu": leaky_relu_ref,
+    "relu2": relu2_ref,
+    "gelu2": gelu2_ref,
+    "silu2": silu2_ref,
+    "leaky_relu2": leaky_relu2_ref,
+}
 GATED_ACTIVATIONS_REFS = {
     "relu": relu_glu_ref,
     "gelu": gelu_glu_ref,
     "silu": silu_glu_ref,
+    "leaky_relu": leaky_relu_glu_ref,
+    "relu2": relu2_glu_ref,
+    "gelu2": gelu2_glu_ref,
+    "silu2": silu2_glu_ref,
+    "leaky_relu2": leaky_relu2_glu_ref,
+    "bilinear": bilinear_ref,
+    "bilinear2": bilinear2_ref,
+    "powlu": powlu_glu_ref,
 }
 
 
@@ -245,10 +330,54 @@ def gqa_ref(
     return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
 
 
-# ---------------------------- FFN ----------------------------
+def mla_ref(
+    m,
+    x: torch.Tensor,
+    rope: nn.Module | None = None,
+    position_ids: torch.Tensor | None = None,
+    attn_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Eager MLA: latent Q/KV compression → decoupled rope → sdpa_ref → o_proj.
+
+    `m` is a MultiHeadLatentAttention module; its projections/norms are reused so
+    this pins the attention math (fused SDPA vs eager fp32 sdpa_ref) through the
+    MLA assembly. Scale defaults to 1/sqrt(qk_head_dim) inside sdpa_ref.
+    """
+    B, S, _ = x.shape
+    H, nope, rdim, vdim = (
+        m.n_heads,
+        m.qk_nope_head_dim,
+        m.qk_rope_head_dim,
+        m.v_head_dim,
+    )
+
+    if m.q_lora_rank > 0:
+        q = m.q_b_proj(m.q_a_norm(m.q_a_proj(x)))
+    else:
+        q = m.q_proj(x)
+    q = q.view(B, S, H, nope + rdim).transpose(1, 2)
+    q_nope, q_rope = q.split([nope, rdim], dim=-1)
+
+    compressed = m.kv_a_proj(x)
+    c_kv, k_rope = compressed.split([m.kv_lora_rank, rdim], dim=-1)
+    k_rope = k_rope.view(B, S, 1, rdim).transpose(1, 2)
+    kv = m.kv_b_proj(m.kv_a_norm(c_kv)).view(B, S, H, nope + vdim).transpose(1, 2)
+    k_nope, v = kv.split([nope, vdim], dim=-1)
+
+    if rope is not None:
+        q_rope = rope(q_rope, position_ids=position_ids)
+        k_rope = rope(k_rope, position_ids=position_ids)
+
+    q = torch.cat([q_nope, q_rope], dim=-1)
+    k = torch.cat([k_nope, k_rope.expand(B, H, S, rdim)], dim=-1)
+    attn = sdpa_ref(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
+    return m.o_proj(attn.transpose(1, 2).reshape(B, S, H * vdim))
 
 
-def ffn_ref(
+# ---------------------------- Dense MLP ----------------------
+
+
+def dense_mlp_ref(
     x: torch.Tensor,
     down_proj: nn.Linear,
     activation: str,
@@ -308,7 +437,7 @@ def sparse_moe_block_ref(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eager sparse MoE: naive per-(token, slot) expert dispatch.
 
-    Mirrors FFN's gated/ungated split:
+    Mirrors MLP's gated/ungated split:
       - gated   (expert_gate_up given): hidden = act(gate)*up via GATED_ACTIVATIONS_REFS
       - ungated (expert_up given):      hidden = act(up)      via UNGATED_ACTIVATIONS_REFS
     Returns (output (B,S,D), aux_loss scalar) — Switch Transformer load-balancing loss.

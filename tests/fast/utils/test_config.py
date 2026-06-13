@@ -1,6 +1,6 @@
-import pytest
 import tempfile
 import os
+import pytest
 import yaml
 from src.utils.config import ModelConfig, load_config, TrainingConfig, DataConfig
 
@@ -15,14 +15,19 @@ def _write_yaml(tmp_dir, data):
 MINIMAL_CONFIG = {
     "max_seq_len": 128,
     "model": {
-        "arch": "gpt2",
-        "n_layers": 2,
-        "n_heads": 2,
         "d_model": 64,
+        "n_layers": 2,
         "vocab_size": 256,
-        "dropout_embd": 0.0,
-        "dropout_attn": 0.0,
-        "dropout_ffn": 0.0,
+        "attn_cls": "gqa",
+        "attn_kwargs": {
+            "n_heads": 4,
+            "dropout": 0.0,
+            "attn_implementation": "flex_attention",
+        },
+        "mlp_cls": "dense",
+        "mlp_kwargs": {"activation": "silu", "gated": True, "intermediate_size": 0},
+        "pos_emb_cls": "rope",
+        "pos_emb_kwargs": {"rope_theta": 1e4},
     },
     "data": {
         "dataset": "test",
@@ -54,32 +59,57 @@ MINIMAL_CONFIG = {
 }
 
 
+# ==================== ModelConfig defaults ====================
+
+
+def test_model_config_defaults():
+    cfg = ModelConfig()
+    assert cfg.attn_cls == "gqa"
+    assert cfg.mlp_cls == "dense"
+    assert cfg.norm_cls == "rmsnorm"
+    assert cfg.pos_emb_cls == "rope"
+    assert cfg.residual_cls == "standard"
+    # __post_init__ fills component defaults: attn_implementation for attn,
+    # intermediate_size (4*d_model) for mlp.
+    assert cfg.attn_kwargs == {"attn_implementation": "flex_attention"}
+    assert cfg.mlp_kwargs == {"intermediate_size": 4 * 768}
+    assert cfg.norm_kwargs == {}
+    assert cfg.pos_emb_kwargs == {}
+    assert cfg.residual_kwargs == {}
+
+
+# ==================== Loading from YAML ====================
+
+
 def test_load_config_from_yaml():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         config = load_config(path)
         assert config.max_seq_len == 128
-        assert config.model.arch == "gpt2"
         assert config.model.n_layers == 2
         assert config.optimizer.lr == 1e-3
 
 
-def test_config_d_ff_default():
+def test_load_config_model_kwargs():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_yaml(tmp, MINIMAL_CONFIG)
+        cfg = load_config(path)
+        assert cfg.model.attn_kwargs["n_heads"] == 4
+        assert cfg.model.mlp_kwargs["activation"] == "silu"
+        assert cfg.model.pos_emb_kwargs["rope_theta"] == 1e4
+
+
+def test_config_to_dict_roundtrip():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         config = load_config(path)
-        assert config.model.intermediate_size == 4 * 64
+        d = config.to_dict()
+        assert d["max_seq_len"] == 128
+        assert d["model"]["attn_cls"] == "gqa"
+        assert d["model"]["attn_kwargs"]["n_heads"] == 4
 
 
-def test_config_d_ff_explicit():
-    data = {
-        **MINIMAL_CONFIG,
-        "model": {**MINIMAL_CONFIG["model"], "intermediate_size": 128},
-    }
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _write_yaml(tmp, data)
-        config = load_config(path)
-        assert config.model.intermediate_size == 128
+# ==================== CLI overrides ====================
 
 
 def test_config_cli_overrides():
@@ -92,40 +122,24 @@ def test_config_cli_overrides():
         assert config.training.batch_size == 8
 
 
-def test_config_to_dict_roundtrip():
+def test_config_cli_override_nested_kwargs():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
-        config = load_config(path)
-        d = config.to_dict()
-        assert d["max_seq_len"] == 128
-        assert d["model"]["arch"] == "gpt2"
+        cfg = load_config(path, overrides=["model.attn_kwargs.n_heads=8"])
+        assert cfg.model.attn_kwargs["n_heads"] == 8
 
 
-def test_config_moe_fields():
-    data = {
-        **MINIMAL_CONFIG,
-        "model": {
-            **MINIMAL_CONFIG["model"],
-            "moe_n_experts": 8,
-            "moe_n_experts_per_token": 2,
-            "moe_aux_loss_coef": 0.02,
-        },
-    }
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _write_yaml(tmp, data)
-        config = load_config(path)
-        assert config.model.moe_n_experts == 8
-        assert config.model.moe_n_experts_per_token == 2
-        assert config.model.moe_aux_loss_coef == 0.02
+# ==================== Nested coercion ====================
 
 
-def test_config_moe_fields_defaults():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _write_yaml(tmp, MINIMAL_CONFIG)
-        config = load_config(path)
-        assert config.model.moe_n_experts == 0
-        assert config.model.moe_n_experts_per_token == 2
-        assert config.model.moe_aux_loss_coef == 0.01
+def test_load_config_coerces_nested_kwargs(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("model:\n  pos_emb_kwargs:\n    rope_theta: 1e4\n")
+    cfg = load_config(str(p))
+    assert cfg.model.pos_emb_kwargs["rope_theta"] == 10000.0
+
+
+# ==================== TrainingConfig / DataConfig ====================
 
 
 def test_training_config_intra_doc_masking_default():
@@ -154,7 +168,6 @@ data:
 
 
 def test_unknown_yaml_fields_ignored(tmp_path):
-    """Deprecated or unknown YAML fields should be silently ignored."""
     yaml_content = """
 max_seq_len: 128
 data:
@@ -166,64 +179,178 @@ data:
     assert cfg.max_seq_len == 128
 
 
-# ==================== attn_implementation validation ====================
+# ==================== TokenizerTrainingConfig ====================
 
 
-def test_model_config_attn_implementation_default():
-    assert ModelConfig().attn_implementation == "flex_attention"
+def test_tokenizer_training_defaults():
+    from src.utils.config import TokenizerTrainingConfig
+
+    tc = TokenizerTrainingConfig()
+    assert tc.method == "bpe"
+    # eval_num_docs default is filled by __post_init__
+    assert tc.method_kwargs == {"eval_num_docs": 1000}
+    assert tc.num_samples == 1_000_000
+    assert tc.checkpoint_every == 5000
+    assert tc.eval_every == 5000
 
 
-@pytest.mark.parametrize("value", ["flex_attention", "sdpa"])
-def test_model_config_attn_implementation_accepts_valid(value):
-    cfg = ModelConfig(attn_implementation=value)
-    assert cfg.attn_implementation == value
-
-
-@pytest.mark.parametrize("value", ["flash", "FlexAttention", "", "sdpa "])
-def test_model_config_attn_implementation_rejects_invalid(value):
-    with pytest.raises(ValueError, match="unknown attn_implementation"):
-        ModelConfig(attn_implementation=value)
-
-
-def test_load_config_rejects_invalid_attn_implementation(tmp_path):
-    yaml_content = """
-max_seq_len: 128
-model:
-  arch: gpt2
-  attn_implementation: nope
-"""
-    p = tmp_path / "cfg.yaml"
-    p.write_text(yaml_content)
-    with pytest.raises(ValueError, match="unknown attn_implementation"):
-        load_config(str(p))
-
-
-# ==================== tokenizer-training fields on DataConfig ====================
-
-
-def test_dataconfig_tokenizer_train_defaults():
-    dc = DataConfig()
-    assert dc.tokenizer_train_method == "bpe"
-    assert dc.tokenizer_train_method_kwargs == {}
-
-
-def test_dataconfig_loads_superbpe_yaml(tmp_path):
+def test_loads_superbpe_tokenizer_training_yaml(tmp_path):
     yaml_content = """
 model:
   vocab_size: 200000
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/superbpe_200k_t80k
-  tokenizer_train_method: superbpe
-  tokenizer_train_method_kwargs:
+tokenizer_training:
+  method: superbpe
+  method_kwargs:
     transition_size: 80000
     max_superword_words: 4
+  checkpoint_dir: tokenizers/superbpe_200k_t80k
+  checkpoint_every: 5000
 """
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml_content)
     cfg = load_config(str(p))
-    assert cfg.data.tokenizer_train_method == "superbpe"
-    assert cfg.data.tokenizer_train_method_kwargs == {
+    assert cfg.data.tokenizer_path == "tokenizers/superbpe_200k_t80k"
+    assert cfg.tokenizer_training.method == "superbpe"
+    assert cfg.tokenizer_training.method_kwargs == {
         "transition_size": 80000,
         "max_superword_words": 4,
+        "eval_num_docs": 1000,  # filled by __post_init__
     }
+    assert cfg.tokenizer_training.checkpoint_dir == "tokenizers/superbpe_200k_t80k"
+
+
+# ==================== task and eval_train fields ====================
+
+
+def test_default_task_is_pretrain():
+    from src.utils.config import TrainConfig
+
+    cfg = TrainConfig()
+    assert cfg.task == "pretrain"
+
+
+def test_task_accepts_sft():
+    from src.utils.config import TrainConfig
+
+    cfg = TrainConfig()
+    cfg.task = "sft"
+    assert cfg.task == "sft"
+
+
+def test_default_eval_train_is_false():
+    from src.utils.config import TrainingConfig
+
+    cfg = TrainingConfig()
+    assert cfg.eval_train is False
+
+
+# ==================== attn_cls / attn_kwargs ====================
+
+
+def test_attn_cls_defaults():
+    # Default attn_cls is gqa
+    assert ModelConfig().attn_cls == "gqa"
+    assert ModelConfig(attn_cls="mha").attn_cls == "mha"
+    assert ModelConfig(attn_cls="mla").attn_cls == "mla"
+
+
+def test_attn_kwargs_preserved():
+    # attn_implementation default is filled; explicit values are preserved
+    assert ModelConfig().attn_kwargs == {"attn_implementation": "flex_attention"}
+    assert ModelConfig(attn_kwargs={"n_heads": 8}).attn_kwargs["n_heads"] == 8
+
+
+def test_attn_kwargs_round_trip_from_yaml(tmp_path):
+    yaml_content = """
+model:
+  arch: qwen3
+  attn_cls: mla
+  d_model: 64
+  attn_kwargs:
+    n_heads: 8
+    kv_lora_rank: 32
+    qk_rope_head_dim: 16
+"""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(yaml_content)
+    cfg = load_config(str(p))
+    assert cfg.model.attn_cls == "mla"
+    assert cfg.model.attn_kwargs["kv_lora_rank"] == 32
+    assert cfg.model.attn_kwargs["qk_rope_head_dim"] == 16
+    assert cfg.model.attn_kwargs["n_heads"] == 8
+
+
+# ==================== component defaults + validation (moved into config) ====================
+
+
+@pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
+def test_modelconfig_resolves_intermediate_size(mlp_cls):
+    extra = {"n_experts": 4} if mlp_cls == "moe" else {}
+    cfg = ModelConfig(d_model=128, mlp_cls=mlp_cls, mlp_kwargs=dict(extra))
+    assert cfg.mlp_kwargs["intermediate_size"] == 4 * 128
+    # explicit value preserved
+    cfg2 = ModelConfig(
+        d_model=128, mlp_cls=mlp_cls, mlp_kwargs={"intermediate_size": 256, **extra}
+    )
+    assert cfg2.mlp_kwargs["intermediate_size"] == 256
+
+
+def test_modelconfig_unknown_activation_raises():
+    with pytest.raises(ValueError, match="Unknown activation"):
+        ModelConfig(mlp_kwargs={"activation": "mish"})
+
+
+def test_modelconfig_gated_only_activation_rejected_when_ungated():
+    # bilinear is gated-only; rejected for an ungated mlp
+    with pytest.raises(ValueError, match="Unknown activation"):
+        ModelConfig(mlp_kwargs={"activation": "bilinear", "gated": False})
+    # accepted when gated
+    ModelConfig(mlp_kwargs={"activation": "bilinear", "gated": True})
+
+
+def test_modelconfig_validates_attn_dims():
+    with pytest.raises(ValueError, match="divisible by n_heads"):
+        ModelConfig(d_model=100, attn_kwargs={"n_heads": 3})
+    with pytest.raises(ValueError, match="divisible by\\s+n_kv_heads"):
+        ModelConfig(
+            d_model=64, attn_cls="gqa", attn_kwargs={"n_heads": 4, "n_kv_heads": 3}
+        )
+
+
+def test_modelconfig_gqa_defaults_n_kv_heads():
+    cfg = ModelConfig(d_model=64, attn_cls="gqa", attn_kwargs={"n_heads": 8})
+    assert cfg.attn_kwargs["n_kv_heads"] == 8  # defaults to n_heads
+
+
+# ==================== string-field validation ====================
+
+
+def test_scheduler_unknown_name_raises():
+    from src.utils.config import SchedulerConfig
+
+    with pytest.raises(ValueError, match="unknown scheduler"):
+        SchedulerConfig(name="step")
+    SchedulerConfig(name="cosine")
+    SchedulerConfig(name="constant")
+
+
+def test_optimizer_unknown_name_raises():
+    from src.utils.config import OptimizerConfig
+
+    with pytest.raises(ValueError, match="unknown optimizer"):
+        OptimizerConfig(name="sgd")
+    OptimizerConfig(name="adamw")
+    OptimizerConfig(name="lion")
+
+
+def test_training_unknown_mixed_precision_raises():
+    with pytest.raises(ValueError, match="unknown mixed_precision"):
+        TrainingConfig(mixed_precision="fp8")
+
+
+def test_training_unknown_loss_fn_raises():
+    with pytest.raises(ValueError, match="unknown loss_fn"):
+        TrainingConfig(loss_fn="huber")

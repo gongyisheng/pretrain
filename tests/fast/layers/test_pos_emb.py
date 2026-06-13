@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.layers.pos_emb import LearnedPositionalEmbedding, RoPE
+from src.layers.pos_emb import POS_EMB_REGISTRY, LearnedPositionalEmbedding, RoPE
 from tests.fast.layers._refs import (
     SIMPLE_DTYPES,
     learned_pos_emb_ref,
@@ -83,7 +83,7 @@ def test_rope_forward_reset_position_ids_differ():
 def test_rope_cos_sin_buffers_match_ref(theta):
     """RoPE cos/sin buffers equal the eager rope_cos_sin_ref tables (fp32)."""
     d_head, max_seq_len = 16, 32
-    rope = RoPE(d_head=d_head, max_seq_len=max_seq_len, theta=theta)
+    rope = RoPE(d_head=d_head, max_seq_len=max_seq_len, rope_theta=theta)
     cos_ref, sin_ref = rope_cos_sin_ref(d_head, max_seq_len, theta=theta)
     assert torch.allclose(rope.cos, cos_ref, atol=1e-6)
     assert torch.allclose(rope.sin, sin_ref, atol=1e-6)
@@ -94,7 +94,7 @@ def test_rope_matches_ref(dtype, atol):
     """RoPE output equals eager rope_ref (rotate-half rotation, in input dtype)."""
     torch.manual_seed(0)
     B, S, n_heads, d_head = 2, 8, 4, 16
-    rope = RoPE(d_head=d_head, max_seq_len=32, theta=10000.0)
+    rope = RoPE(d_head=d_head, max_seq_len=32, rope_theta=10000.0)
     position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
 
     x = torch.randn(B, n_heads, S, d_head, dtype=dtype)
@@ -115,7 +115,7 @@ def test_rope_matches_hf_apply_rotary_pos_emb(dtype, atol):
 
     torch.manual_seed(0)
     B, S, n_heads, d_head = 2, 8, 4, 16
-    rope = RoPE(d_head=d_head, max_seq_len=32, theta=10000.0)
+    rope = RoPE(d_head=d_head, max_seq_len=32, rope_theta=10000.0)
     position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
 
     q = torch.randn(B, n_heads, S, d_head, dtype=dtype)
@@ -132,3 +132,10 @@ def test_rope_matches_hf_apply_rotary_pos_emb(dtype, atol):
     assert out_q.dtype == dtype and out_k.dtype == dtype
     assert torch.allclose(out_q, out_q_ref, atol=atol)
     assert torch.allclose(out_k, out_k_ref, atol=atol)
+
+
+def test_pos_emb_registry_and_rotary_flags():
+    assert POS_EMB_REGISTRY["rope"] is RoPE
+    assert POS_EMB_REGISTRY["learned"] is LearnedPositionalEmbedding
+    assert RoPE.rotary is True
+    assert LearnedPositionalEmbedding.rotary is False

@@ -467,9 +467,15 @@ int BpeEngine::train(
             }
         }
 
-        int32_t merged_id = static_cast<int32_t>(id2token_.size());
-        id2token_.push_back(merged_token);
-        token2id_[merged_token] = merged_id;
+        // avoid different pairs (xy, z), (x, yz) merge into same token
+        int32_t merged_id;
+        if (auto it = token2id_.find(merged_token); it != token2id_.end()) {
+            merged_id = it->second;
+        } else {
+            merged_id = static_cast<int32_t>(id2token_.size());
+            id2token_.push_back(merged_token);
+            token2id_[merged_token] = merged_id;
+        }
         merges_.emplace_back(a, b);
 
         // Push heap entries for each pair whose count changed.

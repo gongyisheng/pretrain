@@ -47,7 +47,15 @@ def _tiny_config(tmp_dir):
     return TrainConfig(
         max_seq_len=64,
         model=ModelConfig(
-            arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=4096
+            n_layers=2,
+            d_model=64,
+            vocab_size=4096,
+            attn_cls="mha",
+            attn_kwargs={"n_heads": 2, "bias": True},
+            mlp_cls="dense",
+            mlp_kwargs={"activation": "gelu", "gated": False, "bias": True},
+            norm_cls="layernorm",
+            pos_emb_cls="learned",
         ),
         data=DataConfig(
             dataset="test",
@@ -81,16 +89,17 @@ def _tiny_moe_config(tmp_dir):
     return TrainConfig(
         max_seq_len=64,
         model=ModelConfig(
-            arch="qwen3_moe",
             n_layers=2,
-            n_heads=2,
-            n_kv_heads=2,
             d_model=64,
-            intermediate_size=32,
             vocab_size=4096,
-            moe_n_experts=4,
-            moe_n_experts_per_token=2,
-            moe_aux_loss_coef=0.01,
+            attn_kwargs={"n_heads": 2, "n_kv_heads": 2},
+            mlp_cls="moe",
+            mlp_kwargs={
+                "intermediate_size": 32,
+                "n_experts": 4,
+                "n_experts_per_token": 2,
+                "aux_loss_coef": 0.01,
+            },
         ),
         data=DataConfig(
             dataset="test",
@@ -159,3 +168,12 @@ def test_trainer_moe_runs_without_error(mock_memmap):
         trainer = Trainer(_tiny_moe_config(tmp), wandb_enabled=False)
         trainer.train()
         assert trainer.step == 5
+
+
+def test_trainer_rejects_unknown_loss_fn(mock_memmap):
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        cfg = _tiny_config(tmp)
+        cfg.training.loss_fn = "not_a_real_loss"
+        with pytest.raises(ValueError, match="unknown loss_fn"):
+            Trainer(cfg, wandb_enabled=False)
