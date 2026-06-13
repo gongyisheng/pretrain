@@ -70,6 +70,45 @@ class TransformerLM(nn.Module):
         )
         return blocks + final_norm + lm_head
 
+    @staticmethod
+    def compute_parameters(config: ModelConfig, max_seq_len: int) -> dict[str, int]:
+        """Analytic {total, non_emb, active_non_emb} param counts, mirroring
+        `compute_parameters` summed up from each block. Reproduces the live model's
+        `sum(p.numel())` exactly: vocab is padded to a multiple of 128, tied
+        lm_head shares the token-embedding weight, and learned pos_emb is counted
+        as an embedding (excluded from non_emb). For MoE, active_non_emb counts
+        only the k routed experts per layer; for dense it equals non_emb.
+        """
+        d_model = config.d_model
+        pad = 128
+        padded_vocab = ((config.vocab_size + pad - 1) // pad) * pad
+
+        pos = POS_EMB_REGISTRY[config.pos_emb_cls].compute_parameters(
+            max_seq_len, d_model
+        )
+        embeddings = padded_vocab * d_model + pos  # token_emb + (learned) pos_emb
+
+        # Every block has the same param count (depth-independent), so scale by n.
+        blocks = config.n_layers * TransformerBlock.compute_parameters(config)
+        blocks_active = config.n_layers * TransformerBlock.compute_parameters(
+            config, active=True
+        )
+        final_norm = NORM_REGISTRY[config.norm_cls].compute_parameters(
+            d_model, **config.norm_kwargs
+        )
+        # Tied → lm_head.weight is the token_emb weight (already in embeddings).
+        lm_head = (0 if config.tie_word_embeddings else padded_vocab * d_model) + (
+            padded_vocab if config.lm_head_bias else 0
+        )
+
+        non_emb = blocks + final_norm + lm_head
+        active_non_emb = blocks_active + final_norm + lm_head
+        return {
+            "total": embeddings + non_emb,
+            "non_emb": non_emb,
+            "active_non_emb": active_non_emb,
+        }
+
     def forward(self, idx, position_ids, attn_mask=None, return_logits=True):
         x = self.token_emb(idx)
         if self.pos_emb is not None:

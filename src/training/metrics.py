@@ -8,7 +8,7 @@ log-cadence timing, cached optimizer step-norms, running token totals
 trainer feeds it raw numbers and never assembles a log_dict itself.
 
 Setup (once):
-    print_model_summary(model)            # startup banner: param counts + device
+    print_model_summary()                 # startup banner: param counts + device
     train_begin()                         # reset the log-window timer
 
 Lifecycle per optimizer step:
@@ -96,13 +96,13 @@ class MetricsTracker:
     # Model summary
     # ------------------------------------------------------------------
 
-    def print_model_summary(self, model: torch.nn.Module) -> None:
+    def print_model_summary(self) -> None:
         """Print the one-line startup banner (param counts + device).
 
         MoE models report total params + active (k-expert) non-embedding params;
         dense models report total + non-embedding.
         """
-        counts = metric_utils.count_parameters(model, self.config)
+        counts = metric_utils.count_parameters(self.config)
         label = f"{self.config.model.attn_cls}+{self.config.model.mlp_cls}"
         if self.is_moe:
             msg = (

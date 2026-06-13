@@ -11,7 +11,6 @@ import math
 import pytest
 import torch
 
-from src.model import build_model
 from src.training.metrics import MetricsTracker
 from src.utils.config import ModelConfig, TrainConfig
 
@@ -312,8 +311,7 @@ def test_eval_moe_aux_loss_subtracts_floor():
 def test_print_model_summary_dense(capsys):
     cfg = TrainConfig(max_seq_len=128, model=_cfg().model)
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
-    model = build_model(cfg)
-    assert tracker.print_model_summary(model) is None
+    assert tracker.print_model_summary() is None
     out = capsys.readouterr().out
     assert "Model: mha+dense" in out and "non-embedding" in out and "device=cpu" in out
 
@@ -336,6 +334,6 @@ def test_print_model_summary_moe(capsys):
         ),
     )
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
-    tracker.print_model_summary(build_model(cfg))
+    tracker.print_model_summary()
     out = capsys.readouterr().out
     assert "total params" in out and "active non-embedding" in out

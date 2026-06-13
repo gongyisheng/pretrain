@@ -275,26 +275,49 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
 # ---------------------------------------------------------------------------
 
 
-def test_count_parameters_dense():
-    """Dense model: active_non_emb == non_emb < total (embeddings present)."""
-    cfg = TrainConfig(max_seq_len=128, model=_gpt2_cfg("sdpa"))
+def _gpt2_layernorm_learned_cfg(impl):
+    """GPT-2-style: layernorm (weight + bias) + learned positional embedding +
+    untied lm_head with bias. Exercises the norm-bias, learned-pos-emb, and
+    untied-head param paths the rmsnorm+rope factories don't."""
+    return ModelConfig(
+        n_layers=2,
+        d_model=64,
+        vocab_size=256,
+        attn_cls="mha",
+        attn_kwargs={"n_heads": 2, "bias": True, "attn_implementation": impl},
+        mlp_cls="dense",
+        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
+        norm_cls="layernorm",
+        pos_emb_cls="learned",
+        tie_word_embeddings=False,
+        lm_head_bias=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [*_CFG_FACTORIES.values(), _gpt2_layernorm_learned_cfg],
+    ids=[*_CFG_FACTORIES, "gpt2_layernorm_learned"],
+)
+def test_count_parameters_matches_real_model(factory):
+    """Analytic count_parameters reproduces the live model's param counts exactly
+    for every architecture variant."""
+    cfg = TrainConfig(max_seq_len=128, model=factory("sdpa"))
     model = build_model(cfg)
-    c = metric_utils.count_parameters(model, cfg)
-    assert c["total"] == sum(p.numel() for p in model.parameters())
-    assert c["active_non_emb"] == c["non_emb"]
-    assert c["non_emb"] < c["total"]
+    c = metric_utils.count_parameters(cfg)
 
+    real_total = sum(p.numel() for p in model.parameters())
+    real_non_emb = real_total - sum(
+        p.numel() for name, p in model.named_parameters() if "emb" in name
+    )
+    assert c["total"] == real_total
+    assert c["non_emb"] == real_non_emb
+    assert c["non_emb"] < c["total"]  # embeddings present
 
-def test_count_parameters_moe_active_below_total_non_emb():
-    """MoE: active_non_emb uses k experts, so it's below full non-embedding.
-
-    Note: unified TransformerLM pads MoE vocab to multiple of 128, so we
-    don't assert exact unpadded counts — just the ordering invariant.
-    """
-    cfg = TrainConfig(max_seq_len=128, model=_qwen3_moe_cfg("sdpa"))
-    model = build_model(cfg)
-    c = metric_utils.count_parameters(model, cfg)
-    assert c["active_non_emb"] < c["non_emb"] <= c["total"]
+    if cfg.model.mlp_cls == "moe":
+        assert c["active_non_emb"] < c["non_emb"]  # k experts < all experts
+    else:
+        assert c["active_non_emb"] == c["non_emb"]
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,19 @@ class MultiHeadAttention(nn.Module):
         qk = (3 * (n_heads + n_kv) * head_dim) if qk_norm else 0
         return qkv + o + attn_matmul + qk
 
+    @classmethod
+    def compute_parameters(
+        cls, d_model, *, n_heads, bias=False, qk_norm=False, **_
+    ) -> int:
+        head_dim = d_model // n_heads
+        n_kv = n_heads
+        qkv = d_model * (n_heads + 2 * n_kv) * head_dim
+        if bias:
+            qkv += (n_heads + 2 * n_kv) * head_dim
+        o = d_model * d_model + (d_model if bias else 0)
+        qk = (2 * head_dim) if qk_norm else 0  # q_norm + k_norm RMSNorm(head_dim)
+        return qkv + o + qk
+
     def forward(
         self,
         x: torch.Tensor,
@@ -170,6 +183,19 @@ class GroupedQueryAttention(nn.Module):
         attn_matmul = 4 * n_heads * head_dim * max_seq_len
         qk = (3 * (n_heads + n_kv) * head_dim) if qk_norm else 0
         return qkv + o + attn_matmul + qk
+
+    @classmethod
+    def compute_parameters(
+        cls, d_model, *, n_heads, n_kv_heads=None, bias=False, qk_norm=False, **_
+    ) -> int:
+        n_kv = n_kv_heads or n_heads
+        head_dim = d_model // n_heads
+        qkv = d_model * (n_heads + 2 * n_kv) * head_dim
+        if bias:
+            qkv += (n_heads + 2 * n_kv) * head_dim
+        o = d_model * d_model + (d_model if bias else 0)
+        qk = (2 * head_dim) if qk_norm else 0  # q_norm + k_norm RMSNorm(head_dim)
+        return qkv + o + qk
 
     def forward(
         self,

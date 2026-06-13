@@ -196,7 +196,7 @@ class Trainer:
         # Metrics and Logging
         self.logger = WandbLogger(config, enabled=wandb_enabled)
         self.metrics = MetricsTracker(config, self.device, logger=self.logger)
-        self.metrics.print_model_summary(self.model)
+        self.metrics.print_model_summary()
 
         # Checkpoint dir
         os.makedirs(config.training.checkpoint_dir, exist_ok=True)

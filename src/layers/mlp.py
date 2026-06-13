@@ -131,6 +131,19 @@ class DenseMLPBlock(nn.Module):
             b = (d_ff + d_model) if bias else 0
         return matmul + b
 
+    @classmethod
+    def compute_parameters(
+        cls, d_model, *, intermediate_size, gated=True, bias=False, active=False, **_
+    ) -> int:
+        d_ff = intermediate_size
+        if gated:
+            weights = 3 * d_ff * d_model  # gate_up (2*d_ff x d) + down (d x d_ff)
+            b = (2 * d_ff + d_model) if bias else 0
+        else:
+            weights = 2 * d_ff * d_model  # up (d_ff x d) + down (d x d_ff)
+            b = (d_ff + d_model) if bias else 0
+        return weights + b
+
 
 # ---------------------------------------------------------------------------
 # MoE routing helpers
@@ -442,6 +455,31 @@ class SparseMoEBlock(nn.Module):
             expert = 4 * d_model * d_ff
             b = (d_ff + d_model) if bias else 0
         return router + n_experts_per_token * (expert + b)
+
+    @classmethod
+    def compute_parameters(
+        cls,
+        d_model,
+        *,
+        intermediate_size,
+        n_experts,
+        n_experts_per_token=2,
+        gated=True,
+        bias=False,
+        active=False,
+        **_,
+    ) -> int:
+        d_ff = intermediate_size
+        router = d_model * n_experts  # gate, no bias
+        # active counts only the k experts that actually run per token.
+        n = n_experts_per_token if active else n_experts
+        if gated:
+            expert = 3 * d_ff * d_model
+            b = (2 * d_ff + d_model) if bias else 0
+        else:
+            expert = 2 * d_ff * d_model
+            b = (d_ff + d_model) if bias else 0
+        return router + n * (expert + b)
 
 
 MLP_REGISTRY = {"dense": DenseMLPBlock, "moe": SparseMoEBlock}

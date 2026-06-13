@@ -193,39 +193,14 @@ def compute_bits_per_byte(loss: float, tokens_per_byte: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def count_parameters(model: torch.nn.Module, config: TrainConfig) -> dict[str, int]:
+def count_parameters(config: TrainConfig) -> dict[str, int]:
     """Total, non-embedding, and active-non-embedding parameter counts.
 
-    For dense models active_non_emb == non_emb. For MoE, active_non_emb
-    replaces each layer's full expert-FFN params with the k-activated subset
-    (what actually runs per token).
+    Thin wrapper over ``TransformerLM.compute_parameters`` (analytic from config,
+    summed up from each layer component). For dense models active_non_emb ==
+    non_emb; for MoE active_non_emb counts only the k routed experts per layer.
     """
-    total = sum(p.numel() for p in model.parameters())
-    non_emb = total - sum(
-        p.numel() for name, p in model.named_parameters() if "emb" in name
-    )
-
-    mc = config.model
-    if mc.mlp_cls == "moe":
-        mk = mc.mlp_kwargs
-        n_exp = mk["n_experts"]
-        k = mk["n_experts_per_token"]
-        d_ff = mk["intermediate_size"]
-        bias = mk["bias"]
-        expert_ffn_per_layer = n_exp * 3 * d_ff * mc.d_model
-        active_ffn_per_layer = k * 3 * d_ff * mc.d_model
-        if bias:
-            expert_ffn_per_layer += n_exp * (2 * d_ff + mc.d_model)
-            active_ffn_per_layer += k * (2 * d_ff + mc.d_model)
-        active_non_emb = (
-            non_emb
-            - mc.n_layers * expert_ffn_per_layer
-            + mc.n_layers * active_ffn_per_layer
-        )
-    else:
-        active_non_emb = non_emb
-
-    return {"total": total, "non_emb": non_emb, "active_non_emb": active_non_emb}
+    return TransformerLM.compute_parameters(config.model, config.max_seq_len)
 
 
 # ---------------------------------------------------------------------------

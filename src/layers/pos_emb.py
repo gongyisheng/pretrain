@@ -28,6 +28,10 @@ class LearnedPositionalEmbedding(nn.Module):
         pos = torch.arange(0, S, device=x.device).unsqueeze(0)  # (1, S)
         return x + self.embedding(pos)
 
+    @classmethod
+    def compute_parameters(cls, max_seq_len, d_model, **_) -> int:
+        return max_seq_len * d_model
+
 
 @torch.compile
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -71,6 +75,10 @@ class RoPE(nn.Module):
         cos = self.cos[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         sin = self.sin[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         return _apply_rope(x, cos, sin)
+
+    @classmethod
+    def compute_parameters(cls, max_seq_len, d_model, **_) -> int:
+        return 0  # cos/sin are buffers, not trainable params
 
 
 POS_EMB_REGISTRY = {

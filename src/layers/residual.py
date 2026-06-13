@@ -64,6 +64,11 @@ class BaseResidual(nn.Module):
         """
         return 0
 
+    @classmethod
+    def compute_parameters(cls, config) -> int:
+        """Trainable params for ONE residual slot. Default 0: a plain add has none."""
+        return 0
+
 
 class StandardResidual(BaseResidual):
     """Standard residual: out = x + r. Ctx passes through unchanged."""
@@ -123,6 +128,14 @@ class AttnResidual(BaseResidual):
         seal = config.residual_kwargs.get("seal_block_size", 1)
         n_ctx = layer_idx // seal + 1
         return 7 * n_ctx * config.d_model
+
+    @classmethod
+    def compute_parameters(cls, config) -> int:
+        """proj (d_model x 1, no bias) + norm, matching __init__."""
+        d = config.d_model
+        norm = config.residual_kwargs.get("norm", "rmsnorm")
+        norm_cls = LayerNorm if norm == "layernorm" else RMSNorm
+        return d + norm_cls.compute_parameters(d)
 
 
 # Name → class registry for YAML/config lookup.

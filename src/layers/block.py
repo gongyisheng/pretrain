@@ -53,6 +53,26 @@ class TransformerBlock(nn.Module):
         )
         return attn + mlp + norm + residual
 
+    @staticmethod
+    def compute_parameters(config: ModelConfig, active: bool = False) -> int:
+        """Trainable params for one block: the two pre-norms + attn + mlp + the
+        residual params for both slots. `active=True` makes MoE count only the
+        k routed experts; it's a no-op for dense MLP. Unlike `compute_flops`,
+        this is depth-independent (no `layer_idx`): every block has the same
+        param count.
+        """
+        norm = 2 * NORM_REGISTRY[config.norm_cls].compute_parameters(
+            config.d_model, **config.norm_kwargs
+        )
+        attn = ATTN_REGISTRY[config.attn_cls].compute_parameters(
+            config.d_model, **config.attn_kwargs
+        )
+        mlp = MLP_REGISTRY[config.mlp_cls].compute_parameters(
+            config.d_model, active=active, **config.mlp_kwargs
+        )
+        residual = 2 * RESIDUAL_REGISTRY[config.residual_cls].compute_parameters(config)
+        return norm + attn + mlp + residual
+
     def forward(self, x, ctx=None, rope=None, position_ids=None, attn_mask=None):
         h = self.attn_res_layer.pre(x, ctx)
         attn_out = self.attn(
