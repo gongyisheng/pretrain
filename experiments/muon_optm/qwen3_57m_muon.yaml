@@ -40,7 +40,9 @@ optimizer:
   name: muon
   lr: 5e-4
   weight_decay: 0.1
-  betas: [0.9, 0.95]  # used by the AdamW sub-optimizer (embeddings, lm_head, 1D params)
+  betas:  # used by the AdamW sub-optimizer (embeddings, lm_head, 1D params)
+  - 0.9
+  - 0.95
   muon_momentum: 0.95
   muon_nesterov: true
   muon_adjust_lr_fn: match_rms_adamw  # reuse the AdamW-tuned lr/wd

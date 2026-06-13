@@ -40,7 +40,9 @@ optimizer:
   name: adamw
   lr: 2e-4
   weight_decay: 0.1
-  betas: [0.9, 0.95]
+  betas:
+  - 0.9
+  - 0.95
 
 scheduler:
   name: cosine
