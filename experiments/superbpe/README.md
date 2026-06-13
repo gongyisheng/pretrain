@@ -69,7 +69,7 @@ or open in a spreadsheet to slice/pivot.)
 | `name` | Filename stem / wandb run name |
 | `V`, `t`, `m` | Parsed from `name` |
 | `method` | `bpe` or `superbpe` |
-| `bytes_per_token` | `scripts/eval_tokenizer.py` JSON output |
+| `bytes_per_token` | `TokenizerTrainer.evaluate` output |
 | `stage2_merges_accepted` | (TODO — parsed from train logs) |
 | `wall_seconds` | (TODO — captured from train script timing) |
 

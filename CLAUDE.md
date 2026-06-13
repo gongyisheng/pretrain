@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. Two model architectures: GPT-2 (MHA baseline) and Qwen3 (GQA + RoPE + RMSNorm + SwiGLU). Fused `@torch.compile` ops live inside their owning layer files under `src/layers/`.
+Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. One unified model (`TransformerLM`) assembled from registered components: `mha`/`gqa` attention, `dense`/`moe` MLP, `rmsnorm`/`layernorm` norm, `rope`/`learned` pos_emb. Fused `@torch.compile` ops live inside their owning layer files under `src/layers/`.
 
 ## Commands
 
@@ -14,8 +14,8 @@ uv sync
 
 # Tests
 uv run pytest                          # all tests
-uv run pytest tests/test_gpt2.py       # single file
-uv run pytest tests/test_gpt2.py -k "test_forward"  # single test
+uv run pytest tests/fast/model/test_transformer.py       # single file
+uv run pytest tests/fast/model/test_transformer.py -k "test_forward"  # single test
 
 # Lint
 uv run ruff check src/ tests/
@@ -40,17 +40,19 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 ### Layers vs. models
 
-Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm), `rope.py`, `attention.py` (MHA + GQA), `activation.py` (unary `relu/gelu/silu` + gated `relu_glu/gelu_glu/silu_glu`, each in its own registry: `UNGATED_ACTIVATIONS`, `GATED_ACTIVATIONS`), `ffn.py` (unified `FFN(activation, gated, bias, dropout)`; SwiGLU = `gated=True, activation="silu"`), `moe.py` (router + sparse block), `block.py` (BaseTransformerBlock + AttnRes helpers). Full architectures live in `src/model/` (`gpt2.py`, `qwen3.py`, `qwen3_moe.py`) and compose layers from `src/layers/`. Fused `@torch.compile` ops (rmsnorm, rope, glu variants, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Cross-entropy is inlined at the top of `src/training/trainer.py`.
+Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA, `ATTN_REGISTRY`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `residual.py` (`StandardResidual`/`AttnResidual`, `RESIDUAL_REGISTRY`), `block.py` (`TransformerBlock`). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/__init__.py` constructs it from the config. Fused `@torch.compile` ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Loss functions live in `src/training/loss.py` (`LOSS_REGISTRY`, `compute_loss`), selected via `config.training.loss_fn`.
 
-`ModelConfig` defaults are modern (`mlp_activation="silu"`, `mlp_gated=True`, all biases False); GPT-2 YAML/test configs explicitly opt into the classic convention with `mlp_activation: "gelu"`, `mlp_gated: false`, `attn_bias: true`, `mlp_bias: true`.
+GPT-2-style configs use `attn_cls: mha`, `mlp_cls: dense`, `norm_cls: layernorm`, `pos_emb_cls: learned`, with `mlp_kwargs: {activation: gelu, gated: false, bias: true}`. Qwen3-style configs use `attn_cls: gqa`, `mlp_cls: dense`, `norm_cls: rmsnorm`, `pos_emb_cls: rope`. MoE configs use `mlp_cls: moe`.
 
 ### Model registry
 
-Models register via `@register_model("name")` decorator in `src/model/registry.py`. `create_model(config)` dispatches by `config.model.architecture`. Adding a new architecture: create `src/model/<name>.py`, decorate the class, and add a YAML config.
+`build_model(config)` in `src/model/__init__.py` constructs `TransformerLM`, which dispatches to components through the registries: `ATTN_REGISTRY`, `MLP_REGISTRY`, `NORM_REGISTRY`, `POS_EMB_REGISTRY`, `RESIDUAL_REGISTRY`. To add a new component: implement the class, add it to the relevant registry in its owning layer file.
 
 ### Config system
 
-`src/utils/config.py` defines nested dataclasses (`TrainConfig` → `ModelConfig`, `DataConfig`, `TrainingConfig`, `OptimizerConfig`, `SchedulerConfig`, `LoggingConfig`, `DebugConfig`). Loaded from YAML with CLI override support. The `ModelConfig.architecture` field drives model selection. The `ModelConfig.extra` dict passes architecture-specific params (e.g., `num_kv_heads`, `rope_theta`, `qk_norm`).
+`src/utils/config.py` defines nested dataclasses (`TrainConfig` → `ModelConfig`, `DataConfig`, `TrainingConfig`, `OptimizerConfig`, `SchedulerConfig`, `LoggingConfig`, `DebugConfig`). Loaded from YAML with CLI override support.
+
+`ModelConfig` uses a cls+kwargs schema: `attn_cls`/`attn_kwargs`, `mlp_cls`/`mlp_kwargs`, `norm_cls`/`norm_kwargs`, `pos_emb_cls`/`pos_emb_kwargs`, `residual_cls`/`residual_kwargs`. Each `*_cls` names a registry key; each `*_kwargs` dict is forwarded directly to the component constructor. Component classes own their parameter defaults. Top-level `ModelConfig` fields: `d_model`, `n_layers`, `vocab_size`, `dropout_embd`, `tie_word_embeddings`, `lm_head_bias`.
 
 ### Data pipeline
 
@@ -65,7 +67,7 @@ Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated ui
 ### Workflow for layer/model changes
 
 1. Run related tests before and after changes to confirm nothing breaks.
-2. For perf-sensitive changes, run `benchmarks/trainer/bench_train.py` before/after to guard against regressions.
+2. For perf-sensitive changes, run `benchmarks/bench_train.py` before/after to guard against regressions.
 
 ### Dtype handling
 
@@ -78,6 +80,22 @@ Fused ops must support float32, float16, and bfloat16. Never hardcode a dtype or
 Every experiment folder must include a `README.md` with: hypothesis, setup table (configs, key params, approx param counts), run command, results table (filled in after running), and notes.
 
 Experiment YAML configs should explicitly set `batch_size`, `gradient_accumulation_steps`, `checkpoint_every`, `eval_every`, and `eval_steps` to the default values from `src/utils/config.py` (16, 16, 500, 100, 25) unless the experiment intentionally changes them.
+
+Model configs use the cls+kwargs schema. A Qwen3-style 57M config looks like:
+```yaml
+model:
+  d_model: 512
+  n_layers: 8
+  vocab_size: 50257
+  attn_cls: gqa
+  attn_kwargs: {n_heads: 8, n_kv_heads: 4, qk_norm: true}
+  mlp_cls: dense
+  mlp_kwargs: {activation: silu, gated: true}
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs: {rope_theta: 10000.0}
+```
+MoE replaces `mlp_cls: dense` with `mlp_cls: moe` and adds `mlp_kwargs: {n_experts: N, n_experts_per_token: K, ...}`.
 
 Standard LR by model size (from scaling law experiments, `min_lr` = `lr / 10`):
 

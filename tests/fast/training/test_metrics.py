@@ -11,7 +11,6 @@ import math
 import pytest
 import torch
 
-from src.model.registry import build_model
 from src.training.metrics import MetricsTracker
 from src.utils.config import ModelConfig, TrainConfig
 
@@ -36,7 +35,13 @@ class FakeLogger:
 def _cfg(task="pretrain", log_every=2, **logging):
     cfg = TrainConfig(
         model=ModelConfig(
-            arch="gpt2", n_layers=2, n_heads=2, d_model=64, vocab_size=256
+            n_layers=2,
+            d_model=64,
+            vocab_size=256,
+            attn_cls="mha",
+            attn_kwargs={"n_heads": 2},
+            mlp_cls="dense",
+            mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
         )
     )
     cfg.task = task
@@ -146,7 +151,7 @@ def test_tokens_per_step_from_config_and_total_accumulates():
     assert tracker.total_tokens == 2 * tracker.tokens_per_step
     d = tracker.log_train(step=2, model=model, optimizer=opt)
     assert d["train/total_tokens"] == tracker.total_tokens
-    assert d["train/flops"] == tracker.flops_per_token["total"] * tracker.total_tokens
+    assert d["train/flops"] == tracker._flops_per_token * tracker.total_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -274,16 +279,17 @@ def test_eval_sft_train_acc_passthrough():
 def test_eval_moe_aux_loss_subtracts_floor():
     cfg = TrainConfig(
         model=ModelConfig(
-            arch="qwen3_moe",
             n_layers=2,
-            n_heads=2,
-            n_kv_heads=1,
             d_model=64,
             vocab_size=256,
-            qk_norm=True,
-            moe_n_experts=4,
-            moe_n_experts_per_token=2,
-            moe_intermediate_size=128,
+            attn_cls="gqa",
+            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+            mlp_cls="moe",
+            mlp_kwargs={
+                "n_experts": 4,
+                "n_experts_per_token": 2,
+                "intermediate_size": 128,
+            },
         )
     )
     cfg.task = "pretrain"
@@ -305,29 +311,29 @@ def test_eval_moe_aux_loss_subtracts_floor():
 def test_print_model_summary_dense(capsys):
     cfg = TrainConfig(max_seq_len=128, model=_cfg().model)
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
-    model = build_model(cfg)
-    assert tracker.print_model_summary(model) is None
+    assert tracker.print_model_summary() is None
     out = capsys.readouterr().out
-    assert "Model: gpt2" in out and "non-embedding" in out and "device=cpu" in out
+    assert "Model: mha+dense" in out and "non-embedding" in out and "device=cpu" in out
 
 
 def test_print_model_summary_moe(capsys):
     cfg = TrainConfig(
         max_seq_len=128,
         model=ModelConfig(
-            arch="qwen3_moe",
             n_layers=2,
-            n_heads=2,
-            n_kv_heads=1,
             d_model=64,
             vocab_size=256,
-            qk_norm=True,
-            moe_n_experts=4,
-            moe_n_experts_per_token=2,
-            moe_intermediate_size=128,
+            attn_cls="gqa",
+            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+            mlp_cls="moe",
+            mlp_kwargs={
+                "n_experts": 4,
+                "n_experts_per_token": 2,
+                "intermediate_size": 128,
+            },
         ),
     )
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
-    tracker.print_model_summary(build_model(cfg))
+    tracker.print_model_summary()
     out = capsys.readouterr().out
     assert "total params" in out and "active non-embedding" in out

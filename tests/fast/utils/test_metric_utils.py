@@ -9,7 +9,8 @@ import math
 import pytest
 import torch
 
-from src.model.registry import build_model
+from src.model import build_model
+from src.model.transformer import TransformerLM
 from src.training.optimizer import AdamWOptimizer, LionOptimizer
 from src.utils import metric_utils
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
@@ -23,69 +24,84 @@ from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsu
 
 def _gpt2_cfg(impl):
     return ModelConfig(
-        arch="gpt2",
         n_layers=2,
-        n_heads=2,
         d_model=64,
         vocab_size=256,
-        attn_implementation=impl,
+        attn_cls="mha",
+        attn_kwargs={"n_heads": 2, "attn_implementation": impl},
+        mlp_cls="dense",
+        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
     )
 
 
 def _qwen3_cfg(impl):
     return ModelConfig(
-        arch="qwen3",
         n_layers=2,
-        n_heads=2,
-        n_kv_heads=1,
         d_model=64,
         vocab_size=256,
-        qk_norm=True,
-        attn_implementation=impl,
+        attn_cls="gqa",
+        attn_kwargs={
+            "n_heads": 2,
+            "n_kv_heads": 1,
+            "qk_norm": True,
+            "attn_implementation": impl,
+        },
+        mlp_cls="dense",
+        mlp_kwargs={},
     )
 
 
 def _qwen3_moe_cfg(impl):
     return ModelConfig(
-        arch="qwen3_moe",
         n_layers=2,
-        n_heads=2,
-        n_kv_heads=1,
         d_model=64,
         vocab_size=256,
-        qk_norm=True,
-        moe_n_experts=4,
-        moe_n_experts_per_token=2,
-        moe_intermediate_size=128,
-        attn_implementation=impl,
+        attn_cls="gqa",
+        attn_kwargs={
+            "n_heads": 2,
+            "n_kv_heads": 1,
+            "qk_norm": True,
+            "attn_implementation": impl,
+        },
+        mlp_cls="moe",
+        mlp_kwargs={
+            "n_experts": 4,
+            "n_experts_per_token": 2,
+            "intermediate_size": 128,
+        },
     )
 
 
 def _gpt2_attn_res_cfg(impl):
     return ModelConfig(
-        arch="gpt2",
         n_layers=4,
-        n_heads=2,
         d_model=64,
         vocab_size=256,
+        attn_cls="mha",
+        attn_kwargs={"n_heads": 2, "attn_implementation": impl},
+        mlp_cls="dense",
+        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
         residual_cls="attn_res",
         residual_kwargs={"seal_block_size": 2},
-        attn_implementation=impl,
     )
 
 
 def _qwen3_attn_res_cfg(impl):
     return ModelConfig(
-        arch="qwen3",
         n_layers=4,
-        n_heads=2,
-        n_kv_heads=1,
         d_model=64,
         vocab_size=256,
-        qk_norm=True,
+        attn_cls="gqa",
+        attn_kwargs={
+            "n_heads": 2,
+            "n_kv_heads": 1,
+            "qk_norm": True,
+            "attn_implementation": impl,
+        },
+        mlp_cls="dense",
+        mlp_kwargs={},
         residual_cls="attn_res",
         residual_kwargs={"seal_block_size": 2},
-        attn_implementation=impl,
     )
 
 
@@ -327,22 +343,49 @@ def test_layer_svd_metrics_compiled_model_strips_prefix():
 # ---------------------------------------------------------------------------
 
 
-def test_count_parameters_dense():
-    """Dense model: active_non_emb == non_emb < total (embeddings present)."""
-    cfg = TrainConfig(max_seq_len=128, model=_gpt2_cfg("sdpa"))
-    model = build_model(cfg)
-    c = metric_utils.count_parameters(model, cfg)
-    assert c["total"] == sum(p.numel() for p in model.parameters())
-    assert c["active_non_emb"] == c["non_emb"]
-    assert c["non_emb"] < c["total"]
+def _gpt2_layernorm_learned_cfg(impl):
+    """GPT-2-style: layernorm (weight + bias) + learned positional embedding +
+    untied lm_head with bias. Exercises the norm-bias, learned-pos-emb, and
+    untied-head param paths the rmsnorm+rope factories don't."""
+    return ModelConfig(
+        n_layers=2,
+        d_model=64,
+        vocab_size=256,
+        attn_cls="mha",
+        attn_kwargs={"n_heads": 2, "bias": True, "attn_implementation": impl},
+        mlp_cls="dense",
+        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
+        norm_cls="layernorm",
+        pos_emb_cls="learned",
+        tie_word_embeddings=False,
+        lm_head_bias=True,
+    )
 
 
-def test_count_parameters_moe_active_below_total_non_emb():
-    """MoE: active_non_emb uses k experts, so it's below full non-embedding."""
-    cfg = TrainConfig(max_seq_len=128, model=_qwen3_moe_cfg("sdpa"))
+@pytest.mark.parametrize(
+    "factory",
+    [*_CFG_FACTORIES.values(), _gpt2_layernorm_learned_cfg],
+    ids=[*_CFG_FACTORIES, "gpt2_layernorm_learned"],
+)
+def test_count_parameters_matches_real_model(factory):
+    """Analytic count_parameters reproduces the live model's param counts exactly
+    for every architecture variant."""
+    cfg = TrainConfig(max_seq_len=128, model=factory("sdpa"))
     model = build_model(cfg)
-    c = metric_utils.count_parameters(model, cfg)
-    assert c["active_non_emb"] < c["non_emb"] <= c["total"]
+    c = metric_utils.count_parameters(cfg)
+
+    real_total = sum(p.numel() for p in model.parameters())
+    real_non_emb = real_total - sum(
+        p.numel() for name, p in model.named_parameters() if "emb" in name
+    )
+    assert c["total"] == real_total
+    assert c["non_emb"] == real_non_emb
+    assert c["non_emb"] < c["total"]  # embeddings present
+
+    if cfg.model.mlp_cls == "moe":
+        assert c["active_non_emb"] < c["non_emb"]  # k experts < all experts
+    else:
+        assert c["active_non_emb"] == c["non_emb"]
 
 
 # ---------------------------------------------------------------------------
@@ -408,97 +451,100 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
     """GPT-2 style: MHA, ungated FFN with biases. Hand-computed expected values."""
     cfg = TrainConfig(max_seq_len=128)
     cfg.model = ModelConfig(
-        arch="gpt2",
         n_layers=2,
-        n_heads=2,
         d_model=64,
         vocab_size=256,
-        intermediate_size=256,
-        mlp_activation="gelu",
-        mlp_gated=False,
-        attn_bias=True,
-        mlp_bias=True,
+        attn_cls="mha",
+        attn_kwargs={"n_heads": 2, "bias": True},
+        mlp_cls="dense",
+        mlp_kwargs={
+            "intermediate_size": 256,
+            "activation": "gelu",
+            "gated": False,
+            "bias": True,
+        },
     )
     f = metric_utils.compute_flops_per_token(cfg)
-    # head_dim=32, n_kv_heads=n_heads=2 (MHA), L=2, T=128
-    # qkv_proj per layer: 2*64*(2+2*2)*32 + (2+2*2)*32 = 24576+192 = 24768
-    assert f["qkv_proj"] == 2 * 24768
-    # o_proj per layer: 2*64*64 + 64 = 8256
-    assert f["o_proj"] == 2 * 8256
-    # attn_matmul per layer (full T, PaLM): 4 * n_heads*head_dim*seq_len = 4*2*32*128
-    assert f["attn_matmul"] == 2 * 32768
-    # ffn ungated per layer: 4*64*256 + (256+64) = 65856
-    assert f["ffn"] == 2 * 65856
-    # lm_head: 2*64*256 = 32768 (no bias by default)
-    assert f["lm_head"] == 32768
-    # norm: per-layer (2 RMSNorms) = 2*3*64 = 384; final = 3*64 = 192
-    assert f["norm"] == 2 * 384 + 192
-    expected_fwd = 2 * 24768 + 2 * 8256 + 2 * 32768 + 2 * 65856 + 960 + 32768
-    assert f["fwd_total"] == expected_fwd
-    # default activation_checkpointing=False -> 3x
-    assert f["total"] == 3 * expected_fwd
+    # head_dim=32, n_kv_heads=n_heads=2 (MHA), L=2, T=128. Per-layer components:
+    #   attn = qkv + o + matmul = 24768 + 8256 + 32768   (qkv has bias +192, o +64)
+    #   mlp (ungated, bias) = 4*64*256 + (256+64) = 65856
+    #   norm (2 LayerNorms) = 2*3*64 = 384
+    # final norm = 3*64 = 192; lm_head = 2*64*256 = 32768 (no bias by default)
+    attn = 24768 + 8256 + 32768
+    mlp = 65856
+    norm_per_layer = 384
+    expected_fwd = 2 * (attn + mlp + norm_per_layer) + 192 + 32768
+    # compute_flops_per_token returns the total (fwd × 3 by default)
+    assert f == 3 * expected_fwd
 
 
 def test_compute_flops_per_token_gqa_gated_qwen3():
     """GQA halves KV proj vs MHA; gated FFN is 6*d*d_ff (vs 4 ungated)."""
     cfg = TrainConfig(max_seq_len=128)
     cfg.model = ModelConfig(
-        arch="qwen3",
         n_layers=2,
-        n_heads=4,
-        n_kv_heads=2,
         d_model=64,
         vocab_size=256,
-        intermediate_size=256,
-        mlp_activation="silu",
-        mlp_gated=True,
-        attn_bias=False,
-        mlp_bias=False,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "bias": False},
+        mlp_cls="dense",
+        mlp_kwargs={
+            "intermediate_size": 256,
+            "activation": "silu",
+            "gated": True,
+            "bias": False,
+        },
     )
     f = metric_utils.compute_flops_per_token(cfg)
-    assert f["qkv_proj"] == 2 * 16384
-    assert f["o_proj"] == 2 * 8192
-    assert f["attn_matmul"] == 2 * 32768
-    assert f["ffn"] == 2 * 98304
-    assert f["lm_head"] == 2 * 64 * 256
-    # GQA invariant: with n_kv_heads = n_heads/2, qkv = 2 * Q-only proj
-    q_only = 2 * 64 * 4 * 16
-    assert f["qkv_proj"] // cfg.model.n_layers == 2 * q_only
+    # head_dim=16. Per-layer: attn = qkv(16384) + o(8192) + matmul(32768);
+    # gated mlp = 6*64*256 = 98304; norm = 2*3*64 = 384.
+    attn = 16384 + 8192 + 32768
+    mlp = 98304
+    norm_per_layer = 384
+    expected_fwd = 2 * (attn + mlp + norm_per_layer) + 192 + 2 * 64 * 256
+    assert f == 3 * expected_fwd
 
 
 def test_compute_flops_per_token_moe_uses_k_active():
-    """MoE ffn cost = router + k active experts, NOT all N experts."""
+    """MoE mlp cost = router + k active experts, NOT all N experts."""
     cfg = TrainConfig(max_seq_len=128)
     cfg.model = ModelConfig(
-        arch="qwen3_moe",
         n_layers=2,
-        n_heads=4,
-        n_kv_heads=2,
         d_model=64,
         vocab_size=256,
-        intermediate_size=256,
-        moe_n_experts=8,
-        moe_n_experts_per_token=2,
-        moe_intermediate_size=128,
-        mlp_gated=True,
-        mlp_bias=False,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        mlp_cls="moe",
+        mlp_kwargs={
+            "n_experts": 8,
+            "n_experts_per_token": 2,
+            "intermediate_size": 128,
+            "gated": True,
+            "bias": False,
+        },
     )
     f = metric_utils.compute_flops_per_token(cfg)
-    expected_ffn_per_layer = 1024 + 98304  # router + k=2 gated experts
-    assert f["ffn"] == 2 * expected_ffn_per_layer
-    full_expert_ffn = 1024 + 8 * 6 * 64 * 128
-    assert f["ffn"] < 2 * full_expert_ffn // 3
+    # head_dim=16. attn = 16384 + 8192 + 32768; norm = 384.
+    # moe mlp = router(2*64*8=1024) + k=2 gated experts (2*6*64*128=98304) = 99328.
+    attn = 16384 + 8192 + 32768
+    mlp_k_active = 1024 + 98304
+    expected_fwd = 2 * (attn + mlp_k_active + 384) + 192 + 2 * 64 * 256
+    assert f == 3 * expected_fwd
+    # k-active is far cheaper than activating all N=8 experts
+    mlp_all_experts = 1024 + 8 * 6 * 64 * 128
+    assert mlp_k_active < mlp_all_experts // 3
 
 
 def test_compute_flops_per_token_ckpt_multiplier():
     """activation_checkpointing flips backward multiplier 3 -> 4."""
     base_kwargs = dict(
-        arch="qwen3",
         n_layers=2,
-        n_heads=4,
-        n_kv_heads=2,
         d_model=64,
         vocab_size=256,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        mlp_cls="dense",
+        mlp_kwargs={},
     )
     cfg_off = TrainConfig(
         max_seq_len=128,
@@ -510,32 +556,87 @@ def test_compute_flops_per_token_ckpt_multiplier():
         model=ModelConfig(**base_kwargs),
         training=TrainingConfig(activation_checkpointing=True),
     )
+    fwd = TransformerLM.compute_flops(cfg_off.model, cfg_off.max_seq_len)
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
-    assert f_off["fwd_total"] == f_on["fwd_total"]
-    assert f_off["total"] == 3 * f_off["fwd_total"]
-    assert f_on["total"] == 4 * f_on["fwd_total"]
+    assert f_off == 3 * fwd
+    assert f_on == 4 * fwd
 
 
 def test_compute_flops_per_token_lm_head_bias():
     """LM head bias adds vocab_size FLOPs when lm_head_bias=True."""
-    base = dict(arch="qwen3", n_layers=1, n_heads=2, d_model=32, vocab_size=128)
+    base = dict(
+        n_layers=1,
+        d_model=32,
+        vocab_size=128,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 2},
+        mlp_cls="dense",
+        mlp_kwargs={},
+    )
     cfg_off = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=False))
     cfg_on = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=True))
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
-    assert f_on["lm_head"] - f_off["lm_head"] == 128
+    # lm_head bias adds vocab_size (128) FLOPs to fwd; total is ×3
+    assert f_on - f_off == 3 * 128
 
 
 def test_compute_flops_per_token_qk_norm():
     """qk_norm adds 3 * (n_heads + n_kv_heads) * head_dim per layer."""
     base = dict(
-        arch="qwen3", n_layers=2, n_heads=4, n_kv_heads=2, d_model=64, vocab_size=256
+        n_layers=2,
+        d_model=64,
+        vocab_size=256,
+        attn_cls="gqa",
+        mlp_cls="dense",
+        mlp_kwargs={},
     )
-    cfg_off = TrainConfig(max_seq_len=128, model=ModelConfig(**base, qk_norm=False))
-    cfg_on = TrainConfig(max_seq_len=128, model=ModelConfig(**base, qk_norm=True))
+    cfg_off = TrainConfig(
+        max_seq_len=128,
+        model=ModelConfig(
+            **base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": False}
+        ),
+    )
+    cfg_on = TrainConfig(
+        max_seq_len=128,
+        model=ModelConfig(
+            **base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": True}
+        ),
+    )
     f_off = metric_utils.compute_flops_per_token(cfg_off)
     f_on = metric_utils.compute_flops_per_token(cfg_on)
+    # qk_norm adds 3*(n_heads+n_kv_heads)*head_dim per layer to fwd; total is ×3
     expected_delta = 2 * 3 * (4 + 2) * 16
-    assert f_on["norm"] - f_off["norm"] == expected_delta
-    assert f_on["fwd_total"] - f_off["fwd_total"] == expected_delta
+    assert f_on - f_off == 3 * expected_delta
+
+
+def test_compute_flops_per_token_counts_attn_res_residual():
+    """attn_res adds depth-dependent residual FLOPs; standard residual adds 0."""
+    from src.layers.residual import AttnResidual, StandardResidual
+
+    base = dict(
+        n_layers=4,
+        d_model=64,
+        vocab_size=256,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        mlp_cls="dense",
+        mlp_kwargs={},
+    )
+    std = TrainConfig(max_seq_len=64, model=ModelConfig(**base))
+    ar = TrainConfig(
+        max_seq_len=64,
+        model=ModelConfig(
+            **base, residual_cls="attn_res", residual_kwargs={"seal_block_size": 2}
+        ),
+    )
+    # per-slot residual cost: 0 for standard, 7 * n_ctx * d_model for attn_res
+    assert StandardResidual.compute_flops(std.model, 64, layer_idx=3) == 0
+    assert (
+        AttnResidual.compute_flops(ar.model, 64, layer_idx=3) == 7 * (3 // 2 + 1) * 64
+    )
+    # model-level: attn_res strictly higher than standard residual
+    assert metric_utils.compute_flops_per_token(
+        ar
+    ) > metric_utils.compute_flops_per_token(std)

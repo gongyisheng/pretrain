@@ -1,7 +1,11 @@
 import math
 import re
+from typing import TYPE_CHECKING
+
 import torch
-from src.utils.config import TrainConfig
+
+if TYPE_CHECKING:
+    from src.utils.config import TrainConfig
 
 
 AdamWOptimizer = torch.optim.AdamW
@@ -120,7 +124,7 @@ class MuonAdamWOptimizer:
     AdamW-tuned base lr so both subsystems run off one lr the scheduler drives.
     """
 
-    def __init__(self, muon_groups, adamw_groups, config: TrainConfig):
+    def __init__(self, muon_groups, adamw_groups, config: "TrainConfig"):
         opt = config.optimizer
         self.muon = torch.optim.Muon(
             muon_groups,
@@ -172,7 +176,16 @@ class MuonAdamWOptimizer:
         self.adamw.load_state_dict(state_dict["adamw"])
 
 
-def build_optimizer(model: torch.nn.Module, config: TrainConfig):
+OPTIMIZER_REGISTRY = {
+    "adamw": AdamWOptimizer,
+    "lion": LionOptimizer,
+    "muon": MuonAdamWOptimizer,
+}
+
+
+def build_optimizer(
+    model: torch.nn.Module, config: "TrainConfig"
+) -> torch.optim.Optimizer:
     """Build optimizer with weight decay applied only to non-bias, non-layernorm params.
 
     Each key in `config.optimizer.lr_mult` is a regular expression. A parameter
@@ -240,7 +253,7 @@ def build_optimizer(model: torch.nn.Module, config: TrainConfig):
         adamw_groups = [g for g in param_groups if not g["use_muon"]]
         return MuonAdamWOptimizer(muon_groups, adamw_groups, config)
     raise ValueError(
-        f"unknown optimizer: {name!r}; expected 'adamw', 'lion', or 'muon'"
+        f"unknown optimizer: {name!r}; expected one of {sorted(OPTIMIZER_REGISTRY)}"
     )
 
 
@@ -325,9 +338,20 @@ class ConstantWarmupScheduler:
         self.max_lr = state_dict.get("max_lr", self.max_lr)
 
 
-def build_scheduler(optimizer, config: TrainConfig):
-    """Build LR scheduler from config. Dispatches on config.scheduler.name."""
+SCHEDULER_REGISTRY = {
+    "cosine": CosineWarmupScheduler,
+    "constant": ConstantWarmupScheduler,
+}
+
+
+def build_scheduler(optimizer, config: "TrainConfig"):
+    """Build LR scheduler from config. Dispatches on config.scheduler.name
+    (also validated against SCHEDULER_REGISTRY in SchedulerConfig)."""
     name = config.scheduler.name
+    if name not in SCHEDULER_REGISTRY:
+        raise ValueError(
+            f"unknown scheduler: {name!r}; expected one of {sorted(SCHEDULER_REGISTRY)}"
+        )
     if name == "cosine":
         return CosineWarmupScheduler(
             optimizer=optimizer,
@@ -336,10 +360,8 @@ def build_scheduler(optimizer, config: TrainConfig):
             min_lr=config.scheduler.min_lr,
             max_lr=config.optimizer.lr,
         )
-    if name == "constant":
-        return ConstantWarmupScheduler(
-            optimizer=optimizer,
-            warmup_steps=config.scheduler.warmup_steps,
-            max_lr=config.optimizer.lr,
-        )
-    raise ValueError(f"unknown scheduler: {name!r}; expected 'cosine' or 'constant'")
+    return ConstantWarmupScheduler(
+        optimizer=optimizer,
+        warmup_steps=config.scheduler.warmup_steps,
+        max_lr=config.optimizer.lr,
+    )

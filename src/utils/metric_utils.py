@@ -2,8 +2,7 @@
 
 The bottom layer of the metrics stack. Everything here takes numbers/tensors
 in and returns numbers/dicts out; it never touches W&B or the training loop.
-`MetricsTracker` (the stateful assembler) and `src/eval/` offline evaluators
-both build on these primitives.
+`MetricsTracker` (the stateful assembler) builds on these primitives.
 """
 
 import math
@@ -11,6 +10,7 @@ import statistics
 
 import torch
 
+from src.model.transformer import TransformerLM
 from src.utils.config import TrainConfig
 
 # ---------------------------------------------------------------------------
@@ -19,11 +19,8 @@ from src.utils.config import TrainConfig
 
 
 def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-    """Per-parameter L2 gradient norms, keyed by parameter name.
-
-    Keys are the raw parameter names (e.g. blocks.0.attn.q_proj.weight); the
-    caller applies any logging namespace (e.g. a "grad_norm/" prefix). The
-    "_orig_mod." prefix added by torch.compile is stripped.
+    """
+    Per-parameter L2 gradient norms, keyed by parameter name.
     """
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
@@ -88,7 +85,8 @@ def compute_layer_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, flo
 
 
 def snapshot_params(model: torch.nn.Module) -> list[torch.Tensor]:
-    """Detached clone of every trainable parameter, ordered by model.parameters().
+    """
+    Detached clone of every trainable parameter, ordered by model.parameters().
 
     Use with compute_param_step_norm to measure ||θ_after - θ_before||.
     """
@@ -98,10 +96,8 @@ def snapshot_params(model: torch.nn.Module) -> list[torch.Tensor]:
 def compute_param_step_norm(
     model: torch.nn.Module, snapshot: list[torch.Tensor]
 ) -> float:
-    """L2 norm of the parameter delta vs. an earlier snapshot.
-
-    Accumulates the squared deltas in a single device tensor and syncs once
-    (one .item()), rather than per parameter.
+    """
+    L2 norm of the parameter delta vs. an earlier snapshot.
     """
     total_sq: torch.Tensor | None = None
     params = (p for p in model.parameters() if p.requires_grad)
@@ -114,9 +110,8 @@ def compute_param_step_norm(
 def _aggregate_state_norm(
     optimizer: torch.optim.Optimizer, *, key: str
 ) -> float | None:
-    """L2 norm across all `state[p][key]` buffers, or None if no buffer exists.
-
-    Accumulates in a single device tensor and syncs once, not per buffer.
+    """
+    L2 norm across all `state[p][key]` buffers, or None if no buffer exists.
     """
     total_sq: torch.Tensor | None = None
     for state in optimizer.state.values():
@@ -129,22 +124,15 @@ def _aggregate_state_norm(
 
 
 def compute_momentum_norm(optimizer: torch.optim.Optimizer) -> float | None:
-    """L2 norm across optimizer first-moment buffers.
-
-    Reads `state[p]["exp_avg"]` for every param with state. Works for both
-    Lion (single momentum buffer) and AdamW (first moment). Returns None if no
-    such buffer exists (e.g. before the first optimizer.step()), so the caller
-    can skip logging the metric.
+    """
+    L2 norm across optimizer first-moment buffers.
     """
     return _aggregate_state_norm(optimizer, key="exp_avg")
 
 
 def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
-    """L2 norm across optimizer second-moment buffers.
-
-    Reads `state[p]["exp_avg_sq"]` for every param with state — AdamW's running
-    average of squared gradients. Returns None for Lion (no second moment) and
-    before the first optimizer.step(), so the caller can skip logging it.
+    """
+    L2 norm across optimizer second-moment buffers.
     """
     return _aggregate_state_norm(optimizer, key="exp_avg_sq")
 
@@ -155,10 +143,8 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 
 
 def compute_statistics(values: list[float]) -> dict[str, float]:
-    """{mean, median, max, min} over a non-empty list of scalars.
-
-    Generic reducer for probes that summarize a population (e.g. per-sample
-    p_correct -> min/mean/max). Returns an empty dict for empty input.
+    """
+    {mean, median, max, min} over a non-empty list of scalars.
     """
     if not values:
         return {}
@@ -182,11 +168,8 @@ def count_correct(
     ignore_index: int = -100,
     exclude_id: int | None = None,
 ) -> tuple[int, int]:
-    """Count positions where argmax(logits) == labels.
-
-    Masks out `ignore_index` (loss-ignored positions) and, when given,
-    `exclude_id` (e.g. the EOT token, which is trivially predictable in SFT).
-    Returns (correct, total) as python ints.
+    """
+    Count positions where argmax(logits) == labels.
     """
     preds = logits.argmax(dim=-1)
     mask = labels != ignore_index
@@ -198,13 +181,24 @@ def count_correct(
 
 
 def compute_decoded_byte_len(tokenizer, token_ids: list[int]) -> int:
-    """UTF-8 byte length of `token_ids` decoded back to text.
-
-    Used to convert a token-space loss to bits-per-byte: counting the bytes the
-    target tokens decode to gives the tokens/byte ratio for that conversion.
-    Special tokens are dropped (skip_special_tokens=True).
+    """
+    UTF-8 byte length of `token_ids` decoded back to text.
     """
     return len(tokenizer.decode(token_ids, skip_special_tokens=True).encode("utf-8"))
+
+
+def compute_bytes_per_token(tokenizer, texts: list[str]) -> float:
+    """
+    Bytes/token over `texts` using `tokenizer` (special tokens excluded).
+    """
+    n_bytes = 0
+    n_tokens = 0
+    for t in texts:
+        n_bytes += len(t.encode("utf-8"))
+        n_tokens += len(tokenizer.encode(t, add_special_tokens=False).ids)
+    if n_tokens == 0:
+        raise ValueError("no tokens produced; corpus may be empty")
+    return n_bytes / n_tokens
 
 
 def compute_perplexity(loss: float, cap: float = 1e6) -> float:
@@ -225,42 +219,11 @@ def compute_bits_per_byte(loss: float, tokens_per_byte: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def count_parameters(model: torch.nn.Module, config: TrainConfig) -> dict[str, int]:
-    """Total, non-embedding, and active-non-embedding parameter counts.
-
-    For dense models active_non_emb == non_emb. For MoE, active_non_emb
-    replaces each layer's full expert-FFN params with the k-activated subset
-    (what actually runs per token).
+def count_parameters(config: TrainConfig) -> dict[str, int]:
     """
-    total = sum(p.numel() for p in model.parameters())
-    non_emb = total - sum(
-        p.numel() for name, p in model.named_parameters() if "emb" in name
-    )
-
-    mc = config.model
-    if mc.moe_n_experts > 0:
-        expert_ffn_per_layer = (
-            mc.moe_n_experts * 3 * mc.moe_intermediate_size * mc.d_model
-        )
-        active_ffn_per_layer = (
-            mc.moe_n_experts_per_token * 3 * mc.moe_intermediate_size * mc.d_model
-        )
-        if mc.mlp_bias:
-            expert_ffn_per_layer += mc.moe_n_experts * (
-                2 * mc.moe_intermediate_size + mc.d_model
-            )
-            active_ffn_per_layer += mc.moe_n_experts_per_token * (
-                2 * mc.moe_intermediate_size + mc.d_model
-            )
-        active_non_emb = (
-            non_emb
-            - mc.n_layers * expert_ffn_per_layer
-            + mc.n_layers * active_ffn_per_layer
-        )
-    else:
-        active_non_emb = non_emb
-
-    return {"total": total, "non_emb": non_emb, "active_non_emb": active_non_emb}
+    Total, non-embedding, and active-non-embedding parameter counts.
+    """
+    return TransformerLM.compute_parameters(config.model, config.max_seq_len)
 
 
 # ---------------------------------------------------------------------------
@@ -268,104 +231,13 @@ def count_parameters(model: torch.nn.Module, config: TrainConfig) -> dict[str, i
 # ---------------------------------------------------------------------------
 
 
-def compute_flops_per_token(config: TrainConfig) -> dict[str, int]:
-    """Per-token training FLOPs broken down by component.
-
-    Returns dict with: qkv_proj, o_proj, attn_matmul, ffn, norm, lm_head
-    (each summed across n_layers where applicable), fwd_total, total. The
-    total applies a backward multiplier of 4 if activation_checkpointing
-    else 3. Attention matmul uses full max_seq_len (PaLM/nanoGPT convention,
-    ignores causal masking and intra-doc masking; comparable to literature
-    MFU numbers). Norms (pre-attn, pre-FFN, optional qk_norm, final
-    pre-lm_head) are counted at ~3 FLOPs per element. Embedding lookup and
-    RoPE are 0 FLOPs.
+def compute_flops_per_token(config: TrainConfig) -> int:
     """
-    head_dim = config.model.d_model // config.model.n_heads
-
-    # Attention projections (per layer per token)
-    qkv_matmul = (
-        2
-        * config.model.d_model
-        * (config.model.n_heads + 2 * config.model.n_kv_heads)
-        * head_dim
-    )
-    qkv_bias = (
-        (config.model.n_heads + 2 * config.model.n_kv_heads) * head_dim
-        if config.model.attn_bias
-        else 0
-    )
-    qkv_per_layer = qkv_matmul + qkv_bias
-
-    o_matmul = 2 * config.model.d_model * config.model.d_model
-    o_bias = config.model.d_model if config.model.attn_bias else 0
-    o_per_layer = o_matmul + o_bias
-
-    # Attention matmul: full max_seq_len (PaLM/nanoGPT convention, no causal
-    # or intra-doc-mask discount; matches literature MFU). Per token per layer:
-    # QK^T = 2*n_heads*head_dim*max_seq_len, AV = same -> sum = 4*...
-    attn_matmul_per_layer = 4 * config.model.n_heads * head_dim * config.max_seq_len
-
-    # FFN
-    if config.model.moe_n_experts > 0:
-        # Router: 2 * d * n_experts
-        router = 2 * config.model.d_model * config.model.moe_n_experts
-        d_ff = config.model.moe_intermediate_size
-        k = config.model.moe_n_experts_per_token
-        if config.model.mlp_gated:
-            expert_matmul = 6 * config.model.d_model * d_ff
-            expert_bias = (
-                (2 * d_ff + config.model.d_model) if config.model.mlp_bias else 0
-            )
-        else:
-            expert_matmul = 4 * config.model.d_model * d_ff
-            expert_bias = (d_ff + config.model.d_model) if config.model.mlp_bias else 0
-        ffn_per_layer = router + k * (expert_matmul + expert_bias)
-    else:
-        d_ff = config.model.intermediate_size
-        if config.model.mlp_gated:
-            ffn_matmul = 6 * config.model.d_model * d_ff
-            ffn_bias = (2 * d_ff + config.model.d_model) if config.model.mlp_bias else 0
-        else:
-            ffn_matmul = 4 * config.model.d_model * d_ff
-            ffn_bias = (d_ff + config.model.d_model) if config.model.mlp_bias else 0
-        ffn_per_layer = ffn_matmul + ffn_bias
-
-    # Norms (RMSNorm/LayerNorm ~3 FLOPs per element: x*x, sum, rsqrt, x*inv*gamma)
-    # Per layer: pre-attn norm + pre-FFN norm. Plus optional qk_norm on Q/K.
-    norm_ops_per_element = 3
-    norm_per_layer = 2 * norm_ops_per_element * config.model.d_model
-    if config.model.qk_norm:
-        norm_per_layer += (
-            norm_ops_per_element
-            * (config.model.n_heads + config.model.n_kv_heads)
-            * head_dim
-        )
-    final_norm = norm_ops_per_element * config.model.d_model  # before lm_head
-
-    # LM head (once per token, not per layer)
-    lm_head = 2 * config.model.d_model * config.model.vocab_size + (
-        config.model.vocab_size if config.model.lm_head_bias else 0
-    )
-
-    qkv_proj = config.model.n_layers * qkv_per_layer
-    o_proj = config.model.n_layers * o_per_layer
-    attn_matmul = config.model.n_layers * attn_matmul_per_layer
-    ffn = config.model.n_layers * ffn_per_layer
-    norm = config.model.n_layers * norm_per_layer + final_norm
-    fwd_total = qkv_proj + o_proj + attn_matmul + ffn + norm + lm_head
-
+    Total training FLOPs per token
+    """
+    fwd_total = TransformerLM.compute_flops(config.model, config.max_seq_len)
     backward_mult = 4 if config.training.activation_checkpointing else 3
-
-    return {
-        "qkv_proj": qkv_proj,
-        "o_proj": o_proj,
-        "attn_matmul": attn_matmul,
-        "ffn": ffn,
-        "norm": norm,
-        "lm_head": lm_head,
-        "fwd_total": fwd_total,
-        "total": fwd_total * backward_mult,
-    }
+    return fwd_total * backward_mult
 
 
 # ---------------------------------------------------------------------------

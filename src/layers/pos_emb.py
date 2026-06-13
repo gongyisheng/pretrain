@@ -16,6 +16,8 @@ import torch.nn as nn
 class LearnedPositionalEmbedding(nn.Module):
     """Learned absolute positional embedding (GPT-2 style)."""
 
+    rotary = False
+
     def __init__(self, max_seq_len: int, d_model: int):
         super().__init__()
         self.embedding = nn.Embedding(max_seq_len, d_model)
@@ -25,6 +27,10 @@ class LearnedPositionalEmbedding(nn.Module):
         S = x.shape[1]
         pos = torch.arange(0, S, device=x.device).unsqueeze(0)  # (1, S)
         return x + self.embedding(pos)
+
+    @classmethod
+    def compute_parameters(cls, max_seq_len, d_model, **_) -> int:
+        return max_seq_len * d_model
 
 
 @torch.compile
@@ -36,15 +42,21 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
 
 
 class RoPE(nn.Module):
-    def __init__(self, d_head: int, max_seq_len: int = 4096, theta: float = 10000.0):
+    rotary = True
+
+    def __init__(
+        self, d_head: int, max_seq_len: int = 4096, rope_theta: float = 10000.0
+    ):
         super().__init__()
         self.d_head = d_head
-        self.theta = theta
+        self.rope_theta = rope_theta
         self.max_seq_len = max_seq_len
         self._build_buffers()
 
     def _build_buffers(self):
-        freqs = 1.0 / (self.theta ** (torch.arange(0, self.d_head, 2) / self.d_head))
+        freqs = 1.0 / (
+            self.rope_theta ** (torch.arange(0, self.d_head, 2) / self.d_head)
+        )
         positions = torch.arange(self.max_seq_len)
         angles = positions[:, None] * freqs[None, :]  # (max_seq_len, d_head//2)
         angles = torch.cat([angles, angles], dim=-1)  # (max_seq_len, d_head)
@@ -63,3 +75,13 @@ class RoPE(nn.Module):
         cos = self.cos[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         sin = self.sin[position_ids][:, None, :, :].to(x.dtype)  # (B, 1, S, d_head)
         return _apply_rope(x, cos, sin)
+
+    @classmethod
+    def compute_parameters(cls, max_seq_len, d_model, **_) -> int:
+        return 0  # cos/sin are buffers, not trainable params
+
+
+POS_EMB_REGISTRY = {
+    "rope": RoPE,
+    "learned": LearnedPositionalEmbedding,
+}

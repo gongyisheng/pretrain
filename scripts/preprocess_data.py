@@ -4,10 +4,12 @@ Uses a two-pass approach to avoid loading all tokens into RAM:
   Pass 1: Stream dataset, tokenize, write to a single temporary .bin file
   Pass 2: Split the temp file into train.bin and val.bin
 """
+
 import argparse
 import os
 import sys
 import numpy as np
+
 sys.path.insert(0, ".")
 
 from datasets import load_dataset
@@ -20,9 +22,16 @@ BATCH_SIZE = 1024  # documents per encode_batch call (uses all CPUs)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--max_samples", type=int, default=None,
-                        help="Max samples to process (None = all)")
+    parser.add_argument(
+        "--config",
+        required=True
+    )
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="Max samples to process (None = all)"
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -67,7 +76,9 @@ def main():
                     buffer = []
 
                 if n_docs % 10000 < BATCH_SIZE:
-                    print(f"  Tokenized {n_docs} documents ({total_tokens + len(buffer):,} tokens)")
+                    print(
+                        f"  Tokenized {n_docs} documents ({total_tokens + len(buffer):,} tokens)"
+                    )
 
         if doc_batch:
             encoded = tokenizer.encode_batch(doc_batch)

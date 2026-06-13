@@ -2,7 +2,152 @@ import torch
 import torch.nn as nn
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
-from src.layers.ffn import gated_ffn, ungated_ffn
+
+
+@torch.compile
+def gated_mlp(
+    x: torch.Tensor,
+    w_gate_up: torch.Tensor,
+    w_down: torch.Tensor,
+    act_fn,
+    b_gate_up: torch.Tensor = None,
+    b_down: torch.Tensor = None,
+) -> torch.Tensor:
+    """Fused gated MLP: gate_up matmul → chunk → act(gate, up) → down matmul.
+
+    Shapes are unified via `@` (matmul broadcasts arbitrary leading dims):
+      - Dense (used by DenseMLPBlock): x (..., D); w_gate_up (2*I, D); w_down (D, I).
+      - Batched (used by MoE):         x (E, C, D); w_gate_up (E, 2*I, D); w_down (E, D, I).
+    Bias is 1D for the dense form and 2D for the batched form (auto-broadcasts).
+    """
+    gate_up = x @ w_gate_up.mT
+    if b_gate_up is not None:
+        gate_up = gate_up + (
+            b_gate_up if b_gate_up.ndim == 1 else b_gate_up.unsqueeze(-2)
+        )
+    gate, up = gate_up.chunk(2, dim=-1)
+    hidden = act_fn(gate, up)
+    out = hidden @ w_down.mT
+    if b_down is not None:
+        out = out + (b_down if b_down.ndim == 1 else b_down.unsqueeze(-2))
+    return out
+
+
+@torch.compile
+def ungated_mlp(
+    x: torch.Tensor,
+    w_up: torch.Tensor,
+    w_down: torch.Tensor,
+    act_fn,
+    b_up: torch.Tensor = None,
+    b_down: torch.Tensor = None,
+) -> torch.Tensor:
+    """Fused ungated MLP: up matmul → act(up) → down matmul.
+
+    Shapes (parallel to gated_mlp):
+      - Dense:   x (..., D); w_up (I, D); w_down (D, I).
+      - Batched: x (E, C, D); w_up (E, I, D); w_down (E, D, I).
+    """
+    up = x @ w_up.mT
+    if b_up is not None:
+        up = up + (b_up if b_up.ndim == 1 else b_up.unsqueeze(-2))
+    hidden = act_fn(up)
+    out = hidden @ w_down.mT
+    if b_down is not None:
+        out = out + (b_down if b_down.ndim == 1 else b_down.unsqueeze(-2))
+    return out
+
+
+class DenseMLPBlock(nn.Module):
+    """Configurable dense feed-forward block.
+
+    Two structural variants selected by `gated`:
+      - gated=False: down_proj(activation(up_proj(x)))
+      - gated=True (GLU family): down_proj(activation(gate, up)) where
+        (gate, up) = chunk(gate_up_proj(x), 2, dim=-1)
+
+    `activation` is one of ``"relu"`` / ``"gelu"`` / ``"silu"``. Combinations:
+        gated=True + activation="silu" → SwiGLU
+        gated=True + activation="gelu" → GeGLU
+        gated=True + activation="relu" → ReGLU
+
+    Bias defaults to False (modern LLM convention); pass `bias=True` for the
+    GPT-2 / classic Transformer convention.
+
+    Returns a tuple (out, None) to match the uniform MLP block contract.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        *,
+        intermediate_size: int,
+        activation: str = "silu",
+        gated: bool = True,
+        bias: bool = False,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        # Defaults/validation (intermediate_size, activation) live in ModelConfig.
+        registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
+        self.gated = gated
+        self.act_fn = registry[activation]
+        if gated:
+            self.gate_up_proj = nn.Linear(d_model, 2 * intermediate_size, bias=bias)
+        else:
+            self.up_proj = nn.Linear(d_model, intermediate_size, bias=bias)
+        self.down_proj = nn.Linear(intermediate_size, d_model, bias=bias)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> tuple:
+        if self.gated:
+            out = gated_mlp(
+                x,
+                self.gate_up_proj.weight,
+                self.down_proj.weight,
+                self.act_fn,
+                self.gate_up_proj.bias,
+                self.down_proj.bias,
+            )
+        else:
+            out = ungated_mlp(
+                x,
+                self.up_proj.weight,
+                self.down_proj.weight,
+                self.act_fn,
+                self.up_proj.bias,
+                self.down_proj.bias,
+            )
+        return self.dropout(out), None
+
+    @classmethod
+    def compute_flops(cls, d_model, *, intermediate_size, gated=True, bias=False, **_):
+        d_ff = intermediate_size
+        if gated:
+            matmul = 6 * d_model * d_ff
+            b = (2 * d_ff + d_model) if bias else 0
+        else:
+            matmul = 4 * d_model * d_ff
+            b = (d_ff + d_model) if bias else 0
+        return matmul + b
+
+    @classmethod
+    def compute_parameters(
+        cls, d_model, *, intermediate_size, gated=True, bias=False, active=False, **_
+    ) -> int:
+        d_ff = intermediate_size
+        if gated:
+            weights = 3 * d_ff * d_model  # gate_up (2*d_ff x d) + down (d x d_ff)
+            b = (2 * d_ff + d_model) if bias else 0
+        else:
+            weights = 2 * d_ff * d_model  # up (d_ff x d) + down (d x d_ff)
+            b = (d_ff + d_model) if bias else 0
+        return weights + b
+
+
+# ---------------------------------------------------------------------------
+# MoE routing helpers
+# ---------------------------------------------------------------------------
 
 
 def _route(
@@ -130,7 +275,7 @@ class MoERouter(nn.Module):
 
 
 class SparseMoEBlock(nn.Module):
-    """Sparse Mixture-of-Experts FFN block with batched expert dispatch.
+    """Sparse Mixture-of-Experts MLP block with batched expert dispatch.
 
     Expert weights are stored as stacked tensors and processed via torch.bmm,
     replacing the sequential per-expert loop with batched GEMMs.
@@ -142,36 +287,35 @@ class SparseMoEBlock(nn.Module):
       - Outputs are gathered back with routing weights.
       - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
 
-    Mirrors FFN's gated/ungated split: by default `gated=True, activation="silu"`
-    (SwiGLU experts); set `gated=False` for ungated experts with the same
-    activation registry as FFN (relu/gelu/silu).
+    Mirrors DenseMLPBlock's gated/ungated split: by default `gated=True, activation="silu"`
+    (SwiGLU experts); set `gated=False` for ungated experts.
 
     Note: aux_loss scale grows linearly with n_experts_per_token (k). Under balanced
-    routing the expected value is approximately k. Callers using moe_aux_loss_coef should
+    routing the expected value is approximately k. Callers using aux_loss_coef should
     account for this when comparing runs across different k values.
     """
 
     def __init__(
         self,
         d_model: int,
+        *,
         intermediate_size: int,
         n_experts: int,
-        n_experts_per_token: int,
-        dropout_ffn: float = 0.0,
-        capacity_factor: float = None,
-        bias: bool = False,
-        gated: bool = True,
+        n_experts_per_token: int = 2,
+        aux_loss_coef: float = 0.01,
+        expert_capacity_factor: float = None,
         activation: str = "silu",
+        gated: bool = True,
+        bias: bool = False,
+        dropout: float = 0.0,
     ):
         super().__init__()
+        # Defaults/validation (intermediate_size, activation) live in ModelConfig.
         registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
-        if activation not in registry:
-            raise ValueError(
-                f"Unknown activation: {activation!r}; expected one of {sorted(registry)}"
-            )
         self.n_experts = n_experts
         self.n_experts_per_token = n_experts_per_token
-        self.capacity_factor = capacity_factor
+        self.aux_loss_coef = aux_loss_coef
+        self.expert_capacity_factor = expert_capacity_factor
         self.gated = gated
         self.act_fn = registry[activation]
         self.router = MoERouter(d_model, n_experts, n_experts_per_token)
@@ -202,7 +346,7 @@ class SparseMoEBlock(nn.Module):
         self.expert_down_bias = (
             nn.Parameter(torch.zeros(n_experts, d_model)) if bias else None
         )
-        self.expert_dropout = nn.Dropout(dropout_ffn)
+        self.expert_dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)
@@ -215,7 +359,7 @@ class SparseMoEBlock(nn.Module):
         top_indices, top_weights, router_probs = self.router(x_flat)
         # top_indices: (T, k)   top_weights: (T, k)   router_probs: (T, E)
 
-        if self.capacity_factor is not None:
+        if self.expert_capacity_factor is not None:
             # --- Optimized routing with capacity filtering ---
             (
                 sorted_expert_ids,
@@ -224,7 +368,7 @@ class SparseMoEBlock(nn.Module):
                 positions,
                 capacity,
                 expert_counts,
-            ) = _route(top_indices, top_weights, E, self.capacity_factor)
+            ) = _route(top_indices, top_weights, E, self.expert_capacity_factor)
         else:
             # --- Dynamic capacity: no tokens dropped ---
             flat_expert_ids = top_indices.reshape(-1)
@@ -249,9 +393,9 @@ class SparseMoEBlock(nn.Module):
             x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity
         )
 
-        # --- Batched expert FFN: shared gated/ungated_ffn from layers.ffn (3D x + 3D weights) ---
+        # --- Batched expert MLP: shared gated/ungated_mlp (3D x + 3D weights) ---
         if self.gated:
-            expert_out = gated_ffn(
+            expert_out = gated_mlp(
                 padded_input,
                 self.expert_gate_up,
                 self.expert_down,
@@ -260,7 +404,7 @@ class SparseMoEBlock(nn.Module):
                 self.expert_down_bias,
             )
         else:
-            expert_out = ungated_ffn(
+            expert_out = ungated_mlp(
                 padded_input,
                 self.expert_up,
                 self.expert_down,
@@ -289,3 +433,53 @@ class SparseMoEBlock(nn.Module):
         aux_loss = E * (f * P).sum()
 
         return output.view(B, S, D), aux_loss
+
+    @classmethod
+    def compute_flops(
+        cls,
+        d_model,
+        *,
+        intermediate_size,
+        n_experts,
+        n_experts_per_token=2,
+        gated=True,
+        bias=False,
+        **_,
+    ):
+        d_ff = intermediate_size
+        router = 2 * d_model * n_experts
+        if gated:
+            expert = 6 * d_model * d_ff
+            b = (2 * d_ff + d_model) if bias else 0
+        else:
+            expert = 4 * d_model * d_ff
+            b = (d_ff + d_model) if bias else 0
+        return router + n_experts_per_token * (expert + b)
+
+    @classmethod
+    def compute_parameters(
+        cls,
+        d_model,
+        *,
+        intermediate_size,
+        n_experts,
+        n_experts_per_token=2,
+        gated=True,
+        bias=False,
+        active=False,
+        **_,
+    ) -> int:
+        d_ff = intermediate_size
+        router = d_model * n_experts  # gate, no bias
+        # active counts only the k experts that actually run per token.
+        n = n_experts_per_token if active else n_experts
+        if gated:
+            expert = 3 * d_ff * d_model
+            b = (2 * d_ff + d_model) if bias else 0
+        else:
+            expert = 2 * d_ff * d_model
+            b = (d_ff + d_model) if bias else 0
+        return router + n * (expert + b)
+
+
+MLP_REGISTRY = {"dense": DenseMLPBlock, "moe": SparseMoEBlock}

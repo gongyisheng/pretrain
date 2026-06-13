@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, SchedulerConfig
-from src.model.registry import build_model
+from src.model import build_model
 from src.training.optimizer import (
     LionOptimizer,
     MuonAdamWOptimizer,
@@ -33,13 +33,10 @@ def _make_cfg(tie: bool = False, lr_mult: dict | None = None) -> TrainConfig:
     cfg = TrainConfig()
     cfg.max_seq_len = 128
     cfg.model = ModelConfig(
-        arch="qwen3",
         d_model=64,
         n_layers=2,
-        n_heads=4,
-        n_kv_heads=2,
         vocab_size=256,
-        qk_norm=True,
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": True},
         tie_word_embeddings=tie,
     )
     cfg.optimizer = OptimizerConfig(
@@ -254,8 +251,8 @@ def test_regex_pattern_matches_multiple_params():
     """A regex like 'bias' should catch every param whose name contains 'bias'."""
     cfg = _make_cfg(tie=False, lr_mult={"bias": 0.5})
     # Enable some biases so we have params matching.
-    cfg.model.attn_bias = True
-    cfg.model.mlp_bias = True
+    cfg.model.attn_kwargs["bias"] = True
+    cfg.model.mlp_kwargs["bias"] = True
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
 

@@ -1,18 +1,24 @@
+import itertools
 import math
 import os
 import random
+import time
+from typing import Callable, Iterable
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.utils.checkpoint
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from tqdm import tqdm
 
-from src.model.registry import build_model
+from src.model import build_model
+from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
 from src.training.optimizer import build_optimizer, build_scheduler
-from src.training.metrics import MetricsTracker
+from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
 from src.training.loss import LOSS_REGISTRY, compute_loss
 from src.utils.config import TrainConfig
 from src.utils.metric_utils import count_correct
@@ -66,9 +72,14 @@ class Trainer:
 
         # Model
         self.model = build_model(config).to(self.device)
-        self.is_moe = config.model.arch == "qwen3_moe"
+        self.is_moe = config.model.mlp_cls == "moe"
 
         # Data
+        if not os.path.isdir(config.data.data_dir):
+            raise FileNotFoundError(
+                f"data_dir not found: {config.data.data_dir!r}; "
+                f"run scripts/preprocess_data.py first"
+            )
         if config.task == "pretrain":
             train_path = os.path.join(config.data.data_dir, "train.bin")
             val_path = os.path.join(config.data.data_dir, "val.bin")
@@ -155,7 +166,7 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
-        if self.is_moe and config.model.moe_expert_capacity_factor is None:
+        if self.is_moe and config.model.mlp_kwargs["expert_capacity_factor"] is None:
             # Dynamic capacity uses .item() — can't compile the full model
             for block in self.model.blocks:
                 block.attn = torch.compile(block.attn)
@@ -185,7 +196,7 @@ class Trainer:
         # Metrics and Logging
         self.logger = WandbLogger(config, enabled=wandb_enabled)
         self.metrics = MetricsTracker(config, self.device, logger=self.logger)
-        self.metrics.print_model_summary(self.model)
+        self.metrics.print_model_summary()
 
         # Checkpoint dir
         os.makedirs(config.training.checkpoint_dir, exist_ok=True)
@@ -228,11 +239,7 @@ class Trainer:
         # Deferred loss: keep previous step's loss tensor to read while next step runs
         prev_loss_tensor = None
 
-        stop_at = (
-            self.config.debug.max_steps
-            if self.config.debug.max_steps > 0
-            else cfg.max_steps
-        )
+        stop_at = cfg.early_stop if cfg.early_stop > 0 else cfg.max_steps
         pbar = tqdm(
             total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True
         )
@@ -312,7 +319,9 @@ class Trainer:
                             position_ids,
                             self.device,
                             mask_dtype,
-                            attn_implementation=self.config.model.attn_implementation,
+                            attn_implementation=self.config.model.attn_kwargs[
+                                "attn_implementation"
+                            ],
                         )
                     else:
                         B, S = position_ids.shape
@@ -320,7 +329,9 @@ class Trainer:
                             B,
                             S,
                             self.device,
-                            attn_implementation=self.config.model.attn_implementation,
+                            attn_implementation=self.config.model.attn_kwargs[
+                                "attn_implementation"
+                            ],
                         )
                     logits, aux_loss = self.model(
                         input_ids, position_ids=position_ids, attn_mask=attn_mask
@@ -332,7 +343,10 @@ class Trainer:
                         label_smoothing=self.config.training.label_smoothing,
                     )
                     if aux_loss is not None:
-                        loss = loss + self.config.model.moe_aux_loss_coef * aux_loss
+                        loss = (
+                            loss
+                            + self.config.model.mlp_kwargs["aux_loss_coef"] * aux_loss
+                        )
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
@@ -422,7 +436,9 @@ class Trainer:
                     position_ids,
                     self.device,
                     mask_dtype,
-                    attn_implementation=self.config.model.attn_implementation,
+                    attn_implementation=self.config.model.attn_kwargs[
+                        "attn_implementation"
+                    ],
                 )
             else:
                 B, S = position_ids.shape
@@ -430,7 +446,9 @@ class Trainer:
                     B,
                     S,
                     self.device,
-                    attn_implementation=self.config.model.attn_implementation,
+                    attn_implementation=self.config.model.attn_kwargs[
+                        "attn_implementation"
+                    ],
                 )
             logits, aux_loss = self.model(
                 input_ids, position_ids=position_ids, attn_mask=attn_mask
@@ -508,7 +526,9 @@ class Trainer:
                 B,
                 S,
                 self.device,
-                attn_implementation=self.config.model.attn_implementation,
+                attn_implementation=self.config.model.attn_kwargs[
+                    "attn_implementation"
+                ],
             )
             logits, _ = self.model(idx_cond, position_ids=pos_ids, attn_mask=attn_mask)
             logits = logits[:, -1, :]  # take last token's logits
@@ -568,3 +588,270 @@ class Trainer:
             torch.cuda.set_rng_state(rng["cuda"].cpu().to(torch.uint8).contiguous())
 
         print(f"Resumed at step {self.step}")
+
+
+class TokenizerTrainer:
+    """Train a tokenizer from a text iterable. Dispatches by
+    `config.tokenizer_training.method`.
+
+    Method-specific kwargs live in `config.tokenizer_training.method_kwargs` and
+    are consumed by the matching `_train_*` method (e.g. `transition_size`,
+    `max_superword_words`, `eval_num_docs` for "superbpe"). W&B identity comes
+    from `config.logging`; `wandb_enabled` is constructor-controlled (default
+    True), matching the model `Trainer`.
+
+    Two independent cadences (both in merges, both must be multiples of the
+    BpeTrainer's `progress_every`): `eval_every` logs (vocab_size,
+    bytes_per_token) to W&B; `checkpoint_every` saves the partial tokenizer to
+    `checkpoint_dir`.
+    """
+
+    _SPECIAL_TOKENS = ("<|endoftext|>",)
+
+    def __init__(self, config: TrainConfig, wandb_enabled: bool = True):
+        self.config = config
+        self.wandb_enabled = wandb_enabled
+        self.vocab_size = config.model.vocab_size
+        self.train_method = config.tokenizer_training.method
+        self.train_method_kwargs = dict(config.tokenizer_training.method_kwargs)
+        self.eval_every = config.tokenizer_training.eval_every
+        self.checkpoint_every = config.tokenizer_training.checkpoint_every
+        self.eval_num_docs = self.train_method_kwargs["eval_num_docs"]
+
+        if self.train_method not in ("bpe", "superbpe"):
+            raise ValueError(
+                f"unknown method: {self.train_method!r}; expected 'bpe' or 'superbpe'"
+            )
+
+        # Validate SuperBPE-specific knobs up front so `_train_superbpe` can
+        # assume they're well-formed when it reads them from train_method_kwargs.
+        if self.train_method == "superbpe":
+            ts = self.train_method_kwargs.get("transition_size")
+            if ts is None or not (0 < ts <= self.vocab_size):
+                raise ValueError(
+                    f"method='superbpe' requires 0 < transition_size <= vocab_size; "
+                    f"got transition_size={ts}, vocab_size={self.vocab_size}"
+                )
+
+        os.makedirs(config.tokenizer_training.checkpoint_dir, exist_ok=True)
+
+        self.logger = WandbLogger(config, enabled=wandb_enabled)
+        self.metrics = TokenizerMetricsTracker(self.logger)
+        self.eval_texts: list[str] = []
+
+    # ---- Shared helpers ----
+
+    def _make_train_iter(
+        self,
+        dataset_iter: Callable[[], Iterable[str]],
+        eval_texts: list[str],
+    ) -> Callable[[], Iterable[str]]:
+        """Factory: returns a zero-arg callable that yields a fresh training
+        stream skipping the eval slice. Tiny-dataset fallback: if the source
+        is exhausted by the eval slice, train on `eval_texts` itself.
+        """
+
+        def _factory() -> Iterable[str]:
+            it = itertools.islice(dataset_iter(), self.eval_num_docs, None)
+            try:
+                first = next(it)
+                return itertools.chain([first], it)
+            except StopIteration:
+                return iter(eval_texts)
+
+        return _factory
+
+    def _progress_callback(
+        self, use_regex: bool, checkpoint: bool
+    ) -> Callable[[int, dict, list], None]:
+        """Factory: returns a `BpeTrainer.progress_callback` that, on the
+        coarser eval/checkpoint cadences, logs to W&B (every `eval_every`
+        merges, when the logger is enabled) and/or saves the partial tokenizer
+        to `save_path` (every `checkpoint_every` merges, when `checkpoint`).
+
+        The native callback fires at `BpeTrainer.progress_every` cadence;
+        `eval_every`/`checkpoint_every` must be multiples of it or the throttle
+        never fires. `use_regex` selects the eval/save-time pretokenizer
+        (True for "bpe", False for superbpe passes — matching the saved config).
+        """
+
+        def _callback(vocab_size: int, vocab: dict, merges: list) -> None:
+            do_log = self.logger.enabled and vocab_size % self.eval_every == 0
+            do_ckpt = checkpoint and vocab_size % self.checkpoint_every == 0
+            if not (do_log or do_ckpt):
+                return
+            tok = Tokenizer(models.BPE(vocab=vocab, merges=merges))
+            tok.pre_tokenizer = pre_tokenizers.ByteLevel(
+                add_prefix_space=False, use_regex=use_regex
+            )
+            tok.decoder = decoders.ByteLevel()
+            if do_log:
+                self.metrics.log_train(tok, vocab_size, self.eval_texts)
+            if do_ckpt:
+                self._save_checkpoint(tok)
+
+        return _callback
+
+    def _save_checkpoint(self, tokenizer: Tokenizer) -> None:
+        """Save the tokenizer to `checkpoint_dir/tokenizer.json`."""
+        path = os.path.join(
+            self.config.tokenizer_training.checkpoint_dir, "tokenizer.json"
+        )
+        tokenizer.save(path)
+
+    @staticmethod
+    def evaluate(
+        tokenizer_path: str,
+        text_iter: Iterable[str],
+        batch_size: int = 1000,
+    ) -> dict:
+        """Evaluate a saved tokenizer's encoding efficiency on a stream of texts.
+
+        Returns {n_docs, n_bytes, n_tokens, bytes_per_token, tokens_per_byte}.
+        """
+        tokenizer = load_tokenizer(tokenizer_path)
+        n_docs = 0
+        n_bytes = 0
+        n_tokens = 0
+        batch: list[str] = []
+        for text in text_iter:
+            batch.append(text)
+            n_bytes += len(text.encode("utf-8"))
+            n_docs += 1
+            if len(batch) >= batch_size:
+                encs = tokenizer.encode_batch(batch, add_special_tokens=False)
+                n_tokens += sum(len(e.ids) for e in encs)
+                batch = []
+        if batch:
+            encs = tokenizer.encode_batch(batch, add_special_tokens=False)
+            n_tokens += sum(len(e.ids) for e in encs)
+        if n_tokens == 0:
+            raise ValueError("no tokens produced; corpus may be empty")
+        if n_bytes == 0:
+            raise ValueError("no bytes produced; corpus may be empty")
+        return {
+            "n_docs": n_docs,
+            "n_bytes": n_bytes,
+            "n_tokens": n_tokens,
+            "bytes_per_token": n_bytes / n_tokens,
+            "tokens_per_byte": n_tokens / n_bytes,
+        }
+
+    def train(self, dataset_iter: Callable[[], Iterable[str]]) -> Tokenizer:
+        """Train and save a tokenizer.
+
+        `dataset_iter` is a zero-arg callable that returns a fresh text
+        iterable each time it's called. SuperBPE needs the corpus twice
+        (stage 1 training + stage 2 re-encoding) and we refuse to materialize
+        the whole stream in memory — so the caller must provide something
+        replayable (a generator function, an iterable, etc.).
+        """
+        # Pull eval_texts from the front of a fresh stream.
+        eval_texts = list(itertools.islice(dataset_iter(), self.eval_num_docs))
+        if not eval_texts:
+            raise ValueError("dataset_iter produced no text")
+        self.eval_texts = eval_texts
+
+        make_train_iter = self._make_train_iter(dataset_iter, eval_texts)
+
+        if self.train_method == "bpe":
+            tokenizer = self._train_bpe(make_train_iter)
+        else:
+            tokenizer = self._train_superbpe(make_train_iter)
+
+        self._save_checkpoint(tokenizer)
+        print(
+            f"{self.train_method.upper()} tokenizer saved to "
+            f"{self.config.tokenizer_training.checkpoint_dir}/ "
+            f"(vocab_size={tokenizer.get_vocab_size()})"
+        )
+        self.logger.finish()
+        return tokenizer
+
+    # ---- BPE ----
+
+    def _train_bpe(self, make_train_iter: Callable[[], Iterable[str]]) -> Tokenizer:
+        bpe = BpeTrainer(
+            vocab_size=self.vocab_size,
+            special_tokens=self._SPECIAL_TOKENS,
+            pretokenizer="bpe",
+            progress_callback=self._progress_callback(use_regex=True, checkpoint=True),
+            show_progress=True,
+            progress_desc="[bpe]",
+        )
+        vocab, merges = bpe.train(make_train_iter)
+
+        tokenizer = Tokenizer(models.BPE(vocab=vocab, merges=merges))
+        tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        tokenizer.decoder = decoders.ByteLevel()
+        return tokenizer
+
+    # ---- SuperBPE ----
+
+    def _train_superbpe(
+        self, make_train_iter: Callable[[], Iterable[str]]
+    ) -> Tokenizer:
+        transition_size = self.train_method_kwargs["transition_size"]
+        max_superword_words = self.train_method_kwargs["max_superword_words"]
+
+        # ---- Subword pass: standard BPE with paper-default whitespace pretokenization ----
+        t0 = time.perf_counter()
+        subword_bpe = BpeTrainer(
+            vocab_size=transition_size,
+            special_tokens=self._SPECIAL_TOKENS,
+            pretokenizer="bpe",
+            progress_callback=self._progress_callback(use_regex=False, checkpoint=False)
+            if self.logger.enabled
+            else None,
+            show_progress=True,
+            progress_desc="[superbpe][subword pass]",
+        )
+        subword_vocab, subword_merges = subword_bpe.train(make_train_iter)
+
+        subword_tok = Tokenizer(models.BPE(vocab=subword_vocab, merges=subword_merges))
+        subword_tok.pre_tokenizer = pre_tokenizers.ByteLevel(
+            add_prefix_space=False, use_regex=False
+        )
+        subword_tok.decoder = decoders.ByteLevel()
+        subword_tok.save(
+            os.path.join(
+                self.config.tokenizer_training.checkpoint_dir, "subword_tokenizer.json"
+            )
+        )
+        print(
+            f"SuperBPE subword pass done: vocab_size={len(subword_vocab)} "
+            f"({time.perf_counter() - t0:.2f}s)"
+        )
+
+        # ---- Superword pass: byte-level chunking + SuperBPE filters ----
+        t0 = time.perf_counter()
+
+        def superbpe_filter(a: str, b: str, merged: str) -> bool:
+            if ":Ġ" in merged:
+                return False
+            word_count = merged.count("Ġ") + (0 if merged.startswith("Ġ") else 1)
+            return word_count <= max_superword_words
+
+        superword_bpe = BpeTrainer(
+            vocab_size=self.vocab_size,
+            special_tokens=self._SPECIAL_TOKENS,
+            pretokenizer="bytelevel",
+            initial_vocab=subword_vocab,
+            initial_merges=subword_merges,
+            merge_filter=superbpe_filter,
+            progress_callback=self._progress_callback(use_regex=False, checkpoint=True),
+            show_progress=True,
+            progress_desc="[superbpe][superword pass]",
+        )
+        vocab, merges = superword_bpe.train(make_train_iter)
+        print(
+            f"SuperBPE superword pass done: vocab_size={len(vocab)} "
+            f"({time.perf_counter() - t0:.2f}s)"
+        )
+
+        final = Tokenizer(models.BPE(vocab=vocab, merges=merges))
+        final.pre_tokenizer = pre_tokenizers.ByteLevel(
+            add_prefix_space=False, use_regex=False
+        )
+        final.decoder = decoders.ByteLevel()
+        return final

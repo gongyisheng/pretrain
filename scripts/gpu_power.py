@@ -8,6 +8,7 @@ sudo python3 scripts/gpu_power.py 300 --gpu 0   # GPU 0 only
 sudo python3 scripts/gpu_power.py 300 --gpu 0,1 # GPUs 0 and 1
 sudo python3 scripts/gpu_power.py default       # restore driver default
 """
+
 import argparse
 import sys
 from pynvml import (
@@ -46,10 +47,13 @@ def parse_gpus(arg: str | None, total: int) -> list[int]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Set NVIDIA GPU power limit via NVML.")
-    parser.add_argument("watts", help="power limit in watts (e.g. 300), or 'default' to restore")
+    parser.add_argument(
+        "watts",
+        help="power limit in watts (e.g. 300), or 'default' to restore"
+    )
     parser.add_argument(
         "--gpu",
-        help="comma-separated GPU indices (e.g. 0 or 0,1). Defaults to all GPUs.",
+        help="comma-separated GPU indices (e.g. 0 or 0,1). Defaults to all GPUs."
     )
     args = parser.parse_args()
 

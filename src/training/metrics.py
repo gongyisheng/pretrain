@@ -8,7 +8,7 @@ log-cadence timing, cached optimizer step-norms, running token totals
 trainer feeds it raw numbers and never assembles a log_dict itself.
 
 Setup (once):
-    print_model_summary(model)            # startup banner: param counts + device
+    print_model_summary()                 # startup banner: param counts + device
     train_begin()                         # reset the log-window timer
 
 Lifecycle per optimizer step:
@@ -29,6 +29,7 @@ Eval:
 import time
 
 import torch
+from tokenizers import Tokenizer
 
 from src.utils import metric_utils
 from src.utils.config import TrainConfig
@@ -48,13 +49,13 @@ class MetricsTracker:
         self.device = device
         self.logger = logger
 
-        self.is_moe = config.model.arch == "qwen3_moe"
+        self.is_moe = config.model.mlp_cls == "moe"
         if self.is_moe:
             self._aux_floor = (
-                config.model.n_layers * config.model.moe_n_experts_per_token
+                config.model.n_layers * config.model.mlp_kwargs["n_experts_per_token"]
             )
 
-        self.flops_per_token = metric_utils.compute_flops_per_token(config)
+        self._flops_per_token = metric_utils.compute_flops_per_token(config)
         self._gpu_peak_flops = metric_utils.estimate_gpu_peak_flops(device)
         self.tokens_per_step = (
             config.training.batch_size
@@ -95,23 +96,23 @@ class MetricsTracker:
     # Model summary
     # ------------------------------------------------------------------
 
-    def print_model_summary(self, model: torch.nn.Module) -> None:
+    def print_model_summary(self) -> None:
         """Print the one-line startup banner (param counts + device).
 
         MoE models report total params + active (k-expert) non-embedding params;
         dense models report total + non-embedding.
         """
-        counts = metric_utils.count_parameters(model, self.config)
-        arch = self.config.model.arch
+        counts = metric_utils.count_parameters(self.config)
+        label = f"{self.config.model.attn_cls}+{self.config.model.mlp_cls}"
         if self.is_moe:
             msg = (
-                f"Model: {arch} | {counts['total'] / 1e6:.1f}M total params "
+                f"Model: {label} | {counts['total'] / 1e6:.1f}M total params "
                 f"({counts['active_non_emb'] / 1e6:.1f}M active non-embedding) "
                 f"| device={self.device}"
             )
         else:
             msg = (
-                f"Model: {arch} | {counts['total'] / 1e6:.1f}M params "
+                f"Model: {label} | {counts['total'] / 1e6:.1f}M params "
                 f"({counts['non_emb'] / 1e6:.1f}M non-embedding) | device={self.device}"
             )
         print(msg)
@@ -205,7 +206,7 @@ class MetricsTracker:
         d: dict[str, float] = {
             # train
             "train/loss": loss,
-            "train/flops": self.flops_per_token["total"] * self.total_tokens,
+            "train/flops": self._flops_per_token * self.total_tokens,
             "train/total_tokens": self.total_tokens,
             # optim
             "optim/lr": lr,
@@ -229,7 +230,7 @@ class MetricsTracker:
 
         # MFU
         if self._gpu_peak_flops and tokens_per_sec > 0:
-            flops_per_sec = self.flops_per_token["total"] * tokens_per_sec
+            flops_per_sec = self._flops_per_token * tokens_per_sec
             d["perf/mfu"] = flops_per_sec / self._gpu_peak_flops
 
         # GPU memory
@@ -368,3 +369,46 @@ class MetricsTracker:
         if "val/aux_loss" in d:
             msg += f" | val_aux_loss={d['val/aux_loss']:.4f}"
         return msg
+
+
+class TokenizerMetricsTracker:
+    """Assembles tokenizer-training metrics and dispatches them via its logger.
+
+    `eval_texts` (the held-out slice used to measure bytes/token) is passed per
+    call rather than held on the tracker. Logs are keyed by vocab_size as the
+    W&B step so curves plot against vocabulary growth.
+    """
+
+    def __init__(self, logger: WandbLogger):
+        self.logger = logger
+
+    def log_train(
+        self, tokenizer: Tokenizer, vocab_size: int, eval_texts: list[str]
+    ) -> None:
+        """Log a per-step point (vocab_size, bytes_per_token) for a (partial or
+        full) tokenizer."""
+        self.logger.log(
+            {
+                "vocab_size": vocab_size,
+                "bytes_per_token": metric_utils.compute_bytes_per_token(
+                    tokenizer, eval_texts
+                ),
+            },
+            step=vocab_size,
+        )
+
+    def log_eval(
+        self, tokenizer: Tokenizer, vocab_size: int, eval_texts: list[str]
+    ) -> None:
+        """Log an eval point. Identical to log_train for now; kept separate so
+        the two can diverge as eval-only metrics (coverage, OOV rate) are added.
+        """
+        self.logger.log(
+            {
+                "vocab_size": vocab_size,
+                "bytes_per_token": metric_utils.compute_bytes_per_token(
+                    tokenizer, eval_texts
+                ),
+            },
+            step=vocab_size,
+        )
