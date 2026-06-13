@@ -40,13 +40,13 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 ### Layers vs. models
 
-Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA, `ATTN_REGISTRY`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `block.py` (BaseTransformerBlock + AttnRes helpers). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/registry.py` constructs it from the config. Fused `@torch.compile` ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Cross-entropy is inlined at the top of `src/training/trainer.py`.
+Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA, `ATTN_REGISTRY`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `residual.py` (`StandardResidual`/`AttnResidual`, `RESIDUAL_REGISTRY`), `block.py` (`TransformerBlock`). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/__init__.py` constructs it from the config. Fused `@torch.compile` ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Loss functions live in `src/training/loss.py` (`LOSS_REGISTRY`, `compute_loss`), selected via `config.training.loss_fn`.
 
 GPT-2-style configs use `attn_cls: mha`, `mlp_cls: dense`, `norm_cls: layernorm`, `pos_emb_cls: learned`, with `mlp_kwargs: {activation: gelu, gated: false, bias: true}`. Qwen3-style configs use `attn_cls: gqa`, `mlp_cls: dense`, `norm_cls: rmsnorm`, `pos_emb_cls: rope`. MoE configs use `mlp_cls: moe`.
 
 ### Model registry
 
-`build_model(config)` in `src/model/registry.py` dispatches to `TransformerLM` using component registries: `ATTN_REGISTRY`, `MLP_REGISTRY`, `NORM_REGISTRY`, `POS_EMB_REGISTRY`, `RESIDUAL_REGISTRY`. To add a new component: implement the class, add it to the relevant registry in its owning layer file.
+`build_model(config)` in `src/model/__init__.py` constructs `TransformerLM`, which dispatches to components through the registries: `ATTN_REGISTRY`, `MLP_REGISTRY`, `NORM_REGISTRY`, `POS_EMB_REGISTRY`, `RESIDUAL_REGISTRY`. To add a new component: implement the class, add it to the relevant registry in its owning layer file.
 
 ### Config system
 
@@ -85,15 +85,15 @@ Model configs use the cls+kwargs schema. A Qwen3-style 57M config looks like:
 ```yaml
 model:
   d_model: 512
-  n_layers: 16
+  n_layers: 8
   vocab_size: 50257
   attn_cls: gqa
-  attn_kwargs: {n_heads: 8, n_kv_heads: 2, qk_norm: true}
+  attn_kwargs: {n_heads: 8, n_kv_heads: 4, qk_norm: true}
   mlp_cls: dense
   mlp_kwargs: {activation: silu, gated: true}
   norm_cls: rmsnorm
   pos_emb_cls: rope
-  pos_emb_kwargs: {rope_theta: 500000}
+  pos_emb_kwargs: {rope_theta: 10000.0}
 ```
 MoE replaces `mlp_cls: dense` with `mlp_cls: moe` and adds `mlp_kwargs: {n_experts: N, n_experts_per_token: K, ...}`.
 

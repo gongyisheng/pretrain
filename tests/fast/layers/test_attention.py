@@ -370,3 +370,19 @@ def test_gqa_compute_flops_qk_norm():
         64, 128, n_heads=2, n_kv_heads=1, qk_norm=True
     )
     assert on - off == 3 * (2 + 1) * 32
+
+
+@pytest.mark.parametrize(
+    "cls, kwargs",
+    [
+        (MultiHeadAttention, dict(n_heads=2)),
+        (MultiHeadAttention, dict(n_heads=2, bias=True, qk_norm=True)),
+        (GroupedQueryAttention, dict(n_heads=4, n_kv_heads=2)),
+        (GroupedQueryAttention, dict(n_heads=4, n_kv_heads=2, bias=True, qk_norm=True)),
+    ],
+)
+def test_compute_parameters_matches_module(cls, kwargs):
+    d_model = 64
+    module = cls(d_model, **kwargs)
+    actual = sum(p.numel() for p in module.parameters())
+    assert cls.compute_parameters(d_model, **kwargs) == actual

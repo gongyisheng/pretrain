@@ -14,10 +14,13 @@ from src.training.trainer import Trainer
 STEPS = 1
 
 _TOKENIZER_PATH = "tokenizers/custom_bpe_50k/tokenizer.json"
-_needs_tokenizer = pytest.mark.skipif(
-    not os.path.exists(_TOKENIZER_PATH),
-    reason=f"tokenizer not found at {_TOKENIZER_PATH}; run preprocess_data first",
-)
+
+
+def _require_tokenizer():
+    if not os.path.exists(_TOKENIZER_PATH):
+        pytest.fail(
+            f"tokenizer not found at {_TOKENIZER_PATH}; run preprocess_data first"
+        )
 
 
 def _run_dry_run(config_path):
@@ -39,11 +42,11 @@ def _run_dry_run(config_path):
     assert all(loss > 0 for loss in losses[1:])
 
 
-@_needs_tokenizer
 def test_gpt2_dry_run():
+    _require_tokenizer()
     _run_dry_run("configs/gpt2_124m.yaml")
 
 
-@_needs_tokenizer
 def test_qwen3_dry_run():
+    _require_tokenizer()
     _run_dry_run("configs/qwen3_57m.yaml")

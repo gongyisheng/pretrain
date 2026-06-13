@@ -13,7 +13,7 @@ from src.layers.mlp import (
 from tests.fast.layers._refs import (
     COMPOUND_DTYPES,
     SIMPLE_DTYPES,
-    ffn_ref,
+    dense_mlp_ref,
     moe_router_ref,
     sparse_moe_block_ref,
 )
@@ -97,7 +97,7 @@ def test_dense_compute_flops_gated_bias():
 
 
 # ---------------------------------------------------------------------------
-# DenseMLPBlock — numerical parity vs ffn_ref
+# DenseMLPBlock — numerical parity vs dense_mlp_ref
 # ---------------------------------------------------------------------------
 
 
@@ -115,7 +115,9 @@ def test_dense_ungated_matches_ref(activation, dtype, atol):
     blk.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)
     out, _ = blk(x)
-    out_ref = ffn_ref(x, blk.down_proj, activation=activation, up_proj=blk.up_proj)
+    out_ref = dense_mlp_ref(
+        x, blk.down_proj, activation=activation, up_proj=blk.up_proj
+    )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
@@ -134,7 +136,7 @@ def test_dense_gated_matches_ref(activation, dtype, atol):
     blk.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)
     out, _ = blk(x)
-    out_ref = ffn_ref(
+    out_ref = dense_mlp_ref(
         x, blk.down_proj, activation=activation, gate_up_proj=blk.gate_up_proj
     )
     assert out.dtype == dtype

@@ -374,10 +374,10 @@ def mla_ref(
     return m.o_proj(attn.transpose(1, 2).reshape(B, S, H * vdim))
 
 
-# ---------------------------- FFN ----------------------------
+# ---------------------------- Dense MLP ----------------------
 
 
-def ffn_ref(
+def dense_mlp_ref(
     x: torch.Tensor,
     down_proj: nn.Linear,
     activation: str,
@@ -437,7 +437,7 @@ def sparse_moe_block_ref(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eager sparse MoE: naive per-(token, slot) expert dispatch.
 
-    Mirrors FFN's gated/ungated split:
+    Mirrors MLP's gated/ungated split:
       - gated   (expert_gate_up given): hidden = act(gate)*up via GATED_ACTIVATIONS_REFS
       - ungated (expert_up given):      hidden = act(up)      via UNGATED_ACTIVATIONS_REFS
     Returns (output (B,S,D), aux_loss scalar) — Switch Transformer load-balancing loss.
