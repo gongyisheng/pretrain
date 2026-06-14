@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. One unified model (`TransformerLM`) assembled from registered components: `mha`/`gqa` attention, `dense`/`moe` MLP, `rmsnorm`/`layernorm` norm, `rope`/`learned` pos_emb. Fused `@torch.compile` ops live inside their owning layer files under `src/layers/`.
+Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. One unified model (`TransformerLM`) assembled from registered components: `mha`/`gqa`/`mla` attention, `dense`/`moe` MLP, `rmsnorm`/`layernorm` norm, `rope`/`learned` pos_emb. Fused `@torch.compile` ops live inside their owning layer files under `src/layers/`.
 
 ## Commands
 
@@ -40,7 +40,7 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 ### Layers vs. models
 
-Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA, `ATTN_REGISTRY`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `residual.py` (`StandardResidual`/`AttnResidual`, `RESIDUAL_REGISTRY`), `block.py` (`TransformerBlock`). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/__init__.py` constructs it from the config. Fused `@torch.compile` ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Loss functions live in `src/training/loss.py` (`LOSS_REGISTRY`, `compute_loss`), selected via `config.training.loss_fn`.
+Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA + MLA, `ATTN_REGISTRY`; MLA = `MultiHeadLatentAttention`, DeepSeek-V2/V3 low-rank KV/Q compression with decoupled RoPE — `qk_rope_head_dim` carries position, the shared RoPE is sized to it in `transformer.py`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `residual.py` (`StandardResidual`/`AttnResidual`, `RESIDUAL_REGISTRY`), `block.py` (`TransformerBlock`). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/__init__.py` constructs it from the config. Fused `@torch.compile` ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, flash_attn, moe routing/scatter/ffn) are module-level functions in their owning file. Loss functions live in `src/training/loss.py` (`LOSS_REGISTRY`, `compute_loss`), selected via `config.training.loss_fn`.
 
 GPT-2-style configs use `attn_cls: mha`, `mlp_cls: dense`, `norm_cls: layernorm`, `pos_emb_cls: learned`, with `mlp_kwargs: {activation: gelu, gated: false, bias: true}`. Qwen3-style configs use `attn_cls: gqa`, `mlp_cls: dense`, `norm_cls: rmsnorm`, `pos_emb_cls: rope`. MoE configs use `mlp_cls: moe`.
 
@@ -68,6 +68,10 @@ Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated ui
 
 1. Run related tests before and after changes to confirm nothing breaks.
 2. For perf-sensitive changes, run `benchmarks/bench_train.py` before/after to guard against regressions.
+
+### Config defaults and validation
+
+All default config values and validation logic live in `ModelConfig.__post_init__` (and the other dataclasses) in `src/utils/config.py` — not in component constructors. Components (attention/mlp/etc.) take resolved values as explicit args; `__post_init__` fills `*_kwargs` defaults via `setdefault` and raises on invalid combinations. This keeps `config.py` the single source of truth for what a config means (e.g. MLA head dims default off `d_model // n_heads` there, and `transformer.py` reads them back from the populated `attn_kwargs`).
 
 ### Dtype handling
 
