@@ -49,5 +49,5 @@ scheduler:
   min_lr: 6e-5
 logging:
   wandb_project: pretrain-fp8
-  wandb_run_name: qwen3-57m-fp8-rowwise_with_gw_hp
+  wandb_run_name: qwen3-57m-fp8-rowwise-with-gw-hp
   log_every: 10
