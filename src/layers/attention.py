@@ -287,7 +287,9 @@ class MultiHeadLatentAttention(nn.Module):
         if q_lora_rank > 0:
             self.q_a_proj = nn.Linear(d_model, q_lora_rank, bias=bias)
             self.q_a_norm = RMSNorm(q_lora_rank)
-            self.q_b_proj = nn.Linear(q_lora_rank, n_heads * self.qk_head_dim, bias=bias)
+            self.q_b_proj = nn.Linear(
+                q_lora_rank, n_heads * self.qk_head_dim, bias=bias
+            )
         else:
             self.q_proj = nn.Linear(d_model, n_heads * self.qk_head_dim, bias=bias)
 
@@ -397,7 +399,9 @@ class MultiHeadLatentAttention(nn.Module):
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         compressed = self.kv_a_proj(x)
-        c_kv, k_rope = compressed.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        c_kv, k_rope = compressed.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
         # (B, 1, S, qk_rope_head_dim), shared across heads
         k_rope = k_rope.view(B, S, 1, self.qk_rope_head_dim).transpose(1, 2)
         kv = self.kv_b_proj(self.kv_a_norm(c_kv))
