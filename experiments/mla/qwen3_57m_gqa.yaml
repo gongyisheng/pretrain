@@ -24,7 +24,7 @@ data:
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
-  max_steps: 6500
+  max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
   checkpoint_dir: checkpoints/mla/gqa/
@@ -40,9 +40,9 @@ optimizer:
   - 0.95
 scheduler:
   name: cosine
-  warmup_steps: 200
+  warmup_steps: 1000
   min_lr: 6e-5
 logging:
   wandb_project: pretrain-mla
-  wandb_run_name: mla-gqa
+  wandb_run_name: qwen3-57m-gqa
   log_every: 10

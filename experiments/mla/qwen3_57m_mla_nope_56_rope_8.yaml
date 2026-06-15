@@ -1,4 +1,4 @@
-# q_lora_rank on: 384, query compression (kv_lora=256, qk_rope=32 fixed).
+# Phase 3 qk_nope:qk_rope split: 56:8 (total=64, v_head=64, kv_lora=512 fixed).
 max_seq_len: 1024
 model:
   d_model: 512
@@ -7,11 +7,11 @@ model:
   attn_cls: mla
   attn_kwargs:
     n_heads: 8
-    qk_nope_head_dim: 64
-    qk_rope_head_dim: 32
+    qk_nope_head_dim: 56
+    qk_rope_head_dim: 8
     v_head_dim: 64
-    kv_lora_rank: 256
-    q_lora_rank: 384
+    kv_lora_rank: 512
+    q_lora_rank: 0
   mlp_cls: dense
   mlp_kwargs: {}
   norm_cls: rmsnorm
@@ -27,10 +27,10 @@ data:
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
-  max_steps: 6500
+  max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/mla/qlora384/
+  checkpoint_dir: checkpoints/mla/nope_56_rope_8/
   checkpoint_every: 500
   eval_every: 100
   eval_steps: 25
@@ -43,9 +43,9 @@ optimizer:
   - 0.95
 scheduler:
   name: cosine
-  warmup_steps: 200
+  warmup_steps: 1000
   min_lr: 6e-5
 logging:
   wandb_project: pretrain-mla
-  wandb_run_name: mla-qlora384
+  wandb_run_name: qwen3-57m-mla-nope-56-rope-8
   log_every: 10

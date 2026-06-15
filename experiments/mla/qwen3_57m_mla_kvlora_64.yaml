@@ -1,13 +1,17 @@
-# MHA baseline (quality ceiling).
+# Phase 2 kv_lora_rank sweep: 64 (nope=32, rope=32, v_head=64 fixed).
 max_seq_len: 1024
 model:
   d_model: 512
   n_layers: 8
   vocab_size: 50257
-  attn_cls: mha
+  attn_cls: mla
   attn_kwargs:
     n_heads: 8
-    qk_norm: true
+    qk_nope_head_dim: 32
+    qk_rope_head_dim: 32
+    v_head_dim: 64
+    kv_lora_rank: 64
+    q_lora_rank: 0
   mlp_cls: dense
   mlp_kwargs: {}
   norm_cls: rmsnorm
@@ -26,7 +30,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/mla/mha/
+  checkpoint_dir: checkpoints/mla/kvlora_64/
   checkpoint_every: 500
   eval_every: 100
   eval_steps: 25
@@ -43,5 +47,5 @@ scheduler:
   min_lr: 6e-5
 logging:
   wandb_project: pretrain-mla
-  wandb_run_name: qwen3-57m-mha
+  wandb_run_name: qwen3-57m-mla-kvlora-64
   log_every: 10
