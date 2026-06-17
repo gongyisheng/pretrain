@@ -51,6 +51,6 @@ scheduler:
   warmup_steps: 300
   min_lr: 6e-5
 logging:
-  wandb_project: pretrain
+  wandb_project: pretrain-moe-aux-loss
   wandb_run_name: qwen3-moe-auxloss-coef1e-2
   log_every: 10

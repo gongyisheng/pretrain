@@ -52,6 +52,6 @@ scheduler:
   warmup_steps: 300
   min_lr: 6e-5
 logging:
-  wandb_project: pretrain
+  wandb_project: pretrain-moe-expert-bias
   wandb_run_name: qwen3-moe-expertbias-rate3e-4
   log_every: 10
