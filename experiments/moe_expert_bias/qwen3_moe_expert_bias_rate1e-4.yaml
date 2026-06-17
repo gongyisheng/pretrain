@@ -17,7 +17,7 @@ model:
     expert_capacity_factor: 1.25
     dropout: 0.0
     expert_bias: true
-    expert_bias_update_rate: 0.001
+    expert_bias_update_rate: 0.0001
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -36,7 +36,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_expert_bias/qwen3_moe_bias_rate1e-3/
+  checkpoint_dir: checkpoints/moe_expert_bias/qwen3_moe_expert_bias_rate1e-4/
   checkpoint_every: 500
   eval_every: 100
   eval_steps: 25
@@ -53,5 +53,5 @@ scheduler:
   min_lr: 6e-5
 logging:
   wandb_project: pretrain-moe-expert-bias
-  wandb_run_name: qwen3-moe-expertbias-rate1e-3
+  wandb_run_name: qwen3-moe-expertbias-rate1e-4
   log_every: 10

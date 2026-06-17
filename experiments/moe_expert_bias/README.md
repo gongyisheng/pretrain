@@ -31,18 +31,18 @@ only `expert_bias_update_rate` varies.
 
 | Config | expert_bias_update_rate |
 |--------|-------------------------|
-| `qwen3_moe_bias_rate1e-4` | 0.0001 |
-| `qwen3_moe_bias_rate3e-4` | 0.0003 |
-| `qwen3_moe_bias_rate1e-3` | 0.001 (DeepSeek-V3 default) |
-| `qwen3_moe_bias_rate3e-3` | 0.003 |
-| `qwen3_moe_bias_rate1e-2` | 0.01 |
+| `qwen3_moe_expert_bias_rate1e-4` | 0.0001 |
+| `qwen3_moe_expert_bias_rate3e-4` | 0.0003 |
+| `qwen3_moe_expert_bias_rate1e-3` | 0.001 (DeepSeek-V3 default) |
+| `qwen3_moe_expert_bias_rate3e-3` | 0.003 |
+| `qwen3_moe_expert_bias_rate1e-2` | 0.01 |
 
 ## Run
 
 ```bash
 nohup bash experiments/moe_expert_bias/run.sh > logs/moe_expert_bias.log 2>&1 &
 # single:
-uv run python scripts/train.py --config experiments/moe_expert_bias/qwen3_moe_bias_rate1e-3.yaml
+uv run python scripts/train.py --config experiments/moe_expert_bias/qwen3_moe_expert_bias_rate1e-3.yaml
 ```
 
 ## Results
