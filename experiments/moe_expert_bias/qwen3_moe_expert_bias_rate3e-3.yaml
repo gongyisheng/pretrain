@@ -16,6 +16,7 @@ model:
     n_experts_per_token: 2
     expert_capacity_factor: 1.25
     dropout: 0.0
+    aux_loss: false
     expert_bias: true
     expert_bias_update_rate: 0.003
   norm_cls: rmsnorm
