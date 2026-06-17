@@ -12,7 +12,7 @@ dir=experiments/moe_shared_experts
 configs=()
 for s in "${shared_counts[@]}"; do
   for k in "${routed_ks[@]}"; do
-    match=("$dir"/*-shared-"${s}"-routed-"${k}".yaml)
+    match=("$dir"/*-s"${s}"-r"${k}".yaml)
     configs+=("${match[0]}")
   done
 done
