@@ -55,9 +55,21 @@ class ModelConfig:
             )
         if self.mlp_cls == "moe":
             self.mlp_kwargs.setdefault("n_experts_per_token", 2)
-            self.mlp_kwargs.setdefault("aux_loss_coef", 0.01)
             self.mlp_kwargs.setdefault("expert_capacity_factor", None)
             self.mlp_kwargs.setdefault("bias", False)
+            # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
+            # exclusive balancing strategies; aux_loss defaults on unless the
+            # bias rule is requested.
+            self.mlp_kwargs.setdefault("expert_bias", False)
+            self.mlp_kwargs.setdefault("aux_loss", not self.mlp_kwargs["expert_bias"])
+            if self.mlp_kwargs["aux_loss"] and self.mlp_kwargs["expert_bias"]:
+                raise ValueError(
+                    "aux_loss and expert_bias are mutually exclusive MoE balancing strategies"
+                )
+            if self.mlp_kwargs["expert_bias"]:
+                self.mlp_kwargs.setdefault("expert_bias_update_rate", 0.001)
+            if self.mlp_kwargs["aux_loss"]:
+                self.mlp_kwargs.setdefault("aux_loss_coef", 0.01)
 
 
 @dataclass
