@@ -1,0 +1,63 @@
+# MoE Aux-Loss Coefficient Sweep
+
+## Hypothesis
+
+The Switch Transformer load-balancing loss adds `α · E · Σ_i f_i·P_i` to the
+objective. `α` (`aux_loss_coef`) trades off balancing strength against
+interference with the language-modeling gradient:
+
+- Too small → experts collapse, tokens dropped at capacity, val loss rises.
+- Too large → the balancing gradient dominates, hurting LM quality.
+
+There should be a sweet spot near the Switch default `0.01`. This sweep finds
+the `aux_loss_coef` that minimizes validation loss.
+
+## Setup
+
+Fixed testbed: `qwen3_moe_133m` architecture (133M total, ~35M active), 64
+experts, top-2, capacity factor 1.25. Only `aux_loss_coef` varies.
+
+| Param | Value |
+|-------|-------|
+| d_model / n_layers | 512 / 8 |
+| n_experts / top-k | 64 / 2 |
+| expert_capacity_factor | 1.25 |
+| batch × grad_accum × seq | 16 × 16 × 1024 (≈0.26M tok/step) |
+| max_steps | 8000 (≈2.1B tokens) |
+| lr / min_lr / warmup | 6e-4 / 6e-5 / 300 |
+
+| Config | aux_loss_coef |
+|--------|---------------|
+| `qwen3_moe_aux_coef1e-3` | 0.001 |
+| `qwen3_moe_aux_coef3e-3` | 0.003 |
+| `qwen3_moe_aux_coef1e-2` | 0.01 (Switch default) |
+| `qwen3_moe_aux_coef3e-2` | 0.03 |
+| `qwen3_moe_aux_coef1e-1` | 0.1 |
+
+## Run
+
+```bash
+nohup bash experiments/moe_aux_loss/run.sh > logs/moe_aux_loss.log 2>&1 &
+# single:
+uv run python scripts/train.py --config experiments/moe_aux_loss/qwen3_moe_aux_coef1e-2.yaml
+```
+
+## Results
+
+`train/aux_loss` and `val/aux_loss` (reported minus the balanced floor
+`n_layers · k`) measure imbalance; lower is better balanced.
+
+| aux_loss_coef | val_loss | val_aux_loss (balance) | notes |
+|---------------|----------|------------------------|-------|
+| 0.001 | | | |
+| 0.003 | | | |
+| 0.01  | | | |
+| 0.03  | | | |
+| 0.1   | | | |
+
+Best: _TBD_
+
+## Notes
+
+- Compare against the expert-bias sweep in `../moe_expert_bias/` (same testbed)
+  to see whether auxiliary-loss-free balancing matches or beats the best `α`.
