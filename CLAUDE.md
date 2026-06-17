@@ -95,7 +95,7 @@ model:
   pos_emb_cls: rope
   pos_emb_kwargs: {rope_theta: 10000.0}
 ```
-MoE replaces `mlp_cls: dense` with `mlp_cls: moe` and adds `mlp_kwargs: {n_experts: N, n_experts_per_token: K, ...}`.
+MoE replaces `mlp_cls: dense` with `mlp_cls: moe` and adds `mlp_kwargs: {n_routed_experts: N, n_routed_experts_per_token: K, n_shared_experts: 0, ...}`.
 
 Standard LR by model size (from scaling law experiments, `min_lr` = `lr / 10`):
 

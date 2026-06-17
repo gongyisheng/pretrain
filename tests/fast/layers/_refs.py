@@ -408,7 +408,7 @@ def dense_mlp_ref(
 def moe_router_ref(
     x: torch.Tensor,
     gate_weight: torch.Tensor,
-    n_experts_per_token: int,
+    n_routed_experts_per_token: int,
     normalize: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Eager MoE router: softmax(x @ gate.T) → topk → optional sum-to-1 normalize.
@@ -419,7 +419,9 @@ def moe_router_ref(
     dtype = x.dtype
     logits = x.float() @ gate_weight.float().T
     router_probs = logits.softmax(-1)
-    top_weights, top_indices = torch.topk(router_probs, n_experts_per_token, dim=-1)
+    top_weights, top_indices = torch.topk(
+        router_probs, n_routed_experts_per_token, dim=-1
+    )
     if normalize:
         top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
     return top_indices, top_weights.to(dtype), router_probs.to(dtype)
@@ -429,7 +431,7 @@ def sparse_moe_block_ref(
     x: torch.Tensor,
     gate_weight: torch.Tensor,
     expert_down: torch.Tensor,
-    n_experts_per_token: int,
+    n_routed_experts_per_token: int,
     activation: str = "silu",
     expert_gate_up: torch.Tensor | None = None,
     expert_up: torch.Tensor | None = None,
@@ -452,12 +454,12 @@ def sparse_moe_block_ref(
     x_flat = x.view(T, D)
 
     top_indices, top_weights, router_probs = moe_router_ref(
-        x_flat, gate_weight, n_experts_per_token, normalize=normalize
+        x_flat, gate_weight, n_routed_experts_per_token, normalize=normalize
     )
 
     output = torch.zeros_like(x_flat)
     for t in range(T):
-        for slot in range(n_experts_per_token):
+        for slot in range(n_routed_experts_per_token):
             e = top_indices[t, slot].item()
             w = top_weights[t, slot]
             if expert_gate_up is not None:

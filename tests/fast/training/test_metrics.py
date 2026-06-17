@@ -286,8 +286,8 @@ def test_eval_moe_aux_loss_subtracts_floor():
             attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
             mlp_cls="moe",
             mlp_kwargs={
-                "n_experts": 4,
-                "n_experts_per_token": 2,
+                "n_routed_experts": 4,
+                "n_routed_experts_per_token": 2,
                 "intermediate_size": 128,
             },
         )
@@ -327,8 +327,8 @@ def test_print_model_summary_moe(capsys):
             attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
             mlp_cls="moe",
             mlp_kwargs={
-                "n_experts": 4,
-                "n_experts_per_token": 2,
+                "n_routed_experts": 4,
+                "n_routed_experts_per_token": 2,
                 "intermediate_size": 128,
             },
         ),

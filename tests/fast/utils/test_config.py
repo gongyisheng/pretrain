@@ -288,7 +288,7 @@ model:
 
 @pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
 def test_modelconfig_resolves_intermediate_size(mlp_cls):
-    extra = {"n_experts": 4} if mlp_cls == "moe" else {}
+    extra = {"n_routed_experts": 4} if mlp_cls == "moe" else {}
     cfg = ModelConfig(d_model=128, mlp_cls=mlp_cls, mlp_kwargs=dict(extra))
     assert cfg.mlp_kwargs["intermediate_size"] == 4 * 128
     # explicit value preserved

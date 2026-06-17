@@ -153,7 +153,7 @@ class DenseMLPBlock(nn.Module):
 def _route(
     top_indices: torch.Tensor,
     top_weights: torch.Tensor,
-    n_experts: int,
+    n_routed_experts: int,
     capacity_factor: float,
 ) -> tuple:
     """Sort-based MoE token routing with fixed capacity (drops overflow tokens).
@@ -161,14 +161,14 @@ def _route(
     Args:
         top_indices: (T, k) — expert indices per token
         top_weights: (T, k) — routing weights per token
-        n_experts: total number of experts
+        n_routed_experts: total number of experts
         capacity_factor: fixed capacity = T * k * factor / E
 
     Returns:
         expert_ids, token_ids, weights, positions, capacity, expert_counts
     """
     T, k = top_indices.shape
-    E = n_experts
+    E = n_routed_experts
     device = top_indices.device
 
     flat_expert_ids = top_indices.reshape(-1)
@@ -243,15 +243,15 @@ class MoERouter(nn.Module):
     def __init__(
         self,
         d_model: int,
-        n_experts: int,
-        n_experts_per_token: int,
+        n_routed_experts: int,
+        n_routed_experts_per_token: int,
         normalize: bool = True,
     ):
         super().__init__()
-        self.n_experts = n_experts
-        self.n_experts_per_token = n_experts_per_token
+        self.n_routed_experts = n_routed_experts
+        self.n_routed_experts_per_token = n_routed_experts_per_token
         self.normalize = normalize
-        self.gate = nn.Linear(d_model, n_experts, bias=False)
+        self.gate = nn.Linear(d_model, n_routed_experts, bias=False)
 
     def _apply(self, fn, recurse: bool = True):
         # Pin gate.weight to fp32 across .to(bf16) / .bfloat16() / .float() / etc.
@@ -267,7 +267,7 @@ class MoERouter(nn.Module):
             logits = self.gate(x.float())
             router_probs = logits.softmax(-1)
         top_weights, top_indices = torch.topk(
-            router_probs, self.n_experts_per_token, dim=-1
+            router_probs, self.n_routed_experts_per_token, dim=-1
         )
         if self.normalize:
             top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
@@ -290,7 +290,7 @@ class SparseMoEBlock(nn.Module):
     Mirrors DenseMLPBlock's gated/ungated split: by default `gated=True, activation="silu"`
     (SwiGLU experts); set `gated=False` for ungated experts.
 
-    Note: aux_loss scale grows linearly with n_experts_per_token (k). Under balanced
+    Note: aux_loss scale grows linearly with n_routed_experts_per_token (k). Under balanced
     routing the expected value is approximately k. Callers using aux_loss_coef should
     account for this when comparing runs across different k values.
     """
@@ -300,8 +300,9 @@ class SparseMoEBlock(nn.Module):
         d_model: int,
         *,
         intermediate_size: int,
-        n_experts: int,
-        n_experts_per_token: int = 2,
+        n_routed_experts: int,
+        n_routed_experts_per_token: int = 2,
+        n_shared_experts: int = 0,
         aux_loss_coef: float = 0.01,
         expert_capacity_factor: float = None,
         activation: str = "silu",
@@ -312,39 +313,55 @@ class SparseMoEBlock(nn.Module):
         super().__init__()
         # Defaults/validation (intermediate_size, activation) live in ModelConfig.
         registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
-        self.n_experts = n_experts
-        self.n_experts_per_token = n_experts_per_token
+        self.n_routed_experts = n_routed_experts
+        self.n_routed_experts_per_token = n_routed_experts_per_token
+        self.n_shared_experts = n_shared_experts
         self.aux_loss_coef = aux_loss_coef
         self.expert_capacity_factor = expert_capacity_factor
         self.gated = gated
         self.act_fn = registry[activation]
-        self.router = MoERouter(d_model, n_experts, n_experts_per_token)
+        self.router = MoERouter(d_model, n_routed_experts, n_routed_experts_per_token)
+
+        # DeepSeekMoE shared experts: always-on FFN run on every token, merged
+        # into one dense block of width n_shared_experts * intermediate_size and
+        # added to the routed output. Not part of routing or the aux loss.
+        if n_shared_experts > 0:
+            self.shared_expert = DenseMLPBlock(
+                d_model,
+                intermediate_size=n_shared_experts * intermediate_size,
+                activation=activation,
+                gated=gated,
+                bias=bias,
+                dropout=dropout,
+            )
+        else:
+            self.shared_expert = None
 
         # Stacked expert weights: (E, out, in) following nn.Linear convention.
         # Gated path fuses gate and up into one tensor (one bmm vs two).
         if gated:
             self.expert_gate_up = nn.Parameter(
-                torch.empty(n_experts, 2 * intermediate_size, d_model)
+                torch.empty(n_routed_experts, 2 * intermediate_size, d_model)
             )
             self.expert_gate_up_bias = (
-                nn.Parameter(torch.zeros(n_experts, 2 * intermediate_size))
+                nn.Parameter(torch.zeros(n_routed_experts, 2 * intermediate_size))
                 if bias
                 else None
             )
         else:
             self.expert_up = nn.Parameter(
-                torch.empty(n_experts, intermediate_size, d_model)
+                torch.empty(n_routed_experts, intermediate_size, d_model)
             )
             self.expert_up_bias = (
-                nn.Parameter(torch.zeros(n_experts, intermediate_size))
+                nn.Parameter(torch.zeros(n_routed_experts, intermediate_size))
                 if bias
                 else None
             )
         self.expert_down = nn.Parameter(
-            torch.empty(n_experts, d_model, intermediate_size)
+            torch.empty(n_routed_experts, d_model, intermediate_size)
         )
         self.expert_down_bias = (
-            nn.Parameter(torch.zeros(n_experts, d_model)) if bias else None
+            nn.Parameter(torch.zeros(n_routed_experts, d_model)) if bias else None
         )
         self.expert_dropout = nn.Dropout(dropout)
 
@@ -352,8 +369,8 @@ class SparseMoEBlock(nn.Module):
         # x: (B, S, D)
         B, S, D = x.shape
         T = B * S
-        k = self.n_experts_per_token
-        E = self.n_experts
+        k = self.n_routed_experts_per_token
+        E = self.n_routed_experts
         x_flat = x.view(T, D)
 
         top_indices, top_weights, router_probs = self.router(x_flat)
@@ -432,7 +449,11 @@ class SparseMoEBlock(nn.Module):
         P = router_probs.mean(0)  # (E,)
         aux_loss = E * (f * P).sum()
 
-        return output.view(B, S, D), aux_loss
+        output = output.view(B, S, D)
+        if self.shared_expert is not None:
+            shared_out, _ = self.shared_expert(x)
+            output = output + shared_out
+        return output, aux_loss
 
     @classmethod
     def compute_flops(
@@ -440,21 +461,32 @@ class SparseMoEBlock(nn.Module):
         d_model,
         *,
         intermediate_size,
-        n_experts,
-        n_experts_per_token=2,
+        n_routed_experts,
+        n_routed_experts_per_token=2,
+        n_shared_experts=0,
         gated=True,
         bias=False,
         **_,
     ):
         d_ff = intermediate_size
-        router = 2 * d_model * n_experts
+        router = 2 * d_model * n_routed_experts
         if gated:
             expert = 6 * d_model * d_ff
             b = (2 * d_ff + d_model) if bias else 0
         else:
             expert = 4 * d_model * d_ff
             b = (d_ff + d_model) if bias else 0
-        return router + n_experts_per_token * (expert + b)
+        shared = (
+            DenseMLPBlock.compute_flops(
+                d_model,
+                intermediate_size=n_shared_experts * d_ff,
+                gated=gated,
+                bias=bias,
+            )
+            if n_shared_experts > 0
+            else 0
+        )
+        return router + n_routed_experts_per_token * (expert + b) + shared
 
     @classmethod
     def compute_parameters(
@@ -462,24 +494,36 @@ class SparseMoEBlock(nn.Module):
         d_model,
         *,
         intermediate_size,
-        n_experts,
-        n_experts_per_token=2,
+        n_routed_experts,
+        n_routed_experts_per_token=2,
+        n_shared_experts=0,
         gated=True,
         bias=False,
         active=False,
         **_,
     ) -> int:
         d_ff = intermediate_size
-        router = d_model * n_experts  # gate, no bias
+        router = d_model * n_routed_experts  # gate, no bias
         # active counts only the k experts that actually run per token.
-        n = n_experts_per_token if active else n_experts
+        n = n_routed_experts_per_token if active else n_routed_experts
         if gated:
             expert = 3 * d_ff * d_model
             b = (2 * d_ff + d_model) if bias else 0
         else:
             expert = 2 * d_ff * d_model
             b = (d_ff + d_model) if bias else 0
-        return router + n * (expert + b)
+        # Shared experts always run, so they count toward both active and total.
+        shared = (
+            DenseMLPBlock.compute_parameters(
+                d_model,
+                intermediate_size=n_shared_experts * d_ff,
+                gated=gated,
+                bias=bias,
+            )
+            if n_shared_experts > 0
+            else 0
+        )
+        return router + n * (expert + b) + shared
 
 
 MLP_REGISTRY = {"dense": DenseMLPBlock, "moe": SparseMoEBlock}

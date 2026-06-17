@@ -149,7 +149,7 @@ def test_dense_gated_matches_ref(activation, dtype, atol):
 
 
 def test_moe_router_output_shapes():
-    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
+    router = MoERouter(d_model=64, n_routed_experts=8, n_routed_experts_per_token=2)
     x = torch.randn(4 * 16, 64)
     top_indices, top_weights, router_probs = router(x)
     assert top_indices.shape == (64, 2)
@@ -158,7 +158,7 @@ def test_moe_router_output_shapes():
 
 
 def test_moe_router_indices_in_range():
-    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
+    router = MoERouter(d_model=64, n_routed_experts=8, n_routed_experts_per_token=2)
     x = torch.randn(32, 64)
     top_indices, _, _ = router(x)
     assert top_indices.min() >= 0
@@ -166,7 +166,9 @@ def test_moe_router_indices_in_range():
 
 
 def test_moe_router_weights_normalized():
-    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2, normalize=True)
+    router = MoERouter(
+        d_model=64, n_routed_experts=8, n_routed_experts_per_token=2, normalize=True
+    )
     x = torch.randn(32, 64)
     _, top_weights, _ = router(x)
     sums = top_weights.sum(dim=-1)
@@ -174,7 +176,9 @@ def test_moe_router_weights_normalized():
 
 
 def test_moe_router_weights_unnormalized():
-    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2, normalize=False)
+    router = MoERouter(
+        d_model=64, n_routed_experts=8, n_routed_experts_per_token=2, normalize=False
+    )
     x = torch.randn(32, 64)
     _, top_weights, _ = router(x)
     assert (top_weights > 0).all()
@@ -183,7 +187,7 @@ def test_moe_router_weights_unnormalized():
 
 
 def test_moe_router_gate_weight_stays_fp32_across_dtype_casts():
-    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
+    router = MoERouter(d_model=64, n_routed_experts=8, n_routed_experts_per_token=2)
     assert router.gate.weight.dtype == torch.float32
     for cast in [
         lambda m: m.to(torch.bfloat16),
@@ -199,7 +203,7 @@ def test_moe_router_gate_weight_stays_fp32_across_dtype_casts():
 @pytest.mark.parametrize("source_dtype", [torch.bfloat16, torch.float16])
 def test_moe_router_gate_weight_loaded_as_fp32(source_dtype):
     torch.manual_seed(0)
-    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
+    router = MoERouter(d_model=64, n_routed_experts=8, n_routed_experts_per_token=2)
     state_dict = router.state_dict()
     state_dict["gate.weight"] = state_dict["gate.weight"].to(source_dtype)
     src_values = state_dict["gate.weight"].clone()
@@ -213,8 +217,8 @@ def test_moe_router_runs_in_fp32_under_autocast(amp_dtype):
     if not torch.cuda.is_available():
         pytest.skip("autocast fp16/bf16 path is CUDA-only in this codebase")
     torch.manual_seed(0)
-    d_model, n_experts, k = 512, 64, 4
-    router = MoERouter(d_model, n_experts, k).cuda()
+    d_model, n_routed_experts, k = 512, 64, 4
+    router = MoERouter(d_model, n_routed_experts, k).cuda()
     router.eval()
     x = torch.randn(256, d_model, device="cuda", dtype=amp_dtype) * 30
     top_idx_a, _, _ = router(x)
@@ -230,7 +234,10 @@ def test_moe_router_runs_in_fp32_under_autocast(amp_dtype):
 
 def test_sparse_moe_block_output_shape():
     block = SparseMoEBlock(
-        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
     )
     x = torch.randn(2, 8, 64)
     out, _ = block(x)
@@ -239,7 +246,10 @@ def test_sparse_moe_block_output_shape():
 
 def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
     block = SparseMoEBlock(
-        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
     )
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
@@ -249,7 +259,10 @@ def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
 
 def test_sparse_moe_block_aux_loss_has_grad():
     block = SparseMoEBlock(
-        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
     )
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
@@ -259,9 +272,90 @@ def test_sparse_moe_block_aux_loss_has_grad():
 
 def test_sparse_moe_block_aux_loss_coef_stored():
     block = SparseMoEBlock(
-        d_model=64, intermediate_size=128, n_experts=4, aux_loss_coef=0.05
+        d_model=64, intermediate_size=128, n_routed_experts=4, aux_loss_coef=0.05
     )
     assert block.aux_loss_coef == 0.05
+
+
+# ---------------------------------------------------------------------------
+# SparseMoEBlock — shared experts (DeepSeekMoE)
+# ---------------------------------------------------------------------------
+
+
+def test_sparse_moe_no_shared_experts_by_default():
+    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    assert block.shared_expert is None
+
+
+@pytest.mark.parametrize("n_shared_experts", [1, 2])
+@pytest.mark.parametrize("gated", [True, False])
+def test_sparse_moe_shared_expert_width_and_shape(n_shared_experts, gated):
+    inter = 128
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=inter,
+        n_routed_experts=4,
+        n_shared_experts=n_shared_experts,
+        gated=gated,
+    )
+    assert block.shared_expert is not None
+    w1 = block.shared_expert.gate_up_proj if gated else block.shared_expert.up_proj
+    expected = (2 if gated else 1) * n_shared_experts * inter
+    assert w1.weight.shape[0] == expected
+    out, aux = block(torch.randn(2, 8, 64))
+    assert out.shape == (2, 8, 64)
+    assert aux.ndim == 0
+
+
+def test_sparse_moe_shared_expert_adds_to_routed_output():
+    """Output with shared experts = routed output + shared FFN(x)."""
+    torch.manual_seed(0)
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=32,
+        n_routed_experts=4,
+        n_shared_experts=2,
+        dropout=0.0,
+    )
+    block.eval()
+    x = torch.randn(2, 8, 64)
+    out, _ = block(x)
+    shared_out, _ = block.shared_expert(x)
+    block.shared_expert = None
+    routed_out, _ = block(x)
+    assert torch.allclose(out, routed_out + shared_out, atol=1e-5)
+
+
+def test_sparse_moe_shared_expert_in_param_count():
+    kwargs = dict(
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        gated=True,
+    )
+    base = SparseMoEBlock.compute_parameters(64, **kwargs)
+    with_shared = SparseMoEBlock.compute_parameters(64, n_shared_experts=2, **kwargs)
+    dense = DenseMLPBlock.compute_parameters(64, intermediate_size=2 * 128, gated=True)
+    assert with_shared - base == dense
+    # Shared experts count in active params too (always run).
+    base_active = SparseMoEBlock.compute_parameters(64, active=True, **kwargs)
+    shared_active = SparseMoEBlock.compute_parameters(
+        64, n_shared_experts=2, active=True, **kwargs
+    )
+    assert shared_active - base_active == dense
+
+
+def test_sparse_moe_shared_expert_in_flops():
+    kwargs = dict(
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        gated=True,
+    )
+    base = SparseMoEBlock.compute_flops(64, **kwargs)
+    with_shared = SparseMoEBlock.compute_flops(64, n_shared_experts=2, **kwargs)
+    dense = DenseMLPBlock.compute_flops(64, intermediate_size=2 * 128, gated=True)
+    assert with_shared - base == dense
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +367,8 @@ def test_sparse_moe_compute_flops_gated():
     f = SparseMoEBlock.compute_flops(
         64,
         intermediate_size=128,
-        n_experts=4,
-        n_experts_per_token=2,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
         gated=True,
         bias=False,
     )
@@ -287,8 +381,8 @@ def test_sparse_moe_compute_flops_ungated():
     f = SparseMoEBlock.compute_flops(
         64,
         intermediate_size=128,
-        n_experts=4,
-        n_experts_per_token=2,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
         gated=False,
         bias=False,
     )
@@ -306,8 +400,8 @@ def test_sparse_moe_compute_flops_ungated():
 @pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
 def test_moe_router_matches_ref(normalize, dtype, atol):
     torch.manual_seed(0)
-    d_model, n_experts, k = 64, 8, 2
-    router = MoERouter(d_model, n_experts, k, normalize=normalize).to(dtype)
+    d_model, n_routed_experts, k = 64, 8, 2
+    router = MoERouter(d_model, n_routed_experts, k, normalize=normalize).to(dtype)
     router.eval()
     x = torch.randn(32, d_model, dtype=dtype)
     top_idx, top_w, probs = router(x)
@@ -322,8 +416,8 @@ def test_moe_router_matches_ref(normalize, dtype, atol):
 @pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
 def test_moe_router_matches_ref_under_saturation(dtype, atol):
     torch.manual_seed(0)
-    d_model, n_experts, k = 512, 64, 4
-    router = MoERouter(d_model, n_experts, k).to(dtype)
+    d_model, n_routed_experts, k = 512, 64, 4
+    router = MoERouter(d_model, n_routed_experts, k).to(dtype)
     router.eval()
     x = torch.randn(256, d_model, dtype=dtype) * 30
     top_idx, top_w, probs = router(x)
@@ -351,12 +445,12 @@ def test_moe_router_matches_ref_under_saturation(dtype, atol):
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
 def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
     torch.manual_seed(0)
-    d_model, inter, n_experts, k = 64, 32, 4, 2
+    d_model, inter, n_routed_experts, k = 64, 32, 4, 2
     block = SparseMoEBlock(
         d_model=d_model,
         intermediate_size=inter,
-        n_experts=n_experts,
-        n_experts_per_token=k,
+        n_routed_experts=n_routed_experts,
+        n_routed_experts_per_token=k,
         dropout=0.0,
         gated=gated,
         activation=activation,
@@ -374,7 +468,7 @@ def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
         x,
         block.router.gate.weight,
         block.expert_down,
-        n_experts_per_token=k,
+        n_routed_experts_per_token=k,
         activation=activation,
         normalize=True,
         expert_gate_up=block.expert_gate_up if gated else None,
@@ -394,13 +488,13 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
     )
 
     torch.manual_seed(0)
-    d_model, inter, n_experts, top_k = 64, 32, 4, 2
+    d_model, inter, n_routed_experts, top_k = 64, 32, 4, 2
 
     ours = SparseMoEBlock(
         d_model=d_model,
         intermediate_size=inter,
-        n_experts=n_experts,
-        n_experts_per_token=top_k,
+        n_routed_experts=n_routed_experts,
+        n_routed_experts_per_token=top_k,
         dropout=0.0,
     )
     with torch.no_grad():
@@ -411,7 +505,7 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
     hf_cfg = Qwen3MoeConfig(
         hidden_size=d_model,
         moe_intermediate_size=inter,
-        num_experts=n_experts,
+        num_experts=n_routed_experts,
         num_experts_per_tok=top_k,
         norm_topk_prob=True,
     )

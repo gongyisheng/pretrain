@@ -54,7 +54,8 @@ class ModelConfig:
                 f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
             )
         if self.mlp_cls == "moe":
-            self.mlp_kwargs.setdefault("n_experts_per_token", 2)
+            self.mlp_kwargs.setdefault("n_routed_experts_per_token", 2)
+            self.mlp_kwargs.setdefault("n_shared_experts", 0)
             self.mlp_kwargs.setdefault("aux_loss_coef", 0.01)
             self.mlp_kwargs.setdefault("expert_capacity_factor", None)
             self.mlp_kwargs.setdefault("bias", False)

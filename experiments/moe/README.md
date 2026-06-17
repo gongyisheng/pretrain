@@ -13,8 +13,8 @@ Single config scaling the MoE architecture to ~500M total params.
 | `n_heads` | 16 |
 | `n_kv_heads` | 8 |
 | `moe_intermediate_size` (per expert) | 128 |
-| `moe_n_experts` | 64 |
-| `moe_n_experts_per_token` | 4 |
+| `moe_n_routed_experts` | 64 |
+| `moe_n_routed_experts_per_token` | 4 |
 | `vocab_size` | 50257 |
 
 Total params: ~506M (weight-tied). Active per token: ~128M.
@@ -51,7 +51,7 @@ uv run python scripts/train.py --config experiments/moe/qwen3_moe_506m_a128m.yam
 MoE training uses Switch Transformer load-balancing loss:
 
 ```
-L_total = L_CE + α * n_experts * Σ_i(f_i * P_i)
+L_total = L_CE + α * n_routed_experts * Σ_i(f_i * P_i)
 ```
 
 where `f_i` = fraction of tokens routed to expert `i` (hard), `P_i` = mean router softmax
