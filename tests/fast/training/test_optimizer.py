@@ -16,6 +16,7 @@ from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, Schedule
 from src.model import build_model
 from src.training.optimizer import (
     LionOptimizer,
+    MuonAdamWOptimizer,
     build_optimizer,
     build_scheduler,
     ConstantWarmupScheduler,
@@ -336,6 +337,78 @@ def test_build_optimizer_dispatches_to_lion():
     # At least one decay group and one no-decay group exist.
     wds = {pg["weight_decay"] for pg in opt.param_groups}
     assert 0.0 in wds and cfg.optimizer.weight_decay in wds
+
+
+def test_build_optimizer_dispatches_to_muon():
+    cfg = _make_cfg(tie=False)
+    cfg.optimizer.name = "muon"
+    model = build_model(cfg)
+    opt = build_optimizer(model, cfg)
+    assert isinstance(opt, MuonAdamWOptimizer)
+    # Every trainable param appears exactly once across the two subsystems.
+    seen = [id(p) for pg in opt.param_groups for p in pg["params"]]
+    trainable = [id(p) for p in model.parameters() if p.requires_grad]
+    assert sorted(seen) == sorted(trainable)
+    assert len(seen) == len(set(seen))
+
+
+def test_muon_routes_only_2d_hidden_weights():
+    """2D weights -> Muon; embeddings, lm_head, and 1D params -> AdamW."""
+    cfg = _make_cfg(tie=False)
+    cfg.optimizer.name = "muon"
+    model = build_model(cfg)
+    opt = build_optimizer(model, cfg)
+
+    name_by_id = {id(p): n for n, p in model.named_parameters()}
+    muon_ids = {id(p) for pg in opt.muon.param_groups for p in pg["params"]}
+    adamw_ids = {id(p) for pg in opt.adamw.param_groups for p in pg["params"]}
+
+    # Muon only ever sees 2D non-embedding, non-head weights.
+    for pid in muon_ids:
+        p = next(p for _, p in model.named_parameters() if id(p) == pid)
+        n = name_by_id[pid]
+        assert p.ndim == 2 and "emb" not in n and "lm_head" not in n
+
+    # Embeddings and the output head route to AdamW; a hidden projection to Muon.
+    assert id(model.token_emb.weight) in adamw_ids
+    assert id(model.lm_head.weight) in adamw_ids
+    q_proj = dict(model.named_parameters())["blocks.0.attn.q_proj.weight"]
+    assert id(q_proj) in muon_ids
+
+
+def test_muon_step_updates_params(device):
+    if device != "cuda":
+        pytest.skip("Muon hybrid uses fused AdamW (CUDA-only)")
+    cfg = _make_cfg(tie=False)
+    cfg.optimizer.name = "muon"
+    model = build_model(cfg)
+    opt = build_optimizer(model, cfg)
+    for p in model.parameters():
+        p.grad = torch.randn_like(p)
+    before = {n: p.detach().clone() for n, p in model.named_parameters()}
+    opt.step()
+    for n, p in model.named_parameters():
+        assert not torch.allclose(p, before[n]), f"{n} did not update"
+
+
+def test_muon_state_dict_roundtrip(device):
+    if device != "cuda":
+        pytest.skip("Muon hybrid uses fused AdamW (CUDA-only)")
+    cfg = _make_cfg(tie=False)
+    cfg.optimizer.name = "muon"
+    model = build_model(cfg)
+    opt = build_optimizer(model, cfg)
+    for p in model.parameters():
+        p.grad = torch.randn_like(p)
+    opt.step()
+
+    state = opt.state_dict()
+    assert set(state) == {"muon", "adamw"}
+
+    opt2 = build_optimizer(model, cfg)
+    opt2.load_state_dict(state)  # must not raise
+    # Muon momentum buffers were restored.
+    assert any("momentum_buffer" in s for s in opt2.muon.state.values())
 
 
 def test_build_optimizer_unknown_name_raises():

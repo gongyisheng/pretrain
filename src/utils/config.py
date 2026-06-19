@@ -120,12 +120,19 @@ class TrainingConfig:
 
 @dataclass
 class OptimizerConfig:
-    name: str = "adamw"
+    name: str = "adamw"  # "adamw" | "lion" | "muon"
     lr: float = 6e-4
     lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = True
+    muon_ns_coefficients: List[float] = field(
+        default_factory=lambda: [3.4445, -4.775, 2.0315]
+    )
+    muon_ns_steps: int = 5
+    muon_adjust_lr_fn: str = "match_rms_adamw"
 
     def __post_init__(self):
         if self.name not in OPTIMIZER_REGISTRY:
@@ -157,6 +164,9 @@ class LoggingConfig:
     log_every: int = 10
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
     log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
+    log_optimizer_svd_metrics: bool = (
+        True  # log per-2D-weight srank/pr; costly, SVD per weight
+    )
 
 
 @dataclass
