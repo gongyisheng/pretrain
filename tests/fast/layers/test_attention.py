@@ -11,6 +11,7 @@ from src.layers.attention import (
     ATTN_REGISTRY,
     GroupedQueryAttention,
     MultiHeadAttention,
+    MultiHeadLatentAttention,
 )
 from src.layers.pos_emb import RoPE
 from src.utils.masking_utils import build_intra_doc_attention_mask
@@ -20,7 +21,13 @@ from tests.fast.helpers import (
     make_attn_mask,
     skip_if_unsupported,
 )
-from tests.fast.layers._refs import COMPOUND_DTYPES, gqa_ref, mha_ref, sdpa_ref
+from tests.fast.layers._refs import (
+    COMPOUND_DTYPES,
+    gqa_ref,
+    mha_ref,
+    mla_ref,
+    sdpa_ref,
+)
 
 
 # ====================== F.scaled_dot_product_attention vs sdpa_ref ======================
@@ -353,9 +360,128 @@ def test_gqa_qk_norm_matches_ref(impl, device, dtype, atol):
     assert torch.allclose(out, out_ref, atol=atol)
 
 
+# ============================= MultiHeadLatentAttention behavior =============================
+
+
+def _make_mla(impl, dtype=None, q_lora_rank=0):
+    mla = MultiHeadLatentAttention(
+        d_model=64,
+        n_heads=4,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=8,
+        v_head_dim=16,
+        kv_lora_rank=32,
+        q_lora_rank=q_lora_rank,
+        dropout=0.0,
+        attn_implementation=impl,
+    )
+    return mla.to(dtype) if dtype is not None else mla
+
+
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
+@pytest.mark.parametrize("kind", MASK_KIND)
+@pytest.mark.parametrize("q_lora_rank", [0, 24])
+def test_mla_attn_mask_output_shape(kind, impl, q_lora_rank, device):
+    skip_if_unsupported(impl, device)
+    mla = _make_mla(impl, q_lora_rank=q_lora_rank)
+    x = torch.randn(2, 8, 64)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    attn_mask, _ = make_attn_mask(kind, impl, pos, x.dtype)
+    assert mla(x, attn_mask=attn_mask).shape == (2, 8, 64)
+
+
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
+def test_mla_intra_doc_mask_blocks_cross_doc_attention(impl, device):
+    skip_if_unsupported(impl, device)
+    torch.manual_seed(0)
+    mla = _make_mla(impl)
+    mla.eval()
+
+    x = torch.randn(1, 4, 64)
+    pos = torch.tensor([[0, 1, 0, 1]])
+    attn_mask, _ = make_attn_mask("intra_doc", impl, pos, x.dtype)
+
+    out_base = mla(x, attn_mask=attn_mask)
+    x2 = x.clone()
+    x2[0, 0, :] = torch.randn(64)
+    x2[0, 1, :] = torch.randn(64)
+    out_modified = mla(x2, attn_mask=attn_mask)
+
+    assert torch.allclose(out_base[0, 2:], out_modified[0, 2:], atol=1e-5)
+    assert not torch.allclose(out_base[0, :2], out_modified[0, :2], atol=1e-5)
+
+
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
+def test_mla_causal_mask_blocks_future(impl, device):
+    skip_if_unsupported(impl, device)
+    torch.manual_seed(0)
+    mla = _make_mla(impl)
+    mla.eval()
+
+    x = torch.randn(1, 8, 64)
+    pos = torch.arange(8).unsqueeze(0)
+    attn_mask, _ = make_attn_mask("causal", impl, pos, x.dtype)
+
+    out_base = mla(x, attn_mask=attn_mask)
+    x2 = x.clone()
+    x2[0, 7, :] = torch.randn(64)
+    out_modified = mla(x2, attn_mask=attn_mask)
+    assert torch.allclose(out_base[0, :7], out_modified[0, :7], atol=1e-5)
+
+
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
+def test_mla_with_rope_output_shape(impl, device):
+    skip_if_unsupported(impl, device)
+    mla = _make_mla(impl)
+    rope = RoPE(d_head=mla.qk_rope_head_dim, max_seq_len=32)
+    x = torch.randn(2, 8, 64)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    attn_mask, _ = make_attn_mask("causal", impl, pos, x.dtype)
+    assert mla(x, rope, position_ids=pos, attn_mask=attn_mask).shape == (2, 8, 64)
+
+
+# --- MLA numerical parity vs eager mla_ref ---
+
+
+@pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
+@pytest.mark.parametrize("kind", MASK_KIND)
+@pytest.mark.parametrize("q_lora_rank", [0, 24])
+def test_mla_matches_ref_attn_mask(kind, impl, q_lora_rank, device, dtype, atol):
+    skip_if_unsupported(impl, device)
+    torch.manual_seed(0)
+    mla = _make_mla(impl, dtype=dtype, q_lora_rank=q_lora_rank)
+    mla.eval()
+    x = torch.randn(1, 4, 64, dtype=dtype)
+    pos = torch.tensor([[0, 1, 0, 1]] if kind == "intra_doc" else [[0, 1, 2, 3]])
+    attn_mask, ref_mask = make_attn_mask(kind, impl, pos, x.dtype)
+    out = mla(x, attn_mask=attn_mask)
+    out_ref = mla_ref(mla, x, attn_mask=ref_mask)
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+
+
+@pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
+def test_mla_with_rope_matches_ref(impl, device, dtype, atol):
+    skip_if_unsupported(impl, device)
+    torch.manual_seed(0)
+    mla = _make_mla(impl, dtype=dtype)
+    mla.eval()
+    rope = RoPE(d_head=mla.qk_rope_head_dim, max_seq_len=32).to(dtype)
+    x = torch.randn(2, 8, 64, dtype=dtype)
+    pos = torch.arange(8).unsqueeze(0).expand(2, -1)
+    attn_mask, ref_mask = make_attn_mask("causal", impl, pos, x.dtype)
+    out = mla(x, rope, position_ids=pos, attn_mask=attn_mask)
+    out_ref = mla_ref(mla, x, rope=rope, position_ids=pos, attn_mask=ref_mask)
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+
+
 def test_attn_registry_keys():
     assert ATTN_REGISTRY["mha"] is MultiHeadAttention
     assert ATTN_REGISTRY["gqa"] is GroupedQueryAttention
+    assert ATTN_REGISTRY["mla"] is MultiHeadLatentAttention
 
 
 def test_mha_compute_flops_value():
@@ -379,6 +505,28 @@ def test_gqa_compute_flops_qk_norm():
         (MultiHeadAttention, dict(n_heads=2, bias=True, qk_norm=True)),
         (GroupedQueryAttention, dict(n_heads=4, n_kv_heads=2)),
         (GroupedQueryAttention, dict(n_heads=4, n_kv_heads=2, bias=True, qk_norm=True)),
+        (
+            MultiHeadLatentAttention,
+            dict(
+                n_heads=4,
+                qk_nope_head_dim=16,
+                qk_rope_head_dim=8,
+                v_head_dim=16,
+                kv_lora_rank=32,
+            ),
+        ),
+        (
+            MultiHeadLatentAttention,
+            dict(
+                n_heads=4,
+                qk_nope_head_dim=16,
+                qk_rope_head_dim=8,
+                v_head_dim=16,
+                kv_lora_rank=32,
+                q_lora_rank=24,
+                bias=True,
+            ),
+        ),
     ],
 )
 def test_compute_parameters_matches_module(cls, kwargs):

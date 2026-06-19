@@ -35,7 +35,8 @@ class ModelConfig:
         self.attn_kwargs.setdefault("attn_implementation", "flex_attention")
         n_heads = self.attn_kwargs.get("n_heads")
         if n_heads is not None:
-            if self.d_model % n_heads != 0:
+            # MLA sets its head dims explicitly, so d_model need not divide n_heads.
+            if self.attn_cls in ("mha", "gqa") and self.d_model % n_heads != 0:
                 raise ValueError(
                     f"d_model ({self.d_model}) must be divisible by n_heads ({n_heads})"
                 )
@@ -45,6 +46,15 @@ class ModelConfig:
                     raise ValueError(
                         f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv})"
                     )
+            elif self.attn_cls == "mla":
+                # Decoupled-RoPE head dims default off d_model // n_heads;
+                # q_lora_rank=0 disables query compression.
+                head_dim = self.d_model // n_heads
+                self.attn_kwargs.setdefault("qk_nope_head_dim", head_dim)
+                self.attn_kwargs.setdefault("qk_rope_head_dim", max(head_dim // 2, 1))
+                self.attn_kwargs.setdefault("v_head_dim", head_dim)
+                self.attn_kwargs.setdefault("kv_lora_rank", 4 * head_dim)
+                self.attn_kwargs.setdefault("q_lora_rank", 0)
 
         self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
         gated = self.mlp_kwargs.get("gated", True)
