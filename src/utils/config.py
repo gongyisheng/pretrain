@@ -5,6 +5,7 @@ import yaml
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
+from src.training.fp8 import FP8_RECIPES
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 
@@ -104,6 +105,11 @@ class TrainingConfig:
     eval_steps: int = 25
     eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
+    fp8: bool = False
+    fp8_recipe: str = "tensorwise"
+    fp8_exclude_lm_head: bool = (
+        True  # numerically sensitive, especially with tied embeddings
+    )
 
     def __post_init__(self):
         if self.mixed_precision not in _MIXED_PRECISION:
@@ -115,6 +121,11 @@ class TrainingConfig:
             raise ValueError(
                 f"unknown loss_fn: {self.loss_fn!r}; "
                 f"expected one of {sorted(LOSS_REGISTRY)}"
+            )
+        if self.fp8 and self.fp8_recipe not in FP8_RECIPES:
+            raise ValueError(
+                f"unknown fp8_recipe: {self.fp8_recipe!r}; "
+                f"expected one of {sorted(FP8_RECIPES)}"
             )
 
 
