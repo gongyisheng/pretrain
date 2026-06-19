@@ -47,5 +47,5 @@ scheduler:
   min_lr: 6e-5
 logging:
   wandb_project: pretrain-mla
-  wandb_run_name: qwen3-57m-mla-center
+  wandb_run_name: qwen3-57m-mla
   log_every: 10
