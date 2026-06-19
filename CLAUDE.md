@@ -83,7 +83,7 @@ Fused ops must support float32, float16, and bfloat16. Never hardcode a dtype or
 
 Every experiment folder must include a `README.md` with: hypothesis, setup table (configs, key params, approx param counts), run command, results table (filled in after running), and notes.
 
-Experiment YAML configs should explicitly set `batch_size`, `gradient_accumulation_steps`, `checkpoint_every`, `eval_every`, and `eval_steps` to the default values from `src/utils/config.py` (16, 16, 500, 100, 25) unless the experiment intentionally changes them.
+Experiment YAML configs should explicitly set `batch_size`, `gradient_accumulation_steps`, `checkpoint_every`, `eval_every`, and `eval_steps` to the default values from `src/utils/config.py`. Use `batch_size: 16`, `gradient_accumulation_steps: 16`, `checkpoint_every: 5000`, `eval_every: 100`, `eval_steps: 25` unless the experiment intentionally changes them (`checkpoint_every` is raised to 5000 from the config default of 500 to avoid excessive checkpoint writes across many runs).
 
 Model configs use the cls+kwargs schema. A Qwen3-style 57M config looks like:
 ```yaml

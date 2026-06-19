@@ -31,7 +31,7 @@ training:
   mixed_precision: bf16
   grad_clip: 1.0
   checkpoint_dir: checkpoints/mla/kvlora_128/
-  checkpoint_every: 500
+  checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
 optimizer:
