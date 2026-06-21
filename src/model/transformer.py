@@ -21,7 +21,11 @@ class TransformerLM(nn.Module):
 
         pos_cls = POS_EMB_REGISTRY[config.pos_emb_cls]
         if pos_cls.rotary:
-            head_dim = config.d_model // config.attn_kwargs["n_heads"]
+            if config.attn_cls == "mla":
+                # MLA rotates only its decoupled rope part, not the full head.
+                head_dim = config.attn_kwargs["qk_rope_head_dim"]
+            else:
+                head_dim = config.d_model // config.attn_kwargs["n_heads"]
             self.rope = pos_cls(head_dim, max_seq_len, **config.pos_emb_kwargs)
             self.pos_emb = None
         else:

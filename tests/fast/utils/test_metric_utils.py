@@ -271,6 +271,74 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
 
 
 # ---------------------------------------------------------------------------
+# Per-2D-weight spectral metrics (SVD)
+# ---------------------------------------------------------------------------
+
+
+def _expected_svd_keys(model: torch.nn.Module) -> set[str]:
+    """2D float params, raw names, minus rope buffers and embeddings."""
+    keys = set()
+    for name, param in model.named_parameters():
+        if param.ndim != 2 or not param.is_floating_point():
+            continue
+        name = name.removeprefix("_orig_mod.")
+        if name.startswith("rope.") or "emb" in name:
+            continue
+        keys.add(name)
+    return keys
+
+
+def test_svd_metrics_orthogonal_is_full_rank():
+    """Orthogonal matrix: all σ equal → srank=pr=n."""
+    torch.manual_seed(0)
+    q, _ = torch.linalg.qr(torch.randn(8, 8))  # σ all == 1
+    m = metric_utils._svd_metrics(q)
+    assert m["srank"] == pytest.approx(8.0, rel=1e-4)
+    assert m["pr"] == pytest.approx(8.0, rel=1e-4)
+
+
+def test_svd_metrics_rank_one_is_minimal():
+    """Rank-1 matrix: one σ dominates → srank≈pr≈1."""
+    w = torch.outer(torch.arange(1.0, 6.0), torch.arange(1.0, 4.0))
+    m = metric_utils._svd_metrics(w)
+    assert m["srank"] == pytest.approx(1.0, abs=1e-4)
+    assert m["pr"] == pytest.approx(1.0, abs=1e-4)
+
+
+def test_svd_metrics_zero_matrix():
+    """All-zero weight (no positive σ) → every metric 0."""
+    assert metric_utils._svd_metrics(torch.zeros(4, 4)) == {
+        "srank": 0.0,
+        "pr": 0.0,
+    }
+
+
+@pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
+def test_layer_svd_metrics_keys_and_bounds(arch_id):
+    """One entry per 2D weight (no rope/embedding); metrics within bounds."""
+    model_cfg = _CFG_FACTORIES[arch_id]("sdpa")
+    model = build_model(_FakeTrainConfig(model_cfg))
+    result = metric_utils.compute_layer_svd_metrics(model)
+    assert set(result) == _expected_svd_keys(model)
+    assert not any("emb" in k or k.startswith("rope.") for k in result)
+
+    shapes = {n: tuple(p.shape) for n, p in model.named_parameters()}
+    for name, m in result.items():
+        n = min(shapes[name])
+        assert 1.0 - 1e-4 <= m["srank"] <= n + 1e-4
+        assert 1.0 - 1e-4 <= m["pr"] <= n + 1e-4
+
+
+def test_layer_svd_metrics_compiled_model_strips_prefix():
+    """Works after torch.compile (which prepends _orig_mod.)."""
+    model = build_model(_FakeTrainConfig(_qwen3_cfg("sdpa")))
+    compiled = torch.compile(model, backend="eager")
+    result = metric_utils.compute_layer_svd_metrics(compiled)
+    assert set(result) == _expected_svd_keys(compiled)
+    assert all(not k.startswith("_orig_mod.") for k in result)
+
+
+# ---------------------------------------------------------------------------
 # Parameter counts
 # ---------------------------------------------------------------------------
 

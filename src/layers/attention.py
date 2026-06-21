@@ -248,7 +248,183 @@ class GroupedQueryAttention(nn.Module):
         return self.attn_dropout(self.o_proj(out))
 
 
+class MultiHeadLatentAttention(nn.Module):
+    """Multi-head Latent Attention (DeepSeek-V2/V3).
+
+    KV is compressed to a single ``kv_lora_rank`` latent (the only thing a KV
+    cache would store) and up-projected to per-head K/V. RoPE can't fold through
+    the latent up-projection, so position is carried by a *decoupled* rope part:
+    each head's Q/K is ``[nope ; rope]`` where the K rope part (``qk_rope_head_dim``)
+    is shared across heads and broadcast. Queries optionally share a ``q_lora_rank``
+    latent too (params/compute saving, not a cache saving).
+
+    Head dims are explicit; ``ModelConfig.__post_init__`` fills their defaults.
+    ``q_lora_rank=0`` disables query compression (a plain ``q_proj`` is used).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        q_lora_rank: int = 0,
+        dropout: float = 0.0,
+        bias: bool = False,
+        attn_implementation: str = "flex_attention",
+    ):
+        super().__init__()
+        self.n_heads = n_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+        self.q_lora_rank = q_lora_rank
+
+        if q_lora_rank > 0:
+            self.q_a_proj = nn.Linear(d_model, q_lora_rank, bias=bias)
+            self.q_a_norm = RMSNorm(q_lora_rank)
+            self.q_b_proj = nn.Linear(
+                q_lora_rank, n_heads * self.qk_head_dim, bias=bias
+            )
+        else:
+            self.q_proj = nn.Linear(d_model, n_heads * self.qk_head_dim, bias=bias)
+
+        # kv_a_proj emits the latent plus the shared (head-agnostic) rope key.
+        self.kv_a_proj = nn.Linear(d_model, kv_lora_rank + qk_rope_head_dim, bias=bias)
+        self.kv_a_norm = RMSNorm(kv_lora_rank)
+        self.kv_b_proj = nn.Linear(
+            kv_lora_rank, n_heads * (qk_nope_head_dim + v_head_dim), bias=bias
+        )
+        self.o_proj = nn.Linear(n_heads * v_head_dim, d_model, bias=bias)
+        self.attn_dropout = nn.Dropout(dropout)
+        self._attn_fn = _ATTN_IMPL[attn_implementation]
+
+    @classmethod
+    def compute_flops(
+        cls,
+        d_model,
+        max_seq_len,
+        *,
+        n_heads,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+        kv_lora_rank,
+        q_lora_rank=0,
+        bias=False,
+        **_,
+    ):
+        qk_head = qk_nope_head_dim + qk_rope_head_dim
+        b = lambda out: out if bias else 0  # noqa: E731
+        if q_lora_rank > 0:
+            q = (
+                2 * d_model * q_lora_rank
+                + b(q_lora_rank)
+                + 3 * q_lora_rank  # q_a_norm
+                + 2 * q_lora_rank * (n_heads * qk_head)
+                + b(n_heads * qk_head)
+            )
+        else:
+            q = 2 * d_model * (n_heads * qk_head) + b(n_heads * qk_head)
+        kv_a = (
+            2 * d_model * (kv_lora_rank + qk_rope_head_dim)
+            + b(kv_lora_rank + qk_rope_head_dim)
+            + 3 * kv_lora_rank  # kv_a_norm
+        )
+        kv_b = 2 * kv_lora_rank * (n_heads * (qk_nope_head_dim + v_head_dim)) + b(
+            n_heads * (qk_nope_head_dim + v_head_dim)
+        )
+        o = 2 * (n_heads * v_head_dim) * d_model + b(d_model)
+        attn_matmul = (
+            2 * n_heads * qk_head * max_seq_len + 2 * n_heads * v_head_dim * max_seq_len
+        )
+        return q + kv_a + kv_b + o + attn_matmul
+
+    @classmethod
+    def compute_parameters(
+        cls,
+        d_model,
+        *,
+        n_heads,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+        kv_lora_rank,
+        q_lora_rank=0,
+        bias=False,
+        **_,
+    ) -> int:
+        qk_head = qk_nope_head_dim + qk_rope_head_dim
+        b = lambda out: out if bias else 0  # noqa: E731
+        if q_lora_rank > 0:
+            q = (
+                d_model * q_lora_rank
+                + b(q_lora_rank)
+                + q_lora_rank  # q_a_norm weight
+                + q_lora_rank * (n_heads * qk_head)
+                + b(n_heads * qk_head)
+            )
+        else:
+            q = d_model * (n_heads * qk_head) + b(n_heads * qk_head)
+        kv_a = (
+            d_model * (kv_lora_rank + qk_rope_head_dim)
+            + b(kv_lora_rank + qk_rope_head_dim)
+            + kv_lora_rank  # kv_a_norm weight
+        )
+        kv_b = kv_lora_rank * (n_heads * (qk_nope_head_dim + v_head_dim)) + b(
+            n_heads * (qk_nope_head_dim + v_head_dim)
+        )
+        o = (n_heads * v_head_dim) * d_model + b(d_model)
+        return q + kv_a + kv_b + o
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope: "RoPE" = None,
+        position_ids: torch.Tensor = None,
+        attn_mask=None,
+    ) -> torch.Tensor:
+        B, S, _ = x.shape
+        H = self.n_heads
+
+        if self.q_lora_rank > 0:
+            q = self.q_b_proj(self.q_a_norm(self.q_a_proj(x)))
+        else:
+            q = self.q_proj(x)
+        q = q.view(B, S, H, self.qk_head_dim).transpose(1, 2)
+        q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+        compressed = self.kv_a_proj(x)
+        c_kv, k_rope = compressed.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        # (B, 1, S, qk_rope_head_dim), shared across heads
+        k_rope = k_rope.view(B, S, 1, self.qk_rope_head_dim).transpose(1, 2)
+        kv = self.kv_b_proj(self.kv_a_norm(c_kv))
+        kv = kv.view(B, S, H, self.qk_nope_head_dim + self.v_head_dim).transpose(1, 2)
+        k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        if rope is not None:
+            assert position_ids is not None, (
+                "position_ids cannot be None when using RoPE"
+            )
+            q_rope = rope(q_rope, position_ids)
+            k_rope = rope(k_rope, position_ids)
+
+        q = torch.cat([q_nope, q_rope], dim=-1)
+        k = torch.cat([k_nope, k_rope.expand(B, H, S, self.qk_rope_head_dim)], dim=-1)
+
+        out = self._attn_fn(q, k, v, attn_mask)
+        out = out.transpose(1, 2).reshape(B, S, H * self.v_head_dim)
+        return self.attn_dropout(self.o_proj(out))
+
+
 ATTN_REGISTRY = {
     "mha": MultiHeadAttention,
     "gqa": GroupedQueryAttention,
+    "mla": MultiHeadLatentAttention,
 }

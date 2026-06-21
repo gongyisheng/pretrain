@@ -378,3 +378,13 @@ def test_training_unknown_mixed_precision_raises():
 def test_training_unknown_loss_fn_raises():
     with pytest.raises(ValueError, match="unknown loss_fn"):
         TrainingConfig(loss_fn="huber")
+
+
+def test_training_unknown_fp8_recipe_raises():
+    with pytest.raises(ValueError, match="unknown fp8_recipe"):
+        TrainingConfig(fp8=True, fp8_recipe="not_a_real_recipe")
+
+
+def test_training_fp8_recipe_unchecked_when_disabled():
+    # Recipe is only validated when fp8 is enabled.
+    TrainingConfig(fp8=False, fp8_recipe="not_a_real_recipe")

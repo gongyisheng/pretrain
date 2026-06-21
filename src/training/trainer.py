@@ -17,6 +17,7 @@ from src.model import build_model
 from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
+from src.training.fp8 import maybe_convert_to_fp8
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
 from src.training.loss import LOSS_REGISTRY, compute_loss
@@ -157,6 +158,10 @@ class Trainer:
         self.scaler = torch.amp.GradScaler(
             enabled=(self.use_amp and self.amp_dtype == torch.float16)
         )
+
+        # FP8: swap eligible nn.Linear modules to Float8Linear. Must run before
+        # torch.compile so the tracer sees the swapped modules.
+        maybe_convert_to_fp8(self.model, config)
 
         # Disable assert_indirect_indexing to avoid spurious CUDA assertions during
         # torchinductor autotuning, which may dispatch kernel test runs on a stream

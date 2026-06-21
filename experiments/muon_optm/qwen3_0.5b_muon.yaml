@@ -1,0 +1,59 @@
+max_seq_len: 1024
+
+model:
+  d_model: 1024
+  n_layers: 28
+  vocab_size: 50257
+  attn_cls: gqa
+  attn_kwargs:
+    n_heads: 16
+    n_kv_heads: 8
+    qk_norm: true
+  mlp_cls: dense
+  mlp_kwargs: {}
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs:
+    rope_theta: 10000.0
+
+data:
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 32
+  max_steps: 50000
+  mixed_precision: bf16
+  activation_checkpointing: false
+  seed: 42
+  grad_clip: 1.0
+  checkpoint_dir: checkpoints/muon/qwen3_0.5b_muon/
+  checkpoint_every: 5000
+  eval_every: 1000
+  eval_steps: 200
+
+optimizer:
+  name: muon
+  lr: 2e-4
+  weight_decay: 0.1
+  betas:  # used by the AdamW sub-optimizer (embeddings, lm_head, 1D params)
+  - 0.9
+  - 0.95
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_adjust_lr_fn: match_rms_adamw  # reuse the AdamW-tuned lr/wd
+
+scheduler:
+  name: cosine
+  warmup_steps: 1500
+  min_lr: 2e-5
+
+logging:
+  wandb_project: pretrain-muon-optm
+  wandb_run_name: qwen3-0.5b-muon
+  log_every: 100
+  log_optimizer_svd_metrics: true

@@ -5,6 +5,7 @@ import yaml
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
+from src.training.fp8 import FP8_RECIPES
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 
@@ -34,7 +35,8 @@ class ModelConfig:
         self.attn_kwargs.setdefault("attn_implementation", "flex_attention")
         n_heads = self.attn_kwargs.get("n_heads")
         if n_heads is not None:
-            if self.d_model % n_heads != 0:
+            # MLA sets its head dims explicitly, so d_model need not divide n_heads.
+            if self.attn_cls in ("mha", "gqa") and self.d_model % n_heads != 0:
                 raise ValueError(
                     f"d_model ({self.d_model}) must be divisible by n_heads ({n_heads})"
                 )
@@ -44,6 +46,15 @@ class ModelConfig:
                     raise ValueError(
                         f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv})"
                     )
+            elif self.attn_cls == "mla":
+                # Decoupled-RoPE head dims default off d_model // n_heads;
+                # q_lora_rank=0 disables query compression.
+                head_dim = self.d_model // n_heads
+                self.attn_kwargs.setdefault("qk_nope_head_dim", head_dim)
+                self.attn_kwargs.setdefault("qk_rope_head_dim", max(head_dim // 2, 1))
+                self.attn_kwargs.setdefault("v_head_dim", head_dim)
+                self.attn_kwargs.setdefault("kv_lora_rank", 4 * head_dim)
+                self.attn_kwargs.setdefault("q_lora_rank", 0)
 
         self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
         gated = self.mlp_kwargs.get("gated", True)
@@ -116,6 +127,11 @@ class TrainingConfig:
     eval_steps: int = 25
     eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
+    fp8: bool = False
+    fp8_recipe: str = "tensorwise"
+    fp8_exclude_lm_head: bool = (
+        True  # numerically sensitive, especially with tied embeddings
+    )
 
     def __post_init__(self):
         if self.mixed_precision not in _MIXED_PRECISION:
@@ -128,16 +144,28 @@ class TrainingConfig:
                 f"unknown loss_fn: {self.loss_fn!r}; "
                 f"expected one of {sorted(LOSS_REGISTRY)}"
             )
+        if self.fp8 and self.fp8_recipe not in FP8_RECIPES:
+            raise ValueError(
+                f"unknown fp8_recipe: {self.fp8_recipe!r}; "
+                f"expected one of {sorted(FP8_RECIPES)}"
+            )
 
 
 @dataclass
 class OptimizerConfig:
-    name: str = "adamw"
+    name: str = "adamw"  # "adamw" | "lion" | "muon"
     lr: float = 6e-4
     lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
     betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
     eps: float = 1e-8
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = True
+    muon_ns_coefficients: List[float] = field(
+        default_factory=lambda: [3.4445, -4.775, 2.0315]
+    )
+    muon_ns_steps: int = 5
+    muon_adjust_lr_fn: str = "match_rms_adamw"
 
     def __post_init__(self):
         if self.name not in OPTIMIZER_REGISTRY:
@@ -169,6 +197,9 @@ class LoggingConfig:
     log_every: int = 10
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
     log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
+    log_optimizer_svd_metrics: bool = (
+        True  # log per-2D-weight srank/pr; costly, SVD per weight
+    )
 
 
 @dataclass
