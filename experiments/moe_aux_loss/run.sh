@@ -5,11 +5,11 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-coefs=(1e-3 3e-3 1e-2 3e-2 1e-1)
+coefs=(0 1e-3 1e-2 1e-1)
 
 configs=()
 for c in "${coefs[@]}"; do
-    configs+=("qwen3_moe_aux_coef${c}")
+    configs+=("qwen3_133m_a35m_aux_coef${c}")
 done
 
 for config in "${configs[@]}"; do

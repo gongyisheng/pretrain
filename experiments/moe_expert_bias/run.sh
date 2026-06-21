@@ -5,11 +5,11 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-rates=(1e-4 3e-4 1e-3 3e-3 1e-2)
+rates=(1e-4 1e-3 1e-2)
 
 configs=()
 for r in "${rates[@]}"; do
-    configs+=("qwen3_moe_expert_bias_rate${r}")
+    configs+=("qwen3_133m_a35m_expert_bias_rate${r}")
 done
 
 for config in "${configs[@]}"; do

@@ -9,8 +9,9 @@ interference with the language-modeling gradient:
 - Too small → experts collapse, tokens dropped at capacity, val loss rises.
 - Too large → the balancing gradient dominates, hurting LM quality.
 
-There should be a sweet spot near the Switch default `0.01`. This sweep finds
-the `aux_loss_coef` that minimizes validation loss.
+There should be a sweet spot near the Switch default `0.01`. This is a coarse
+first pass over decades (plus a `0` no-balancing baseline) to bracket the useful
+range; a finer sweep follows once the range is known.
 
 ## Setup
 
@@ -22,24 +23,23 @@ experts, top-2, capacity factor 1.25. Only `aux_loss_coef` varies.
 | d_model / n_layers | 512 / 8 |
 | n_experts / top-k | 64 / 2 |
 | expert_capacity_factor | 1.25 |
-| batch × grad_accum × seq | 16 × 16 × 1024 (≈0.26M tok/step) |
-| max_steps | 8000 (≈2.1B tokens) |
-| lr / min_lr / warmup | 6e-4 / 6e-5 / 300 |
+| batch × grad_accum × seq | 8 × 32 × 1024 (≈0.26M tok/step) |
+| max_steps | 50000 (≈13B tokens) |
+| lr / min_lr / warmup | 6e-4 / 6e-5 / 1000 |
 
 | Config | aux_loss_coef |
 |--------|---------------|
-| `qwen3_moe_aux_coef1e-3` | 0.001 |
-| `qwen3_moe_aux_coef3e-3` | 0.003 |
-| `qwen3_moe_aux_coef1e-2` | 0.01 (Switch default) |
-| `qwen3_moe_aux_coef3e-2` | 0.03 |
-| `qwen3_moe_aux_coef1e-1` | 0.1 |
+| `qwen3_133m_a35m_aux_coef0` | 0 (no balancing baseline) |
+| `qwen3_133m_a35m_aux_coef1e-3` | 0.001 |
+| `qwen3_133m_a35m_aux_coef1e-2` | 0.01 (Switch default) |
+| `qwen3_133m_a35m_aux_coef1e-1` | 0.1 |
 
 ## Run
 
 ```bash
 nohup bash experiments/moe_aux_loss/run.sh > logs/moe_aux_loss.log 2>&1 &
 # single:
-uv run python scripts/train.py --config experiments/moe_aux_loss/qwen3_moe_aux_coef1e-2.yaml
+uv run python scripts/train.py --config experiments/moe_aux_loss/qwen3_133m_a35m_aux_coef1e-2.yaml
 ```
 
 ## Results
@@ -49,13 +49,12 @@ uv run python scripts/train.py --config experiments/moe_aux_loss/qwen3_moe_aux_c
 
 | aux_loss_coef | val_loss | val_aux_loss (balance) | notes |
 |---------------|----------|------------------------|-------|
+| 0     | | | no balancing |
 | 0.001 | | | |
-| 0.003 | | | |
 | 0.01  | | | |
-| 0.03  | | | |
 | 0.1   | | | |
 
-Best: _TBD_
+Best: _TBD_ → pick finer range from here.
 
 ## Notes
 
