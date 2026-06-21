@@ -356,9 +356,7 @@ class Trainer:
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
-                accum_loss_tensor += (
-                    ce_loss.detach() / cfg.gradient_accumulation_steps
-                )
+                accum_loss_tensor += ce_loss.detach() / cfg.gradient_accumulation_steps
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
