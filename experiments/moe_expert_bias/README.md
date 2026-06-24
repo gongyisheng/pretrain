@@ -35,6 +35,13 @@ only `expert_bias_update_rate` varies.
 | `qwen3_133m_a35m_expert_bias_rate1e-3` | 0.001 (DeepSeek-V3 default) |
 | `qwen3_133m_a35m_expert_bias_rate1e-2` | 0.01 |
 
+Plus an aux-loss baseline on the same testbed as a benchmark for the loss-free
+expert-bias scheme (`expert_bias: false`, `aux_loss: true`):
+
+| Config | aux_loss_coef |
+|--------|---------------|
+| `qwen3_133m_a35m_aux_coef1e-2` | 0.01 |
+
 ## Run
 
 ```bash
@@ -45,11 +52,12 @@ uv run python scripts/train.py --config experiments/moe_expert_bias/qwen3_133m_a
 
 ## Results
 
-| expert_bias_update_rate | val_loss | notes |
-|-------------------------|----------|-------|
-| 0.0001 | | |
-| 0.001  | | DeepSeek-V3 default |
-| 0.01   | | |
+| scheme | param | val_loss | notes |
+|--------|-------|----------|-------|
+| expert_bias | u=0.0001 | | |
+| expert_bias | u=0.001  | | DeepSeek-V3 default |
+| expert_bias | u=0.01   | | |
+| aux_loss    | coef=0.01 | | benchmark baseline |
 
 Best: _TBD_ → pick finer range from here.
 

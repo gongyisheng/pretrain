@@ -8,6 +8,10 @@ cd "$(dirname "$0")/../.."
 rates=(1e-4 1e-3 1e-2)
 
 configs=()
+
+# Aux-loss baseline (same testbed) as a benchmark for loss-free expert bias.
+configs+=("qwen3_133m_a35m_aux_coef1e-2")
+
 for r in "${rates[@]}"; do
     configs+=("qwen3_133m_a35m_expert_bias_rate${r}")
 done
