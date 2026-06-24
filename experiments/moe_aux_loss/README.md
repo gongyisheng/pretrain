@@ -33,6 +33,7 @@ experts, top-2, capacity factor 1.25. Only `aux_loss_coef` varies.
 | `qwen3_133m_a35m_aux_coef1e-3` | 0.001 |
 | `qwen3_133m_a35m_aux_coef1e-2` | 0.01 (Switch default) |
 | `qwen3_133m_a35m_aux_coef1e-1` | 0.1 |
+| `qwen3_133m_a35m_aux_coef1e-0` | 1.0 |
 
 ## Run
 
@@ -53,6 +54,7 @@ uv run python scripts/train.py --config experiments/moe_aux_loss/qwen3_133m_a35m
 | 0.001 | | | |
 | 0.01  | | | |
 | 0.1   | | | |
+| 1.0   | | | |
 
 Best: _TBD_ → pick finer range from here.
 
