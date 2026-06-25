@@ -43,7 +43,7 @@ training:
   eval_steps: 25
 optimizer:
   name: adamw
-  lr: 5e-4
+  lr: 1e-3
   weight_decay: 0.1
   betas:
   - 0.9
@@ -51,7 +51,7 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 1500
-  min_lr: 5e-5
+  min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-expert-bias
   wandb_run_name: qwen3-133m-a35m-expertbias-rate1e-2

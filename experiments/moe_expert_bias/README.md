@@ -27,7 +27,7 @@ only `expert_bias_update_rate` varies.
 | expert_capacity_factor | 1.25 |
 | batch × grad_accum × seq | 8 × 32 × 1024 (≈0.26M tok/step) |
 | max_steps | 50000 (≈13B tokens) |
-| lr / min_lr / warmup | 6e-4 / 6e-5 / 1000 |
+| lr / min_lr / warmup | 1e-3 / 1e-4 / 1000 |
 
 | Config | expert_bias_update_rate |
 |--------|-------------------------|
