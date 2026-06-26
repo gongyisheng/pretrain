@@ -412,6 +412,15 @@ class SparseMoEBlock(nn.Module):
         )
         self.expert_dropout = nn.Dropout(dropout)
 
+        # Per-expert token routing load from the most recent forward, for
+        # load-balance monitoring (MaxVio). Non-persistent; written in-place so
+        # torch.compile records a buffer mutation rather than graph-breaking.
+        self.register_buffer(
+            "expert_load",
+            torch.zeros(n_experts, dtype=torch.long),
+            persistent=False,
+        )
+
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)
         B, S, D = x.shape
@@ -451,6 +460,9 @@ class SparseMoEBlock(nn.Module):
                 torch.arange(len(sorted_expert_ids), device=x.device)
                 - offsets[sorted_expert_ids]
             )
+
+        # Stash pre-drop routing load for MaxVio monitoring (in-place, no grad).
+        self.expert_load.copy_(expert_counts.detach())
 
         # --- Build padded input: (E, capacity, D) ---
         padded_input = _scatter_in(

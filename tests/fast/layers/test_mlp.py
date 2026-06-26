@@ -329,6 +329,20 @@ def test_sparse_moe_block_aux_loss_has_grad():
     assert block.router.gate.weight.grad is not None
 
 
+def test_sparse_moe_block_records_expert_load():
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+    )
+    x = torch.randn(2, 8, 64)  # T=16 tokens, k=2 -> 32 routings
+    block(x)
+    load = block.expert_load
+    assert load.shape == (4,)
+    assert load.sum().item() == 16 * 2
+    assert not load.requires_grad
+    # Buffer is non-persistent (excluded from state_dict).
+    assert "expert_load" not in block.state_dict()
+
+
 def test_sparse_moe_block_aux_loss_coef_stored():
     block = SparseMoEBlock(
         d_model=64, intermediate_size=128, n_experts=4, aux_loss_coef=0.05

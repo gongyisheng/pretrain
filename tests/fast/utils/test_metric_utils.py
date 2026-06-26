@@ -640,3 +640,43 @@ def test_compute_flops_per_token_counts_attn_res_residual():
     assert metric_utils.compute_flops_per_token(
         ar
     ) > metric_utils.compute_flops_per_token(std)
+
+
+# ---------------------------------------------------------------------------
+# MoE load balance (MaxVio)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_maxvio_balanced_is_zero():
+    assert metric_utils.compute_maxvio(torch.tensor([5, 5, 5, 5])) == 0.0
+
+
+def test_compute_maxvio_matches_formula():
+    # mean 5, max 10 -> (10 - 5) / 5 = 1.0
+    assert metric_utils.compute_maxvio(torch.tensor([10, 0, 5, 5])) == pytest.approx(
+        1.0
+    )
+
+
+def test_compute_maxvio_empty_load_is_zero():
+    assert metric_utils.compute_maxvio(torch.zeros(4)) == 0.0
+
+
+def test_compute_moe_maxvio_aggregates_per_layer():
+    load = [torch.tensor([10, 0, 5, 5]), torch.tensor([5, 5, 5, 5])]  # maxvio 1.0, 0.0
+    out = metric_utils.compute_moe_maxvio(load)
+    assert out["layer_0"] == pytest.approx(1.0)
+    assert out["layer_1"] == pytest.approx(0.0)
+    assert out["mean"] == pytest.approx(0.5)
+    assert out["max"] == pytest.approx(1.0)
+
+
+def test_collect_moe_blocks_finds_all_blocks():
+    from src.layers.mlp import SparseMoEBlock
+
+    model = torch.nn.Module()
+    model.a = SparseMoEBlock(d_model=32, intermediate_size=64, n_experts=4)
+    model.b = SparseMoEBlock(d_model=32, intermediate_size=64, n_experts=4)
+    blocks = metric_utils.collect_moe_blocks(model)
+    assert blocks == [model.a, model.b]
+    assert all(b.expert_load.shape == (4,) for b in blocks)
