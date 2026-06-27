@@ -36,6 +36,7 @@ Fixed testbed: `qwen3_moe_133m` architecture, 64 experts, top-2, capacity factor
 | qwen3_133m_a35m_lr2e-3 | 2e-3 | 2e-4 |
 | qwen3_133m_a35m_lr3e-3 | 3e-3 | 3e-4 |
 | qwen3_133m_a35m_lr5e-3 | 5e-3 | 5e-4 |
+| qwen3_133m_a35m_lr5e-4_minlr_1e-4 | 5e-4 | 1e-4 |
 
 ## Run
 
@@ -53,6 +54,7 @@ uv run python scripts/train.py --config experiments/lr_moe/qwen3_133m_a35m_lr1e-
 | 2e-4 | | |
 | 3e-4 | | |
 | 5e-4 | | |
+| 5e-4 | | min_lr 1e-4 (vs 5e-5) |
 | 1e-3 | | |
 | 2e-3 | | |
 | 3e-3 | | |
