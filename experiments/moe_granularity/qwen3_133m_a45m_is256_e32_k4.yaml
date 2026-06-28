@@ -31,7 +31,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_granularity/qwen3-133m-a45m-is256-e32-k4/
+  checkpoint_dir: checkpoints/moe_granularity/qwen3_133m_a45m_is256_e32_k4/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25

@@ -32,7 +32,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_shared_experts/qwen3-133m-a39m-s0-r4/
+  checkpoint_dir: checkpoints/moe_shared_experts/qwen3_133m_a39m_s0_r4/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25

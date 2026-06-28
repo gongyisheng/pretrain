@@ -15,7 +15,7 @@ for t in "${triples[@]}"; do
   match=("$dir"/*_is"${is}"_e"${e}"_k"${k}".yaml)
   configs+=("${match[0]}")
 done
-configs+=("$dir"/qwen3_dense_*.yaml)   # dense baseline, same active width
+configs+=("$dir"/qwen3_45m_is1024.yaml)   # dense baseline, same active width
 
 for config in "${configs[@]}"; do
   echo "=== Training ${config} ==="

@@ -30,7 +30,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_granularity/qwen3-dense-45m-is1024/
+  checkpoint_dir: checkpoints/moe_granularity/qwen3_45m_is1024/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
@@ -47,5 +47,5 @@ scheduler:
   min_lr: 0.0001
 logging:
   wandb_project: pretrain-moe-granularity
-  wandb_run_name: qwen3-dense-45m-is1024
+  wandb_run_name: qwen3-45m-is1024
   log_every: 10

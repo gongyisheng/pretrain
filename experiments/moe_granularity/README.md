@@ -38,7 +38,7 @@ Config filename = ckpt dir = W&B run name.
 | `qwen3_133m_a45m_is512_e16_k2`  | 2 |  512 | 16 | 2 | 133M | 45M |
 | `qwen3_133m_a45m_is256_e32_k4`  | 4 |  256 | 32 | 4 | 133M | 45M |
 | `qwen3_133m_a45m_is128_e64_k8`  | 8 |  128 | 64 | 8 | 133M | 45M |
-| `qwen3_dense_45m_is1024`            | — | 1024 |  — | — |  45M | 45M |
+| `qwen3_45m_is1024`            | — | 1024 |  — | — |  45M | 45M |
 
 The dense `is=1024` baseline has the same active FFN width as every MoE cell (no routing) —
 it tests whether routing buys anything over a plain dense FFN of equal active size.
@@ -66,7 +66,7 @@ W&B project: `pretrain-moe-granularity`.
 | `qwen3_133m_a45m_is512_e16_k2`  | 2 |  512 | 16 | 2 | |
 | `qwen3_133m_a45m_is256_e32_k4`  | 4 |  256 | 32 | 4 | |
 | `qwen3_133m_a45m_is128_e64_k8`  | 8 |  128 | 64 | 8 | |
-| `qwen3_dense_45m_is1024`            | — | 1024 |  — | — | |
+| `qwen3_45m_is1024`            | — | 1024 |  — | — | |
 
 ## Notes
 

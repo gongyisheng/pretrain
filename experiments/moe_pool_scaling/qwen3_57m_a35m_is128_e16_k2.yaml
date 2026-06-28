@@ -31,7 +31,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_pool_scaling/qwen3-57m-a35m-is128-e16-k2/
+  checkpoint_dir: checkpoints/moe_pool_scaling/qwen3_57m_a35m_is128_e16_k2/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
