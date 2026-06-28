@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run MoE 506M top-k grid search experiments sequentially (lowest k first).
-# Usage: nohup bash experiments/moe/run.sh > logs/moe_506m.log 2>&1 &
+# Usage: nohup bash experiments/moe_routed_experts/run.sh > logs/moe_506m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
@@ -13,7 +13,7 @@ for active in "${ACTIVE[@]}"; do
     config="${PREFIX}_${TOTAL}_a${active}"
     echo "=== ${config} ==="
     echo "Started at: $(date)"
-    uv run python scripts/train.py --config "experiments/moe/${config}.yaml"
+    uv run python scripts/train.py --config "experiments/moe_routed_experts/${config}.yaml"
     echo "Finished at: $(date)"
     echo ""
 done

@@ -37,10 +37,10 @@ Sparsity: 4/64 = 6.25% of experts active per token (matches Qwen3-0.6B-MoE ratio
 
 ```bash
 # All configs sequentially:
-nohup bash experiments/moe/qwen3_moe/run.sh > logs/moe_500m.log 2>&1 &
+nohup bash experiments/moe_routed_experts/run.sh > logs/moe_500m.log 2>&1 &
 
 # Single config:
-uv run python scripts/train.py --config experiments/moe/qwen3_moe_506m_a128m.yaml
+uv run python scripts/train.py --config experiments/moe_routed_experts/qwen3_moe_506m_a128m.yaml
 ```
 
 > **Memory note:** Model params + optimizer ~6GB (BF16). If activations OOM on your GPU,
