@@ -21,10 +21,10 @@ Configs are named by **effective batch size in sequences** (`bs` =
 
 | Config | eff. batch (seq) | grad_accu | Effective batch (tokens) | max_steps | warmup | total tokens |
 |--------|------------------|-----------|--------------------------|-----------|--------|--------------|
-| `qwen3_183m_a51m_bs256`  | 256  | 32  | 262K  | 50000 | 1000 | 13.1B  |
-| `qwen3_183m_a51m_bs512`  | 512  | 64  | 524K  | 50000 | 500  | 26.2B  |
-| `qwen3_183m_a51m_bs1024` | 1024 | 128 | 1.05M | 50000 | 250  | 52.4B  |
-| `qwen3_183m_a51m_bs2048` | 2048 | 256 | 2.10M | 50000 | 125  | 104.9B |
+| `qwen3_183m_a51m_bs256`  | 256  | 32  | 262K  | 50000 | 1500 | 13.1B  |
+| `qwen3_183m_a51m_bs512`  | 512  | 64  | 524K  | 50000 | 1500 | 26.2B  |
+| `qwen3_183m_a51m_bs1024` | 1024 | 128 | 1.05M | 50000 | 1500 | 52.4B  |
+| `qwen3_183m_a51m_bs2048` | 2048 | 256 | 2.10M | 50000 | 1500 | 104.9B |
 
 `bs256` is the established baseline.
 
