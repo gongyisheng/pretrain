@@ -15,7 +15,9 @@ for t in "${triples[@]}"; do
   match=("$dir"/*_is"${is}"_e"${e}"_k"${k}".yaml)
   configs+=("${match[0]}")
 done
-configs+=("$dir"/qwen3_45m_is1024.yaml)   # dense baseline, same active width
+configs+=("$dir"/qwen3_45m_is1024.yaml)   # dense baseline, same active width (2*d_model)
+configs+=("$dir"/qwen3_49m_is1408.yaml)   # dense reference, SwiGLU-standard (8/3*d_model→1408)
+configs+=("$dir"/qwen3_57m_is2048.yaml)   # dense reference, vanilla-standard (4*d_model)
 
 for config in "${configs[@]}"; do
   echo "=== Training ${config} ==="
