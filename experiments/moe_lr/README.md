@@ -42,7 +42,9 @@ Same LR grid at each level (`a35m`/`a45m` interchangeable in the names below):
 | qwen3_133m_aXXm_lr2e-3 | 2e-3 | 2e-4 |
 | qwen3_133m_aXXm_lr3e-3 | 3e-3 | 3e-4 |
 | qwen3_133m_aXXm_lr5e-3 | 5e-3 | 5e-4 |
-| qwen3_133m_aXXm_lr5e-4_minlr_1e-4 | 5e-4 | 1e-4 |
+| qwen3_133m_a35m_lr5e-4_minlr_1e-4 | 5e-4 | 1e-4 |
+
+The `_minlr_1e-4` variant exists only for a35m.
 
 ## Run
 

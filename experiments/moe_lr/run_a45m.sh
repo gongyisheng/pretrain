@@ -9,7 +9,6 @@ configs=()
 for lr in 1e-4 2e-4 3e-4 5e-4 1e-3 2e-3 3e-3 5e-3; do
     configs+=("qwen3_133m_a45m_lr${lr}")
 done
-configs+=("qwen3_133m_a45m_lr5e-4_minlr_1e-4")
 
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
