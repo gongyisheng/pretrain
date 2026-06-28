@@ -8,7 +8,7 @@ Under fixed FFN parameter count, the choice of activation matters less than the 
 
 ## Setup
 
-All 19 configs share the Qwen3-51M backbone (d_model=512, layers=8, heads=8, kv_heads=4), seq_len=1024, batch_size=16, grad_accum=16 (~262K tokens/step), 50K steps (~13B tokens), lr=6e-4 cosine to 6e-5 with 1500 warmup steps, bf16, OpenWebText, 50257-vocab BPE.
+All 19 configs share the Qwen3-51M backbone (d_model=512, layers=8, heads=8, kv_heads=4), seq_len=1024, batch_size=16, grad_accum=16 (~262K tokens/step), 50K steps (~13B tokens), lr=5e-4 cosine to 5e-5 with 1500 warmup steps, bf16, OpenWebText, 50257-vocab BPE.
 
 FFN parameters are matched across gated vs ungated by adjusting `intermediate_size`:
 

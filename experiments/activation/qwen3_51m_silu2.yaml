@@ -32,10 +32,10 @@ training:
   checkpoint_dir: checkpoints/activation/qwen3_51m_silu2/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
 optimizer:
   name: adamw
-  lr: 6e-4
+  lr: 5e-4
   weight_decay: 0.1
   betas:
   - 0.9
@@ -43,7 +43,7 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 1500
-  min_lr: 6e-5
+  min_lr: 5e-5
 logging:
   wandb_project: pretrain-activation
   wandb_run_name: qwen3-51m-silu2
