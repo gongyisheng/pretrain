@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run MoE 506M top-k grid search experiments sequentially (lowest k first).
-# Usage: nohup bash experiments/moe_routed_experts/run.sh > logs/moe_506m.log 2>&1 &
+# Usage: nohup bash experiments/moe_routed_experts/run_506m.sh > logs/moe_routed_506m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."

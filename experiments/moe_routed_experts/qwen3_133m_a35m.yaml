@@ -1,0 +1,53 @@
+max_seq_len: 1024
+model:
+  d_model: 512
+  n_layers: 8
+  vocab_size: 50257
+  attn_cls: gqa
+  attn_kwargs:
+    n_heads: 8
+    n_kv_heads: 4
+    qk_norm: true
+  mlp_cls: moe
+  mlp_kwargs:
+    intermediate_size: 128
+    n_routed_experts: 64
+    n_routed_experts_per_token: 2
+    aux_loss_coef: 0.01
+    expert_capacity_factor: 1.25
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs:
+    rope_theta: 10000.0
+data:
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
+  val_split: 0.01
+  num_workers: 4
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 32
+  max_steps: 50000
+  mixed_precision: bf16
+  activation_checkpointing: false
+  grad_clip: 1.0
+  checkpoint_dir: checkpoints/moe_routed_experts/qwen3_133m_a35m/
+  checkpoint_every: 5000
+  eval_every: 100
+  eval_steps: 25
+optimizer:
+  name: adamw
+  lr: 5e-4
+  weight_decay: 0.1
+  betas:
+  - 0.9
+  - 0.95
+scheduler:
+  name: cosine
+  warmup_steps: 1000
+  min_lr: 5e-5
+logging:
+  wandb_project: pretrain-moe-routed-experts
+  wandb_run_name: qwen3-133m-a35m
+  log_every: 10
