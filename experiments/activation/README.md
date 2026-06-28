@@ -19,7 +19,7 @@ Gated `intermediate_size` follows the canonical SwiGLU budget of `8/3 · d_model
 
 ### Ungated variants (8)
 
-| Config | `mlp_activation` | Formula |
+| Config | `activation` | Formula |
 |---|---|---|
 | qwen3_51m_relu | relu | relu(x) |
 | qwen3_51m_gelu | gelu | gelu(x) |
@@ -32,7 +32,7 @@ Gated `intermediate_size` follows the canonical SwiGLU budget of `8/3 · d_model
 
 ### Gated variants (11)
 
-| Config | `mlp_activation` | Literature name | Formula |
+| Config | `activation` | Literature name | Formula |
 |---|---|---|---|
 | qwen3_51m_reglu | relu | ReGLU | relu(g) · u |
 | qwen3_51m_geglu | gelu | GeGLU | gelu(g) · u |
@@ -92,6 +92,6 @@ Fill in after the runs complete.
 ## Notes
 
 - Squaring follows **Rule A** (see `src/layers/activation.py` docstring): squared = unary `act(x)²`. Gated squared = `act(g)² · u`, NOT `(act(g) · u)²`. So SwiGLU² is `silu(g)² · u`.
-- Bilinear GLU and PowLU are exposed only via the gated registry; using them with `mlp_gated: false` raises `ValueError`.
+- Bilinear GLU and PowLU are exposed only via the gated registry; using them with `gated: false` raises `ValueError`.
 - Literature references: Shazeer 2020 "GLU Variants Improve Transformer" (SwiGLU/GeGLU/ReGLU/Bilinear), So et al. 2021 "Primer" (squared ReLU), arXiv:2605.25704 (May 2026) (PowLU).
-- This sweep does not vary `intermediate_size`, learning rate, or any other hyperparameter beyond `mlp_activation` / `mlp_gated` / matched `intermediate_size`.
+- This sweep does not vary `intermediate_size`, learning rate, or any other hyperparameter beyond `activation` / `gated` / matched `intermediate_size`.
