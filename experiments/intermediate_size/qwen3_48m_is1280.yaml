@@ -10,7 +10,7 @@ model:
     qk_norm: true
   mlp_cls: dense
   mlp_kwargs:
-    intermediate_size: 2048
+    intermediate_size: 1280
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -22,34 +22,33 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 8
-  gradient_accumulation_steps: 32
+  batch_size: 16
+  gradient_accumulation_steps: 16
   max_steps: 50000
-  early_stop: 12000
   mixed_precision: bf16
   activation_checkpointing: false
   seed: 42
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/intermediate_size/down_proj_lr_sweep/qwen3_57m_mult4_xt4/
+  checkpoint_dir: checkpoints/intermediate_size/qwen3_48m_is1280/
   checkpoint_every: 5000
   eval_every: 1000
-  eval_steps: 25
+  eval_steps: 100
 optimizer:
-  name: adamw
+  name: muon
   lr: 5e-4
-  lr_mult:
-    down_proj: 4.0
-    lm_head: 1.0
   weight_decay: 0.1
   betas:
   - 0.9
   - 0.95
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_adjust_lr_fn: match_rms_adamw
 scheduler:
   name: cosine
   warmup_steps: 1500
   min_lr: 5e-5
 logging:
-  wandb_project: pretrain-intermediate-size-down-proj-lr-sweep
-  wandb_run_name: qwen3-57m-mult4-xt4
-  wandb_group: mult4
+  wandb_project: pretrain-intermediate-size
+  wandb_run_name: qwen3-48m-is1280
+  wandb_group: mult2_5
   log_every: 10
