@@ -50,5 +50,4 @@ scheduler:
 logging:
   wandb_project: pretrain-intermediate-size
   wandb_run_name: qwen3-51m-is1536
-  wandb_group: mult3
   log_every: 10
