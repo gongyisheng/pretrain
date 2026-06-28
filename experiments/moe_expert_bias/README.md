@@ -31,6 +31,7 @@ only `expert_bias_update_rate` varies.
 
 | Config | expert_bias_update_rate |
 |--------|-------------------------|
+| `qwen3_133m_a35m_expert_bias_rate1e-5` | 0.00001 |
 | `qwen3_133m_a35m_expert_bias_rate1e-4` | 0.0001 |
 | `qwen3_133m_a35m_expert_bias_rate1e-3` | 0.001 (DeepSeek-V3 default) |
 | `qwen3_133m_a35m_expert_bias_rate1e-2` | 0.01 |
@@ -54,6 +55,7 @@ uv run python scripts/train.py --config experiments/moe_expert_bias/qwen3_133m_a
 
 | scheme | param | val_loss | notes |
 |--------|-------|----------|-------|
+| expert_bias | u=0.00001 | | |
 | expert_bias | u=0.0001 | | |
 | expert_bias | u=0.001  | | DeepSeek-V3 default |
 | expert_bias | u=0.01   | | |
