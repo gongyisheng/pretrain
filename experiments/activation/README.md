@@ -1,6 +1,6 @@
 # Activation Function Ablation
 
-Compare 19 FFN activation choices at Qwen3-57M scale with matched parameter counts.
+Compare 19 FFN activation choices at Qwen3-51M scale with matched parameter counts.
 
 ## Hypothesis
 
@@ -8,43 +8,43 @@ Under fixed FFN parameter count, the choice of activation matters less than the 
 
 ## Setup
 
-All 19 configs share the Qwen3-57M backbone (d_model=512, layers=8, heads=8, kv_heads=4), seq_len=1024, batch_size=16, grad_accum=16 (~262K tokens/step), 50K steps (~13B tokens), lr=6e-4 cosine to 6e-5 with 1500 warmup steps, bf16, OpenWebText, 50257-vocab BPE.
+All 19 configs share the Qwen3-51M backbone (d_model=512, layers=8, heads=8, kv_heads=4), seq_len=1024, batch_size=16, grad_accum=16 (~262K tokens/step), 50K steps (~13B tokens), lr=6e-4 cosine to 6e-5 with 1500 warmup steps, bf16, OpenWebText, 50257-vocab BPE.
 
 FFN parameters are matched across gated vs ungated by adjusting `intermediate_size`:
 
 - Gated FFN params per layer = `3 · d_model · intermediate_size`
 - Ungated FFN params per layer = `2 · d_model · intermediate_size`
 
-So `intermediate_size = 2048` (gated) and `3072` (ungated) both yield `12 · d_model² = 3.15M` FFN params per layer.
+Gated `intermediate_size` follows the canonical SwiGLU budget of `8/3 · d_model = 1365.33`, rounded (Llama-style) to `1536` (= 3 · d_model), a multiple of 128. The ungated side is sized to match exactly: `intermediate_size = 1.5 × 1536 = 2304` (= 4.5 · d_model, also a multiple of 128). Both yield `3 · d_model · 1536 = 2 · d_model · 2304 = 2.36M` FFN params per layer, for ~50.9M total params.
 
 ### Ungated variants (8)
 
 | Config | `mlp_activation` | Formula |
 |---|---|---|
-| qwen3_57m_relu | relu | relu(x) |
-| qwen3_57m_gelu | gelu | gelu(x) |
-| qwen3_57m_silu | silu | silu(x) |
-| qwen3_57m_leaky_relu | leaky_relu | leaky_relu(x, 0.01) |
-| qwen3_57m_relu2 | relu2 | relu(x)² |
-| qwen3_57m_gelu2 | gelu2 | gelu(x)² |
-| qwen3_57m_silu2 | silu2 | silu(x)² |
-| qwen3_57m_leaky_relu2 | leaky_relu2 | leaky_relu(x, 0.01)² |
+| qwen3_51m_relu | relu | relu(x) |
+| qwen3_51m_gelu | gelu | gelu(x) |
+| qwen3_51m_silu | silu | silu(x) |
+| qwen3_51m_leaky_relu | leaky_relu | leaky_relu(x, 0.01) |
+| qwen3_51m_relu2 | relu2 | relu(x)² |
+| qwen3_51m_gelu2 | gelu2 | gelu(x)² |
+| qwen3_51m_silu2 | silu2 | silu(x)² |
+| qwen3_51m_leaky_relu2 | leaky_relu2 | leaky_relu(x, 0.01)² |
 
 ### Gated variants (11)
 
 | Config | `mlp_activation` | Literature name | Formula |
 |---|---|---|---|
-| qwen3_57m_reglu | relu | ReGLU | relu(g) · u |
-| qwen3_57m_geglu | gelu | GeGLU | gelu(g) · u |
-| qwen3_57m_swiglu | silu | SwiGLU | silu(g) · u |
-| qwen3_57m_leaky_reglu | leaky_relu | LeakyReGLU | leaky_relu(g) · u |
-| qwen3_57m_reglu2 | relu2 | ReGLU² | relu(g)² · u |
-| qwen3_57m_geglu2 | gelu2 | GeGLU² | gelu(g)² · u |
-| qwen3_57m_swiglu2 | silu2 | SwiGLU² | silu(g)² · u |
-| qwen3_57m_leaky_reglu2 | leaky_relu2 | LeakyReGLU² | leaky_relu(g)² · u |
-| qwen3_57m_bilinear | bilinear | Bilinear GLU | g · u |
-| qwen3_57m_bilinear2 | bilinear2 | Squared Bilinear GLU | g² · u |
-| qwen3_57m_powlu | powlu | PowLU | powlu(g) · u |
+| qwen3_51m_reglu | relu | ReGLU | relu(g) · u |
+| qwen3_51m_geglu | gelu | GeGLU | gelu(g) · u |
+| qwen3_51m_swiglu | silu | SwiGLU | silu(g) · u |
+| qwen3_51m_leaky_reglu | leaky_relu | LeakyReGLU | leaky_relu(g) · u |
+| qwen3_51m_reglu2 | relu2 | ReGLU² | relu(g)² · u |
+| qwen3_51m_geglu2 | gelu2 | GeGLU² | gelu(g)² · u |
+| qwen3_51m_swiglu2 | silu2 | SwiGLU² | silu(g)² · u |
+| qwen3_51m_leaky_reglu2 | leaky_relu2 | LeakyReGLU² | leaky_relu(g)² · u |
+| qwen3_51m_bilinear | bilinear | Bilinear GLU | g · u |
+| qwen3_51m_bilinear2 | bilinear2 | Squared Bilinear GLU | g² · u |
+| qwen3_51m_powlu | powlu | PowLU | powlu(g) · u |
 
 PowLU formula (arXiv:2605.25704, m=3): for x > 0, `x · x^(m/(√x+1)) · σ(x)`; for x ≤ 0, `x² · σ(x)`.
 
@@ -54,7 +54,7 @@ PowLU formula (arXiv:2605.25704, m=3): for x > 0, `x · x^(m/(√x+1)) · σ(x)`
 nohup bash experiments/activation/run.sh > logs/activation.log 2>&1 &
 ```
 
-19 runs × ~6 hours per run on one A100 ≈ 5 days wall-clock. Each run writes to its own `checkpoints/activation/<variant>/` and W&B run name.
+19 runs × ~5 hours per run on one A100 ≈ 4 days wall-clock. Each run writes to its own `checkpoints/activation/<variant>/` and W&B run name.
 
 ## Results
 

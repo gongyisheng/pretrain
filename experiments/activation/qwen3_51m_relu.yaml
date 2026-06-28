@@ -10,8 +10,8 @@ model:
     qk_norm: true
   mlp_cls: dense
   mlp_kwargs:
-    intermediate_size: 3072
-    activation: leaky_relu
+    intermediate_size: 2304
+    activation: relu
     gated: false
   norm_cls: rmsnorm
   pos_emb_cls: rope
@@ -29,7 +29,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/activation/qwen3_57m_leaky_relu/
+  checkpoint_dir: checkpoints/activation/qwen3_51m_relu/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
@@ -46,5 +46,5 @@ scheduler:
   min_lr: 6e-5
 logging:
   wandb_project: pretrain-activation
-  wandb_run_name: qwen3-57m-leaky-relu
+  wandb_run_name: qwen3-51m-relu
   log_every: 10
