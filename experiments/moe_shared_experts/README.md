@@ -12,7 +12,7 @@ We sweep both axes independently and compare final validation loss.
 
 ## Setup
 
-Common backbone (Qwen3-style, all 12 runs identical except the MLP block):
+Common backbone (Qwen3-style, all 16 runs identical except the MLP block):
 
 | Param | Value |
 |-------|-------|
@@ -26,7 +26,7 @@ Common backbone (Qwen3-style, all 12 runs identical except the MLP block):
 
 Axes:
 - **shared** = `n_shared_experts` ∈ {0, 1, 2, 4} — always-on FFN of width `shared × 128`.
-- **routed** = `n_routed_experts_per_token` (top-k) ∈ {1, 2, 4} — over the fixed 64-expert pool.
+- **routed** = `n_routed_experts_per_token` (top-k) ∈ {1, 2, 4, 8} — over the fixed 64-expert pool.
 
 All cells use `moe` with `aux_loss_coef=0.01` and dynamic capacity (no token dropping).
 `shared=0` is the no-shared-expert baseline (pure routed MoE).
@@ -43,15 +43,19 @@ Config filename = ckpt dir = W&B run name. `tot` = total params, `act` = active 
 | `qwen3_133m_a34m_s0_r1` | 0 | 1 | 133M | 34M |
 | `qwen3_133m_a35m_s0_r2` | 0 | 2 | 133M | 35M |
 | `qwen3_133m_a39m_s0_r4` | 0 | 4 | 133M | 39M |
+| `qwen3_133m_a45m_s0_r8` | 0 | 8 | 133M | 45M |
 | `qwen3_135m_a35m_s1_r1` | 1 | 1 | 135M | 35M |
 | `qwen3_135m_a37m_s1_r2` | 1 | 2 | 135M | 37M |
 | `qwen3_135m_a40m_s1_r4` | 1 | 4 | 135M | 40M |
+| `qwen3_135m_a46m_s1_r8` | 1 | 8 | 135M | 46M |
 | `qwen3_136m_a37m_s2_r1` | 2 | 1 | 136M | 37M |
 | `qwen3_136m_a39m_s2_r2` | 2 | 2 | 136M | 39M |
 | `qwen3_136m_a42m_s2_r4` | 2 | 4 | 136M | 42M |
+| `qwen3_136m_a48m_s2_r8` | 2 | 8 | 136M | 48M |
 | `qwen3_139m_a40m_s4_r1` | 4 | 1 | 139M | 40M |
 | `qwen3_139m_a42m_s4_r2` | 4 | 2 | 139M | 42M |
 | `qwen3_139m_a45m_s4_r4` | 4 | 4 | 139M | 45M |
+| `qwen3_139m_a51m_s4_r8` | 4 | 8 | 139M | 51M |
 
 Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
 50000 (~13B tokens, fixed budget for a controlled comparison), cosine LR 1e-3 → 1e-4,
@@ -60,7 +64,7 @@ warmup 1000, bf16.
 ## Running
 
 ```bash
-# All 12 configs sequentially:
+# All 16 configs sequentially:
 nohup bash experiments/moe_shared_experts/run.sh > logs/moe_shared_experts.log 2>&1 &
 
 # Single config:
@@ -76,15 +80,19 @@ W&B project: `pretrain-moe-shared-experts`.
 | `qwen3_133m_a34m_s0_r1` | 0 | 1 | 34M | |
 | `qwen3_133m_a35m_s0_r2` | 0 | 2 | 35M | |
 | `qwen3_133m_a39m_s0_r4` | 0 | 4 | 39M | |
+| `qwen3_133m_a45m_s0_r8` | 0 | 8 | 45M | |
 | `qwen3_135m_a35m_s1_r1` | 1 | 1 | 35M | |
 | `qwen3_135m_a37m_s1_r2` | 1 | 2 | 37M | |
 | `qwen3_135m_a40m_s1_r4` | 1 | 4 | 40M | |
+| `qwen3_135m_a46m_s1_r8` | 1 | 8 | 46M | |
 | `qwen3_136m_a37m_s2_r1` | 2 | 1 | 37M | |
 | `qwen3_136m_a39m_s2_r2` | 2 | 2 | 39M | |
 | `qwen3_136m_a42m_s2_r4` | 2 | 4 | 42M | |
+| `qwen3_136m_a48m_s2_r8` | 2 | 8 | 48M | |
 | `qwen3_139m_a40m_s4_r1` | 4 | 1 | 40M | |
 | `qwen3_139m_a42m_s4_r2` | 4 | 2 | 42M | |
 | `qwen3_139m_a45m_s4_r4` | 4 | 4 | 45M | |
+| `qwen3_139m_a51m_s4_r8` | 4 | 8 | 51M | |
 
 ## Notes
 

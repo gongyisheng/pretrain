@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Shared-experts sweep: n_shared_experts x n_routed_experts_per_token.
-# 4x3 grid = 12 runs.
+# 4x4 grid = 16 runs.
 # Config filenames embed param counts, so each (s, k) is matched by suffix.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 shared_counts=(0 1 2 4)
-routed_ks=(1 2 4)
+routed_ks=(1 2 4 8)
 dir=experiments/moe_shared_experts
 
 configs=()
