@@ -2,7 +2,7 @@
 
 ## Hypothesis
 
-For the `qwen3_133m_a35m` MoE (133M total, ~35M active, 64 experts top-2), there is
+For the `qwen3_133m_a45m` MoE (133M total, ~45M active, 64 experts top-8), there is
 an effective batch size that best trades gradient-noise reduction against
 per-token efficiency. Sweep gradient accumulation (effective batch) at a fixed
 token budget and compare final val loss to find it.
@@ -16,13 +16,14 @@ Effective batch = `batch_size × grad_accu × max_seq_len`. `max_steps` and
 
 | Config | grad_accu | Effective batch (tokens) | max_steps | warmup |
 |--------|-----------|--------------------------|-----------|--------|
-| `qwen3_133m_a35m_ga32`  | 32  | 262K  | 50000 | 1000 |
-| `qwen3_133m_a35m_ga64`  | 64  | 524K  | 25000 | 500  |
-| `qwen3_133m_a35m_ga128` | 128 | 1.05M | 12500 | 250  |
-| `qwen3_133m_a35m_ga256` | 256 | 2.10M | 6250  | 125  |
+| `qwen3_133m_a45m_ga32`  | 32  | 262K  | 50000 | 1000 |
+| `qwen3_133m_a45m_ga64`  | 64  | 524K  | 25000 | 500  |
+| `qwen3_133m_a45m_ga128` | 128 | 1.05M | 12500 | 250  |
+| `qwen3_133m_a45m_ga256` | 256 | 2.10M | 6250  | 125  |
 
-`ga32` is the established baseline. All other settings match the canonical
-`configs/qwen3_133m_a35m.yaml`.
+`ga32` is the established baseline. Settings match the canonical
+`configs/qwen3_133m_a35m.yaml` except `n_routed_experts_per_token: 8` (top-8,
+~45M active).
 
 ## Running
 
@@ -31,17 +32,17 @@ Effective batch = `batch_size × grad_accu × max_seq_len`. `max_steps` and
 nohup bash experiments/moe_batch_size/run.sh > logs/moe_batch_size.log 2>&1 &
 
 # Single config:
-uv run python scripts/train.py --config experiments/moe_batch_size/qwen3_133m_a35m_ga64.yaml
+uv run python scripts/train.py --config experiments/moe_batch_size/qwen3_133m_a45m_ga64.yaml
 ```
 
 ## Results
 
 | Config | grad_accu | Final val loss | Val PPL | Notes |
 |--------|-----------|----------------|---------|-------|
-| `qwen3_133m_a35m_ga32`  | 32  | | | |
-| `qwen3_133m_a35m_ga64`  | 64  | | | |
-| `qwen3_133m_a35m_ga128` | 128 | | | |
-| `qwen3_133m_a35m_ga256` | 256 | | | |
+| `qwen3_133m_a45m_ga32`  | 32  | | | |
+| `qwen3_133m_a45m_ga64`  | 64  | | | |
+| `qwen3_133m_a45m_ga128` | 128 | | | |
+| `qwen3_133m_a45m_ga256` | 256 | | | |
 
 ## Notes
 
