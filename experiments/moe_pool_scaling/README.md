@@ -39,7 +39,7 @@ Config filename = ckpt dir = W&B run name.
 | `qwen3_moe_234m_a36m_is128_e128_k2` | 128 | 2 | 16384 | 234M | 36M | 1.6%  |
 
 Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
-50000 (~13B tokens), cosine LR 6e-4 → 6e-5, warmup 1000, bf16.
+50000 (~13B tokens), cosine LR 1e-3 → 1e-4, warmup 1000, bf16.
 
 ## Running
 

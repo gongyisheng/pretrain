@@ -44,7 +44,7 @@ The dense `is=1024` baseline has the same active FFN width as every MoE cell (no
 it tests whether routing buys anything over a plain dense FFN of equal active size.
 
 Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
-50000 (~13B tokens), cosine LR 6e-4 → 6e-5, warmup 1000, bf16.
+50000 (~13B tokens), cosine LR 1e-3 → 1e-4, warmup 1000, bf16.
 
 ## Running
 

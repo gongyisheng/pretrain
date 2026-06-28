@@ -54,7 +54,7 @@ Config filename = ckpt dir = W&B run name. `tot` = total params, `act` = active 
 | `qwen3_moe_139m_a45m_s4_r4` | 4 | 4 | 139M | 45M |
 
 Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
-50000 (~13B tokens, fixed budget for a controlled comparison), cosine LR 6e-4 → 6e-5,
+50000 (~13B tokens, fixed budget for a controlled comparison), cosine LR 1e-3 → 1e-4,
 warmup 1000, bf16.
 
 ## Running
