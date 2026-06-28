@@ -13,7 +13,7 @@ model:
   mlp_kwargs:
     intermediate_size: 128
     n_routed_experts: 64
-    n_routed_experts_per_token: 2
+    n_routed_experts_per_token: 8
     aux_loss_coef: 0.01
     expert_capacity_factor: 1.25
     dropout: 0.0
@@ -35,13 +35,13 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/lr_moe/qwen3_133m_a35m_lr5e-4_minlr_1e-4/
+  checkpoint_dir: checkpoints/moe_lr/qwen3_133m_a45m_lr3e-3/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
 optimizer:
   name: adamw
-  lr: 5e-4
+  lr: 3e-3
   weight_decay: 0.1
   betas:
   - 0.9
@@ -49,8 +49,8 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 1000
-  min_lr: 1e-4
+  min_lr: 3e-4
 logging:
-  wandb_project: pretrain-lr-moe
-  wandb_run_name: qwen3-133m-a35m-lr5e-4-minlr-1e-4
+  wandb_project: pretrain-moe-lr
+  wandb_run_name: qwen3-133m-a45m-lr3e-3
   log_every: 10
