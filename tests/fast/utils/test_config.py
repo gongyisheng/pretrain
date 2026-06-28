@@ -298,6 +298,30 @@ def test_modelconfig_resolves_intermediate_size(mlp_cls):
     assert cfg2.mlp_kwargs["intermediate_size"] == 256
 
 
+def test_modelconfig_moe_expert_bias_defaults():
+    # default: aux-loss balancing, no expert_bias
+    cfg = ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_experts": 4})
+    assert cfg.mlp_kwargs["expert_bias"] is False
+    assert cfg.mlp_kwargs["aux_loss"] is True
+    assert cfg.mlp_kwargs["aux_loss_coef"] == 0.01
+    # expert_bias on: aux_loss defaults off, bias update rate defaulted
+    cfg2 = ModelConfig(
+        d_model=64, mlp_cls="moe", mlp_kwargs={"n_experts": 4, "expert_bias": True}
+    )
+    assert cfg2.mlp_kwargs["aux_loss"] is False
+    assert cfg2.mlp_kwargs["expert_bias_update_rate"] == 0.001
+    assert "aux_loss_coef" not in cfg2.mlp_kwargs
+
+
+def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ModelConfig(
+            d_model=64,
+            mlp_cls="moe",
+            mlp_kwargs={"n_experts": 4, "aux_loss": True, "expert_bias": True},
+        )
+
+
 def test_modelconfig_unknown_activation_raises():
     with pytest.raises(ValueError, match="Unknown activation"):
         ModelConfig(mlp_kwargs={"activation": "mish"})

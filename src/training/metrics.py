@@ -91,6 +91,8 @@ class MetricsTracker:
         self._eval_bpb_bytes = 0
         self._eval_acc_correct = 0
         self._eval_acc_total = 0
+        self._moe_blocks = None
+        self._moe_expert_load = None
 
     # ------------------------------------------------------------------
     # Model summary
@@ -267,8 +269,9 @@ class MetricsTracker:
 
         return d
 
-    def eval_begin(self) -> None:
-        """Reset eval accumulators before iterating the val loader."""
+    def eval_begin(self, model: torch.nn.Module | None = None) -> None:
+        """Reset eval accumulators before iterating the val loader. `model` is
+        used once (cached) to locate MoE blocks for load-balance monitoring."""
         self._eval_loss_sum = 0.0
         self._eval_aux_sum = 0.0
         self._eval_n_batches = 0
@@ -276,6 +279,16 @@ class MetricsTracker:
         self._eval_bpb_bytes = 0
         self._eval_acc_correct = 0
         self._eval_acc_total = 0
+        if self.is_moe and model is not None and self._moe_blocks is None:
+            self._moe_blocks = metric_utils.collect_moe_blocks(model)
+        self._moe_expert_load = (
+            [
+                torch.zeros_like(b.expert_load, dtype=torch.float)
+                for b in self._moe_blocks
+            ]
+            if self._moe_blocks
+            else None
+        )
 
     def eval_step(
         self,
@@ -310,6 +323,10 @@ class MetricsTracker:
             self._eval_bpb_bytes += metric_utils.compute_decoded_byte_len(
                 tokenizer, target_ids
             )
+
+        if self._moe_expert_load is not None:
+            for acc, b in zip(self._moe_expert_load, self._moe_blocks):
+                acc += b.expert_load.float()
 
     def log_eval(
         self, *, step: int, train_avg_acc: float | None = None
@@ -349,6 +366,9 @@ class MetricsTracker:
                 d["val/train_acc"] = train_avg_acc
         if self.is_moe and avg_aux_loss is not None:
             d["val/aux_loss"] = avg_aux_loss - self._aux_floor
+        if self.is_moe and self._moe_expert_load is not None:
+            for k, v in metric_utils.compute_moe_maxvio(self._moe_expert_load).items():
+                d[f"val/moe_maxvio/{k}"] = v
 
         self.logger.log(d, step=step)
         print(self._format_eval_msg(d, avg_loss))

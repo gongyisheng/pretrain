@@ -6,6 +6,7 @@ import torch
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.mlp import (
     DenseMLPBlock,
+    ExpertBias,
     MLP_REGISTRY,
     MoERouter,
     SparseMoEBlock,
@@ -224,6 +225,77 @@ def test_moe_router_runs_in_fp32_under_autocast(amp_dtype):
 
 
 # ---------------------------------------------------------------------------
+# MoERouter — auxiliary-loss-free balancing bias (arXiv:2408.15664)
+# ---------------------------------------------------------------------------
+
+
+def test_moe_router_no_expert_bias_by_default():
+    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2)
+    assert router.expert_bias is None
+
+
+def test_moe_router_expert_bias_module_created():
+    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2, expert_bias=True)
+    assert isinstance(router.expert_bias, ExpertBias)
+    assert router.expert_bias.bias.shape == (8,)
+    assert router.expert_bias.bias.dtype == torch.float32
+    assert torch.count_nonzero(router.expert_bias.bias) == 0
+
+
+def test_moe_router_bias_drives_selection_not_combine_weights():
+    # normalize=False so returned weights are the raw gathered probs.
+    router = MoERouter(
+        d_model=64,
+        n_experts=8,
+        n_experts_per_token=2,
+        normalize=False,
+        expert_bias=True,
+    )
+    router.expert_bias.bias[3] = 100.0  # force expert 3 into every token's top-k
+    x = torch.randn(32, 64)
+    top_indices, top_weights, router_probs = router(x)
+    # expert 3 selected for every token
+    assert (top_indices == 3).any(dim=-1).all()
+    # combine weights are the ORIGINAL probs (bias must not leak in)
+    expected = router_probs.gather(-1, top_indices)
+    assert torch.allclose(top_weights, expected)
+
+
+def test_moe_router_bias_stays_fp32_across_dtype_casts():
+    router = MoERouter(d_model=64, n_experts=8, n_experts_per_token=2, expert_bias=True)
+    for cast in [
+        lambda m: m.to(torch.bfloat16),
+        lambda m: m.half(),
+        lambda m: m.float(),
+    ]:
+        cast(router)
+        assert router.expert_bias.bias.dtype == torch.float32
+
+
+def test_expert_bias_compute_cost():
+    assert ExpertBias.compute_flops(8) == 8
+    assert ExpertBias.compute_parameters(8) == 8
+
+
+def test_moe_router_compute_cost_with_expert_bias():
+    base_f = MoERouter.compute_flops(64, 8)
+    base_p = MoERouter.compute_parameters(64, 8)
+    assert base_f == 2 * 64 * 8
+    assert base_p == 64 * 8
+    assert MoERouter.compute_flops(64, 8, expert_bias=True) == base_f + 8
+    assert MoERouter.compute_parameters(64, 8, expert_bias=True) == base_p + 8
+
+
+def test_expert_bias_update_moves_toward_balance():
+    eb = ExpertBias(n_experts=4, update_rate=0.01)
+    counts = torch.tensor([10, 0, 5, 5])  # mean 5: expert 0 overloaded, 1 underloaded
+    eb.update(counts)
+    assert eb.bias[0].item() == pytest.approx(-0.01)  # overloaded -> down
+    assert eb.bias[1].item() == pytest.approx(+0.01)  # underloaded -> up
+    assert eb.bias[2].item() == 0.0 and eb.bias[3].item() == 0.0  # balanced
+
+
+# ---------------------------------------------------------------------------
 # SparseMoEBlock — behavior
 # ---------------------------------------------------------------------------
 
@@ -257,11 +329,74 @@ def test_sparse_moe_block_aux_loss_has_grad():
     assert block.router.gate.weight.grad is not None
 
 
+def test_sparse_moe_block_records_expert_load():
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, n_experts_per_token=2
+    )
+    x = torch.randn(2, 8, 64)  # T=16 tokens, k=2 -> 32 routings
+    block(x)
+    load = block.expert_load
+    assert load.shape == (4,)
+    assert load.sum().item() == 16 * 2
+    assert not load.requires_grad
+    # Buffer is non-persistent (excluded from state_dict).
+    assert "expert_load" not in block.state_dict()
+
+
 def test_sparse_moe_block_aux_loss_coef_stored():
     block = SparseMoEBlock(
         d_model=64, intermediate_size=128, n_experts=4, aux_loss_coef=0.05
     )
     assert block.aux_loss_coef == 0.05
+
+
+def test_sparse_moe_block_aux_loss_false_returns_none():
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, aux_loss=False
+    )
+    x = torch.randn(2, 8, 64)
+    _, aux_loss = block(x)
+    assert aux_loss is None
+
+
+def test_sparse_moe_block_expert_bias_returns_no_aux_loss():
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, aux_loss=False, expert_bias=True
+    )
+    x = torch.randn(2, 8, 64)
+    _, aux_loss = block(x)
+    assert aux_loss is None
+
+
+def test_sparse_moe_block_aux_loss_and_expert_bias_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        SparseMoEBlock(
+            d_model=64,
+            intermediate_size=128,
+            n_experts=4,
+            aux_loss=True,
+            expert_bias=True,
+        )
+
+
+def test_sparse_moe_block_expert_bias_updates_in_train_only():
+    torch.manual_seed(0)
+    block = SparseMoEBlock(
+        d_model=64, intermediate_size=128, n_experts=4, aux_loss=False, expert_bias=True
+    )
+    x = torch.randn(4, 16, 64)
+
+    block.eval()
+    block(x)
+    assert (
+        torch.count_nonzero(block.router.expert_bias.bias) == 0
+    )  # no update during eval
+
+    block.train()
+    block(x)
+    assert (
+        torch.count_nonzero(block.router.expert_bias.bias) > 0
+    )  # imbalanced load moves bias
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +430,26 @@ def test_sparse_moe_compute_flops_ungated():
     router = 2 * 64 * 4
     expert = 4 * 64 * 128
     assert f == router + 2 * expert
+
+
+def test_sparse_moe_compute_flops_expert_bias():
+    kwargs = dict(intermediate_size=128, n_experts=4, n_experts_per_token=2, gated=True)
+    base = SparseMoEBlock.compute_flops(64, **kwargs)
+    with_bias = SparseMoEBlock.compute_flops(64, expert_bias=True, **kwargs)
+    assert with_bias == base + 4  # +n_experts for the pre-top-k bias add
+
+
+def test_sparse_moe_compute_parameters_expert_bias():
+    kwargs = dict(intermediate_size=128, n_experts=4, n_experts_per_token=2, gated=True)
+    base = SparseMoEBlock.compute_parameters(64, **kwargs)
+    with_bias = SparseMoEBlock.compute_parameters(64, expert_bias=True, **kwargs)
+    assert with_bias == base + 4  # +n_experts for the load-balancing bias buffer
+    # active count includes the bias too
+    base_active = SparseMoEBlock.compute_parameters(64, active=True, **kwargs)
+    with_bias_active = SparseMoEBlock.compute_parameters(
+        64, expert_bias=True, active=True, **kwargs
+    )
+    assert with_bias_active == base_active + 4
 
 
 # ---------------------------------------------------------------------------

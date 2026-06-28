@@ -29,28 +29,28 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 8
-  gradient_accumulation_steps: 32
+  batch_size: 16
+  gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/qwen3_moe_133m/
+  checkpoint_dir: checkpoints/lr_moe/qwen3_133m_a35m_lr1e-4/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
 optimizer:
   name: adamw
-  lr: 6e-4
+  lr: 1e-4
   weight_decay: 0.1
   betas:
   - 0.9
   - 0.95
 scheduler:
   name: cosine
-  warmup_steps: 1500
-  min_lr: 6e-5
+  warmup_steps: 1000
+  min_lr: 1e-5
 logging:
-  wandb_project: pretrain
-  wandb_run_name: qwen3-moe-133m-a35m
+  wandb_project: pretrain-lr-moe
+  wandb_run_name: qwen3-133m-a35m-lr1e-4
   log_every: 10

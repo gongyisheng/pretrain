@@ -341,12 +341,13 @@ class Trainer:
                     logits, aux_loss = self.model(
                         input_ids, position_ids=position_ids, attn_mask=attn_mask
                     )
-                    loss = compute_loss(
+                    ce_loss = compute_loss(
                         logits,
                         labels,
                         self.config.training.loss_fn,
                         label_smoothing=self.config.training.label_smoothing,
                     )
+                    loss = ce_loss
                     if aux_loss is not None:
                         loss = (
                             loss
@@ -355,7 +356,7 @@ class Trainer:
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
-                accum_loss_tensor += loss.detach()
+                accum_loss_tensor += ce_loss.detach() / cfg.gradient_accumulation_steps
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
@@ -462,7 +463,7 @@ class Trainer:
 
     @torch.no_grad()
     def _evaluate(self):
-        self.metrics.eval_begin()
+        self.metrics.eval_begin(self.model)
         for i, batch in enumerate(self.val_loader):
             if (
                 self.config.training.eval_steps > 0
