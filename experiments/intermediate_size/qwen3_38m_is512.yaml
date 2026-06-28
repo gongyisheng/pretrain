@@ -31,7 +31,7 @@ training:
   grad_clip: 1.0
   checkpoint_dir: checkpoints/intermediate_size/qwen3_38m_is512/
   checkpoint_every: 5000
-  eval_every: 1000
+  eval_every: 100
   eval_steps: 100
 optimizer:
   name: muon
