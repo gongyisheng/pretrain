@@ -13,7 +13,7 @@ model:
     intermediate_size: 128
     n_routed_experts: 64
     n_routed_experts_per_token: 2
-    n_shared_experts: 0
+    n_shared_experts: 1
     aux_loss_coef: 0.01
   norm_cls: rmsnorm
   pos_emb_cls: rope
@@ -32,7 +32,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_shared_experts/qwen3-moe-133m-a35m-s0-r2/
+  checkpoint_dir: checkpoints/moe_shared_experts/qwen3-135m-a37m-s1-r2/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
@@ -49,5 +49,5 @@ scheduler:
   min_lr: 0.0001
 logging:
   wandb_project: pretrain-moe-sexperts
-  wandb_run_name: qwen3-moe-133m-a35m-s0-r2
+  wandb_run_name: qwen3-135m-a37m-s1-r2
   log_every: 10

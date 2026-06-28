@@ -32,7 +32,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_routed_experts/qwen3_moe_506m_a204m/
+  checkpoint_dir: checkpoints/moe_routed_experts/qwen3_506m_a204m/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
@@ -48,6 +48,6 @@ scheduler:
   warmup_steps: 1000
   min_lr: 5e-5
 logging:
-  wandb_project: pretrain-moe
-  wandb_run_name: qwen3-moe-routed-experts-506m-a204m
+  wandb_project: pretrain-moe-routed-experts
+  wandb_run_name: qwen3-506m-a204m
   log_every: 10

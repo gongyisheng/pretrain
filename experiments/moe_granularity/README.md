@@ -34,10 +34,10 @@ Config filename = ckpt dir = W&B run name.
 
 | Config | m (split) | is | E | k | Total | Active |
 |--------|:---------:|---:|---:|---:|:-----:|:------:|
-| `qwen3_moe_133m_a45m_is1024_e8_k1`  | 1 | 1024 |  8 | 1 | 133M | 45M |
-| `qwen3_moe_133m_a45m_is512_e16_k2`  | 2 |  512 | 16 | 2 | 133M | 45M |
-| `qwen3_moe_133m_a45m_is256_e32_k4`  | 4 |  256 | 32 | 4 | 133M | 45M |
-| `qwen3_moe_133m_a45m_is128_e64_k8`  | 8 |  128 | 64 | 8 | 133M | 45M |
+| `qwen3_133m_a45m_is1024_e8_k1`  | 1 | 1024 |  8 | 1 | 133M | 45M |
+| `qwen3_133m_a45m_is512_e16_k2`  | 2 |  512 | 16 | 2 | 133M | 45M |
+| `qwen3_133m_a45m_is256_e32_k4`  | 4 |  256 | 32 | 4 | 133M | 45M |
+| `qwen3_133m_a45m_is128_e64_k8`  | 8 |  128 | 64 | 8 | 133M | 45M |
 | `qwen3_dense_45m_is1024`            | — | 1024 |  — | — |  45M | 45M |
 
 The dense `is=1024` baseline has the same active FFN width as every MoE cell (no routing) —
@@ -53,7 +53,7 @@ Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step
 nohup bash experiments/moe_granularity/run.sh > logs/moe_granularity.log 2>&1 &
 
 # Single config:
-uv run python scripts/train.py --config experiments/moe_granularity/qwen3_moe_133m_a45m_is256_e32_k4.yaml
+uv run python scripts/train.py --config experiments/moe_granularity/qwen3_133m_a45m_is256_e32_k4.yaml
 ```
 
 W&B project: `pretrain-moe-granularity`.
@@ -62,10 +62,10 @@ W&B project: `pretrain-moe-granularity`.
 
 | Config | m | is | E | k | Final val loss |
 |--------|:-:|---:|---:|---:|:--------------:|
-| `qwen3_moe_133m_a45m_is1024_e8_k1`  | 1 | 1024 |  8 | 1 | |
-| `qwen3_moe_133m_a45m_is512_e16_k2`  | 2 |  512 | 16 | 2 | |
-| `qwen3_moe_133m_a45m_is256_e32_k4`  | 4 |  256 | 32 | 4 | |
-| `qwen3_moe_133m_a45m_is128_e64_k8`  | 8 |  128 | 64 | 8 | |
+| `qwen3_133m_a45m_is1024_e8_k1`  | 1 | 1024 |  8 | 1 | |
+| `qwen3_133m_a45m_is512_e16_k2`  | 2 |  512 | 16 | 2 | |
+| `qwen3_133m_a45m_is256_e32_k4`  | 4 |  256 | 32 | 4 | |
+| `qwen3_133m_a45m_is128_e64_k8`  | 8 |  128 | 64 | 8 | |
 | `qwen3_dense_45m_is1024`            | — | 1024 |  — | — | |
 
 ## Notes

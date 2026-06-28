@@ -1,19 +1,20 @@
 max_seq_len: 1024
 model:
-  d_model: 512
-  n_layers: 8
+  d_model: 1024
+  n_layers: 16
   vocab_size: 50257
   attn_cls: gqa
   attn_kwargs:
-    n_heads: 8
-    n_kv_heads: 4
+    n_heads: 16
+    n_kv_heads: 8
     qk_norm: true
   mlp_cls: moe
   mlp_kwargs:
     intermediate_size: 128
-    n_routed_experts: 8
-    n_routed_experts_per_token: 2
+    n_routed_experts: 64
+    n_routed_experts_per_token: 4
     aux_loss_coef: 0.01
+    expert_capacity_factor: 1.25
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -25,19 +26,19 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 16
-  gradient_accumulation_steps: 16
+  batch_size: 8
+  gradient_accumulation_steps: 32
   max_steps: 50000
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_pool_scaling/qwen3-moe-45m-a35m-is128-e8-k2/
+  checkpoint_dir: checkpoints/moe_routed_experts/qwen3_506m_a128m/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
 optimizer:
   name: adamw
-  lr: 0.001
+  lr: 5e-4
   weight_decay: 0.1
   betas:
   - 0.9
@@ -45,8 +46,8 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 1000
-  min_lr: 0.0001
+  min_lr: 5e-5
 logging:
-  wandb_project: pretrain-moe-pool-scaling
-  wandb_run_name: qwen3-moe-45m-a35m-is128-e8-k2
+  wandb_project: pretrain-moe-routed-experts
+  wandb_run_name: qwen3-506m-a128m
   log_every: 10

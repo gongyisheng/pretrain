@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-PREFIX="qwen3_moe"
+PREFIX="qwen3"
 TOTAL="506m"
 ACTIVE=(109m 115m 128m 153m 204m 304m 506m)
 

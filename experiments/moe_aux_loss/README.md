@@ -15,7 +15,7 @@ range; a finer sweep follows once the range is known.
 
 ## Setup
 
-Fixed testbed: `qwen3_moe_133m` architecture (133M total, ~35M active), 64
+Fixed testbed: `qwen3_133m` architecture (133M total, ~35M active), 64
 experts, top-2, capacity factor 1.25. Only `aux_loss_coef` varies.
 
 | Param | Value |

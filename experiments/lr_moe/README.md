@@ -14,7 +14,7 @@ much higher than the dense optimum.
 
 ## Setup
 
-Fixed testbed: `qwen3_moe_133m` architecture, 64 experts, top-2, capacity factor
+Fixed testbed: `qwen3_133m` architecture, 64 experts, top-2, capacity factor
 1.25, `aux_loss_coef=0.01` (Switch default). Only LR varies; `min_lr = lr/10`.
 
 | Param | Value |
