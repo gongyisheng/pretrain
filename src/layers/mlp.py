@@ -101,24 +101,11 @@ class DenseMLPBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple:
         if self.gated:
-            out = gated_mlp(
-                x,
-                self.gate_up_proj.weight,
-                self.down_proj.weight,
-                self.act_fn,
-                self.gate_up_proj.bias,
-                self.down_proj.bias,
-            )
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+            hidden = self.act_fn(gate, up)
         else:
-            out = ungated_mlp(
-                x,
-                self.up_proj.weight,
-                self.down_proj.weight,
-                self.act_fn,
-                self.up_proj.bias,
-                self.down_proj.bias,
-            )
-        return self.dropout(out), None
+            hidden = self.act_fn(self.up_proj(x))
+        return self.dropout(self.down_proj(hidden)), None
 
     @classmethod
     def compute_flops(cls, d_model, *, intermediate_size, gated=True, bias=False, **_):
@@ -232,12 +219,52 @@ def _scatter_out(
     return output
 
 
+class ExpertBias(nn.Module):
+    """Auxiliary-loss-free load-balancing bias (arXiv:2408.15664).
+
+    A per-expert bias added to gating scores for top-k selection only (it never
+    enters the combine weights). It is not a learned parameter — `update` nudges
+    it toward uniform load with a fixed-rate sign rule. The buffer is fp32-pinned
+    via _apply so the small update steps survive bf16/fp16 model casts.
+    """
+
+    def __init__(self, n_experts: int, update_rate: float = 0.001):
+        super().__init__()
+        self.update_rate = update_rate
+        self.register_buffer("bias", torch.zeros(n_experts))
+
+    def _apply(self, fn, recurse: bool = True):
+        result = super()._apply(fn, recurse)
+        if self.bias.dtype != torch.float32:
+            self.bias = self.bias.float()
+        return result
+
+    def forward(self, scores: torch.Tensor) -> torch.Tensor:
+        return scores + self.bias
+
+    @torch.no_grad()
+    def update(self, expert_counts: torch.Tensor):
+        err = expert_counts.float().mean() - expert_counts.float()
+        self.bias += self.update_rate * err.sign()
+
+    @classmethod
+    def compute_flops(cls, n_experts: int) -> int:
+        return n_experts  # add the bias to each expert score
+
+    @classmethod
+    def compute_parameters(cls, n_experts: int) -> int:
+        return n_experts  # the bias buffer
+
+
 class MoERouter(nn.Module):
     """MoE top-k router with fp32-pinned gate weight.
 
     bf16/fp16 rounding of close-competing logits before softmax can flip top-k
     picks, and low-precision storage can't accept sub-ULP gradient updates.
     Gate weight stays fp32 via _apply; forward disables autocast around the GEMM.
+
+    With `expert_bias`, an independent `ExpertBias` submodule shifts the gating
+    scores for selection only (combine weights stay the original softmax probs).
     """
 
     def __init__(
@@ -246,15 +273,22 @@ class MoERouter(nn.Module):
         n_routed_experts: int,
         n_routed_experts_per_token: int,
         normalize: bool = True,
+        expert_bias: bool = False,
+        expert_bias_update_rate: float = 0.001,
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
         self.n_routed_experts_per_token = n_routed_experts_per_token
         self.normalize = normalize
         self.gate = nn.Linear(d_model, n_routed_experts, bias=False)
+        self.expert_bias = (
+            ExpertBias(n_routed_experts, expert_bias_update_rate)
+            if expert_bias
+            else None
+        )
 
     def _apply(self, fn, recurse: bool = True):
-        # Pin gate.weight to fp32 across .to(bf16) / .bfloat16() / .float() / etc.
+        # Pin gate.weight to fp32
         result = super()._apply(fn, recurse)
         if self.gate.weight.dtype != torch.float32:
             self.gate.weight.data = self.gate.weight.data.float()
@@ -262,16 +296,33 @@ class MoERouter(nn.Module):
 
     def forward(self, x: torch.Tensor):
         dtype = x.dtype
+        k = self.n_routed_experts_per_token
         # autocast would downcast the matmul, undoing the fp32 pin.
         with torch.amp.autocast(device_type=x.device.type, enabled=False):
             logits = self.gate(x.float())
             router_probs = logits.softmax(-1)
-        top_weights, top_indices = torch.topk(
-            router_probs, self.n_routed_experts_per_token, dim=-1
-        )
+        if self.expert_bias is not None:
+            top_indices = torch.topk(self.expert_bias(router_probs), k, dim=-1).indices
+            top_weights = router_probs.gather(-1, top_indices)
+        else:
+            top_weights, top_indices = torch.topk(router_probs, k, dim=-1)
         if self.normalize:
             top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
         return top_indices, top_weights.to(dtype), router_probs.to(dtype)
+
+    @classmethod
+    def compute_flops(cls, d_model: int, n_experts: int, *, expert_bias=False) -> int:
+        flops = 2 * d_model * n_experts  # gate matmul (no bias)
+        if expert_bias:
+            flops += ExpertBias.compute_flops(n_experts)
+        return flops
+
+    @classmethod
+    def compute_parameters(cls, d_model: int, n_experts: int, *, expert_bias=False):
+        params = d_model * n_experts  # gate, no bias
+        if expert_bias:
+            params += ExpertBias.compute_parameters(n_experts)
+        return params
 
 
 class SparseMoEBlock(nn.Module):
@@ -303,8 +354,11 @@ class SparseMoEBlock(nn.Module):
         n_routed_experts: int,
         n_routed_experts_per_token: int = 2,
         n_shared_experts: int = 0,
+        aux_loss: bool = True,
         aux_loss_coef: float = 0.01,
         expert_capacity_factor: float = None,
+        expert_bias: bool = False,
+        expert_bias_update_rate: float = 0.001,
         activation: str = "silu",
         gated: bool = True,
         bias: bool = False,
@@ -312,15 +366,27 @@ class SparseMoEBlock(nn.Module):
     ):
         super().__init__()
         # Defaults/validation (intermediate_size, activation) live in ModelConfig.
+        if aux_loss and expert_bias:
+            raise ValueError(
+                "aux_loss and expert_bias are mutually exclusive MoE balancing strategies"
+            )
         registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
         self.n_routed_experts = n_routed_experts
         self.n_routed_experts_per_token = n_routed_experts_per_token
         self.n_shared_experts = n_shared_experts
+        self.aux_loss = aux_loss
         self.aux_loss_coef = aux_loss_coef
         self.expert_capacity_factor = expert_capacity_factor
+        self.expert_bias = expert_bias
         self.gated = gated
         self.act_fn = registry[activation]
-        self.router = MoERouter(d_model, n_routed_experts, n_routed_experts_per_token)
+        self.router = MoERouter(
+            d_model,
+            n_routed_experts,
+            n_routed_experts_per_token,
+            expert_bias=expert_bias,
+            expert_bias_update_rate=expert_bias_update_rate,
+        )
 
         # DeepSeekMoE shared experts: always-on FFN run on every token, merged
         # into one dense block of width n_shared_experts * intermediate_size and
@@ -365,6 +431,15 @@ class SparseMoEBlock(nn.Module):
         )
         self.expert_dropout = nn.Dropout(dropout)
 
+        # Per-expert token routing load from the most recent forward, for
+        # load-balance monitoring (MaxVio). Non-persistent; written in-place so
+        # torch.compile records a buffer mutation rather than graph-breaking.
+        self.register_buffer(
+            "expert_load",
+            torch.zeros(n_routed_experts, dtype=torch.long),
+            persistent=False,
+        )
+
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)
         B, S, D = x.shape
@@ -405,6 +480,9 @@ class SparseMoEBlock(nn.Module):
                 - offsets[sorted_expert_ids]
             )
 
+        # Stash pre-drop routing load for MaxVio monitoring (in-place, no grad).
+        self.expert_load.copy_(expert_counts.detach())
+
         # --- Build padded input: (E, capacity, D) ---
         padded_input = _scatter_in(
             x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity
@@ -441,13 +519,17 @@ class SparseMoEBlock(nn.Module):
             T,
         )
 
-        # --- Switch Transformer load-balancing auxiliary loss ---
-        with torch.no_grad():
-            # Vectorized: f_i = fraction of tokens routed to expert i
-            f = expert_counts.to(x.dtype) / T  # (E,)
-
-        P = router_probs.mean(0)  # (E,)
-        aux_loss = E * (f * P).sum()
+        if self.expert_bias:
+            if self.training:
+                self.router.expert_bias.update(expert_counts)
+            aux_loss = None
+        elif self.aux_loss:
+            with torch.no_grad():
+                f = expert_counts.to(x.dtype) / T  # (E,)
+            P = router_probs.mean(0)  # (E,)
+            aux_loss = E * (f * P).sum()
+        else:
+            aux_loss = None
 
         output = output.view(B, S, D)
         if self.shared_expert is not None:
@@ -466,10 +548,13 @@ class SparseMoEBlock(nn.Module):
         n_shared_experts=0,
         gated=True,
         bias=False,
+        expert_bias=False,
         **_,
     ):
         d_ff = intermediate_size
-        router = 2 * d_model * n_routed_experts
+        router = MoERouter.compute_flops(
+            d_model, n_routed_experts, expert_bias=expert_bias
+        )
         if gated:
             expert = 6 * d_model * d_ff
             b = (2 * d_ff + d_model) if bias else 0
@@ -499,11 +584,14 @@ class SparseMoEBlock(nn.Module):
         n_shared_experts=0,
         gated=True,
         bias=False,
+        expert_bias=False,
         active=False,
         **_,
     ) -> int:
         d_ff = intermediate_size
-        router = d_model * n_routed_experts  # gate, no bias
+        router = MoERouter.compute_parameters(
+            d_model, n_routed_experts, expert_bias=expert_bias
+        )
         # active counts only the k experts that actually run per token.
         n = n_routed_experts_per_token if active else n_routed_experts
         if gated:

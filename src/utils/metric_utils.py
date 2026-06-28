@@ -10,6 +10,7 @@ import statistics
 
 import torch
 
+from src.layers.mlp import SparseMoEBlock
 from src.model.transformer import TransformerLM
 from src.utils.config import TrainConfig
 
@@ -30,6 +31,88 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
         name = name.removeprefix("_orig_mod.")
         norms[name] = param.grad.data.norm(2.0).item()
     return norms
+
+
+# ---------------------------------------------------------------------------
+# MoE load balance (MaxVio, arXiv:2408.15664)
+# ---------------------------------------------------------------------------
+
+
+def collect_moe_blocks(model: torch.nn.Module) -> list[SparseMoEBlock]:
+    """All SparseMoEBlock submodules, in order. Resolve once and cache — each
+    block exposes its last-forward routing load via `expert_load`."""
+    return [m for m in model.modules() if isinstance(m, SparseMoEBlock)]
+
+
+def compute_maxvio(expert_counts: torch.Tensor) -> float:
+    """Maximal load violation for one MoE layer (arXiv:2408.15664):
+    `(max_i load_i - mean load) / mean load`. 0 = perfectly balanced; 1.0 means
+    the hottest expert carries 2x its fair share.
+    """
+    counts = expert_counts.float()
+    mean = counts.mean()
+    if mean == 0:
+        return 0.0
+    return ((counts.max() - mean) / mean).item()
+
+
+def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
+    """Per-layer and aggregate MaxVio from accumulated expert load counts.
+
+    Returns ``{"layer_{i}": v, ..., "mean": ..., "max": ...}``.
+    """
+    per_layer = [compute_maxvio(c) for c in load_per_layer]
+    out = {f"layer_{i}": v for i, v in enumerate(per_layer)}
+    out["mean"] = statistics.mean(per_layer)
+    out["max"] = max(per_layer)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Weight spectral metrics (SVD)
+# ---------------------------------------------------------------------------
+
+
+def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
+    """srank / pr of a 2D weight's σ² spectrum, both effective-rank measures.
+
+    srank = stable rank (‖W‖_F² / σ_max²), top-heavy — a rank-1 collapse canary.
+    pr = participation ratio ((Σσ²)² / Σσ⁴ = 1/Σpᵢ²), the bulk effective
+    dimension; squaring suppresses the noise floor for a cleaner collapse trend.
+
+    srank for monitoring rank-1 collapse
+    pr for monitoring graded collapse
+    """
+    s = torch.linalg.svdvals(weight.float())
+    s = s[s > 0]
+    if s.numel() == 0:
+        return {"srank": 0.0, "pr": 0.0}
+    energy = s.pow(2)
+    return {
+        "srank": (energy.sum() / energy[0]).item(),
+        "pr": (energy.sum().pow(2) / energy.pow(2).sum()).item(),
+    }
+
+
+def compute_layer_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
+    """Per-2D-weight spectral metrics, keyed by parameter name.
+
+    Covers every floating-point 2D parameter except rope buffers and
+    embeddings (names containing "emb"). The caller
+    applies the logging namespace (e.g. an "optim/" prefix). The "_orig_mod."
+    prefix added by torch.compile is stripped. SVD on every weight is costly,
+    so this is gated behind config.logging.log_optimizer_svd_metrics and only
+    runs on log-cadence steps.
+    """
+    metrics: dict[str, dict[str, float]] = {}
+    for name, param in model.named_parameters():
+        if param.ndim != 2 or not param.is_floating_point():
+            continue
+        name = name.removeprefix("_orig_mod.")
+        if name.startswith("rope.") or "emb" in name:
+            continue
+        metrics[name] = _svd_metrics(param.detach())
+    return metrics
 
 
 # ---------------------------------------------------------------------------

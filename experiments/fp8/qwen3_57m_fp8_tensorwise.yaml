@@ -9,13 +9,8 @@ model:
     n_kv_heads: 4
     qk_norm: true
     dropout: 0.0
-  mlp_cls: moe
+  mlp_cls: dense
   mlp_kwargs:
-    intermediate_size: 128
-    n_routed_experts: 64
-    n_routed_experts_per_token: 2
-    aux_loss_coef: 0.01
-    expert_capacity_factor: 1.25
     dropout: 0.0
   norm_cls: rmsnorm
   pos_emb_cls: rope
@@ -29,13 +24,15 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 8
-  gradient_accumulation_steps: 32
+  batch_size: 16
+  gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  activation_checkpointing: false
+  fp8: true
+  fp8_recipe: tensorwise
+  fp8_exclude_lm_head: true
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/qwen3_moe_133m/
+  checkpoint_dir: checkpoints/fp8/qwen3_57m_fp8_tensorwise/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
@@ -51,6 +48,6 @@ scheduler:
   warmup_steps: 1500
   min_lr: 6e-5
 logging:
-  wandb_project: pretrain
-  wandb_run_name: qwen3-moe-133m-a35m
+  wandb_project: pretrain-fp8
+  wandb_run_name: qwen3-57m-fp8-tensorwise
   log_every: 10

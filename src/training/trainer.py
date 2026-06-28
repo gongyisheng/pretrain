@@ -17,6 +17,7 @@ from src.model import build_model
 from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
+from src.training.fp8 import maybe_convert_to_fp8
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
 from src.training.loss import LOSS_REGISTRY, compute_loss
@@ -157,6 +158,10 @@ class Trainer:
         self.scaler = torch.amp.GradScaler(
             enabled=(self.use_amp and self.amp_dtype == torch.float16)
         )
+
+        # FP8: swap eligible nn.Linear modules to Float8Linear. Must run before
+        # torch.compile so the tracer sees the swapped modules.
+        maybe_convert_to_fp8(self.model, config)
 
         # Disable assert_indirect_indexing to avoid spurious CUDA assertions during
         # torchinductor autotuning, which may dispatch kernel test runs on a stream
@@ -336,12 +341,13 @@ class Trainer:
                     logits, aux_loss = self.model(
                         input_ids, position_ids=position_ids, attn_mask=attn_mask
                     )
-                    loss = compute_loss(
+                    ce_loss = compute_loss(
                         logits,
                         labels,
                         self.config.training.loss_fn,
                         label_smoothing=self.config.training.label_smoothing,
                     )
+                    loss = ce_loss
                     if aux_loss is not None:
                         loss = (
                             loss
@@ -350,7 +356,7 @@ class Trainer:
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
-                accum_loss_tensor += loss.detach()
+                accum_loss_tensor += ce_loss.detach() / cfg.gradient_accumulation_steps
 
                 # Swap to prefetched batch
                 if micro_step < cfg.gradient_accumulation_steps - 1:
@@ -457,7 +463,7 @@ class Trainer:
 
     @torch.no_grad()
     def _evaluate(self):
-        self.metrics.eval_begin()
+        self.metrics.eval_begin(self.model)
         for i, batch in enumerate(self.val_loader):
             if (
                 self.config.training.eval_steps > 0

@@ -117,11 +117,13 @@ def test_gated_matches_ref(name, dtype, atol):
     assert out.dtype == dtype
     # rtol scales tolerance with magnitude (output ~ act(gate)*up, can be O(10)).
     # powlu's compound op chain (sqrt + pow + sigmoid) accumulates more error,
-    # so it needs a looser rtol in low precision than the simple gated forms.
+    # and squared variants double the base activation's relative error, so both
+    # need a looser rtol in low precision than the simple gated forms.
+    squared = name.endswith("2")
     if dtype == torch.float32:
         rtol = 0.0
     elif dtype == torch.bfloat16:
-        rtol = 6e-2 if name == "powlu" else 1e-2
+        rtol = 6e-2 if name == "powlu" else (2e-2 if squared else 1e-2)
     else:  # fp16
         rtol = 1e-2 if name == "powlu" else 2e-3
     assert torch.allclose(

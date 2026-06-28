@@ -303,6 +303,73 @@ def test_eval_moe_aux_loss_subtracts_floor():
     assert d["val/aux_loss"] == pytest.approx(0.5)
 
 
+def _moe_cfg():
+    cfg = TrainConfig(
+        model=ModelConfig(
+            n_layers=2,
+            d_model=64,
+            vocab_size=256,
+            attn_cls="gqa",
+            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+            mlp_cls="moe",
+            mlp_kwargs={
+                "n_routed_experts": 4,
+                "n_routed_experts_per_token": 2,
+                "intermediate_size": 128,
+            },
+        )
+    )
+    cfg.task = "pretrain"
+    return cfg
+
+
+def test_eval_moe_maxvio_logged_per_layer():
+    from src.layers.mlp import SparseMoEBlock
+
+    tracker = MetricsTracker(_moe_cfg(), device="cpu", logger=FakeLogger())
+    model = torch.nn.Module()
+    model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    model.l1 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    logits = torch.randn(1, 4, 256)
+    labels = torch.randint(0, 256, (1, 4))
+
+    tracker.eval_begin(model)
+    for _ in range(3):  # accumulate across batches
+        model.l0(torch.randn(2, 8, 64))
+        model.l1(torch.randn(2, 8, 64))
+        tracker.eval_step(loss=2.0, logits=logits, labels=labels)
+    d = tracker.log_eval(step=1)
+
+    assert "val/moe_maxvio/layer_0" in d and "val/moe_maxvio/layer_1" in d
+    assert "val/moe_maxvio/mean" in d and "val/moe_maxvio/max" in d
+    assert d["val/moe_maxvio/max"] >= d["val/moe_maxvio/mean"] - 1e-9
+    assert all(d[k] >= 0.0 for k in d if k.startswith("val/moe_maxvio/"))
+
+
+def test_eval_moe_maxvio_accumulates_load_globally():
+    # MaxVio is computed on summed load, so 3 identical batches give the same
+    # value as one — verifies global (not per-batch-averaged) accumulation.
+    from src.layers.mlp import SparseMoEBlock
+
+    model = torch.nn.Module()
+    model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    x = torch.randn(2, 8, 64)  # shared so both runs route identically
+
+    def maxvio_over(n_batches):
+        tracker = MetricsTracker(_moe_cfg(), device="cpu", logger=FakeLogger())
+        tracker.eval_begin(model)
+        for _ in range(n_batches):
+            model.l0(x)  # identical input -> identical routing each batch
+            tracker.eval_step(
+                loss=1.0,
+                logits=torch.randn(1, 4, 256),
+                labels=torch.randint(0, 256, (1, 4)),
+            )
+        return tracker.log_eval(step=1)["val/moe_maxvio/layer_0"]
+
+    assert maxvio_over(3) == pytest.approx(maxvio_over(1))
+
+
 # ---------------------------------------------------------------------------
 # print_model_summary
 # ---------------------------------------------------------------------------
