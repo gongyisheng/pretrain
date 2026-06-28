@@ -22,8 +22,8 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 8
-  gradient_accumulation_steps: 128
+  batch_size: 4
+  gradient_accumulation_steps: 256
   max_steps: 50000
   mixed_precision: bf16
   activation_checkpointing: false
