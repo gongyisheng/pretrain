@@ -24,50 +24,36 @@ Common backbone (Qwen3-style, identical across all runs except the MLP block):
 | `vocab_size` | 50257 |
 | norm / pos_emb | rmsnorm / rope (θ=10000) |
 
-Invariants across the MoE sweep: pool `E·is = 8192`, active `k·is = 1024`, sparsity
+Invariants across the MoE sweep: pool `E·is = 12288`, active `k·is = 1536`, sparsity
 `k/E = 1/8` (12.5%). `is` = per-expert `intermediate_size`. All MoE cells use
 `aux_loss_coef=0.01` and dynamic capacity (no token dropping).
 
-**Granularity** is defined (DeepSeekMoE / fine-grained scaling laws) as `G = d_ff / d_expert`,
-where `d_expert = is` and `d_ff` is the intermediate width of the *equivalent dense FFN*. There
-are two standard choices for `d_ff` at `d_model = 512`:
-- **vanilla** `d_ff = 4·d_model = 2048` (textbook Transformer FFN) → `G = 2048/is`
-- **SwiGLU-matched** `d_ff = (8/3)·d_model ≈ 1365`, rounded to a multiple of 128 → `1408`
-  (param-matched gated FFN, what Qwen/Llama use) → `G = 1408/is`
-
-The sweep's split factor `m` is granularity *relative to the `is=1024` (2·d_model) baseline*;
-the absolute `G` differs by a constant. Three dense references anchor these frames: `is=1024`
-(active-width baseline), `is=1408` (SwiGLU-standard, `G=1`), `is=2048` (vanilla-standard, `G=1`).
+The active width `k·is = 1536 = 3·d_model` is the Qwen3-0.6B FFN ratio. **Granularity** is
+`G = d_ff / d_expert` (DeepSeekMoE / fine-grained scaling laws), where `d_expert = is` and
+`d_ff` is the intermediate width of the equivalent dense FFN. Taking the active-width dense
+twin `d_ff = 1536` gives `G = 1536/is = m` — the split factor *is* the absolute granularity
+here, and the coarsest cell (`is=1536, k=1`) has `G=1`.
 
 ### Configs
 
-Config filename = ckpt dir = W&B run name.
+Config filename = ckpt dir = W&B run name. `m` = split factor = `G = 1536/is`.
 
-`m` = split factor (granularity vs. the `is=1024` baseline). `G@4d = 2048/is`,
-`G@8/3d = 1408/is` are the absolute granularities under the two dense references.
+| Config | m | is | E | k | Total | Active |
+|--------|:-:|---:|---:|---:|:-----:|:------:|
+| `qwen3_183m_a51m_is1536_e8_k1`  | 1 | 1536 |  8 | 1 | 183M | 51M |
+| `qwen3_183m_a51m_is768_e16_k2`  | 2 |  768 | 16 | 2 | 183M | 51M |
+| `qwen3_183m_a51m_is384_e32_k4`  | 4 |  384 | 32 | 4 | 183M | 51M |
+| `qwen3_183m_a51m_is192_e64_k8`  | 8 |  192 | 64 | 8 | 183M | 51M |
+| `qwen3_51m`                     | — | 1536 |  — | — |  51M | 51M |
 
-| Config | m | is | E | k | G@4d | G@8/3d | Total | Active |
-|--------|:-:|---:|---:|---:|:----:|:------:|:-----:|:------:|
-| `qwen3_133m_a45m_is1024_e8_k1`  | 1 | 1024 |  8 | 1 |  2 |  1.38 | 133M | 45M |
-| `qwen3_133m_a45m_is512_e16_k2`  | 2 |  512 | 16 | 2 |  4 |  2.75 | 133M | 45M |
-| `qwen3_133m_a45m_is256_e32_k4`  | 4 |  256 | 32 | 4 |  8 |  5.50 | 133M | 45M |
-| `qwen3_133m_a45m_is128_e64_k8`  | 8 |  128 | 64 | 8 | 16 | 11.00 | 133M | 45M |
-| `qwen3_45m_is1024`              | — | 1024 |  — | — |  — |  —    |  45M | 45M |
-| `qwen3_49m_is1408`              | — | 1408 |  — | — |  — |  —    |  49M | 49M |
-| `qwen3_57m_is2048`              | — | 2048 |  — | — |  — |  —    |  57M | 57M |
-
-Three dense references (no routing):
-- `is=1024` (2·d_model) — same active FFN width as every MoE cell; tests whether routing buys
-  anything over a plain dense FFN of equal active size.
-- `is=1408` (8/3·d_model ≈ 1365, rounded to mult of 128) — the SwiGLU param-standard FFN, i.e.
-  absolute granularity `G=1`.
-- `is=2048` (4·d_model) — the vanilla param-standard FFN, i.e. `G=1` in the 4·d_model frame.
-
-The dense references have *more* active params than the iso-active MoE cells (49M/57M vs 45M),
-so they are upper-bound anchors for the granularity axis, not iso-compute points.
+`qwen3_51m` is the dense reference (no routing): a plain gated SwiGLU FFN of width
+`is=1536` (3·d_model), i.e. the same active FFN width as every MoE cell. It tests whether
+routing buys anything over a dense FFN of equal active size. It has marginally fewer params
+than the iso-active MoE cells (50.9M vs ~51M active), so it is an upper-bound anchor for the
+granularity axis, not an iso-compute point.
 
 Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
-50000 (~13B tokens), cosine LR 1e-3 → 1e-4, warmup 1000, bf16.
+50000 (~13B tokens), cosine LR 5e-4 → 5e-5, warmup 1500, bf16.
 
 ## Running
 
@@ -76,7 +62,7 @@ Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step
 nohup bash experiments/moe_granularity/run.sh > logs/moe_granularity.log 2>&1 &
 
 # Single config:
-uv run python scripts/train.py --config experiments/moe_granularity/qwen3_133m_a45m_is256_e32_k4.yaml
+uv run python scripts/train.py --config experiments/moe_granularity/qwen3_183m_a51m_is384_e32_k4.yaml
 ```
 
 W&B project: `pretrain-moe-granularity`.
@@ -85,17 +71,15 @@ W&B project: `pretrain-moe-granularity`.
 
 | Config | m | is | E | k | Final val loss |
 |--------|:-:|---:|---:|---:|:--------------:|
-| `qwen3_133m_a45m_is1024_e8_k1`  | 1 | 1024 |  8 | 1 | |
-| `qwen3_133m_a45m_is512_e16_k2`  | 2 |  512 | 16 | 2 | |
-| `qwen3_133m_a45m_is256_e32_k4`  | 4 |  256 | 32 | 4 | |
-| `qwen3_133m_a45m_is128_e64_k8`  | 8 |  128 | 64 | 8 | |
-| `qwen3_45m_is1024`              | — | 1024 |  — | — | |
-| `qwen3_49m_is1408`              | — | 1408 |  — | — | |
-| `qwen3_57m_is2048`              | — | 2048 |  — | — | |
+| `qwen3_183m_a51m_is1536_e8_k1`  | 1 | 1536 |  8 | 1 | |
+| `qwen3_183m_a51m_is768_e16_k2`  | 2 |  768 | 16 | 2 | |
+| `qwen3_183m_a51m_is384_e32_k4`  | 4 |  384 | 32 | 4 | |
+| `qwen3_183m_a51m_is192_e64_k8`  | 8 |  192 | 64 | 8 | |
+| `qwen3_51m`                     | — | 1536 |  — | — | |
 
 ## Notes
 
-- Total params (133M) and active params (45M) are constant across the MoE sweep by
+- Total params (183M) and active params (51M) are constant across the MoE sweep by
   construction; the only knob is `m`. So any val-loss trend is a pure granularity effect.
-- The coarse end (`is=1024, E=8, k=1`) is top-1 routing (Switch-style); the fine end
-  (`is=128, E=64, k=8`) routes to 8 of 64. Sparsity (12.5%) is held fixed throughout.
+- The coarse end (`is=1536, E=8, k=1`) is top-1 routing (Switch-style); the fine end
+  (`is=192, E=64, k=8`) routes to 8 of 64. Sparsity (12.5%) is held fixed throughout.
