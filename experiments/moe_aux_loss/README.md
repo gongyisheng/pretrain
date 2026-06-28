@@ -15,32 +15,34 @@ range; a finer sweep follows once the range is known.
 
 ## Setup
 
-Fixed testbed: `qwen3_133m` architecture (133M total, ~35M active), 64
-experts, top-2, capacity factor 1.25. Only `aux_loss_coef` varies.
+Fixed testbed: `qwen3_183m` architecture (183M total, ~51M active), 64
+experts, top-8, capacity factor 1.25. Only `aux_loss_coef` varies. Active
+intermediate width `k·is = 8·192 = 1536` (3·d_model, Qwen3-0.6B FFN ratio).
 
 | Param | Value |
 |-------|-------|
 | d_model / n_layers | 512 / 8 |
-| n_experts / top-k | 64 / 2 |
+| n_experts / top-k | 64 / 8 |
+| intermediate_size (per expert) | 192 |
 | expert_capacity_factor | 1.25 |
-| batch × grad_accum × seq | 8 × 32 × 1024 (≈0.26M tok/step) |
+| batch × grad_accum × seq | 16 × 16 × 1024 (≈0.26M tok/step) |
 | max_steps | 50000 (≈13B tokens) |
-| lr / min_lr / warmup | 6e-4 / 6e-5 / 1000 |
+| lr / min_lr / warmup | 5e-4 / 5e-5 / 1500 |
 
 | Config | aux_loss_coef |
 |--------|---------------|
-| `qwen3_133m_a35m_aux_coef0` | 0 (no balancing baseline) |
-| `qwen3_133m_a35m_aux_coef1e-3` | 0.001 |
-| `qwen3_133m_a35m_aux_coef1e-2` | 0.01 (Switch default) |
-| `qwen3_133m_a35m_aux_coef1e-1` | 0.1 |
-| `qwen3_133m_a35m_aux_coef1e-0` | 1.0 |
+| `qwen3_183m_a51m_aux_coef0` | 0 (no balancing baseline) |
+| `qwen3_183m_a51m_aux_coef1e-3` | 0.001 |
+| `qwen3_183m_a51m_aux_coef1e-2` | 0.01 (Switch default) |
+| `qwen3_183m_a51m_aux_coef1e-1` | 0.1 |
+| `qwen3_183m_a51m_aux_coef1e-0` | 1.0 |
 
 ## Run
 
 ```bash
 nohup bash experiments/moe_aux_loss/run.sh > logs/moe_aux_loss.log 2>&1 &
 # single:
-uv run python scripts/train.py --config experiments/moe_aux_loss/qwen3_133m_a35m_aux_coef1e-2.yaml
+uv run python scripts/train.py --config experiments/moe_aux_loss/qwen3_183m_a51m_aux_coef1e-2.yaml
 ```
 
 ## Results
