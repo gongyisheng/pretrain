@@ -2,56 +2,49 @@
 
 ## Hypothesis
 
-For the Qwen3 MoE 133M testbed there is an effective batch size that best trades
+For the Qwen3 MoE 183M testbed there is an effective batch size that best trades
 gradient-noise reduction against per-token efficiency. Sweep gradient
 accumulation (effective batch) at a fixed token budget and compare final val
-loss to find it. Run at two activation levels to see whether the optimum shifts:
-
-- **a35m** (top-2, ~35M active) — `run_a35m.sh`
-- **a45m** (top-8, ~45M active) — `run_a45m.sh`
+loss to find it.
 
 ## Setup
 
-Fixed `batch_size=8`, `max_seq_len=1024`, cosine LR, AdamW, bf16. LR is the
-tuned optimum for each level: a35m `1e-3 → 1e-4`, a45m `5e-4 → 5e-5`.
-Effective batch = `batch_size × grad_accu × max_seq_len`. `max_steps` and
-`warmup_steps` scale inversely with grad_accu so every run consumes the same
-~13.1B tokens (~99× the 133M total params). Same grid at each level
-(`a35m`/`a45m` interchangeable below):
+Single config type: `qwen3_183m_a51m` (top-8, ~51M active; per-expert
+`intermediate_size=192`, 64 experts → active `k·is = 1536`). Fixed
+`batch_size=8`, `max_seq_len=1024`, cosine LR `5e-4 → 5e-5`, AdamW, bf16.
+Effective batch = `batch_size × grad_accu × max_seq_len`. `max_steps=50000` is
+fixed across all runs, so the token budget scales with the effective batch (the
+larger batches train on proportionally more tokens, from 13.1B up to 104.9B).
 
-| Config | grad_accu | Effective batch (tokens) | max_steps | warmup |
-|--------|-----------|--------------------------|-----------|--------|
-| `qwen3_133m_aXXm_ga32`  | 32  | 262K  | 50000 | 1000 |
-| `qwen3_133m_aXXm_ga64`  | 64  | 524K  | 25000 | 500  |
-| `qwen3_133m_aXXm_ga128` | 128 | 1.05M | 12500 | 250  |
-| `qwen3_133m_aXXm_ga256` | 256 | 2.10M | 6250  | 125  |
+Configs are named by **effective batch size in sequences** (`bs` =
+`batch_size × grad_accu` = 8 × grad_accu).
 
-`ga32` is the established baseline. Settings match the canonical
-`configs/qwen3_133m_a35m.yaml`; a45m sets `n_routed_experts_per_token: 8`.
+| Config | eff. batch (seq) | grad_accu | Effective batch (tokens) | max_steps | warmup | total tokens |
+|--------|------------------|-----------|--------------------------|-----------|--------|--------------|
+| `qwen3_183m_a51m_bs256`  | 256  | 32  | 262K  | 50000 | 1000 | 13.1B  |
+| `qwen3_183m_a51m_bs512`  | 512  | 64  | 524K  | 50000 | 500  | 26.2B  |
+| `qwen3_183m_a51m_bs1024` | 1024 | 128 | 1.05M | 50000 | 250  | 52.4B  |
+| `qwen3_183m_a51m_bs2048` | 2048 | 256 | 2.10M | 50000 | 125  | 104.9B |
+
+`bs256` is the established baseline.
 
 ## Running
 
 ```bash
-# Each grid sequentially:
-nohup bash experiments/moe_batch_size/run_a35m.sh > logs/moe_batch_size_a35m.log 2>&1 &
-nohup bash experiments/moe_batch_size/run_a45m.sh > logs/moe_batch_size_a45m.log 2>&1 &
+nohup bash experiments/moe_batch_size/run.sh > logs/moe_batch_size.log 2>&1 &
 
 # Single config:
-uv run python scripts/train.py --config experiments/moe_batch_size/qwen3_133m_a45m_ga64.yaml
+uv run python scripts/train.py --config experiments/moe_batch_size/qwen3_183m_a51m_bs512.yaml
 ```
 
 ## Results
 
-| Config | grad_accu | Final val loss | Val PPL | Notes |
-|--------|-----------|----------------|---------|-------|
-| `qwen3_133m_a35m_ga32`  | 32  | | | |
-| `qwen3_133m_a35m_ga64`  | 64  | | | |
-| `qwen3_133m_a35m_ga128` | 128 | | | |
-| `qwen3_133m_a35m_ga256` | 256 | | | |
-| `qwen3_133m_a45m_ga32`  | 32  | | | |
-| `qwen3_133m_a45m_ga64`  | 64  | | | |
-| `qwen3_133m_a45m_ga128` | 128 | | | |
-| `qwen3_133m_a45m_ga256` | 256 | | | |
+| Config | eff. batch (seq) | Final val loss | Val PPL | Notes |
+|--------|------------------|----------------|---------|-------|
+| `qwen3_183m_a51m_bs256`  | 256  | | | |
+| `qwen3_183m_a51m_bs512`  | 512  | | | |
+| `qwen3_183m_a51m_bs1024` | 1024 | | | |
+| `qwen3_183m_a51m_bs2048` | 2048 | | | |
 
 ## Notes
 
