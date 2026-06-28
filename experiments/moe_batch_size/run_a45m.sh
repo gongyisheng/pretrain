@@ -2,7 +2,7 @@
 # Batch-size sweep on qwen3_133m_a45m (top-8): fix batch_size=8, sweep gradient
 # accumulation (effective batch). max_steps scaled inversely so every run sees
 # the same ~13.1B-token budget. Run smallest effective batch first.
-# Usage: nohup bash experiments/moe_batch_size/run.sh > logs/moe_batch_size.log 2>&1 &
+# Usage: nohup bash experiments/moe_batch_size/run_a45m.sh > logs/moe_batch_size_a45m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
