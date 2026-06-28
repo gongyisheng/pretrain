@@ -10,7 +10,7 @@ pool_experts=(8 16 32 64 128)
 
 configs=()
 for e in "${pool_experts[@]}"; do
-  match=("$dir"/*-is128-e"${e}"-k2.yaml)
+  match=("$dir"/*_is128_e"${e}"_k2.yaml)
   configs+=("${match[0]}")
 done
 

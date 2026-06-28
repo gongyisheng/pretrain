@@ -32,11 +32,11 @@ Config filename = ckpt dir = W&B run name.
 
 | Config | E (pool) | k | Pool (E·is) | Total | Active | Sparsity (k/E) |
 |--------|:--------:|:-:|:-----------:|:-----:|:------:|:--------------:|
-| `qwen3-moe-45m-a35m-is128-e8-k2`    |   8 | 2 |  1024 |  45M | 35M | 25%   |
-| `qwen3-moe-57m-a35m-is128-e16-k2`   |  16 | 2 |  2048 |  57M | 35M | 12.5% |
-| `qwen3-moe-83m-a35m-is128-e32-k2`   |  32 | 2 |  4096 |  83M | 35M | 6.25% |
-| `qwen3-moe-133m-a35m-is128-e64-k2`  |  64 | 2 |  8192 | 133M | 35M | 3.1%  |
-| `qwen3-moe-234m-a36m-is128-e128-k2` | 128 | 2 | 16384 | 234M | 36M | 1.6%  |
+| `qwen3_moe_45m_a35m_is128_e8_k2`    |   8 | 2 |  1024 |  45M | 35M | 25%   |
+| `qwen3_moe_57m_a35m_is128_e16_k2`   |  16 | 2 |  2048 |  57M | 35M | 12.5% |
+| `qwen3_moe_83m_a35m_is128_e32_k2`   |  32 | 2 |  4096 |  83M | 35M | 6.25% |
+| `qwen3_moe_133m_a35m_is128_e64_k2`  |  64 | 2 |  8192 | 133M | 35M | 3.1%  |
+| `qwen3_moe_234m_a36m_is128_e128_k2` | 128 | 2 | 16384 | 234M | 36M | 1.6%  |
 
 Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
 50000 (~13B tokens), cosine LR 6e-4 → 6e-5, warmup 1000, bf16.
@@ -48,7 +48,7 @@ Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step
 nohup bash experiments/moe_pool_scaling/run.sh > logs/moe_pool_scaling.log 2>&1 &
 
 # Single config:
-uv run python scripts/train.py --config experiments/moe_pool_scaling/qwen3-moe-83m-a35m-is128-e32-k2.yaml
+uv run python scripts/train.py --config experiments/moe_pool_scaling/qwen3_moe_83m_a35m_is128_e32_k2.yaml
 ```
 
 W&B project: `pretrain-moe-pool-scaling`.
@@ -57,11 +57,11 @@ W&B project: `pretrain-moe-pool-scaling`.
 
 | Config | E (pool) | Total | Active | Final val loss |
 |--------|:--------:|:-----:|:------:|:--------------:|
-| `qwen3-moe-45m-a35m-is128-e8-k2`    |   8 |  45M | 35M | |
-| `qwen3-moe-57m-a35m-is128-e16-k2`   |  16 |  57M | 35M | |
-| `qwen3-moe-83m-a35m-is128-e32-k2`   |  32 |  83M | 35M | |
-| `qwen3-moe-133m-a35m-is128-e64-k2`  |  64 | 133M | 35M | |
-| `qwen3-moe-234m-a36m-is128-e128-k2` | 128 | 234M | 36M | |
+| `qwen3_moe_45m_a35m_is128_e8_k2`    |   8 |  45M | 35M | |
+| `qwen3_moe_57m_a35m_is128_e16_k2`   |  16 |  57M | 35M | |
+| `qwen3_moe_83m_a35m_is128_e32_k2`   |  32 |  83M | 35M | |
+| `qwen3_moe_133m_a35m_is128_e64_k2`  |  64 | 133M | 35M | |
+| `qwen3_moe_234m_a36m_is128_e128_k2` | 128 | 234M | 36M | |
 
 ## Notes
 

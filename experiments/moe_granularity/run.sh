@@ -12,10 +12,10 @@ triples=("1024 8 1" "512 16 2" "256 32 4" "128 64 8")
 configs=()
 for t in "${triples[@]}"; do
   read -r is e k <<< "$t"
-  match=("$dir"/*-is"${is}"-e"${e}"-k"${k}".yaml)
+  match=("$dir"/*_is"${is}"_e"${e}"_k"${k}".yaml)
   configs+=("${match[0]}")
 done
-configs+=("$dir"/qwen3-dense-*.yaml)   # dense baseline, same active width
+configs+=("$dir"/qwen3_dense_*.yaml)   # dense baseline, same active width
 
 for config in "${configs[@]}"; do
   echo "=== Training ${config} ==="
