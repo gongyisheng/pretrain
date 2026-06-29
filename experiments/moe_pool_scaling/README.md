@@ -23,7 +23,7 @@ Common backbone (Qwen3-style, identical across all runs except the expert count)
 | norm / pos_emb | rmsnorm / rope (θ=10000) |
 
 Invariant: active capacity `k·is = 1536` (≈51M active params) for all runs. All cells use
-`aux_loss_coef=0.01` and dynamic capacity (no token dropping). `is` = per-expert
+`aux_loss_coef=0.01` and `expert_capacity_factor=1.25` (fixed capacity, drops overflow). `is` = per-expert
 `intermediate_size`. `E=64` is the **`qwen3_183m_a51m` benchmark** shared across the moe
 experiments; the sweep grows and shrinks the pool around it.
 

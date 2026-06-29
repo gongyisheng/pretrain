@@ -26,7 +26,7 @@ Common backbone (Qwen3-style, identical across all runs except the MLP block):
 
 Invariants across the MoE sweep: pool `E·is = 12288`, active `k·is = 1536`, sparsity
 `k/E = 1/8` (12.5%). `is` = per-expert `intermediate_size`. All MoE cells use
-`aux_loss_coef=0.01` and dynamic capacity (no token dropping).
+`aux_loss_coef=0.01` and `expert_capacity_factor=1.25` (fixed capacity, drops overflow).
 
 The active width `k·is = 1536 = 3·d_model` is the Qwen3-0.6B FFN ratio. **Granularity** is
 `G = d_ff / d_expert` (DeepSeekMoE / fine-grained scaling laws), where `d_expert = is` and

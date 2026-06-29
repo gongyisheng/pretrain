@@ -26,7 +26,7 @@ Common backbone (Qwen3-style, all runs identical except the MLP split):
 
 Invariant: active experts per token `s + k = 8`, so active intermediate `= 1536` (≈51M
 active params) and FLOPs/token are constant. All cells use `moe` with `aux_loss_coef=0.01`
-and dynamic capacity (no token dropping). `s0_r8` is the pure-routed benchmark (no shared
+and `expert_capacity_factor=1.25` (fixed capacity, drops overflow). `s0_r8` is the pure-routed benchmark (no shared
 expert); as `s` grows the always-on shared FFN takes over more of the fixed budget.
 
 ### Configs

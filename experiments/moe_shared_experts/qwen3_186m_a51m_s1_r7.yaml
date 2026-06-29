@@ -15,6 +15,7 @@ model:
     n_routed_experts_per_token: 7
     n_shared_experts: 1
     aux_loss_coef: 0.01
+    expert_capacity_factor: 1.25
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
