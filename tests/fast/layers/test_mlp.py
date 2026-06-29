@@ -712,13 +712,16 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
 # ---------------------------------------------------------------------------
 
 
+# counts cover an empty group in interior, leading, and trailing positions.
+@pytest.mark.parametrize("counts", [[5, 0, 7, 4], [0, 5, 7, 4], [5, 7, 4, 0]])
 @pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
-def test_grouped_mlp_matches_per_group_loop(gated, activation, use_bias, dtype, atol):
+def test_grouped_mlp_matches_per_group_loop(
+    gated, activation, use_bias, dtype, atol, counts
+):
     torch.manual_seed(0)
     E, D, inter = 4, 16, 32
-    counts = [5, 0, 7, 4]  # expert 1 is empty
     R = sum(counts)
     act = (GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS)[activation]
 

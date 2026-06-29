@@ -362,16 +362,19 @@ class MoERouter(nn.Module):
 
 
 class SparseMoEBlock(nn.Module):
-    """Sparse Mixture-of-Experts MLP block with batched expert dispatch.
+    """Sparse Mixture-of-Experts MLP block with two expert-dispatch paths.
 
-    Expert weights are stored as stacked tensors and processed via torch.bmm,
-    replacing the sequential per-expert loop with batched GEMMs.
+    Expert weights are stored as stacked (E, out, in) tensors. Routing chooses
+    the dispatch path by `expert_capacity_factor`:
+      - None (default, dropless): tokens are sorted by expert and run through a
+        variable-group GEMM (`grouped_mlp` / torch._grouped_mm) with no padding
+        and no dropped tokens.
+      - set (capacity-capped): tokens are sorted, padded to a fixed (E, C, D)
+        capacity (overflow dropped), and run through batched `torch.bmm`.
 
     Per forward pass:
       - Tokens are routed to top-k experts via MoERouter.
-      - Routed tokens are sorted by expert, padded, and stacked into (E, C, D).
-      - Batched matmuls compute all experts in parallel.
-      - Outputs are gathered back with routing weights.
+      - Experts run via the path above; outputs are gathered back with routing weights.
       - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
 
     Mirrors DenseMLPBlock's gated/ungated split: by default `gated=True, activation="silu"`
