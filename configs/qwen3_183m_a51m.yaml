@@ -9,8 +9,13 @@ model:
     n_kv_heads: 4
     qk_norm: true
     dropout: 0.0
-  mlp_cls: dense
+  mlp_cls: moe
   mlp_kwargs:
+    intermediate_size: 192
+    n_routed_experts: 64
+    n_routed_experts_per_token: 8
+    aux_loss_coef: 0.01
+    expert_capacity_factor: 1.25
     dropout: 0.0
   norm_cls: rmsnorm
   pos_emb_cls: rope
@@ -24,29 +29,31 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 16
-  gradient_accumulation_steps: 16
+  batch_size: 8
+  gradient_accumulation_steps: 32
   max_steps: 50000
   mixed_precision: bf16
   activation_checkpointing: false
-  seed: 42
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/qwen3_57m/
+  checkpoint_dir: checkpoints/qwen3_183m_a51m/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
 optimizer:
-  name: adamw
+  name: muon
   lr: 5e-4
   weight_decay: 0.1
   betas:
   - 0.9
   - 0.95
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_adjust_lr_fn: match_rms_adamw
 scheduler:
   name: cosine
   warmup_steps: 1500
   min_lr: 5e-5
 logging:
   wandb_project: pretrain
-  wandb_run_name: qwen3-57m
-  log_every: 10
+  wandb_run_name: qwen3-183m-a51m
+  log_every: 100
