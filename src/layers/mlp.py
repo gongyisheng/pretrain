@@ -487,8 +487,11 @@ class SparseMoEBlock(nn.Module):
         top_indices, top_weights, router_probs = self.router(x_flat)
         # top_indices: (T, k)   top_weights: (T, k)   router_probs: (T, E)
 
+        w_in = self.expert_gate_up if self.gated else self.expert_up
+        b_in = self.expert_gate_up_bias if self.gated else self.expert_up_bias
+
         if self.expert_capacity_factor is not None:
-            # --- Optimized routing with capacity filtering ---
+            # --- Capacity-capped path (drops overflow; static shapes) ---
             (
                 sorted_expert_ids,
                 sorted_token_ids,
@@ -497,63 +500,68 @@ class SparseMoEBlock(nn.Module):
                 capacity,
                 expert_counts,
             ) = _route(top_indices, top_weights, E, self.expert_capacity_factor)
+            self.expert_load.copy_(expert_counts.detach())
+            padded_input = _scatter_in(
+                x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity
+            )
+            if self.gated:
+                expert_out = gated_mlp(
+                    padded_input,
+                    self.expert_gate_up,
+                    self.expert_down,
+                    self.act_fn,
+                    self.expert_gate_up_bias,
+                    self.expert_down_bias,
+                )
+            else:
+                expert_out = ungated_mlp(
+                    padded_input,
+                    self.expert_up,
+                    self.expert_down,
+                    self.act_fn,
+                    self.expert_up_bias,
+                    self.expert_down_bias,
+                )
+            expert_out = self.expert_dropout(expert_out)
+            output = _scatter_out(
+                expert_out,
+                sorted_expert_ids,
+                sorted_token_ids,
+                positions,
+                sorted_weights,
+                T,
+            )
         else:
-            # --- Dynamic capacity: no tokens dropped ---
+            # --- Dropless grouped-GEMM path (no padding, no drops) ---
             flat_expert_ids = top_indices.reshape(-1)
             flat_token_ids = (
                 torch.arange(T, device=x.device).unsqueeze(1).expand(T, k).reshape(-1)
             )
             flat_weights = top_weights.reshape(-1)
-            sorted_expert_ids, sorted_order = flat_expert_ids.sort(stable=True)
-            sorted_token_ids = flat_token_ids[sorted_order]
-            sorted_weights = flat_weights[sorted_order]
+            sorted_expert_ids, order = flat_expert_ids.sort(stable=True)
+            sorted_token_ids = flat_token_ids[order]
+            sorted_weights = flat_weights[order]
             expert_counts = torch.bincount(sorted_expert_ids.long(), minlength=E)
-            capacity = (expert_counts.max().item() + 31) // 32 * 32
-            offsets = torch.zeros(E, dtype=torch.long, device=x.device)
-            offsets[1:] = expert_counts[:-1].cumsum(0)
-            positions = (
-                torch.arange(len(sorted_expert_ids), device=x.device)
-                - offsets[sorted_expert_ids]
-            )
-
-        # Stash pre-drop routing load for MaxVio monitoring (in-place, no grad).
-        self.expert_load.copy_(expert_counts.detach())
-
-        # --- Build padded input: (E, capacity, D) ---
-        padded_input = _scatter_in(
-            x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity
-        )
-
-        # --- Batched expert MLP: shared gated/ungated_mlp (3D x + 3D weights) ---
-        if self.gated:
-            expert_out = gated_mlp(
-                padded_input,
-                self.expert_gate_up,
+            self.expert_load.copy_(expert_counts.detach())
+            offs = expert_counts.cumsum(0).to(torch.int32)
+            x_sorted = x_flat[sorted_token_ids]
+            expert_out = grouped_mlp(
+                x_sorted,
+                w_in,
                 self.expert_down,
                 self.act_fn,
-                self.expert_gate_up_bias,
-                self.expert_down_bias,
+                offs,
+                self.gated,
+                row_expert_ids=sorted_expert_ids if b_in is not None else None,
+                b_in=b_in,
+                b_down=self.expert_down_bias,
             )
-        else:
-            expert_out = ungated_mlp(
-                padded_input,
-                self.expert_up,
-                self.expert_down,
-                self.act_fn,
-                self.expert_up_bias,
-                self.expert_down_bias,
+            expert_out = self.expert_dropout(expert_out)
+            weighted = expert_out * sorted_weights.unsqueeze(-1)
+            output = x_flat.new_zeros(T, D, dtype=weighted.dtype)
+            output.scatter_add_(
+                0, sorted_token_ids.unsqueeze(-1).expand_as(weighted), weighted
             )
-        expert_out = self.expert_dropout(expert_out)
-
-        # --- Scatter results back with routing weights ---
-        output = _scatter_out(
-            expert_out,
-            sorted_expert_ids,
-            sorted_token_ids,
-            positions,
-            sorted_weights,
-            T,
-        )
 
         if self.expert_bias:
             if self.training:

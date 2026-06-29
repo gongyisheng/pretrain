@@ -795,3 +795,51 @@ def test_grouped_mlp_compiled_matches_eager_cuda_bf16(gated, activation):
     compiled = torch.compile(grouped_mlp)(x, w_in, w_down, act, offs, gated)
     assert compiled.dtype == torch.bfloat16
     assert torch.allclose(compiled, eager, atol=1e-2)
+
+
+@pytest.mark.parametrize("gated", [True, False])
+def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
+    torch.manual_seed(0)
+    d_model, inter, E, k = 32, 16, 4, 2
+    block = SparseMoEBlock(
+        d_model=d_model,
+        intermediate_size=inter,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        gated=gated,
+        activation="silu" if gated else "gelu",
+        bias=True,
+    )
+    with torch.no_grad():
+        w1 = block.expert_gate_up if gated else block.expert_up
+        torch.nn.init.normal_(w1, std=0.02)
+        torch.nn.init.normal_(block.expert_down, std=0.02)
+        torch.nn.init.normal_(
+            block.expert_gate_up_bias if gated else block.expert_up_bias, std=0.02
+        )
+        torch.nn.init.normal_(block.expert_down_bias, std=0.02)
+        # expert 3 gets logit = gate_weight[3] · x. Using all-negative weight row and
+        # all-positive x (abs) ensures logit_3 << 0 reliably → expert 3 never in top-k.
+        block.router.gate.weight.data[3] = -1e4
+    block.eval()
+
+    # All-positive x guarantees logit_3 = -1e4 * sum(|x_features|) << other logits.
+    x = torch.randn(2, 8, d_model).abs()
+    out, aux = block(x)
+
+    out_ref, aux_ref = sparse_moe_block_ref(
+        x,
+        block.router.gate.weight,
+        block.expert_down,
+        n_routed_experts_per_token=k,
+        activation="silu" if gated else "gelu",
+        normalize=True,
+        expert_gate_up=block.expert_gate_up if gated else None,
+        expert_up=None if gated else block.expert_up,
+        expert_gate_up_bias=block.expert_gate_up_bias if gated else None,
+        expert_up_bias=None if gated else block.expert_up_bias,
+        expert_down_bias=block.expert_down_bias,
+    )
+    assert block.expert_load[3].item() == 0
+    assert torch.allclose(out, out_ref, atol=1e-4)
+    assert torch.allclose(aux, aux_ref, atol=1e-4)

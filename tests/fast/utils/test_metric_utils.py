@@ -263,7 +263,17 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
     skip_if_unsupported(impl, device)
     model_cfg = _CFG_FACTORIES[arch_id](impl)
     model = build_model(_FakeTrainConfig(model_cfg))
-    compiled = torch.compile(model, backend="eager")
+    # Mirror trainer compile strategy: dropless MoE (expert_capacity_factor=None)
+    # uses grouped_mlp (torch._grouped_mm), which only works under compile for bf16.
+    # Trainer compiles only attention in that case; replicate here.
+    is_moe = model_cfg.mlp_cls == "moe"
+    dropless = is_moe and model_cfg.mlp_kwargs.get("expert_capacity_factor") is None
+    if dropless:
+        for block in model.blocks:
+            block.attn = torch.compile(block.attn, backend="eager")
+        compiled = model
+    else:
+        compiled = torch.compile(model, backend="eager")
     _populate_grads(compiled, model_cfg.vocab_size, impl)
     result = metric_utils.compute_layer_grad_norms(compiled)
     assert set(result) == _expected_grad_keys(compiled)

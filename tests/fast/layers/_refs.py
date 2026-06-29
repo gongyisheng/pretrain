@@ -436,12 +436,17 @@ def sparse_moe_block_ref(
     expert_gate_up: torch.Tensor | None = None,
     expert_up: torch.Tensor | None = None,
     normalize: bool = True,
+    expert_gate_up_bias: torch.Tensor | None = None,
+    expert_up_bias: torch.Tensor | None = None,
+    expert_down_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eager sparse MoE: naive per-(token, slot) expert dispatch.
 
     Mirrors MLP's gated/ungated split:
       - gated   (expert_gate_up given): hidden = act(gate)*up via GATED_ACTIVATIONS_REFS
       - ungated (expert_up given):      hidden = act(up)      via UNGATED_ACTIVATIONS_REFS
+    Optional bias tensors (expert_gate_up_bias/expert_up_bias/expert_down_bias) are
+    applied per-expert when provided.
     Returns (output (B,S,D), aux_loss scalar) — Switch Transformer load-balancing loss.
     """
     if (expert_gate_up is None) == (expert_up is None):
@@ -464,12 +469,18 @@ def sparse_moe_block_ref(
             w = top_weights[t, slot]
             if expert_gate_up is not None:
                 gate_up = x_flat[t] @ expert_gate_up[e].T  # (2*I,)
+                if expert_gate_up_bias is not None:
+                    gate_up = gate_up + expert_gate_up_bias[e]
                 g, u = gate_up.chunk(2, dim=-1)
                 hidden = GATED_ACTIVATIONS_REFS[activation](g, u)  # (I,)
             else:
                 up = x_flat[t] @ expert_up[e].T  # (I,)
+                if expert_up_bias is not None:
+                    up = up + expert_up_bias[e]
                 hidden = UNGATED_ACTIVATIONS_REFS[activation](up)
             out_t = hidden @ expert_down[e].T  # (D,)
+            if expert_down_bias is not None:
+                out_t = out_t + expert_down_bias[e]
             output[t] = output[t] + w * out_t
 
     # Switch Transformer aux loss: E * sum_i (f_i * P_i), f_i = #tokens routed to i / T.
