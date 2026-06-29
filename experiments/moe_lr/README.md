@@ -24,7 +24,7 @@ Fixed testbed: `qwen3_183m_a51m` architecture, 64 experts, top-8, per-expert
 | n_experts / top-k | 64 / 8 |
 | intermediate_size (per expert) | 192 |
 | expert_capacity_factor | 1.25 |
-| batch × grad_accum × seq | 16 × 16 × 1024 (≈0.26M tok/step) |
+| batch × grad_accum × seq | 32 × 8 × 1024 (≈0.26M tok/step) |
 | max_steps | 50000 (≈13B tokens) |
 | warmup | 1500 |
 
