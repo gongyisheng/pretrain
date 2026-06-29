@@ -463,7 +463,7 @@ class Trainer:
 
     @torch.no_grad()
     def _evaluate(self):
-        self.metrics.eval_begin(self.model)
+        self.metrics.eval_begin()
         for i, batch in enumerate(self.val_loader):
             if (
                 self.config.training.eval_steps > 0
