@@ -56,4 +56,4 @@ scheduler:
 logging:
   wandb_project: pretrain-moe-lr
   wandb_run_name: qwen3-183m-a51m-lr2e-3
-  log_every: 10
+  log_every: 100
