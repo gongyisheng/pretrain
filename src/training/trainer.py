@@ -532,7 +532,12 @@ class Trainer:
                     "attn_implementation"
                 ],
             )
-            logits, _ = self.model(idx_cond, position_ids=pos_ids, attn_mask=attn_mask)
+            with torch.amp.autocast(
+                self.device, dtype=self.amp_dtype, enabled=self.use_amp
+            ):
+                logits, _ = self.model(
+                    idx_cond, position_ids=pos_ids, attn_mask=attn_mask
+                )
             logits = logits[:, -1, :]  # take last token's logits
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(
