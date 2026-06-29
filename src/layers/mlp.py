@@ -58,6 +58,39 @@ def ungated_mlp(
     return out
 
 
+def grouped_mlp(
+    x: torch.Tensor,
+    w_in: torch.Tensor,
+    w_down: torch.Tensor,
+    act_fn,
+    offs: torch.Tensor,
+    gated: bool,
+    row_expert_ids: torch.Tensor = None,
+    b_in: torch.Tensor = None,
+    b_down: torch.Tensor = None,
+) -> torch.Tensor:
+    """Dropless MoE expert FFN over expert-sorted tokens via grouped GEMM.
+
+    x is (R, D) with rows grouped by expert and `offs` the (E,) int32 cumulative
+    end-offsets (offs[-1] == R). Weights keep nn.Linear (E, out, in) layout; the
+    transposed view w.mT is the (E, in, out) form torch._grouped_mm expects.
+    Empty groups (count 0) are handled by torch._grouped_mm. Bias, when given,
+    is added per row using row_expert_ids.
+    """
+    h = torch._grouped_mm(x, w_in.mT, offs=offs)
+    if b_in is not None:
+        h = h + b_in[row_expert_ids]
+    if gated:
+        gate, up = h.chunk(2, dim=-1)
+        h = act_fn(gate, up)
+    else:
+        h = act_fn(h)
+    out = torch._grouped_mm(h, w_down.mT, offs=offs)
+    if b_down is not None:
+        out = out + b_down[row_expert_ids]
+    return out
+
+
 class DenseMLPBlock(nn.Module):
     """Configurable dense feed-forward block.
 

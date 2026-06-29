@@ -10,6 +10,9 @@ from src.layers.mlp import (
     MLP_REGISTRY,
     MoERouter,
     SparseMoEBlock,
+    grouped_mlp,
+    gated_mlp,
+    ungated_mlp,
 )
 from tests.fast.layers._refs import (
     COMPOUND_DTYPES,
@@ -702,3 +705,72 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
     hf_out = hf(x)
 
     assert torch.allclose(our_out, hf_out, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# grouped_mlp — numerical parity vs per-group loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
+@pytest.mark.parametrize("use_bias", [False, True])
+@pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
+def test_grouped_mlp_matches_per_group_loop(gated, activation, use_bias, dtype, atol):
+    torch.manual_seed(0)
+    E, D, inter = 4, 16, 32
+    counts = [5, 0, 7, 4]  # expert 1 is empty
+    R = sum(counts)
+    act = (GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS)[activation]
+
+    x = torch.randn(R, D, dtype=dtype)
+    out_dim = 2 * inter if gated else inter
+    w_in = torch.randn(E, out_dim, D, dtype=dtype) * 0.1
+    w_down = torch.randn(E, D, inter, dtype=dtype) * 0.1
+    b_in = torch.randn(E, out_dim, dtype=dtype) * 0.1 if use_bias else None
+    b_down = torch.randn(E, D, dtype=dtype) * 0.1 if use_bias else None
+
+    row_expert_ids = torch.repeat_interleave(torch.arange(E), torch.tensor(counts))
+    offs = torch.tensor(counts).cumsum(0).to(torch.int32)
+
+    got = grouped_mlp(
+        x,
+        w_in,
+        w_down,
+        act,
+        offs,
+        gated,
+        row_expert_ids=row_expert_ids,
+        b_in=b_in,
+        b_down=b_down,
+    )
+
+    # Reference: run each group through the existing 2D fused op.
+    ref = torch.empty_like(got)
+    start = 0
+    for e, c in enumerate(counts):
+        if c == 0:
+            continue
+        xs = x[start : start + c]
+        if gated:
+            ref[start : start + c] = gated_mlp(
+                xs,
+                w_in[e],
+                w_down[e],
+                act,
+                b_in[e] if use_bias else None,
+                b_down[e] if use_bias else None,
+            )
+        else:
+            ref[start : start + c] = ungated_mlp(
+                xs,
+                w_in[e],
+                w_down[e],
+                act,
+                b_in[e] if use_bias else None,
+                b_down[e] if use_bias else None,
+            )
+        start += c
+
+    assert got.dtype == dtype
+    assert got.shape == (R, D)
+    assert torch.allclose(got, ref, atol=atol)
