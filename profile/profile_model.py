@@ -10,13 +10,13 @@ gives eager aten attribution (you see _grouped_mm, sdpa, scatter/gather directly
 
 nsys:
     nsys profile --capture-range=cudaProfilerApi -o logs/profiles/qwen3_moe \
-        python profile/profile_model.py --config configs/qwen3_moe_133m.yaml
+        python profile/profile_model.py --config configs/qwen3_183m_a51m.yaml
     nsys stats --report cuda_gpu_kern_sum logs/profiles/qwen3_moe.nsys-rep
 
 ncu (slow — use --steps 1):
     ncu --profile-from-start off --nvtx --nvtx-include "iter/" \
         -o logs/profiles/qwen3_moe_ncu \
-        python profile/profile_model.py --config configs/qwen3_moe_133m.yaml --steps 1
+        python profile/profile_model.py --config configs/qwen3_183m_a51m.yaml --steps 1
 """
 
 import argparse

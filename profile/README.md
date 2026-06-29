@@ -34,8 +34,9 @@ directly. Useful to understand what the compiled path fuses.
 
 ```bash
 mkdir -p logs/profiles
-nsys profile --capture-range=cudaProfilerApi -o logs/profiles/qwen3_moe \
-    python profile/profile_model.py --config configs/qwen3_moe_133m.yaml
+nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
+    -o logs/profiles/qwen3_moe \
+    python profile/profile_model.py --config configs/qwen3_183m_a51m.yaml
 
 # kernel time ranking
 nsys stats --report cuda_gpu_kern_sum logs/profiles/qwen3_moe.nsys-rep
@@ -49,13 +50,13 @@ ncu replays each kernel (~100× slowdown) — use `--steps 1` and scope with NVT
 ```bash
 ncu --profile-from-start off --nvtx --nvtx-include "iter/" \
     -o logs/profiles/qwen3_moe_ncu \
-    python profile/profile_model.py --config configs/qwen3_moe_133m.yaml --steps 1
+    python profile/profile_model.py --config configs/qwen3_183m_a51m.yaml --steps 1
 
 # scope to specific kernels, full metric set
 ncu --profile-from-start off --nvtx --nvtx-include "iter/" --set full \
     -k regex:"grouped|scatter|gather" \
     -o logs/profiles/qwen3_moe_grouped \
-    python profile/profile_model.py --config configs/qwen3_moe_133m.yaml --steps 1
+    python profile/profile_model.py --config configs/qwen3_183m_a51m.yaml --steps 1
 ```
 
 `--profile-from-start off` makes ncu honor the `cudaProfilerStart/Stop` gate.
