@@ -30,14 +30,10 @@ Fixed testbed: `qwen3_183m_a51m` architecture, 64 experts, top-8, per-expert
 
 | Config | LR | min_lr |
 |---|---|---|
-| `qwen3_183m_a51m_lr1e-4` | 1e-4 | 1e-5 |
 | `qwen3_183m_a51m_lr2e-4` | 2e-4 | 2e-5 |
-| `qwen3_183m_a51m_lr3e-4` | 3e-4 | 3e-5 |
 | `qwen3_183m_a51m_lr5e-4` | 5e-4 | 5e-5 |
 | `qwen3_183m_a51m_lr1e-3` | 1e-3 | 1e-4 |
 | `qwen3_183m_a51m_lr2e-3` | 2e-3 | 2e-4 |
-| `qwen3_183m_a51m_lr3e-3` | 3e-3 | 3e-4 |
-| `qwen3_183m_a51m_lr5e-3` | 5e-3 | 5e-4 |
 
 ## Run
 
@@ -51,14 +47,10 @@ uv run python scripts/train.py --config experiments/moe_lr/qwen3_183m_a51m_lr1e-
 
 | LR | Final Val Loss | notes |
 |---|---|---|
-| 1e-4 | | |
 | 2e-4 | | |
-| 3e-4 | | |
 | 5e-4 | | |
 | 1e-3 | | |
 | 2e-3 | | |
-| 3e-3 | | |
-| 5e-3 | | |
 
 Best: _TBD_
 

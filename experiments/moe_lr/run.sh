@@ -6,7 +6,7 @@ set -e
 cd "$(dirname "$0")/../.."
 
 configs=()
-for lr in 1e-4 2e-4 3e-4 5e-4 1e-3 2e-3 3e-3 5e-3; do
+for lr in 2e-4 5e-4 1e-3 2e-3; do
     configs+=("qwen3_183m_a51m_lr${lr}")
 done
 
