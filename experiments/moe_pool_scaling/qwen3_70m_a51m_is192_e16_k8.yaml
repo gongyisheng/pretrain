@@ -10,9 +10,9 @@ model:
     qk_norm: true
   mlp_cls: moe
   mlp_kwargs:
-    intermediate_size: 128
-    n_routed_experts: 32
-    n_routed_experts_per_token: 2
+    intermediate_size: 192
+    n_routed_experts: 16
+    n_routed_experts_per_token: 8
     aux_loss_coef: 0.01
   norm_cls: rmsnorm
   pos_emb_cls: rope
@@ -31,22 +31,22 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_pool_scaling/qwen3_83m_a35m_is128_e32_k2/
+  checkpoint_dir: checkpoints/moe_pool_scaling/qwen3_70m_a51m_is192_e16_k8/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
 optimizer:
   name: adamw
-  lr: 0.001
+  lr: 5e-4
   weight_decay: 0.1
   betas:
   - 0.9
   - 0.95
 scheduler:
   name: cosine
-  warmup_steps: 1000
-  min_lr: 0.0001
+  warmup_steps: 1500
+  min_lr: 5e-5
 logging:
   wandb_project: pretrain-moe-pool-scaling
-  wandb_run_name: qwen3-83m-a35m-is128-e32-k2
+  wandb_run_name: qwen3-70m-a51m-is192-e16-k8
   log_every: 10
