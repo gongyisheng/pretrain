@@ -16,7 +16,7 @@ pushing LR much higher than the dense optimum.
 
 Fixed testbed: `qwen3_183m_a51m` architecture, 64 experts, top-8, per-expert
 `intermediate_size=192` (active `k·is = 1536`), capacity factor 1.25,
-`aux_loss_coef=0.01` (Switch default). Only LR varies; `min_lr = lr/10`.
+`aux_loss_coef=0.001`. Only LR varies; `min_lr = lr/10`.
 
 | Param | Value |
 |-------|-------|
