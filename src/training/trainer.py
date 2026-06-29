@@ -171,15 +171,7 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
-        if self.is_moe and config.model.mlp_kwargs["expert_capacity_factor"] is None:
-            # Dropless MoE routes experts through torch._grouped_mm, which is
-            # bf16-only under torch.compile and isn't covered by autocast's cast
-            # policy (it sees fp32 activations/weights → meta check rejects). So
-            # the MoE FFN must run eager; compile attention only.
-            for block in self.model.blocks:
-                block.attn = torch.compile(block.attn)
-        else:
-            self.model = torch.compile(self.model)
+        self.model = torch.compile(self.model)
 
         # Activation checkpointing
         if config.training.activation_checkpointing:

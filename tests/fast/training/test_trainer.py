@@ -112,7 +112,8 @@ def _tiny_moe_config(tmp_dir):
             batch_size=4,
             gradient_accumulation_steps=1,
             max_steps=5,
-            mixed_precision="no",
+            # Dropless MoE requires bf16 (torch._grouped_mm is bf16-only under compile).
+            mixed_precision="bf16",
             activation_checkpointing=False,
             grad_clip=1.0,
             checkpoint_dir=os.path.join(tmp_dir, "ckpt"),

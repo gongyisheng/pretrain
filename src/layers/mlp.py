@@ -78,8 +78,20 @@ def grouped_mlp(
     is added per row using row_expert_ids.
 
     Eager supports all dtypes; under torch.compile only bf16 is supported
-    (torch._grouped_mm meta limitation), which matches the bf16 training path.
+    (torch._grouped_mm meta limitation). Under autocast, operands are cast to
+    the autocast dtype (e.g. bf16) so grouped GEMM receives the expected dtype,
+    mirroring what autocast does for ordinary matmuls.
     """
+    dev = x.device.type
+    if torch.is_autocast_enabled(dev):
+        dt = torch.get_autocast_dtype(dev)
+        x = x.to(dt)
+        w_in = w_in.to(dt)
+        w_down = w_down.to(dt)
+        if b_in is not None:
+            b_in = b_in.to(dt)
+        if b_down is not None:
+            b_down = b_down.to(dt)
     h = torch._grouped_mm(x, w_in.mT, offs=offs)
     if b_in is not None:
         h = h + b_in[row_expert_ids]

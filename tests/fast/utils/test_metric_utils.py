@@ -263,9 +263,11 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
     skip_if_unsupported(impl, device)
     model_cfg = _CFG_FACTORIES[arch_id](impl)
     model = build_model(_FakeTrainConfig(model_cfg))
-    # Mirror trainer compile strategy: dropless MoE (expert_capacity_factor=None)
-    # uses grouped_mlp (torch._grouped_mm), which only works under compile for bf16.
-    # Trainer compiles only attention in that case; replicate here.
+    # The trainer now does full-model torch.compile for dropless MoE too (grouped_mlp
+    # casts to bf16 under autocast). This test runs fp32 with no autocast, so
+    # full-model compile of dropless MoE would still hit the fp32 _grouped_mm meta
+    # rejection. Compile only attention here so the _orig_mod. prefix stripping
+    # under test is exercised via the compiled attn submodules.
     is_moe = model_cfg.mlp_cls == "moe"
     dropless = is_moe and model_cfg.mlp_kwargs.get("expert_capacity_factor") is None
     if dropless:

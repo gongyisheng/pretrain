@@ -846,3 +846,23 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
     assert block.expert_load[3].item() == 0
     assert torch.allclose(out, out_ref, atol=1e-4)
     assert torch.allclose(aux, aux_ref, atol=1e-4)
+
+
+def test_grouped_mlp_casts_to_autocast_dtype():
+    # Tensors created on CPU explicitly so the test is device-agnostic
+    # (conftest sets default device to cuda when available).
+    torch.manual_seed(0)
+    E, D, inter = 4, 16, 32
+    counts = [5, 0, 7, 4]
+    R = sum(counts)
+    act = GATED_ACTIVATIONS["silu"]
+    x = torch.randn(R, D, device="cpu")  # fp32 on CPU
+    w_in = torch.randn(E, 2 * inter, D, device="cpu") * 0.1  # fp32 on CPU
+    w_down = torch.randn(E, D, inter, device="cpu") * 0.1  # fp32 on CPU
+    offs = torch.tensor(counts, device="cpu").cumsum(0).to(torch.int32)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        out = grouped_mlp(x, w_in, w_down, act, offs, True)
+    assert out.dtype == torch.bfloat16
+    # eager (no autocast) preserves fp32
+    out_eager = grouped_mlp(x, w_in, w_down, act, offs, True)
+    assert out_eager.dtype == torch.float32

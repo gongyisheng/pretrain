@@ -2,7 +2,13 @@ import tempfile
 import os
 import pytest
 import yaml
-from src.utils.config import ModelConfig, load_config, TrainingConfig, DataConfig
+from src.utils.config import (
+    ModelConfig,
+    TrainConfig,
+    load_config,
+    TrainingConfig,
+    DataConfig,
+)
 
 
 def _write_yaml(tmp_dir, data):
@@ -390,3 +396,43 @@ def test_training_unknown_fp8_recipe_raises():
 def test_training_fp8_recipe_unchecked_when_disabled():
     # Recipe is only validated when fp8 is enabled.
     TrainingConfig(fp8=False, fp8_recipe="not_a_real_recipe")
+
+
+# ==================== dropless MoE + precision guard ====================
+
+
+def _moe_train_config(mixed_precision, expert_capacity_factor=None):
+    """Build a minimal TrainConfig with dropless (or capped) MoE."""
+    mlp_kwargs = {
+        "n_routed_experts": 4,
+        "n_routed_experts_per_token": 2,
+        "intermediate_size": 64,
+    }
+    if expert_capacity_factor is not None:
+        mlp_kwargs["expert_capacity_factor"] = expert_capacity_factor
+    return TrainConfig(
+        model=ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs=mlp_kwargs),
+        training=TrainingConfig(mixed_precision=mixed_precision),
+    )
+
+
+def test_dropless_moe_requires_bf16_fp16_raises():
+    with pytest.raises(ValueError, match="bf16"):
+        _moe_train_config("fp16")
+
+
+def test_dropless_moe_requires_bf16_no_raises():
+    with pytest.raises(ValueError, match="bf16"):
+        _moe_train_config("no")
+
+
+def test_dropless_moe_bf16_ok():
+    cfg = _moe_train_config("bf16")
+    assert cfg.training.mixed_precision == "bf16"
+
+
+def test_capacity_capped_moe_any_precision_ok():
+    # expert_capacity_factor set → capacity-capped path; no restriction
+    _moe_train_config("fp16", expert_capacity_factor=1.25)
+    _moe_train_config("no", expert_capacity_factor=1.25)
+    _moe_train_config("bf16", expert_capacity_factor=1.25)

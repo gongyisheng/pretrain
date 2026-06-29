@@ -218,6 +218,23 @@ class TrainConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
+    def __post_init__(self):
+        self._validate_moe_compile_precision()
+
+    def _validate_moe_compile_precision(self):
+        m = self.model
+        if (
+            m.mlp_cls == "moe"
+            and m.mlp_kwargs.get("expert_capacity_factor") is None
+            and self.training.mixed_precision != "bf16"
+        ):
+            raise ValueError(
+                "dropless MoE (mlp_cls='moe', expert_capacity_factor=None) requires "
+                f"training.mixed_precision='bf16'; got {self.training.mixed_precision!r}. "
+                "torch._grouped_mm is bf16-only under torch.compile. Use mixed_precision: bf16, "
+                "or set expert_capacity_factor to use the capacity-capped path."
+            )
+
     def to_dict(self):
         return asdict(self)
 
@@ -327,4 +344,5 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
     if overrides:
         _apply_overrides(config, overrides)
 
+    config._validate_moe_compile_precision()
     return config
