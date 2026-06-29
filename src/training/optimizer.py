@@ -135,18 +135,9 @@ def _adjust_lr(lr: float, adjust_lr_fn: str | None, dim_out: int, dim_in: int) -
     return lr * ratio
 
 
-def _newton_schulz(grad, ns_coefficients, ns_steps, eps):
-    """Batched Newton-Schulz orthogonalization (quintic iteration in bfloat16).
-
-    Treats the last two dims as the matrix and any leading dims as a batch, so a
-    plain 2D weight is a batch-of-1 and MoE experts stacked as `(E, out, in)` are
-    orthogonalized independently per expert. Matches `torch.optim.Muon`'s math
-    with `addmm` -> `baddbmm` (the batched analogue)."""
-    a, b, c = ns_coefficients
-    dim_out, dim_in = grad.size(-2), grad.size(-1)
-    leading = grad.shape[:-2]
-    X = grad.bfloat16().reshape(-1, dim_out, dim_in)  # (B, out, in), B=1 if 2D
-    transposed = dim_out > dim_in  # work on the smaller Gram side
+def _ns_iterate(X, a, b, c, ns_steps, eps):
+    """Quintic Newton-Schulz on one (B, out, in) bf16 batch (per-matrix)."""
+    transposed = X.size(-2) > X.size(-1)  # work on the smaller Gram side
     if transposed:
         X = X.mT
     # Spectral norm <= 1 via per-matrix Frobenius norm.
@@ -155,8 +146,31 @@ def _newton_schulz(grad, ns_coefficients, ns_steps, eps):
         gram = X @ X.mT
         gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
         X = torch.baddbmm(X, gram_update, X, beta=a)
-    if transposed:
-        X = X.mT
+    return X.mT if transposed else X
+
+
+def _newton_schulz(grad, ns_coefficients, max_batch_elems, ns_steps, eps):
+    """Batched Newton-Schulz orthogonalization (quintic iteration in bfloat16).
+
+    Last two dims are the matrix, leading dims are an independent batch, so a 2D
+    weight is a batch-of-1 and MoE experts `(E, out, in)` orthogonalize per
+    expert. `max_batch_elems` caps elements per call, chunking large batches so
+    each matmul stays in the efficient regime; chunking is per-matrix, so the
+    result is identical regardless of the cap."""
+    a, b, c = ns_coefficients
+    dim_out, dim_in = grad.size(-2), grad.size(-1)
+    leading = grad.shape[:-2]
+    X = grad.bfloat16().reshape(-1, dim_out, dim_in)  # (B, out, in), B=1 if 2D
+    max_batch = max(1, max_batch_elems // (dim_out * dim_in))
+    if X.size(0) > max_batch:
+        X = torch.cat(
+            [
+                _ns_iterate(X[i : i + max_batch], a, b, c, ns_steps, eps)
+                for i in range(0, X.size(0), max_batch)
+            ]
+        )
+    else:
+        X = _ns_iterate(X, a, b, c, ns_steps, eps)
     return X.reshape(*leading, dim_out, dim_in)
 
 
@@ -177,6 +191,7 @@ class MuonOptimizer(torch.optim.Optimizer):
         momentum: float = 0.95,
         nesterov: bool = True,
         ns_coefficients=(3.4445, -4.7750, 2.0315),
+        ns_max_batch_elems: int = 8_000_000,
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
@@ -187,6 +202,7 @@ class MuonOptimizer(torch.optim.Optimizer):
             momentum=momentum,
             nesterov=nesterov,
             ns_coefficients=tuple(ns_coefficients),
+            ns_max_batch_elems=ns_max_batch_elems,
             eps=eps,
             ns_steps=ns_steps,
             adjust_lr_fn=adjust_lr_fn,
@@ -211,24 +227,40 @@ class MuonOptimizer(torch.optim.Optimizer):
             wd = group["weight_decay"]
             momentum = group["momentum"]
             nesterov = group["nesterov"]
+
+            buckets: dict = {}
             for p in group["params"]:
-                g = p.grad
-                if g is None:
+                if p.grad is None:
                     continue
-                state = self.state[p]
-                if "momentum_buffer" not in state:
-                    state["momentum_buffer"] = torch.zeros_like(g)
-                buf = state["momentum_buffer"]
-                buf.lerp_(g, 1 - momentum)
-                update = g.lerp(buf, momentum) if nesterov else buf
-                update = _newton_schulz(
-                    update, group["ns_coefficients"], group["ns_steps"], group["eps"]
+                buckets.setdefault((tuple(p.shape), p.dtype, p.device), []).append(p)
+
+            for (shape, _, _), params in buckets.items():
+                grads = [p.grad for p in params]
+                bufs = []
+                for p in params:
+                    state = self.state[p]
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(p.grad)
+                    bufs.append(state["momentum_buffer"])
+
+                torch._foreach_lerp_(bufs, grads, 1 - momentum)
+                updates = (
+                    torch._foreach_lerp(grads, bufs, momentum) if nesterov else bufs
                 )
+
+                ortho = _newton_schulz(
+                    torch.stack(updates),  # (K, *shape)
+                    group["ns_coefficients"],
+                    group["ns_max_batch_elems"],
+                    group["ns_steps"],
+                    group["eps"],
+                )
+
                 adjusted_lr = _adjust_lr(
-                    lr, group["adjust_lr_fn"], p.size(-2), p.size(-1)
+                    lr, group["adjust_lr_fn"], shape[-2], shape[-1]
                 )
-                p.mul_(1 - lr * wd)
-                p.add_(update, alpha=-adjusted_lr)
+                torch._foreach_mul_(params, 1 - lr * wd)
+                torch._foreach_add_(params, list(ortho.unbind(0)), alpha=-adjusted_lr)
         return loss
 
 
@@ -252,6 +284,7 @@ class MuonAdamWOptimizer:
             momentum=opt.muon_momentum,
             nesterov=opt.muon_nesterov,
             ns_coefficients=tuple(opt.muon_ns_coefficients),
+            ns_max_batch_elems=opt.muon_ns_max_batch_elems,
             eps=opt.eps,
             ns_steps=opt.muon_ns_steps,
             adjust_lr_fn=opt.muon_adjust_lr_fn,

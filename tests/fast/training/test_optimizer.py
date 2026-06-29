@@ -488,6 +488,59 @@ def test_muon_batched_matches_per_expert_loop():
             ), f"expert {e} diverged from per-slice Muon"
 
 
+def test_muon_same_shape_params_match_per_param_loop():
+    """Multiple same-shaped 2D params in one group are bucketed into a single
+    batched Newton-Schulz call; the result must equal stepping each param with
+    its own MuonOptimizer (i.e. the batching is numerically transparent)."""
+    torch.manual_seed(0)
+    shape = (8, 5)
+    n_params = 3
+    inits = [torch.randn(*shape) for _ in range(n_params)]
+    hp = dict(
+        lr=1e-2,
+        weight_decay=0.1,
+        momentum=0.95,
+        nesterov=True,
+        ns_coefficients=(3.4445, -4.7750, 2.0315),
+        eps=1e-7,
+        ns_steps=5,
+        adjust_lr_fn="match_rms_adamw",
+    )
+    batched = [torch.nn.Parameter(w.clone()) for w in inits]
+    singles = [torch.nn.Parameter(w.clone()) for w in inits]
+    opt_batched = MuonOptimizer(batched, **hp)  # all in one group -> one bucket
+    opt_singles = [MuonOptimizer([p], **hp) for p in singles]
+
+    for _ in range(3):
+        torch.manual_seed(1)
+        grads = [torch.randn(*shape) for _ in range(n_params)]
+        for i in range(n_params):
+            batched[i].grad = grads[i].clone()
+            singles[i].grad = grads[i].clone()
+        opt_batched.step()
+        for opt in opt_singles:
+            opt.step()
+        for i in range(n_params):
+            assert torch.allclose(
+                batched[i].detach(), singles[i].detach(), atol=0.0, rtol=0.0
+            ), f"param {i} diverged from per-param Muon"
+
+
+def test_muon_mixed_shapes_one_group_all_update():
+    """A group holding several distinct shapes (and a 3D expert stack) buckets
+    correctly and updates every param."""
+    torch.manual_seed(0)
+    shapes = [(8, 5), (8, 5), (6, 6), (4, 8, 5)]  # two share a shape; one 3D
+    params = [torch.nn.Parameter(torch.randn(*s)) for s in shapes]
+    before = [p.detach().clone() for p in params]
+    opt = MuonOptimizer(params, lr=1e-2, ns_steps=3)
+    for p in params:
+        p.grad = torch.randn_like(p)
+    opt.step()
+    for i, p in enumerate(params):
+        assert not torch.allclose(p.detach(), before[i]), f"param {i} did not update"
+
+
 def test_muon_rejects_1d_param():
     p = torch.nn.Parameter(torch.zeros(4))
     with pytest.raises(ValueError, match="ndim>=2"):
