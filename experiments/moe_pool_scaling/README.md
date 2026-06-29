@@ -72,5 +72,5 @@ W&B project: `pretrain-moe-pool-scaling`.
   what top-8 routing can usefully exploit.
 - This is the fixed-active-size counterpart to `moe_granularity` (which fixes the pool and
   varies how it is split).
-- **Memory:** the largest cell (`E=256`, 637M total) holds ~10 GB of weights + AdamW state;
+- **Memory:** the largest cell (`E=256`, 637M total) holds ~10 GB of weights + optimizer state;
   add `--training.activation_checkpointing=true` if it OOMs.

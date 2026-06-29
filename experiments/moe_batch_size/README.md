@@ -11,7 +11,7 @@ loss to find it.
 
 Single config type: `qwen3_183m_a51m` (top-8, ~51M active; per-expert
 `intermediate_size=192`, 64 experts → active `k·is = 1536`). Fixed
-`batch_size=8`, `max_seq_len=1024`, cosine LR `5e-4 → 5e-5`, AdamW, bf16.
+`batch_size=8`, `max_seq_len=1024`, cosine LR `5e-4 → 5e-5`, Muon (`match_rms_adamw`), bf16.
 Effective batch = `batch_size × grad_accu × max_seq_len`. `max_steps=50000` is
 fixed across all runs, so the token budget scales with the effective batch (the
 larger batches train on proportionally more tokens, from 13.1B up to 104.9B).
