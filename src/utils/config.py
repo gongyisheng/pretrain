@@ -165,7 +165,7 @@ class OptimizerConfig:
     muon_ns_coefficients: List[float] = field(
         default_factory=lambda: [3.4445, -4.775, 2.0315]
     )
-    muon_ns_max_batch_elems: int = 8_000_000 # tuned on 5090/6000 pro blackwell
+    muon_ns_max_batch_elems: int = 8_000_000  # tuned on 5090/6000 pro blackwell
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str = "match_rms_adamw"
 
