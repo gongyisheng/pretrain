@@ -76,6 +76,9 @@ def grouped_mlp(
     transposed view w.mT is the (E, in, out) form torch._grouped_mm expects.
     Empty groups (count 0) are handled by torch._grouped_mm. Bias, when given,
     is added per row using row_expert_ids.
+
+    Eager supports all dtypes; under torch.compile only bf16 is supported
+    (torch._grouped_mm meta limitation), which matches the bf16 training path.
     """
     h = torch._grouped_mm(x, w_in.mT, offs=offs)
     if b_in is not None:

@@ -774,3 +774,24 @@ def test_grouped_mlp_matches_per_group_loop(gated, activation, use_bias, dtype, 
     assert got.dtype == dtype
     assert got.shape == (R, D)
     assert torch.allclose(got, ref, atol=atol)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped_mm compile is CUDA+bf16 only"
+)
+@pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
+def test_grouped_mlp_compiled_matches_eager_cuda_bf16(gated, activation):
+    torch.manual_seed(0)
+    E, D, inter = 4, 16, 32
+    counts = [5, 0, 7, 4]  # includes an empty group
+    R = sum(counts)
+    act = (GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS)[activation]
+    x = torch.randn(R, D, device="cuda", dtype=torch.bfloat16)
+    out_dim = 2 * inter if gated else inter
+    w_in = torch.randn(E, out_dim, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    w_down = torch.randn(E, D, inter, device="cuda", dtype=torch.bfloat16) * 0.1
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    eager = grouped_mlp(x, w_in, w_down, act, offs, gated)
+    compiled = torch.compile(grouped_mlp)(x, w_in, w_down, act, offs, gated)
+    assert compiled.dtype == torch.bfloat16
+    assert torch.allclose(compiled, eager, atol=1e-2)
