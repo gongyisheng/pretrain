@@ -344,5 +344,4 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
     if overrides:
         _apply_overrides(config, overrides)
 
-    config._validate_moe_compile_precision()
     return config
