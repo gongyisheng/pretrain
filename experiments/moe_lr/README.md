@@ -15,7 +15,7 @@ pushing LR much higher than the dense optimum.
 ## Setup
 
 Fixed testbed: `qwen3_183m_a51m` architecture, 64 experts, top-8, per-expert
-`intermediate_size=192` (active `k·is = 1536`), capacity factor 1.25,
+`intermediate_size=192` (active `k·is = 1536`), dropless routing,
 `aux_loss_coef=0.001`. Only LR varies; `min_lr = lr/10`.
 
 | Param | Value |
@@ -23,7 +23,7 @@ Fixed testbed: `qwen3_183m_a51m` architecture, 64 experts, top-8, per-expert
 | d_model / n_layers | 512 / 8 |
 | n_experts / top-k | 64 / 8 |
 | intermediate_size (per expert) | 192 |
-| expert_capacity_factor | 1.25 |
+| routing | dropless |
 | batch × grad_accum × seq | 32 × 8 × 1024 (≈0.26M tok/step) |
 | max_steps | 50000 (≈13B tokens) |
 | warmup | 1500 |
