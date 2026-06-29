@@ -13,10 +13,7 @@ done
 
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
-    echo "Started at: $(date)"
     uv run python scripts/train.py --config "experiments/moe_muon_optm/${config}.yaml"
-    echo "Finished at: $(date)"
-    echo ""
 done
 
 echo "=== All moe_muon_optm runs complete ==="
