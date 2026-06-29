@@ -108,17 +108,136 @@ class LionOptimizer(torch.optim.Optimizer):
 
 
 def _is_muon_param(name: str, param: torch.nn.Parameter) -> bool:
-    """Muon orthogonalizes 2D hidden-layer weights. Embeddings, the output head,
-    and 1D params (norms, biases) fall back to AdamW (torch.optim.Muon is 2D-only).
+    """Muon orthogonalizes matrix-valued hidden weights. This includes 2D weights
+    (attention/MLP projections) and the MoE experts' stacked 3D weights
+    `(n_experts, out, in)`, which `MuonOptimizer` orthogonalizes per-expert.
+    Embeddings, the output head, the MoE router gate, and 1D params (norms,
+    biases) fall back to AdamW.
     """
-    return param.ndim == 2 and "emb" not in name and "lm_head" not in name
+    return (
+        param.ndim >= 2
+        and "emb" not in name
+        and "lm_head" not in name
+        and "router" not in name
+    )
+
+
+def _adjust_lr(lr: float, adjust_lr_fn: str | None, dim_out: int, dim_in: int) -> float:
+    """Per-matrix lr scaling so the orthogonalized update has consistent RMS across
+    shapes. `dim_out`/`dim_in` are the matrix dims (last two of the param). Mirrors
+    `torch.optim.Muon._adjust_lr`; `match_rms_adamw` lets Muon reuse AdamW's lr."""
+    if adjust_lr_fn is None or adjust_lr_fn == "original":
+        ratio = math.sqrt(max(1, dim_out / dim_in))
+    elif adjust_lr_fn == "match_rms_adamw":
+        ratio = 0.2 * math.sqrt(max(dim_out, dim_in))
+    else:
+        ratio = 1.0
+    return lr * ratio
+
+
+def _newton_schulz(grad, ns_coefficients, ns_steps, eps):
+    """Batched Newton-Schulz orthogonalization (quintic iteration in bfloat16).
+
+    Treats the last two dims as the matrix and any leading dims as a batch, so a
+    plain 2D weight is a batch-of-1 and MoE experts stacked as `(E, out, in)` are
+    orthogonalized independently per expert. Matches `torch.optim.Muon`'s math
+    with `addmm` -> `baddbmm` (the batched analogue)."""
+    a, b, c = ns_coefficients
+    dim_out, dim_in = grad.size(-2), grad.size(-1)
+    leading = grad.shape[:-2]
+    X = grad.bfloat16().reshape(-1, dim_out, dim_in)  # (B, out, in), B=1 if 2D
+    transposed = dim_out > dim_in  # work on the smaller Gram side
+    if transposed:
+        X = X.mT
+    # Spectral norm <= 1 via per-matrix Frobenius norm.
+    X = X / X.norm(dim=(-2, -1), keepdim=True).clamp(min=eps)
+    for _ in range(ns_steps):
+        gram = X @ X.mT
+        gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+        X = torch.baddbmm(X, gram_update, X, beta=a)
+    if transposed:
+        X = X.mT
+    return X.reshape(*leading, dim_out, dim_in)
+
+
+class MuonOptimizer(torch.optim.Optimizer):
+    """Muon (Jordan et al., https://kellerjordan.github.io/posts/muon/) generalized
+    to batched matrices. Orthogonalizes the momentum-filtered gradient of each
+    matrix weight via Newton-Schulz. Unlike `torch.optim.Muon` (2D-only), this
+    accepts ndim>=2 params and treats leading dims as a batch, so MoE experts
+    stacked as `(E, out, in)` are orthogonalized per-expert. For 2D params it is
+    numerically equivalent to `torch.optim.Muon`.
+    """
+
+    def __init__(
+        self,
+        params,
+        lr: float,
+        weight_decay: float = 0.1,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_coefficients=(3.4445, -4.7750, 2.0315),
+        eps: float = 1e-7,
+        ns_steps: int = 5,
+        adjust_lr_fn: str | None = None,
+    ):
+        defaults = dict(
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_coefficients=tuple(ns_coefficients),
+            eps=eps,
+            ns_steps=ns_steps,
+            adjust_lr_fn=adjust_lr_fn,
+        )
+        super().__init__(params, defaults)
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.ndim < 2:
+                    raise ValueError(
+                        f"Muon needs matrix params (ndim>=2), got shape {tuple(p.size())}"
+                    )
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            wd = group["weight_decay"]
+            momentum = group["momentum"]
+            nesterov = group["nesterov"]
+            for p in group["params"]:
+                g = p.grad
+                if g is None:
+                    continue
+                state = self.state[p]
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(g)
+                buf = state["momentum_buffer"]
+                buf.lerp_(g, 1 - momentum)
+                update = g.lerp(buf, momentum) if nesterov else buf
+                update = _newton_schulz(
+                    update, group["ns_coefficients"], group["ns_steps"], group["eps"]
+                )
+                adjusted_lr = _adjust_lr(
+                    lr, group["adjust_lr_fn"], p.size(-2), p.size(-1)
+                )
+                p.mul_(1 - lr * wd)
+                p.add_(update, alpha=-adjusted_lr)
+        return loss
 
 
 class MuonAdamWOptimizer:
-    """Hybrid optimizer: Muon for 2D hidden weights, AdamW for embeddings, the
-    output head, and 1D params. Composes `torch.optim.Muon` + `torch.optim.AdamW`
-    and exposes a single optimizer-like surface (param_groups, state, step,
-    state_dict) so the scheduler, metrics, and checkpointing treat it uniformly.
+    """Hybrid optimizer: Muon for matrix hidden weights (2D projections and 3D MoE
+    experts), AdamW for embeddings, the output head, the router gate, and 1D
+    params. Composes `MuonOptimizer` + `torch.optim.AdamW` and exposes a single
+    optimizer-like surface (param_groups, state, step, state_dict) so the
+    scheduler, metrics, and checkpointing treat it uniformly.
 
     Muon uses `adjust_lr_fn="match_rms_adamw"` by default, rescaling the shared
     AdamW-tuned base lr so both subsystems run off one lr the scheduler drives.
@@ -126,7 +245,7 @@ class MuonAdamWOptimizer:
 
     def __init__(self, muon_groups, adamw_groups, config: "TrainConfig"):
         opt = config.optimizer
-        self.muon = torch.optim.Muon(
+        self.muon = MuonOptimizer(
             muon_groups,
             lr=opt.lr,
             weight_decay=opt.weight_decay,
