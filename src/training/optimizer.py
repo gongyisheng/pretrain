@@ -192,7 +192,7 @@ class MuonOptimizer(torch.optim.Optimizer):
         nesterov: bool = True,
         ns_coefficients=(3.4445, -4.7750, 2.0315),
         ns_max_batch_elems: int = 8_000_000,
-        eps: float = 1e-7,
+        eps: float = 1e-8,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
     ):
