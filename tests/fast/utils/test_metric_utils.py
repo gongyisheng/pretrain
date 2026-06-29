@@ -276,10 +276,10 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
 
 
 def _expected_svd_keys(model: torch.nn.Module) -> set[str]:
-    """2D float params, raw names, minus rope buffers and embeddings."""
+    """2D/3D float params, raw names, minus rope buffers and embeddings."""
     keys = set()
     for name, param in model.named_parameters():
-        if param.ndim != 2 or not param.is_floating_point():
+        if param.ndim not in (2, 3) or not param.is_floating_point():
             continue
         name = name.removeprefix("_orig_mod.")
         if name.startswith("rope.") or "emb" in name:
@@ -313,9 +313,48 @@ def test_svd_metrics_zero_matrix():
     }
 
 
+def test_svd_metrics_3d_averages_over_experts():
+    """Stacked (E, out, in) tensor: metrics equal the mean of per-expert 2D."""
+    torch.manual_seed(0)
+    w = torch.randn(5, 16, 12)  # (E, out, in)
+    batched = metric_utils._svd_metrics(w)
+    per_expert = [metric_utils._svd_metrics(w[e]) for e in range(w.size(0))]
+    mean_srank = sum(d["srank"] for d in per_expert) / w.size(0)
+    mean_pr = sum(d["pr"] for d in per_expert) / w.size(0)
+    assert batched["srank"] == pytest.approx(mean_srank, rel=1e-5)
+    assert batched["pr"] == pytest.approx(mean_pr, rel=1e-5)
+
+
+def test_svd_metrics_3d_rank_one_experts():
+    """Every expert rank-1 → averaged srank≈pr≈1."""
+    expert = torch.outer(torch.arange(1.0, 6.0), torch.arange(1.0, 4.0))
+    w = expert.unsqueeze(0).expand(4, -1, -1).contiguous()  # (4, 5, 3)
+    m = metric_utils._svd_metrics(w)
+    assert m["srank"] == pytest.approx(1.0, abs=1e-4)
+    assert m["pr"] == pytest.approx(1.0, abs=1e-4)
+
+
+def test_svd_metrics_3d_zero_tensor():
+    """Any all-zero expert (no positive σ) → every metric 0."""
+    assert metric_utils._svd_metrics(torch.zeros(3, 4, 4)) == {
+        "srank": 0.0,
+        "pr": 0.0,
+    }
+
+
+def test_layer_svd_metrics_includes_moe_experts():
+    """3D stacked expert weights are covered (regression: previously skipped)."""
+    model = build_model(_FakeTrainConfig(_qwen3_moe_cfg("sdpa")))
+    result = metric_utils.compute_layer_svd_metrics(model)
+    expert_keys = [k for k in result if "expert_" in k]
+    assert expert_keys, "expected MoE expert weights in SVD metrics"
+    assert any(k.endswith("expert_gate_up") for k in expert_keys)
+    assert any(k.endswith("expert_down") for k in expert_keys)
+
+
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
 def test_layer_svd_metrics_keys_and_bounds(arch_id):
-    """One entry per 2D weight (no rope/embedding); metrics within bounds."""
+    """One entry per 2D/3D weight (no rope/embedding); metrics within bounds."""
     model_cfg = _CFG_FACTORIES[arch_id]("sdpa")
     model = build_model(_FakeTrainConfig(model_cfg))
     result = metric_utils.compute_layer_svd_metrics(model)
@@ -324,7 +363,9 @@ def test_layer_svd_metrics_keys_and_bounds(arch_id):
 
     shapes = {n: tuple(p.shape) for n, p in model.named_parameters()}
     for name, m in result.items():
-        n = min(shapes[name])
+        # Matrix rank is bounded by the last two dims (leading dim of a 3D
+        # expert tensor is the expert batch, not part of the matrix).
+        n = min(shapes[name][-2:])
         assert 1.0 - 1e-4 <= m["srank"] <= n + 1e-4
         assert 1.0 - 1e-4 <= m["pr"] <= n + 1e-4
 
