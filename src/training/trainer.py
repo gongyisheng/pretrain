@@ -383,7 +383,7 @@ class Trainer:
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            self.metrics.on_step(
+            self.metrics.on_train_step(
                 loss=accum_loss,
                 grad_norm=grad_norm_val,
                 model=self.model,
@@ -475,10 +475,11 @@ class Trainer:
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
                 loss = compute_loss(logits, labels, self.config.training.loss_fn)
-            self.metrics.eval_step(
+            self.metrics.on_eval_step(
                 loss=loss.item(),
                 logits=logits,
                 labels=labels,
+                model=self.model,
                 aux_loss=aux_loss.item() if aux_loss is not None else None,
                 tokenizer=self.tokenizer,
                 eot_token_id=self.eot_token_id,

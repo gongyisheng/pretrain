@@ -66,11 +66,11 @@ def _linear_setup():
 
 
 def _do_step(tracker, model, opt, scaler, step, *, loss=2.0, grad_norm=0.5):
-    """Run one tracker step (snapshot → optimizer step → on_step)."""
+    """Run one tracker step (snapshot → optimizer step → on_train_step)."""
     tracker.snapshot_pre_step(model, step)
     scale_before = scaler.get_scale()
     opt.step()
-    tracker.on_step(
+    tracker.on_train_step(
         loss=loss,
         grad_norm=grad_norm,
         model=model,
@@ -163,7 +163,7 @@ def test_step_norms_present_on_log_step():
     tracker, _ = _tracker(_cfg(log_every=2, log_optimizer_step_norms=True))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
-    # step 1 -> (1+1)%2==0, so snapshot fires and on_step computes the norms
+    # step 1 -> (1+1)%2==0, so snapshot fires and on_train_step computes the norms
     _do_step(tracker, model, opt, scaler, step=1)
     d = tracker.log_train(step=2, model=model, optimizer=opt)
     assert "optim/param_step_norm" in d
@@ -229,8 +229,8 @@ def test_eval_pretrain_loss_and_perplexity():
     tracker.eval_begin()
     logits = torch.randn(2, 5, 256)
     labels = torch.randint(0, 256, (2, 5))
-    tracker.eval_step(loss=1.5, logits=logits, labels=labels)
-    tracker.eval_step(loss=2.5, logits=logits, labels=labels)
+    tracker.on_eval_step(loss=1.5, logits=logits, labels=labels)
+    tracker.on_eval_step(loss=2.5, logits=logits, labels=labels)
     d = tracker.log_eval(step=10)
     assert d["val/loss"] == pytest.approx(2.0)  # mean of 1.5, 2.5
     assert d["val/perplexity"] == pytest.approx(math.exp(2.0))
@@ -248,7 +248,7 @@ def test_eval_pretrain_bpb_with_fake_tokenizer():
     tracker.eval_begin()
     labels = torch.tensor([[1, 2, 3, -100]])  # 3 loss-contributing tokens
     logits = torch.randn(1, 4, 256)
-    tracker.eval_step(loss=2.0, logits=logits, labels=labels, tokenizer=FakeTok())
+    tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, tokenizer=FakeTok())
     d = tracker.log_eval(step=1)
     # 3 tokens / 3 bytes -> tokens_per_byte = 1.0 ; bpb = loss * 1 / ln2
     assert d["val/bpb"] == pytest.approx(2.0 / math.log(2))
@@ -260,7 +260,7 @@ def test_eval_sft_accuracy_excludes_eot():
     logits = torch.zeros(1, 3, 4)
     logits[0, torch.arange(3), torch.tensor([1, 2, 3])] = 10.0  # preds 1, 2, 3
     labels = torch.tensor([[1, 2, 3]])
-    tracker.eval_step(loss=0.1, logits=logits, labels=labels, eot_token_id=0)
+    tracker.on_eval_step(loss=0.1, logits=logits, labels=labels, eot_token_id=0)
     d = tracker.log_eval(step=1)
     assert d["val/val_acc"] == pytest.approx(1.0)
     assert "val/perplexity" not in d and "val/bpb" not in d
@@ -271,7 +271,7 @@ def test_eval_sft_train_acc_passthrough():
     tracker.eval_begin()
     logits = torch.zeros(1, 2, 4)
     logits[0, torch.arange(2), torch.tensor([1, 2])] = 10.0
-    tracker.eval_step(loss=0.1, logits=logits, labels=torch.tensor([[1, 2]]))
+    tracker.on_eval_step(loss=0.1, logits=logits, labels=torch.tensor([[1, 2]]))
     d = tracker.log_eval(step=1, train_avg_acc=0.99)
     assert d["val/train_acc"] == pytest.approx(0.99)
 
@@ -298,7 +298,7 @@ def test_eval_moe_aux_loss_subtracts_floor():
     tracker.eval_begin()
     logits = torch.randn(1, 4, 256)
     labels = torch.randint(0, 256, (1, 4))
-    tracker.eval_step(loss=2.0, logits=logits, labels=labels, aux_loss=floor + 0.5)
+    tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, aux_loss=floor + 0.5)
     d = tracker.log_eval(step=1)
     assert d["val/aux_loss"] == pytest.approx(0.5)
 
@@ -323,6 +323,20 @@ def _moe_cfg():
     return cfg
 
 
+def _moe_on_step(tracker, model, opt, step):
+    """Drive one tracker step for an MoE model (no grads needed)."""
+    scaler = torch.amp.GradScaler(enabled=False)
+    tracker.snapshot_pre_step(model, step)
+    tracker.on_train_step(
+        loss=2.0,
+        grad_norm=0.5,
+        model=model,
+        optimizer=opt,
+        scaler=scaler,
+        scale_before=scaler.get_scale(),
+    )
+
+
 def test_train_moe_maxvio_logged_per_layer():
     from src.layers.mlp import SparseMoEBlock
 
@@ -337,6 +351,7 @@ def test_train_moe_maxvio_logged_per_layer():
     tracker.train_begin()
     model.l0(torch.randn(2, 8, 64))
     model.l1(torch.randn(2, 8, 64))
+    _moe_on_step(tracker, model, opt, step=0)
     d = tracker.log_train(step=1, model=model, optimizer=opt)
 
     assert "train/moe_maxvio/layer_0" in d and "train/moe_maxvio/layer_1" in d
@@ -345,14 +360,15 @@ def test_train_moe_maxvio_logged_per_layer():
     assert all(d[k] >= 0.0 for k in d if k.startswith("train/moe_maxvio/"))
 
 
-def test_train_moe_maxvio_is_batch_not_global():
-    # Batch MaxVio reads the live per-forward routing buffer directly — no
-    # cross-batch accumulation. Stamping a known imbalance reproduces the
-    # closed-form maxvio: (max - mean) / mean = (10 - 5) / 5 = 1.0.
+def test_train_moe_maxvio_is_window_averaged():
+    # Train MaxVio sums per-step routing load over the log window (one entry
+    # per on_train_step) and computes maxvio on the average. Two steps stamping
+    # [10,0,5,5] and [0,10,5,5] sum to [10,10,10,10] (balanced) -> maxvio 0,
+    # confirming window accumulation, not last-step-only.
     from src.layers.mlp import SparseMoEBlock
 
     cfg = _moe_cfg()
-    cfg.logging.log_every = 1
+    cfg.logging.log_every = 2
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
     model = torch.nn.Module()
     model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
@@ -360,8 +376,56 @@ def test_train_moe_maxvio_is_batch_not_global():
 
     tracker.train_begin()
     model.l0.expert_load.copy_(torch.tensor([10, 0, 5, 5]))
-    d = tracker.log_train(step=1, model=model, optimizer=opt)
-    assert d["train/moe_maxvio/layer_0"] == pytest.approx(1.0)
+    _moe_on_step(tracker, model, opt, step=0)
+    model.l0.expert_load.copy_(torch.tensor([0, 10, 5, 5]))
+    _moe_on_step(tracker, model, opt, step=1)
+    d = tracker.log_train(step=2, model=model, optimizer=opt)
+    assert d["train/moe_maxvio/layer_0"] == pytest.approx(0.0)
+
+
+def test_eval_moe_maxvio_logged_per_layer():
+    from src.layers.mlp import SparseMoEBlock
+
+    tracker = MetricsTracker(_moe_cfg(), device="cpu", logger=FakeLogger())
+    model = torch.nn.Module()
+    model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    model.l1 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    logits = torch.randn(1, 4, 256)
+    labels = torch.randint(0, 256, (1, 4))
+
+    tracker.eval_begin()
+    for _ in range(3):  # accumulate across batches
+        model.l0(torch.randn(2, 8, 64))
+        model.l1(torch.randn(2, 8, 64))
+        tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, model=model)
+    d = tracker.log_eval(step=1)
+
+    assert "val/moe_maxvio/layer_0" in d and "val/moe_maxvio/layer_1" in d
+    assert "val/moe_maxvio/mean" in d and "val/moe_maxvio/max" in d
+    assert d["val/moe_maxvio/max"] >= d["val/moe_maxvio/mean"] - 1e-9
+    assert all(d[k] >= 0.0 for k in d if k.startswith("val/moe_maxvio/"))
+
+
+def test_eval_moe_maxvio_is_load_averaged():
+    # Eval MaxVio sums per-layer routing load over eval batches and computes
+    # maxvio on the average. Batches [10,0,5,5] and [0,10,5,5] sum to
+    # [10,10,10,10] (balanced) -> maxvio 0, confirming load accumulation across
+    # batches (not last-batch-only, which would give 1.0).
+    from src.layers.mlp import SparseMoEBlock
+
+    tracker = MetricsTracker(_moe_cfg(), device="cpu", logger=FakeLogger())
+    model = torch.nn.Module()
+    model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    logits = torch.randn(1, 4, 256)
+    labels = torch.randint(0, 256, (1, 4))
+
+    batches = [[10, 0, 5, 5], [0, 10, 5, 5]]
+    tracker.eval_begin()
+    for counts in batches:
+        model.l0.expert_load.copy_(torch.tensor(counts))
+        tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, model=model)
+    d = tracker.log_eval(step=1)
+    assert d["val/moe_maxvio/layer_0"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
