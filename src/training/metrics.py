@@ -15,14 +15,14 @@ Lifecycle per optimizer step:
     snapshot_pre_step(model, step)        # before optimizer.step() (snapshots
                                           #   only on pre-log steps)
     ...scaler.step / update...
-    on_step(loss=, grad_norm=, ...)       # update counters + total_tokens,
+    on_train_step(loss=, grad_norm=, ...) # update counters + total_tokens,
                                           #   cache step-norms
     log_train(step=, model=, optimizer=)  # on cadence: assemble + dispatch,
                                           #   else None
 
 Eval:
     eval_begin()
-    eval_step(loss=, logits=, labels=, ...)   # per batch
+    on_eval_step(loss=, logits=, labels=, ...)   # per batch
     log_eval(step=)                            # finalize + dispatch + print
 """
 
@@ -52,8 +52,12 @@ class MetricsTracker:
         self.is_moe = config.model.mlp_cls == "moe"
         if self.is_moe:
             self._aux_floor = (
-                config.model.n_layers * config.model.mlp_kwargs["n_experts_per_token"]
+                config.model.n_layers
+                * config.model.mlp_kwargs["n_routed_experts_per_token"]
             )
+            # MaxVio accumulator dims (every layer is MoE in these configs).
+            self._n_moe_layers = config.model.n_layers
+            self._n_routed_experts = config.model.mlp_kwargs["n_routed_experts"]
 
         self._flops_per_token = metric_utils.compute_flops_per_token(config)
         self._gpu_peak_flops = metric_utils.estimate_gpu_peak_flops(device)
@@ -67,9 +71,6 @@ class MetricsTracker:
         self._grad_clip_steps = 0
         self._steps_since_log = 0
         self._tokens_since_log = 0
-        # Cumulative across the run (intentionally not reset).
-        # total_tokens is public:
-        # the trainer persists/restores it via the checkpoint.
         self._skipped_steps = 0
         self.total_tokens = 0
         self._t_last_log = time.time()
@@ -83,6 +84,10 @@ class MetricsTracker:
         self._momentum_norm: float | None = None
         self._variance_norm: float | None = None
 
+        # MoE
+        self._moe_blocks = None
+        self._moe_expert_load_sum = None
+
         # Eval accumulators (initialized by eval_begin).
         self._eval_loss_sum = 0.0
         self._eval_aux_sum = 0.0
@@ -91,8 +96,7 @@ class MetricsTracker:
         self._eval_bpb_bytes = 0
         self._eval_acc_correct = 0
         self._eval_acc_total = 0
-        self._moe_blocks = None
-        self._moe_expert_load = None
+        self._eval_moe_expert_load_sum = None
 
     # ------------------------------------------------------------------
     # Model summary
@@ -125,9 +129,19 @@ class MetricsTracker:
         """
         self._t_last_log = time.time()
         self._tokens_since_log = 0
+        self._param_step_norm = None
+        self._momentum_norm = None
+        self._variance_norm = None
+        if self.is_moe:
+            self._moe_expert_load_sum = [
+                torch.zeros(
+                    self._n_routed_experts, dtype=torch.float32, device=self.device
+                )
+                for _ in range(self._n_moe_layers)
+            ]
 
     def snapshot_pre_step(self, model: torch.nn.Module, step: int) -> None:
-        """Cache θ before optimizer.step() so on_step can compute ||Δθ||.
+        """Cache θ before optimizer.step() so on_train_step can compute ||Δθ||.
 
         Only snapshots on the step whose update will be logged next
         (``(step + 1) % log_every == 0``): the step-norm logged at a cadence
@@ -142,7 +156,7 @@ class MetricsTracker:
         else:
             self._param_snapshot = None
 
-    def on_step(
+    def on_train_step(
         self,
         *,
         loss: float,
@@ -176,10 +190,12 @@ class MetricsTracker:
             self._momentum_norm = metric_utils.compute_momentum_norm(optimizer)
             self._variance_norm = metric_utils.compute_variance_norm(optimizer)
             self._param_snapshot = None
-        else:
-            self._param_step_norm = None
-            self._momentum_norm = None
-            self._variance_norm = None
+
+        if self.is_moe:
+            if self._moe_blocks is None:
+                self._moe_blocks = metric_utils.collect_moe_blocks(model)
+            for acc, b in zip(self._moe_expert_load_sum, self._moe_blocks):
+                acc += b.expert_load.to(dtype=acc.dtype, device=acc.device)
 
     def log_train(
         self,
@@ -223,9 +239,16 @@ class MetricsTracker:
             "grad_norm/total": self._last_grad_norm,
         }
 
-        # MoE aux loss (cached as a float in on_step)
+        # MoE aux loss (cached as a float in on_train_step)
         if self.is_moe and self._last_aux_loss is not None:
             d["train/aux_loss"] = self._last_aux_loss - self._aux_floor
+
+        if self.is_moe and self._moe_expert_load_sum is not None:
+            loads = [
+                acc / self.config.logging.log_every for acc in self._moe_expert_load_sum
+            ]
+            for name, v in metric_utils.compute_moe_maxvio(loads).items():
+                d[f"train/moe_maxvio/{name}"] = v
 
         if self.config.task == "pretrain":
             d["train/perplexity"] = metric_utils.compute_perplexity(loss)
@@ -265,13 +288,15 @@ class MetricsTracker:
         self._grad_clip_steps = 0
         self._steps_since_log = 0
         self._tokens_since_log = 0
+        if self._moe_expert_load_sum is not None:
+            for acc in self._moe_expert_load_sum:
+                acc.zero_()
         self._t_last_log = now
 
         return d
 
-    def eval_begin(self, model: torch.nn.Module | None = None) -> None:
-        """Reset eval accumulators before iterating the val loader. `model` is
-        used once (cached) to locate MoE blocks for load-balance monitoring."""
+    def eval_begin(self) -> None:
+        """Reset eval accumulators before iterating the val loader."""
         self._eval_loss_sum = 0.0
         self._eval_aux_sum = 0.0
         self._eval_n_batches = 0
@@ -279,23 +304,26 @@ class MetricsTracker:
         self._eval_bpb_bytes = 0
         self._eval_acc_correct = 0
         self._eval_acc_total = 0
-        if self.is_moe and model is not None and self._moe_blocks is None:
-            self._moe_blocks = metric_utils.collect_moe_blocks(model)
-        self._moe_expert_load = (
+        # Per-layer routing load summed over eval batches; log_eval computes
+        # MaxVio on the average. Blocks reuse the cache on_train_step populated.
+        self._eval_moe_expert_load_sum = (
             [
-                torch.zeros_like(b.expert_load, dtype=torch.float)
-                for b in self._moe_blocks
+                torch.zeros(
+                    self._n_routed_experts, dtype=torch.float32, device=self.device
+                )
+                for _ in range(self._n_moe_layers)
             ]
-            if self._moe_blocks
+            if self.is_moe
             else None
         )
 
-    def eval_step(
+    def on_eval_step(
         self,
         *,
         loss: float,
         logits: torch.Tensor,
         labels: torch.Tensor,
+        model: torch.nn.Module | None = None,
         aux_loss: float | None = None,
         tokenizer=None,
         eot_token_id: int | None = None,
@@ -303,7 +331,8 @@ class MetricsTracker:
         """Accumulate one eval batch's contributions (loss, accuracy, bpb).
 
         tokenizer (for bpb byte-counting) and eot_token_id (excluded from SFT
-        accuracy) are passed per call rather than held on the tracker.
+        accuracy) are passed per call rather than held on the tracker. `model`
+        (MoE only) resolves MoE blocks once for load-balance monitoring.
         """
         self._eval_loss_sum += loss
         self._eval_n_batches += 1
@@ -324,9 +353,11 @@ class MetricsTracker:
                 tokenizer, target_ids
             )
 
-        if self._moe_expert_load is not None:
-            for acc, b in zip(self._moe_expert_load, self._moe_blocks):
-                acc += b.expert_load.float()
+        if self.is_moe and model is not None:
+            if self._moe_blocks is None:
+                self._moe_blocks = metric_utils.collect_moe_blocks(model)
+            for acc, b in zip(self._eval_moe_expert_load_sum, self._moe_blocks):
+                acc += b.expert_load.to(dtype=acc.dtype, device=acc.device)
 
     def log_eval(
         self, *, step: int, train_avg_acc: float | None = None
@@ -338,9 +369,11 @@ class MetricsTracker:
         - "pretrain": val/loss, val/perplexity, val/bpb (when tokenizer present)
         - "sft": val/loss, val/val_acc, val/train_acc (when provided)
         """
-        n = max(self._eval_n_batches, 1)
-        avg_loss = self._eval_loss_sum / n
-        avg_aux_loss = (self._eval_aux_sum / n) if self._eval_aux_sum > 0 else None
+        n_batches = max(self._eval_n_batches, 1)
+        avg_loss = self._eval_loss_sum / n_batches
+        avg_aux_loss = (
+            (self._eval_aux_sum / n_batches) if self._eval_aux_sum > 0 else None
+        )
         tokens_per_byte = (
             self._eval_bpb_tokens / self._eval_bpb_bytes
             if self._eval_bpb_bytes > 0
@@ -366,9 +399,10 @@ class MetricsTracker:
                 d["val/train_acc"] = train_avg_acc
         if self.is_moe and avg_aux_loss is not None:
             d["val/aux_loss"] = avg_aux_loss - self._aux_floor
-        if self.is_moe and self._moe_expert_load is not None:
-            for k, v in metric_utils.compute_moe_maxvio(self._moe_expert_load).items():
-                d[f"val/moe_maxvio/{k}"] = v
+        if self.is_moe and self._eval_moe_expert_load_sum is not None:
+            loads = [acc / n_batches for acc in self._eval_moe_expert_load_sum]
+            for name, v in metric_utils.compute_moe_maxvio(loads).items():
+                d[f"val/moe_maxvio/{name}"] = v
 
         self.logger.log(d, step=step)
         print(self._format_eval_msg(d, avg_loss))

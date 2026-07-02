@@ -15,8 +15,8 @@ model:
   mlp_cls: moe
   mlp_kwargs:
     intermediate_size: 128
-    n_experts: 64
-    n_experts_per_token: 4
+    n_routed_experts: 64
+    n_routed_experts_per_token: 4
     aux_loss_coef: 0.01
     expert_capacity_factor: 1.25
     dropout: 0.0
@@ -42,10 +42,10 @@ training:
   checkpoint_dir: checkpoints/deepseek_v2/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
 optimizer:
   name: adamw
-  lr: 6e-4
+  lr: 5e-4
   weight_decay: 0.1
   betas:
   - 0.9
@@ -53,7 +53,7 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 1500
-  min_lr: 6e-5
+  min_lr: 5e-5
 logging:
   wandb_project: pretrain
   wandb_run_name: deepseek-v2-136m-a42m

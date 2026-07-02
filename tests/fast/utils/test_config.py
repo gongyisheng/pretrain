@@ -2,7 +2,13 @@ import tempfile
 import os
 import pytest
 import yaml
-from src.utils.config import ModelConfig, load_config, TrainingConfig, DataConfig
+from src.utils.config import (
+    ModelConfig,
+    TrainConfig,
+    load_config,
+    TrainingConfig,
+    DataConfig,
+)
 
 
 def _write_yaml(tmp_dir, data):
@@ -288,7 +294,7 @@ model:
 
 @pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
 def test_modelconfig_resolves_intermediate_size(mlp_cls):
-    extra = {"n_experts": 4} if mlp_cls == "moe" else {}
+    extra = {"n_routed_experts": 4} if mlp_cls == "moe" else {}
     cfg = ModelConfig(d_model=128, mlp_cls=mlp_cls, mlp_kwargs=dict(extra))
     assert cfg.mlp_kwargs["intermediate_size"] == 4 * 128
     # explicit value preserved
@@ -300,13 +306,15 @@ def test_modelconfig_resolves_intermediate_size(mlp_cls):
 
 def test_modelconfig_moe_expert_bias_defaults():
     # default: aux-loss balancing, no expert_bias
-    cfg = ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_experts": 4})
+    cfg = ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4})
     assert cfg.mlp_kwargs["expert_bias"] is False
     assert cfg.mlp_kwargs["aux_loss"] is True
     assert cfg.mlp_kwargs["aux_loss_coef"] == 0.01
     # expert_bias on: aux_loss defaults off, bias update rate defaulted
     cfg2 = ModelConfig(
-        d_model=64, mlp_cls="moe", mlp_kwargs={"n_experts": 4, "expert_bias": True}
+        d_model=64,
+        mlp_cls="moe",
+        mlp_kwargs={"n_routed_experts": 4, "expert_bias": True},
     )
     assert cfg2.mlp_kwargs["aux_loss"] is False
     assert cfg2.mlp_kwargs["expert_bias_update_rate"] == 0.001
@@ -318,7 +326,7 @@ def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
         ModelConfig(
             d_model=64,
             mlp_cls="moe",
-            mlp_kwargs={"n_experts": 4, "aux_loss": True, "expert_bias": True},
+            mlp_kwargs={"n_routed_experts": 4, "aux_loss": True, "expert_bias": True},
         )
 
 
@@ -388,3 +396,43 @@ def test_training_unknown_fp8_recipe_raises():
 def test_training_fp8_recipe_unchecked_when_disabled():
     # Recipe is only validated when fp8 is enabled.
     TrainingConfig(fp8=False, fp8_recipe="not_a_real_recipe")
+
+
+# ==================== dropless MoE + precision guard ====================
+
+
+def _moe_train_config(mixed_precision, expert_capacity_factor=None):
+    """Build a minimal TrainConfig with dropless (or capped) MoE."""
+    mlp_kwargs = {
+        "n_routed_experts": 4,
+        "n_routed_experts_per_token": 2,
+        "intermediate_size": 64,
+    }
+    if expert_capacity_factor is not None:
+        mlp_kwargs["expert_capacity_factor"] = expert_capacity_factor
+    return TrainConfig(
+        model=ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs=mlp_kwargs),
+        training=TrainingConfig(mixed_precision=mixed_precision),
+    )
+
+
+def test_dropless_moe_requires_bf16_fp16_raises():
+    with pytest.raises(ValueError, match="bf16"):
+        _moe_train_config("fp16")
+
+
+def test_dropless_moe_requires_bf16_no_raises():
+    with pytest.raises(ValueError, match="bf16"):
+        _moe_train_config("no")
+
+
+def test_dropless_moe_bf16_ok():
+    cfg = _moe_train_config("bf16")
+    assert cfg.training.mixed_precision == "bf16"
+
+
+def test_capacity_capped_moe_any_precision_ok():
+    # expert_capacity_factor set → capacity-capped path; no restriction
+    _moe_train_config("fp16", expert_capacity_factor=1.25)
+    _moe_train_config("no", expert_capacity_factor=1.25)
+    _moe_train_config("bf16", expert_capacity_factor=1.25)

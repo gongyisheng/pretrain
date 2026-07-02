@@ -74,7 +74,7 @@ def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """srank / pr of a 2D weight's σ² spectrum, both effective-rank measures.
+    """srank / pr of a weight's σ² spectrum, both effective-rank measures.
 
     srank = stable rank (‖W‖_F² / σ_max²), top-heavy — a rank-1 collapse canary.
     pr = participation ratio ((Σσ²)² / Σσ⁴ = 1/Σpᵢ²), the bulk effective
@@ -82,31 +82,34 @@ def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
 
     srank for monitoring rank-1 collapse
     pr for monitoring graded collapse
+
+    Accepts a 2D matrix or a stacked 3D tensor `(E, out, in)` (MoE experts);
+    for 3D the SVD is batched over the leading dim and the per-expert metrics
+    are averaged.
     """
-    s = torch.linalg.svdvals(weight.float())
-    s = s[s > 0]
-    if s.numel() == 0:
-        return {"srank": 0.0, "pr": 0.0}
+    s = torch.linalg.svdvals(weight.float())  # (..., k)
     energy = s.pow(2)
-    return {
-        "srank": (energy.sum() / energy[0]).item(),
-        "pr": (energy.sum().pow(2) / energy.pow(2).sum()).item(),
-    }
+    total = energy.sum(-1)
+    if (total == 0).any():
+        return {"srank": 0.0, "pr": 0.0}
+    srank = total / energy[..., 0]
+    pr = total.pow(2) / energy.pow(2).sum(-1)
+    return {"srank": srank.mean().item(), "pr": pr.mean().item()}
 
 
 def compute_layer_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
-    """Per-2D-weight spectral metrics, keyed by parameter name.
+    """Per-weight spectral metrics, keyed by parameter name.
 
-    Covers every floating-point 2D parameter except rope buffers and
-    embeddings (names containing "emb"). The caller
-    applies the logging namespace (e.g. an "optim/" prefix). The "_orig_mod."
-    prefix added by torch.compile is stripped. SVD on every weight is costly,
-    so this is gated behind config.logging.log_optimizer_svd_metrics and only
-    runs on log-cadence steps.
+    Covers every floating-point 2D parameter and stacked 3D MoE expert tensors
+    `(E, out, in)` (averaged per-expert), except rope buffers and embeddings
+    (names containing "emb"). The caller applies the logging namespace (e.g. an
+    "optim/" prefix). The "_orig_mod." prefix added by torch.compile is
+    stripped. SVD on every weight is costly, so this is gated behind
+    config.logging.log_optimizer_svd_metrics and only runs on log-cadence steps.
     """
     metrics: dict[str, dict[str, float]] = {}
     for name, param in model.named_parameters():
-        if param.ndim != 2 or not param.is_floating_point():
+        if param.ndim not in (2, 3) or not param.is_floating_point():
             continue
         name = name.removeprefix("_orig_mod.")
         if name.startswith("rope.") or "emb" in name:

@@ -16,6 +16,7 @@ from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, Schedule
 from src.model import build_model
 from src.training.optimizer import (
     LionOptimizer,
+    MuonOptimizer,
     MuonAdamWOptimizer,
     build_optimizer,
     build_scheduler,
@@ -374,6 +375,176 @@ def test_muon_routes_only_2d_hidden_weights():
     assert id(model.lm_head.weight) in adamw_ids
     q_proj = dict(model.named_parameters())["blocks.0.attn.q_proj.weight"]
     assert id(q_proj) in muon_ids
+
+
+def _make_moe_cfg() -> TrainConfig:
+    cfg = _make_cfg(tie=False)
+    cfg.optimizer.name = "muon"
+    cfg.model.mlp_cls = "moe"
+    cfg.model.mlp_kwargs = {
+        "n_routed_experts": 4,
+        "n_routed_experts_per_token": 2,
+        "n_shared_experts": 1,
+        "intermediate_size": 32,
+        "activation": "silu",
+        "gated": True,
+    }
+    return cfg
+
+
+def test_muon_routes_experts_in_router_out():
+    """MoE: 3D expert weights -> Muon; router gate, embeddings, head -> AdamW."""
+    cfg = _make_moe_cfg()
+    model = build_model(cfg)
+    opt = build_optimizer(model, cfg)
+
+    name_by_id = {id(p): n for n, p in model.named_parameters()}
+    muon_ids = {id(p) for pg in opt.muon.param_groups for p in pg["params"]}
+    adamw_ids = {id(p) for pg in opt.adamw.param_groups for p in pg["params"]}
+
+    params = dict(model.named_parameters())
+    # Stacked 3D experts go to Muon.
+    expert_names = [n for n in params if "expert_" in n and params[n].ndim == 3]
+    assert expert_names, "expected stacked 3D expert weights"
+    for n in expert_names:
+        assert id(params[n]) in muon_ids, f"{n} should route to Muon"
+
+    # Router gate (2D) stays on AdamW; shared-expert 2D weights go to Muon.
+    router_gate = params["blocks.0.mlp.router.gate.weight"]
+    assert id(router_gate) in adamw_ids
+    shared = params["blocks.0.mlp.shared_expert.gate_up_proj.weight"]
+    assert id(shared) in muon_ids
+
+    # Embeddings / head on AdamW; nothing routed to Muon has ndim<2 or is excluded.
+    assert id(model.token_emb.weight) in adamw_ids
+    assert id(model.lm_head.weight) in adamw_ids
+    for pid in muon_ids:
+        n = name_by_id[pid]
+        assert "router" not in n and "emb" not in n and "lm_head" not in n
+
+
+def test_muon_2d_matches_torch_reference():
+    """On a 2D weight, MuonOptimizer must match torch.optim.Muon step-for-step."""
+    torch.manual_seed(0)
+    init = torch.randn(8, 5)
+    hp = dict(
+        lr=1e-2,
+        weight_decay=0.1,
+        momentum=0.95,
+        nesterov=True,
+        ns_coefficients=(3.4445, -4.7750, 2.0315),
+        eps=1e-7,
+        ns_steps=5,
+        adjust_lr_fn="match_rms_adamw",
+    )
+    p_ref = torch.nn.Parameter(init.clone())
+    p_mine = torch.nn.Parameter(init.clone())
+    ref = torch.optim.Muon([p_ref], **hp)
+    mine = MuonOptimizer([p_mine], **hp)
+
+    for _ in range(4):
+        torch.manual_seed(1)
+        g = torch.randn_like(init)
+        p_ref.grad = g.clone()
+        p_mine.grad = g.clone()
+        ref.step()
+        mine.step()
+        # bf16 Newton-Schulz: identical math, allow tiny fp tolerance.
+        assert torch.allclose(p_mine.detach(), p_ref.detach(), atol=1e-5, rtol=1e-4)
+
+
+def test_muon_batched_matches_per_expert_loop():
+    """A 3D (E, out, in) stack updated by MuonOptimizer must equal running
+    torch.optim.Muon independently on each expert's 2D slice."""
+    torch.manual_seed(0)
+    E, out, inn = 4, 8, 5
+    stack_init = torch.randn(E, out, inn)
+    hp = dict(
+        lr=1e-2,
+        weight_decay=0.1,
+        momentum=0.95,
+        nesterov=True,
+        ns_coefficients=(3.4445, -4.7750, 2.0315),
+        eps=1e-7,
+        ns_steps=5,
+        adjust_lr_fn="match_rms_adamw",
+    )
+    stacked = torch.nn.Parameter(stack_init.clone())
+    slices = [torch.nn.Parameter(stack_init[e].clone()) for e in range(E)]
+    opt_stacked = MuonOptimizer([stacked], **hp)
+    opt_slices = torch.optim.Muon(slices, **hp)
+
+    for _ in range(3):
+        torch.manual_seed(1)
+        g = torch.randn_like(stack_init)
+        stacked.grad = g.clone()
+        for e in range(E):
+            slices[e].grad = g[e].clone()
+        opt_stacked.step()
+        opt_slices.step()
+        for e in range(E):
+            assert torch.allclose(
+                stacked.detach()[e], slices[e].detach(), atol=1e-5, rtol=1e-4
+            ), f"expert {e} diverged from per-slice Muon"
+
+
+def test_muon_same_shape_params_match_per_param_loop():
+    """Multiple same-shaped 2D params in one group are bucketed into a single
+    batched Newton-Schulz call; the result must equal stepping each param with
+    its own MuonOptimizer (i.e. the batching is numerically transparent)."""
+    torch.manual_seed(0)
+    shape = (8, 5)
+    n_params = 3
+    inits = [torch.randn(*shape) for _ in range(n_params)]
+    hp = dict(
+        lr=1e-2,
+        weight_decay=0.1,
+        momentum=0.95,
+        nesterov=True,
+        ns_coefficients=(3.4445, -4.7750, 2.0315),
+        eps=1e-7,
+        ns_steps=5,
+        adjust_lr_fn="match_rms_adamw",
+    )
+    batched = [torch.nn.Parameter(w.clone()) for w in inits]
+    singles = [torch.nn.Parameter(w.clone()) for w in inits]
+    opt_batched = MuonOptimizer(batched, **hp)  # all in one group -> one bucket
+    opt_singles = [MuonOptimizer([p], **hp) for p in singles]
+
+    for _ in range(3):
+        torch.manual_seed(1)
+        grads = [torch.randn(*shape) for _ in range(n_params)]
+        for i in range(n_params):
+            batched[i].grad = grads[i].clone()
+            singles[i].grad = grads[i].clone()
+        opt_batched.step()
+        for opt in opt_singles:
+            opt.step()
+        for i in range(n_params):
+            assert torch.allclose(
+                batched[i].detach(), singles[i].detach(), atol=0.0, rtol=0.0
+            ), f"param {i} diverged from per-param Muon"
+
+
+def test_muon_mixed_shapes_one_group_all_update():
+    """A group holding several distinct shapes (and a 3D expert stack) buckets
+    correctly and updates every param."""
+    torch.manual_seed(0)
+    shapes = [(8, 5), (8, 5), (6, 6), (4, 8, 5)]  # two share a shape; one 3D
+    params = [torch.nn.Parameter(torch.randn(*s)) for s in shapes]
+    before = [p.detach().clone() for p in params]
+    opt = MuonOptimizer(params, lr=1e-2, ns_steps=3)
+    for p in params:
+        p.grad = torch.randn_like(p)
+    opt.step()
+    for i, p in enumerate(params):
+        assert not torch.allclose(p.detach(), before[i]), f"param {i} did not update"
+
+
+def test_muon_rejects_1d_param():
+    p = torch.nn.Parameter(torch.zeros(4))
+    with pytest.raises(ValueError, match="ndim>=2"):
+        MuonOptimizer([p], lr=1e-3)
 
 
 def test_muon_step_updates_params(device):

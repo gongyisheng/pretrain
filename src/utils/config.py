@@ -65,7 +65,8 @@ class ModelConfig:
                 f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
             )
         if self.mlp_cls == "moe":
-            self.mlp_kwargs.setdefault("n_experts_per_token", 2)
+            self.mlp_kwargs.setdefault("n_routed_experts_per_token", 2)
+            self.mlp_kwargs.setdefault("n_shared_experts", 0)
             self.mlp_kwargs.setdefault("expert_capacity_factor", None)
             self.mlp_kwargs.setdefault("bias", False)
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
@@ -164,6 +165,7 @@ class OptimizerConfig:
     muon_ns_coefficients: List[float] = field(
         default_factory=lambda: [3.4445, -4.775, 2.0315]
     )
+    muon_ns_max_batch_elems: int = 8_000_000  # tuned on 5090/6000 pro blackwell
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str = "match_rms_adamw"
 
@@ -215,6 +217,23 @@ class TrainConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+    def __post_init__(self):
+        self._validate_moe_compile_precision()
+
+    def _validate_moe_compile_precision(self):
+        m = self.model
+        if (
+            m.mlp_cls == "moe"
+            and m.mlp_kwargs.get("expert_capacity_factor") is None
+            and self.training.mixed_precision != "bf16"
+        ):
+            raise ValueError(
+                "dropless MoE (mlp_cls='moe', expert_capacity_factor=None) requires "
+                f"training.mixed_precision='bf16'; got {self.training.mixed_precision!r}. "
+                "torch._grouped_mm is bf16-only under torch.compile. Use mixed_precision: bf16, "
+                "or set expert_capacity_factor to use the capacity-capped path."
+            )
 
     def to_dict(self):
         return asdict(self)

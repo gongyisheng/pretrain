@@ -9,7 +9,7 @@ coefs=(0 1e-3 1e-2 1e-1 1e-0)
 
 configs=()
 for c in "${coefs[@]}"; do
-    configs+=("qwen3_133m_a35m_aux_coef${c}")
+    configs+=("qwen3_183m_a51m_aux_coef${c}")
 done
 
 for config in "${configs[@]}"; do
