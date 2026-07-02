@@ -16,7 +16,7 @@ range; a finer sweep follows once the range is known.
 ## Setup
 
 Fixed testbed: `qwen3_183m` architecture (183M total, ~51M active), 64
-experts, top-8, capacity factor 1.25. Only `aux_loss_coef` varies. Active
+experts, top-8, no expert capacity limit. Only `aux_loss_coef` varies. Active
 intermediate width `k·is = 8·192 = 1536` (3·d_model, Qwen3-0.6B FFN ratio).
 
 | Param | Value |
@@ -24,10 +24,9 @@ intermediate width `k·is = 8·192 = 1536` (3·d_model, Qwen3-0.6B FFN ratio).
 | d_model / n_layers | 512 / 8 |
 | n_experts / top-k | 64 / 8 |
 | intermediate_size (per expert) | 192 |
-| expert_capacity_factor | 1.25 |
-| batch × grad_accum × seq | 16 × 16 × 1024 (≈0.26M tok/step) |
+| batch × grad_accum × seq | 64 × 4 × 1024 (≈0.26M tok/step) |
 | max_steps | 50000 (≈13B tokens) |
-| lr / min_lr / warmup | 5e-4 / 5e-5 / 1500 |
+| lr / min_lr / warmup | 1e-3 / 1e-4 / 1500 |
 
 | Config | aux_loss_coef |
 |--------|---------------|

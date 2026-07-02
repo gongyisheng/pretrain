@@ -14,10 +14,9 @@ model:
     intermediate_size: 192
     n_routed_experts: 64
     n_routed_experts_per_token: 8
-    expert_capacity_factor: 1.25
     dropout: 0.0
     aux_loss: true
-    aux_loss_coef: 1e-2
+    aux_loss_coef: 1e-3
     expert_bias: false
   norm_cls: rmsnorm
   pos_emb_cls: rope
@@ -31,19 +30,19 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 16
-  gradient_accumulation_steps: 16
+  batch_size: 64
+  gradient_accumulation_steps: 4
   max_steps: 50000
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_expert_bias/qwen3_183m_a51m_aux_coef1e-2/
+  checkpoint_dir: checkpoints/moe_expert_bias/qwen3_183m_a51m_aux_coef1e-3/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
 optimizer:
   name: muon
-  lr: 5e-4
+  lr: 1e-3
   weight_decay: 0.1
   betas:
   - 0.9
@@ -54,8 +53,8 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 1500
-  min_lr: 5e-5
+  min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-expert-bias
-  wandb_run_name: qwen3-183m-a51m-auxloss-coef1e-2
-  log_every: 10
+  wandb_run_name: qwen3-183m-a51m-auxloss-coef1e-3
+  log_every: 100

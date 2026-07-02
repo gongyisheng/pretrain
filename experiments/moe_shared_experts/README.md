@@ -25,8 +25,8 @@ Common backbone (Qwen3-style, all runs identical except the MLP split):
 | norm / pos_emb | rmsnorm / rope (θ=10000) |
 
 Invariant: active experts per token `s + k = 8`, so active intermediate `= 1536` (≈51M
-active params) and FLOPs/token are constant. All cells use `moe` with `aux_loss_coef=0.01`
-and `expert_capacity_factor=1.25` (fixed capacity, drops overflow). `s0_r8` is the pure-routed benchmark (no shared
+active params) and FLOPs/token are constant. All cells use `moe` with `aux_loss_coef=0.001`
+and no expert capacity limit (no token drops). `s0_r8` is the pure-routed benchmark (no shared
 expert); as `s` grows the always-on shared FFN takes over more of the fixed budget.
 
 ### Configs
@@ -42,9 +42,10 @@ Config filename = ckpt dir = W&B run name. `s` = `n_shared_experts`, `k` = top-k
 | `qwen3_193m_a51m_s4_r4` | 4 | 4 | 193M | 51M |
 | `qwen3_195m_a51m_s5_r3` | 5 | 3 | 195M | 51M |
 | `qwen3_197m_a51m_s6_r2` | 6 | 2 | 197M | 51M |
+| `qwen3_200m_a51m_s7_r1` | 7 | 1 | 200M | 51M |
 
-Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
-50000 (~13B tokens, fixed budget for a controlled comparison), cosine LR 5e-4 → 5e-5,
+Training (all runs): batch 64 × grad-accum 4 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
+50000 (~13B tokens, fixed budget for a controlled comparison), cosine LR 1e-3 → 1e-4,
 warmup 1500, bf16.
 
 ## Running
@@ -70,6 +71,7 @@ W&B project: `pretrain-moe-shared-experts`.
 | `qwen3_193m_a51m_s4_r4` | 4 | 4 | 51M | |
 | `qwen3_195m_a51m_s5_r3` | 5 | 3 | 51M | |
 | `qwen3_197m_a51m_s6_r2` | 6 | 2 | 51M | |
+| `qwen3_200m_a51m_s7_r1` | 7 | 1 | 51M | |
 
 ## Notes
 

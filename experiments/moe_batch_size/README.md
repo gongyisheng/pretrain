@@ -11,20 +11,20 @@ loss to find it.
 
 Single config type: `qwen3_183m_a51m` (top-8, ~51M active; per-expert
 `intermediate_size=192`, 64 experts → active `k·is = 1536`). Fixed
-`batch_size=8`, `max_seq_len=1024`, cosine LR `5e-4 → 5e-5`, Muon (`match_rms_adamw`), bf16.
+`batch_size=64`, `max_seq_len=1024`, cosine LR `1e-3 → 1e-4`, Muon (`match_rms_adamw`), bf16.
 Effective batch = `batch_size × grad_accu × max_seq_len`. `max_steps=50000` is
 fixed across all runs, so the token budget scales with the effective batch (the
 larger batches train on proportionally more tokens, from 13.1B up to 104.9B).
 
 Configs are named by **effective batch size in sequences** (`bs` =
-`batch_size × grad_accu` = 8 × grad_accu).
+`batch_size × grad_accu` = 64 × grad_accu).
 
 | Config | eff. batch (seq) | grad_accu | Effective batch (tokens) | max_steps | warmup | total tokens |
 |--------|------------------|-----------|--------------------------|-----------|--------|--------------|
-| `qwen3_183m_a51m_bs256`  | 256  | 32  | 262K  | 50000 | 1500 | 13.1B  |
-| `qwen3_183m_a51m_bs512`  | 512  | 64  | 524K  | 50000 | 1500 | 26.2B  |
-| `qwen3_183m_a51m_bs1024` | 1024 | 128 | 1.05M | 50000 | 1500 | 52.4B  |
-| `qwen3_183m_a51m_bs2048` | 2048 | 256 | 2.10M | 50000 | 1500 | 104.9B |
+| `qwen3_183m_a51m_bs256`  | 256  | 4  | 262K  | 50000 | 1500 | 13.1B  |
+| `qwen3_183m_a51m_bs512`  | 512  | 8  | 524K  | 50000 | 1500 | 26.2B  |
+| `qwen3_183m_a51m_bs1024` | 1024 | 16 | 1.05M | 50000 | 1500 | 52.4B  |
+| `qwen3_183m_a51m_bs2048` | 2048 | 32 | 2.10M | 50000 | 1500 | 104.9B |
 
 `bs256` is the established baseline.
 

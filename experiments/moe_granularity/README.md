@@ -26,7 +26,7 @@ Common backbone (Qwen3-style, identical across all runs except the MLP block):
 
 Invariants across the MoE sweep: pool `E·is = 12288`, active `k·is = 1536`, sparsity
 `k/E = 1/8` (12.5%). `is` = per-expert `intermediate_size`. All MoE cells use
-`aux_loss_coef=0.01` and `expert_capacity_factor=1.25` (fixed capacity, drops overflow).
+`aux_loss_coef=0.001` and no expert capacity limit (no token drops).
 
 The active width `k·is = 1536 = 3·d_model` is the Qwen3-0.6B FFN ratio. **Granularity** is
 `G = d_ff / d_expert` (DeepSeekMoE / fine-grained scaling laws), where `d_expert = is` and
@@ -52,8 +52,8 @@ routing buys anything over a dense FFN of equal active size. It has marginally f
 than the iso-active MoE cells (50.9M vs ~51M active), so it is an upper-bound anchor for the
 granularity axis, not an iso-compute point.
 
-Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
-50000 (~13B tokens), cosine LR 5e-4 → 5e-5, warmup 1500, bf16.
+Training (all runs): batch 64 × grad-accum 4 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
+50000 (~13B tokens), cosine LR 1e-3 → 1e-4, warmup 1500, bf16.
 
 ## Running
 

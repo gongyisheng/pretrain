@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 dir=experiments/moe_shared_experts
 
-splits=("0 8" "1 7" "2 6" "3 5" "4 4" "5 3" "6 2")
+splits=("0 8" "1 7" "2 6" "3 5" "4 4" "5 3" "6 2" "7 1")
 
 configs=()
 for sk in "${splits[@]}"; do

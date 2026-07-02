@@ -23,7 +23,7 @@ Common backbone (Qwen3-style, identical across all runs except the expert count)
 | norm / pos_emb | rmsnorm / rope (θ=10000) |
 
 Invariant: active capacity `k·is = 1536` (≈51M active params) for all runs. All cells use
-`aux_loss_coef=0.01` and `expert_capacity_factor=1.25` (fixed capacity, drops overflow). `is` = per-expert
+`aux_loss_coef=0.001` and no expert capacity limit (no token drops). `is` = per-expert
 `intermediate_size`. `E=64` is the **`qwen3_183m_a51m` benchmark** shared across the moe
 experiments; the sweep grows and shrinks the pool around it.
 
@@ -39,8 +39,8 @@ Config filename = ckpt dir = W&B run name.
 | `qwen3_335m_a51m_is192_e128_k8` | 128 | 8 | 24576 | 335M | 51M | 6.25% |
 | `qwen3_637m_a51m_is192_e256_k8` | 256 | 8 | 49152 | 637M | 51M | 3.1%  |
 
-Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
-50000 (~13B tokens), cosine LR 5e-4 → 5e-5, warmup 1500, bf16.
+Training (all runs): batch 64 × grad-accum 4 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
+50000 (~13B tokens), cosine LR 1e-3 → 1e-4, warmup 1500, bf16.
 
 ## Running
 

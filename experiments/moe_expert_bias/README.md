@@ -17,7 +17,7 @@ bracket the useful range; a finer sweep follows once the range is known.
 ## Setup
 
 Fixed testbed: `qwen3_183m_a51m` architecture (183M total, ~51M active), 64
-experts, top-8, capacity factor 1.25. `expert_bias: true` (so `aux_loss` is off);
+experts, top-8, no expert capacity limit. `expert_bias: true` (so `aux_loss` is off);
 only `expert_bias_update_rate` varies. Active intermediate width
 `k·is = 8·192 = 1536` (3·d_model, Qwen3-0.6B FFN ratio). Same testbed as
 `../moe_aux_loss/` so the two balancing schemes are directly comparable.
@@ -27,10 +27,9 @@ only `expert_bias_update_rate` varies. Active intermediate width
 | d_model / n_layers | 512 / 8 |
 | n_experts / top-k | 64 / 8 |
 | intermediate_size (per expert) | 192 |
-| expert_capacity_factor | 1.25 |
-| batch × grad_accum × seq | 16 × 16 × 1024 (≈0.26M tok/step) |
+| batch × grad_accum × seq | 64 × 4 × 1024 (≈0.26M tok/step) |
 | max_steps | 50000 (≈13B tokens) |
-| lr / min_lr / warmup | 5e-4 / 5e-5 / 1500 |
+| lr / min_lr / warmup | 1e-3 / 1e-4 / 1500 |
 
 | Config | expert_bias_update_rate |
 |--------|-------------------------|
@@ -44,7 +43,7 @@ expert-bias scheme (`expert_bias: false`, `aux_loss: true`):
 
 | Config | aux_loss_coef |
 |--------|---------------|
-| `qwen3_183m_a51m_aux_coef1e-2` | 0.01 |
+| `qwen3_183m_a51m_aux_coef1e-3` | 0.001 |
 
 ## Run
 
@@ -62,7 +61,7 @@ uv run python scripts/train.py --config experiments/moe_expert_bias/qwen3_183m_a
 | expert_bias | u=0.0001 | | |
 | expert_bias | u=0.001  | | DeepSeek-V3 default |
 | expert_bias | u=0.01   | | |
-| aux_loss    | coef=0.01 | | benchmark baseline |
+| aux_loss    | coef=0.001 | | benchmark baseline |
 
 Best: _TBD_ → pick finer range from here.
 
@@ -72,7 +71,7 @@ Best: _TBD_ → pick finer range from here.
   not logged — compare runs by `val_loss`. (Balance is enforced by the bias rule
   rather than a loss term.)
 - The bias update runs once per micro-batch under `model.train()`. With
-  `gradient_accumulation_steps=32`, that is 32 sign-steps per optimizer step;
-  the effective rate is ~32× `u`. The sign rule is self-correcting, so this just
+  `gradient_accumulation_steps=4`, that is 4 sign-steps per optimizer step;
+  the effective rate is ~4× `u`. The sign rule is self-correcting, so this just
   shifts the useful `u` range — accounted for by sweeping two orders of magnitude.
 - Compare against `../moe_aux_loss/` (same testbed) for aux-loss vs loss-free.

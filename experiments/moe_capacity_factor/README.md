@@ -29,28 +29,28 @@ Common backbone (Qwen3-style, identical across all runs except `expert_capacity_
 | `intermediate_size` (per expert) | 192 |
 | `n_routed_experts` (E) | 64 |
 | `n_routed_experts_per_token` (k) | 8 |
-| `aux_loss_coef` | 0.01 |
+| `aux_loss_coef` | 0.001 |
 | `vocab_size` | 50257 |
 | norm / pos_emb | rmsnorm / rope (θ=10000) |
 
 The only knob is `expert_capacity_factor`. Total 183M / active 51M params, sparsity
-`k/E = 12.5%` — identical across cells. At training batch (16 × seq 1024 = 16384 tokens),
-the balanced per-expert load is `T·k/E = 2048`, so fixed capacity `= floor(2048·f)`.
+`k/E = 12.5%` — identical across cells. At training batch (64 × seq 1024 = 65536 tokens),
+the balanced per-expert load is `T·k/E = 8192`, so fixed capacity `= floor(8192·f)`.
 
 ### Configs
 
 Config filename = ckpt dir = W&B run name.
 
-| Config | `expert_capacity_factor` | Capacity (T=16384) | Behavior |
+| Config | `expert_capacity_factor` | Capacity (T=65536) | Behavior |
 |--------|:------------------------:|:------------------:|----------|
 | `qwen3_183m_a51m_capf_none` | none (dynamic) | = max load | no drops; sized to peak |
-| `qwen3_183m_a51m_capf_1.0`  | 1.0  | 2048 | drops above balanced load |
-| `qwen3_183m_a51m_capf_1.25` | 1.25 | 2560 | codebase default |
-| `qwen3_183m_a51m_capf_1.5`  | 1.5  | 3072 | |
-| `qwen3_183m_a51m_capf_2.0`  | 2.0  | 4096 | |
+| `qwen3_183m_a51m_capf_1.0`  | 1.0  | 8192  | drops above balanced load |
+| `qwen3_183m_a51m_capf_1.25` | 1.25 | 10240 | codebase default |
+| `qwen3_183m_a51m_capf_1.5`  | 1.5  | 12288 | |
+| `qwen3_183m_a51m_capf_2.0`  | 2.0  | 16384 | |
 
-Training (all runs): batch 16 × grad-accum 16 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
-50000 (~13B tokens), Muon lr 5e-4 → 5e-5, warmup 1500, bf16.
+Training (all runs): batch 64 × grad-accum 4 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
+50000 (~13B tokens), Muon lr 1e-3 → 1e-4, warmup 1500, bf16.
 
 ## Running
 
