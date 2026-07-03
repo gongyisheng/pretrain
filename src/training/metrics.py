@@ -280,7 +280,7 @@ class MetricsTracker:
         if self.config.logging.log_optimizer_svd_metrics:
             for name, m in metric_utils.compute_layer_svd_metrics(model).items():
                 for metric, val in m.items():
-                    d[f"optim/{metric}/{name}"] = val
+                    d[f"weight/{metric}/{name}"] = val
 
         self.logger.log(d, step=step)
 

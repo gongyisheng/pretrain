@@ -73,15 +73,50 @@ def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
+def _esd_alpha(eigs: torch.Tensor) -> float:
+    """Power-law exponent α of the ESD tail (Martin & Mahoney / WeightWatcher).
+
+    Fits p(λ) ∝ λ^(-α) to the upper tail λ ≥ xmin of the eigenvalue spectrum
+    (eigs = σ² of the weight). For each candidate xmin (every eigenvalue) the
+    continuous MLE α = 1 + n / Σ ln(λ_tail / xmin) is computed, and the xmin
+    minimizing the KS distance between the empirical and fitted tail CDFs is
+    chosen. Lower α (heavier tail, ~2–4) tracks a more correlated / better-fit
+    weight; α → large signals a near-random spectrum. Returns NaN if fewer than
+    four positive eigenvalues survive.
+    """
+    eigs = torch.sort(eigs.flatten()).values
+    eigs = eigs[eigs > 0]
+    n = eigs.numel()
+    if n < 4:
+        return float("nan")
+    logs = eigs.log()
+    # suffix[i] = Σ_{j>=i} log λ_j  →  Σ_{j>=i} ln(λ_j / λ_i) = suffix[i] - nt·logs[i]
+    suffix = torch.flip(torch.cumsum(torch.flip(logs, [0]), 0), [0])
+    idx = torch.arange(n, device=eigs.device)
+    nt = (n - idx).to(logs.dtype)  # tail size for xmin = eigs[i]
+    alpha = 1.0 + nt / (suffix - nt * logs).clamp_min(1e-12)
+    # KS distance per candidate xmin: max over the tail of |emp_cdf - fit_cdf|.
+    log_ratio = logs.unsqueeze(0) - logs.unsqueeze(1)  # [i,j] = ln(λ_j / λ_i)
+    fit_cdf = 1.0 - torch.exp(-(alpha.unsqueeze(1) - 1.0) * log_ratio)
+    rank = (idx.unsqueeze(0) - idx.unsqueeze(1) + 1).to(logs.dtype)  # [i,j]=j-i+1
+    emp_cdf = rank / nt.unsqueeze(1)
+    tail = idx.unsqueeze(0) >= idx.unsqueeze(1)  # j >= i
+    ks = torch.where(tail, (emp_cdf - fit_cdf).abs(), logs.new_zeros(())).amax(1)
+    ks = torch.where(nt >= 2, ks, logs.new_full((), float("inf")))
+    return alpha[ks.argmin()].item()
+
+
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """srank / pr of a weight's σ² spectrum, both effective-rank measures.
+    """srank / pr / esd_alpha of a weight's σ² spectrum.
 
     srank = stable rank (‖W‖_F² / σ_max²), top-heavy — a rank-1 collapse canary.
     pr = participation ratio ((Σσ²)² / Σσ⁴ = 1/Σpᵢ²), the bulk effective
     dimension; squaring suppresses the noise floor for a cleaner collapse trend.
+    esd_alpha = power-law exponent of the eigenvalue tail (see `_esd_alpha`).
 
     srank for monitoring rank-1 collapse
     pr for monitoring graded collapse
+    esd_alpha for monitoring heavy-tailed self-regularization
 
     Accepts a 2D matrix or a stacked 3D tensor `(E, out, in)` (MoE experts);
     for 3D the SVD is batched over the leading dim and the per-expert metrics
@@ -91,10 +126,17 @@ def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
     energy = s.pow(2)
     total = energy.sum(-1)
     if (total == 0).any():
-        return {"srank": 0.0, "pr": 0.0}
+        return {"srank": 0.0, "pr": 0.0, "esd_alpha": 0.0}
     srank = total / energy[..., 0]
     pr = total.pow(2) / energy.pow(2).sum(-1)
-    return {"srank": srank.mean().item(), "pr": pr.mean().item()}
+    alphas = [_esd_alpha(e) for e in energy.reshape(-1, energy.shape[-1])]
+    alphas = [a for a in alphas if not math.isnan(a)]
+    esd_alpha = statistics.mean(alphas) if alphas else float("nan")
+    return {
+        "srank": srank.mean().item(),
+        "pr": pr.mean().item(),
+        "esd_alpha": esd_alpha,
+    }
 
 
 def compute_layer_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
