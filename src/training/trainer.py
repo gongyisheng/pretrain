@@ -134,7 +134,7 @@ class Trainer:
         )
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=config.training.batch_size,
+            batch_size=config.training.eval_batch_size,
             shuffle=False,
             num_workers=n_worker,
             pin_memory=True,

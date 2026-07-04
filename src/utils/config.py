@@ -126,6 +126,7 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 100
     eval_steps: int = 25
+    eval_batch_size: int = 16
     eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
     fp8: bool = False
