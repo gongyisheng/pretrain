@@ -10,8 +10,6 @@ Muon orthogonalizes each 2D weight's momentum via Newton–Schulz, equalizing th
 1. Muon keeps its edge — orthogonalization is computed on the (bf16) momentum buffer, so the update geometry is unaffected by FP8 GEMM noise; the gap tracks the bf16 result.
 2. Muon's edge shrinks — FP8 noise in the forward/grad GEMMs perturbs the momentum Muon orthogonalizes, eroding the clean singular-value equalization that gives it the advantage.
 
-bf16 references for both optimizers live in `experiments/muon_optm/` (bf16 Muon vs AdamW at 51/57M) and `experiments/fp8/` (AdamW bf16 vs FP8 recipes); this folder isolates the optimizer axis under fixed FP8 tensorwise.
-
 ## Setup
 
 Both configs are identical except `optimizer.name` (and the Muon-only hyperparams). Muon uses the hybrid `MuonAdamWOptimizer`: 2D hidden weights → Muon, everything else (embeddings, `lm_head`, RMSNorm scales) → AdamW. `adjust_lr_fn=match_rms_adamw` matches Muon's update RMS to AdamW so it reuses the AdamW-tuned `lr`/`wd` directly.
@@ -48,5 +46,5 @@ nohup bash experiments/fp8_muon/run.sh > logs/fp8_muon_51m.log 2>&1 &
 
 - Compare the FP8 Muon−AdamW gap here against the bf16 Muon−AdamW gap in `experiments/muon_optm/` — a preserved gap supports outcome (1), a shrunk gap supports (2).
 - `optim/momentum_norm` and `optim/variance_norm` in W&B reflect only the AdamW-routed params (Muon's `momentum_buffer` is not aggregated by `metric_utils`).
-- tensorwise is the most aggressive recipe; if Muon's edge collapses here, rerun with `rowwise` / `rowwise_with_gw_hp` (see `experiments/fp8/`) to see whether tighter scaling restores it.
+- tensorwise is the most aggressive recipe; if Muon's edge collapses here, rerun with `rowwise` / `rowwise_with_gw_hp` (see `experiments/fp8_granularity/`) to see whether tighter scaling restores it.
 - If turnaround matters, compare the 5K/10K-step intermediate eval losses before committing both runs to 50K.

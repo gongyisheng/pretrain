@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run FP8 (3 recipes) vs bf16 experiment at 51M on Qwen3.
-# Usage: nohup bash experiments/fp8/run.sh > logs/fp8_51m.log 2>&1 &
+# Usage: nohup bash experiments/fp8_granularity/run.sh > logs/fp8_granularity.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
@@ -13,7 +13,7 @@ done
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
     echo "Started at: $(date)"
-    uv run python scripts/train.py --config "experiments/fp8/${config}.yaml"
+    uv run python scripts/train.py --config "experiments/fp8_granularity/${config}.yaml"
     echo "Finished at: $(date)"
     echo ""
 done
