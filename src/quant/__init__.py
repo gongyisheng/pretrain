@@ -29,5 +29,12 @@ QUANT_DTYPE_RECIPES = {
     "fp8": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad": "fp8_e5m2"},
 }
 
-# The three GEMM operand roles a QuantConfig.dtype map may set.
+# The three GEMM operand roles a QuantConfig.dtype map may set; these are
+# auto-filled with the run's compute dtype when unset.
 QUANT_OPERANDS = ("weight", "act", "grad")
+
+# Extra dtype keys — the grad-output dtype per backward GEMM, each defaulting to
+# `grad`. `input_grad` is the dgrad GEMM (dX = dY@W); `weight_grad` is the wgrad
+# GEMM (dW = dYᵀ@X). Set either to a passthrough dtype (bf16) to keep that
+# gradient out of fp8 (e.g. weight_grad: bf16 = torchao's `*_with_gw_hp`).
+QUANT_DTYPE_KEYS = QUANT_OPERANDS + ("input_grad", "weight_grad")

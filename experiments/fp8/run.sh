@@ -1,13 +1,13 @@
 #!/bin/bash
-# Run FP8 (3 recipes) vs bf16 experiment at 0.5B on Qwen3.
-# Usage: nohup bash experiments/fp8/run_0.5b.sh > logs/fp8_0.5b.log 2>&1 &
+# Run FP8 (3 recipes) vs bf16 experiment at 57M on Qwen3.
+# Usage: nohup bash experiments/fp8/run.sh > logs/fp8_57m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
 
-configs=(qwen3_0.5b_bf16)
+configs=(qwen3_57m_bf16)
 for recipe in tensorwise rowwise rowwise_with_gw_hp; do
-    configs+=("qwen3_0.5b_fp8_${recipe}")
+    configs+=("qwen3_57m_fp8_${recipe}")
 done
 
 for config in "${configs[@]}"; do
@@ -18,4 +18,4 @@ for config in "${configs[@]}"; do
     echo ""
 done
 
-echo "=== 0.5B FP8 runs complete ==="
+echo "=== 57M FP8 runs complete ==="

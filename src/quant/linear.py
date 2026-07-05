@@ -29,9 +29,9 @@ class QuantizedLinearFn(torch.autograd.Function):
         else:
             compute_dtype = x.dtype
 
-        act_dtype = quant_dtype(cfg.dtype.get("act"))
-        weight_dtype = quant_dtype(cfg.dtype.get("weight"))
-        rowwise = cfg.scaling.get("granularity") == "rowwise"
+        act_dtype = quant_dtype(cfg.dtype["act"])
+        weight_dtype = quant_dtype(cfg.dtype["weight"])
+        rowwise = cfg.scaling["granularity"] == "rowwise"
 
         x2d = x.reshape(-1, x.shape[-1]).to(compute_dtype)
         w = weight.to(compute_dtype)
@@ -54,15 +54,17 @@ class QuantizedLinearFn(torch.autograd.Function):
         compute_dtype = x2d.dtype
         g = grad_out.reshape(-1, grad_out.shape[-1]).to(compute_dtype)  # (M, N)
 
-        grad_dtype = quant_dtype(cfg.dtype.get("grad"))
-        weight_dtype = quant_dtype(cfg.dtype.get("weight"))
-        act_dtype = quant_dtype(cfg.dtype.get("act"))
-        rowwise = cfg.scaling.get("granularity") == "rowwise"
+        weight_dtype = quant_dtype(cfg.dtype["weight"])
+        act_dtype = quant_dtype(cfg.dtype["act"])
+        # grad-output dtype per backward GEMM (each defaults to `grad`).
+        input_grad_dtype = quant_dtype(cfg.dtype["input_grad"])
+        weight_grad_dtype = quant_dtype(cfg.dtype["weight_grad"])
+        rowwise = cfg.scaling["granularity"] == "rowwise"
 
         # dX = g @ W          (M,N)@(N,K) -> (M,K)
-        dx = _gemm(g, w, grad_dtype, weight_dtype, compute_dtype, rowwise)
+        dx = _gemm(g, w, input_grad_dtype, weight_dtype, compute_dtype, rowwise)
         # dW = gᵀ @ X         (N,M)@(M,K) -> (N,K)
-        dw = _gemm(g.t(), x2d, grad_dtype, act_dtype, compute_dtype, rowwise)
+        dw = _gemm(g.t(), x2d, weight_grad_dtype, act_dtype, compute_dtype, rowwise)
         db = g.sum(dim=0) if ctx.has_bias else None
 
         dx = dx.reshape(*ctx.x_shape).to(ctx.x_dtype)
