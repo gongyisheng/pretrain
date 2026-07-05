@@ -1,6 +1,6 @@
-# FP8 vs bf16 Training Ablation
+# FP8 Scaling Granularity Ablation
 
-Compare end-task loss and throughput between FP8 (in-house `src/quant/` framework, cuBLASLt FP8 GEMM via `torch._scaled_mm`) and a bf16 baseline at Qwen3-51M, sweeping two FP8 scaling granularities.
+Compare end-task loss and throughput across FP8 scaling granularities (`tensorwise`, `rowwise`, `rowwise_with_gw_hp`) against a bf16 baseline at Qwen3-51M, using the in-house `src/quant/` framework (cuBLASLt FP8 GEMM via `torch._scaled_mm`). The independent variable is the scaling granularity; the bf16 run anchors the loss/throughput reference.
 
 ## Hypothesis
 
@@ -53,7 +53,7 @@ Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 60
 The script runs the bf16 baseline followed by both FP8 recipes.
 
 ```bash
-nohup bash experiments/fp8/run.sh > logs/fp8_51m.log 2>&1 &
+nohup bash experiments/fp8_granularity/run.sh > logs/fp8_granularity_51m.log 2>&1 &
 ```
 
 ## Results

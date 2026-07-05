@@ -32,11 +32,13 @@ training:
   quant:
     enabled: true
     dtype_recipe: fp8
+    dtype:
+      weight_grad: bf16
     scaling:
       granularity: rowwise
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8/qwen3_51m_fp8_rowwise/
+  checkpoint_dir: checkpoints/fp8_granularity/qwen3_51m_fp8_rowwise_with_gw_hp/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -53,5 +55,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-fp8
-  wandb_run_name: qwen3-51m-fp8-rowwise
+  wandb_run_name: qwen3-51m-fp8-rowwise-with-gw-hp
   log_every: 10
