@@ -17,7 +17,7 @@ from src.model import build_model
 from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
-from src.training.fp8 import maybe_convert_to_fp8
+from src.quant.convert import apply_quantization
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
 from src.training.loss import LOSS_REGISTRY, compute_loss
@@ -35,7 +35,12 @@ class Trainer:
         self, config: TrainConfig, wandb_enabled: bool = True, resume_from: str = None
     ):
         self.config = config
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = config.training.device
+        self.device = (
+            ("cuda" if torch.cuda.is_available() else "cpu")
+            if device == "auto"
+            else device
+        )
         self.step = 0
 
         # Enable TF32 for matmuls on Ampere+ GPUs
@@ -159,9 +164,9 @@ class Trainer:
             enabled=(self.use_amp and self.amp_dtype == torch.float16)
         )
 
-        # FP8: swap eligible nn.Linear modules to Float8Linear. Must run before
-        # torch.compile so the tracer sees the swapped modules.
-        maybe_convert_to_fp8(self.model, config)
+        # Quantization: swap eligible nn.Linear modules to QuantLinear. Must run
+        # before torch.compile so the tracer sees the swapped modules.
+        apply_quantization(self.model, config)
 
         # Disable assert_indirect_indexing to avoid spurious CUDA assertions during
         # torchinductor autotuning, which may dispatch kernel test runs on a stream

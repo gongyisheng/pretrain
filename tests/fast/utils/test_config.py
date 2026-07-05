@@ -8,6 +8,7 @@ from src.utils.config import (
     load_config,
     TrainingConfig,
     DataConfig,
+    QuantConfig,
 )
 
 
@@ -433,14 +434,11 @@ def test_training_unknown_loss_fn_raises():
         TrainingConfig(loss_fn="huber")
 
 
-def test_training_unknown_fp8_recipe_raises():
-    with pytest.raises(ValueError, match="unknown fp8_recipe"):
-        TrainingConfig(fp8=True, fp8_recipe="not_a_real_recipe")
-
-
-def test_training_fp8_recipe_unchecked_when_disabled():
-    # Recipe is only validated when fp8 is enabled.
-    TrainingConfig(fp8=False, fp8_recipe="not_a_real_recipe")
+def test_training_device_default_and_validation():
+    assert TrainingConfig().device == "auto"
+    assert TrainingConfig(device="cpu").device == "cpu"
+    with pytest.raises(ValueError, match="unknown device"):
+        TrainingConfig(device="tpu")
 
 
 # ==================== dropless MoE + precision guard ====================
@@ -474,3 +472,125 @@ def test_dropless_moe_requires_bf16_no_raises():
 def test_dropless_moe_bf16_ok():
     cfg = _moe_train_config("bf16")
     assert cfg.training.mixed_precision == "bf16"
+
+
+# ==================== Quantization config ====================
+
+
+def _only_rule(tc):
+    # TrainingConfig normalizes quant to a list of rules; single-rule helper.
+    assert len(tc.quant) == 1
+    return tc.quant[0]
+
+
+def test_quant_defaults_disabled():
+    q = QuantConfig()
+    assert q.enabled is False
+    assert q.exclude == ["lm_head"]
+    # disabled rule is inert: no dtype/scaling defaults applied
+    assert q.dtype == {} and q.scaling == {}
+
+
+def test_quant_operand_defaults_follow_mixed_precision():
+    r = _only_rule(TrainingConfig(mixed_precision="bf16", quant={"enabled": True}))
+    assert r.dtype == {"weight": "bf16", "act": "bf16", "grad": "bf16"}
+    r32 = _only_rule(TrainingConfig(mixed_precision="no", quant={"enabled": True}))
+    assert r32.dtype["weight"] == "fp32"
+    # explicit operands are kept; only unset ones follow the compute dtype
+    r2 = _only_rule(
+        TrainingConfig(
+            mixed_precision="bf16",
+            quant={"enabled": True, "dtype": {"weight": "fp8"}},
+        )
+    )
+    assert r2.dtype == {"weight": "fp8", "act": "bf16", "grad": "bf16"}
+
+
+def test_quant_disabled_rule_dtype_stays_empty():
+    # a disabled rule is inert: no operand-dtype fill
+    r = _only_rule(TrainingConfig(mixed_precision="bf16", quant={"enabled": False}))
+    assert r.dtype == {}
+
+
+def test_quant_dtype_is_mixable():
+    q = QuantConfig(enabled=True, dtype={"weight": "fp8", "act": "fp8", "grad": "bf16"})
+    assert q.dtype["weight"] == "fp8" and q.dtype["grad"] == "bf16"
+
+
+def test_quant_dtype_recipe_fp8():
+    q = QuantConfig(enabled=True, dtype_recipe="fp8")
+    assert q.dtype == {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad": "fp8_e5m2"}
+
+
+def test_quant_dtype_recipe_respects_explicit_operand():
+    q = QuantConfig(enabled=True, dtype_recipe="fp8", dtype={"grad": "bf16"})
+    assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["grad"] == "bf16"
+
+
+def test_quant_unknown_recipe_raises():
+    with pytest.raises(ValueError, match="dtype_recipe"):
+        QuantConfig(enabled=True, dtype_recipe="fp3")
+
+
+def test_quant_include_defaults_empty():
+    q = QuantConfig()
+    assert q.include == [] and q.exclude == ["lm_head"]
+    q2 = QuantConfig(enabled=True, dtype_recipe="fp8", include=["*.mlp.*"])
+    assert q2.include == ["*.mlp.*"]
+
+
+def test_quant_disabled_skips_validation():
+    # inert when off: bad fmt is not checked
+    QuantConfig(enabled=False, dtype={"weight": "not_a_fmt"})
+
+
+def test_quant_rejects_unknown_operand():
+    with pytest.raises(ValueError, match="operand"):
+        QuantConfig(enabled=True, dtype={"wieght": "fp8"})
+
+
+def test_quant_rejects_unknown_format():
+    # int8 is a roadmap format (not in QUANT_FORMATS yet) -> unknown fmt
+    with pytest.raises(ValueError, match="unknown quant fmt"):
+        QuantConfig(enabled=True, dtype={"weight": "int8"})
+
+
+def test_quant_accepts_rowwise_granularity():
+    q = QuantConfig(
+        enabled=True, dtype_recipe="fp8", scaling={"granularity": "rowwise"}
+    )
+    assert q.scaling["granularity"] == "rowwise"
+
+
+def test_quant_default_granularity_is_tensorwise():
+    q = QuantConfig(enabled=True, dtype_recipe="fp8")
+    assert q.scaling["granularity"] == "tensorwise"
+
+
+def test_quant_rejects_unsupported_granularity():
+    with pytest.raises(ValueError, match="granularity"):
+        QuantConfig(enabled=True, dtype_recipe="fp8", scaling={"granularity": "row"})
+
+
+def test_training_config_normalizes_single_rule_to_list():
+    tc = TrainingConfig(quant={"enabled": True, "dtype_recipe": "fp8"})
+    assert isinstance(tc.quant, list) and len(tc.quant) == 1
+    assert tc.quant[0].dtype["weight"] == "fp8_e4m3"
+
+
+def test_training_config_accepts_list_of_rules():
+    tc = TrainingConfig(
+        mixed_precision="bf16",
+        quant=[
+            {"enabled": True, "dtype_recipe": "fp8", "include": ["*.mlp.*"]},
+            {"enabled": True, "dtype": {"weight": "fp8"}, "include": ["*.attn.*"]},
+        ],
+    )
+    assert len(tc.quant) == 2
+    assert tc.quant[0].include == ["*.mlp.*"]
+    assert tc.quant[1].dtype == {"weight": "fp8", "act": "bf16", "grad": "bf16"}
+
+
+def test_quant_disabled_stays_disabled():
+    tc = TrainingConfig(quant={"enabled": False})
+    assert _only_rule(tc).enabled is False

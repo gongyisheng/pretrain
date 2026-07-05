@@ -1,14 +1,20 @@
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 import yaml
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.mlp import MOE_ROUTER_SCORE_FNS
+from src.quant import (
+    QUANT_FORMATS,
+    QUANT_GRANULARITY,
+    QUANT_DTYPE_RECIPES,
+    QUANT_OPERANDS,
+)
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
-from src.training.fp8 import FP8_RECIPES
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
+_DEVICES = frozenset({"auto", "cuda", "cpu"})
 
 
 @dataclass
@@ -119,11 +125,55 @@ class TokenizerTrainingConfig:
 
 
 @dataclass
+class QuantConfig:
+    enabled: bool = False
+    dtype_recipe: Optional[str] = None
+    dtype: dict = field(default_factory=dict)  # {weight/act/grad: fmt}
+    scaling: dict = field(default_factory=dict)  # {granularity, block_size}
+    include: List[str] = field(default_factory=list)
+    exclude: List[str] = field(default_factory=lambda: ["lm_head"])
+
+    def __post_init__(self):
+        if not self.enabled:
+            return
+
+        if self.dtype_recipe is not None:
+            if self.dtype_recipe not in QUANT_DTYPE_RECIPES:
+                raise ValueError(
+                    f"unknown quant dtype_recipe: {self.dtype_recipe!r}; "
+                    f"expected one of {sorted(QUANT_DTYPE_RECIPES)}"
+                )
+            for operand, fmt in QUANT_DTYPE_RECIPES[self.dtype_recipe].items():
+                self.dtype.setdefault(operand, fmt)  # explicit dtype wins
+
+        self.scaling.setdefault("granularity", "tensorwise")
+        granularity = self.scaling["granularity"]
+        if granularity not in QUANT_GRANULARITY:
+            raise ValueError(
+                f"unknown quant granularity: {granularity!r}; "
+                f"expected one of {sorted(QUANT_GRANULARITY)}"
+            )
+
+        for operand, fmt in self.dtype.items():
+            if operand not in QUANT_OPERANDS:
+                raise ValueError(
+                    f"unknown quant dtype operand: {operand!r}; "
+                    f"expected one of {sorted(QUANT_OPERANDS)}"
+                )
+            if fmt not in QUANT_FORMATS:
+                raise ValueError(
+                    f"unknown quant fmt for {operand}: {fmt!r}; "
+                    f"expected one of {sorted(QUANT_FORMATS)}"
+                )
+
+
+@dataclass
 class TrainingConfig:
     batch_size: int = 16
     gradient_accumulation_steps: int = 16
     max_steps: int = 50000
     early_stop: int = 0
+    device: str = "auto"  # "auto" (cuda if available else cpu) | "cuda" | "cpu"
     mixed_precision: str = "bf16"
     loss_fn: str = "cross_entropy"
     label_smoothing: float = 0.0  # for CE loss only
@@ -138,13 +188,13 @@ class TrainingConfig:
     eval_batch_size: int = 16
     eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
-    fp8: bool = False
-    fp8_recipe: str = "tensorwise"
-    fp8_exclude_lm_head: bool = (
-        True  # numerically sensitive, especially with tied embeddings
-    )
+    quant: Union[QuantConfig, dict, list] = field(default_factory=QuantConfig)
 
     def __post_init__(self):
+        if self.device not in _DEVICES:
+            raise ValueError(
+                f"unknown device: {self.device!r}; expected one of {sorted(_DEVICES)}"
+            )
         if self.mixed_precision not in _MIXED_PRECISION:
             raise ValueError(
                 f"unknown mixed_precision: {self.mixed_precision!r}; "
@@ -155,11 +205,17 @@ class TrainingConfig:
                 f"unknown loss_fn: {self.loss_fn!r}; "
                 f"expected one of {sorted(LOSS_REGISTRY)}"
             )
-        if self.fp8 and self.fp8_recipe not in FP8_RECIPES:
-            raise ValueError(
-                f"unknown fp8_recipe: {self.fp8_recipe!r}; "
-                f"expected one of {sorted(FP8_RECIPES)}"
-            )
+        rules = self.quant if isinstance(self.quant, list) else [self.quant]
+        amp_dtype = "fp32" if self.mixed_precision == "no" else self.mixed_precision
+        normalized = []
+        for rule in rules:
+            if isinstance(rule, dict):
+                rule = QuantConfig(**rule)
+            if rule.enabled:
+                for operand in QUANT_OPERANDS:
+                    rule.dtype.setdefault(operand, amp_dtype)
+            normalized.append(rule)
+        self.quant = normalized
 
 
 @dataclass
@@ -345,6 +401,8 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         config.tokenizer_training.method_kwargs,
     ):
         _coerce_kwargs(kw)
+    for rule in config.training.quant:
+        _coerce_kwargs(rule.scaling)
 
     if overrides:
         _apply_overrides(config, overrides)
