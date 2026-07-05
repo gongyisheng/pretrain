@@ -28,7 +28,6 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  fp8: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8/qwen3_57m_bf16/
   checkpoint_every: 5000

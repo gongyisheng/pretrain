@@ -86,6 +86,27 @@ def test_rowwise_forward_and_backward():
 
 
 @fp8_only
+def test_high_precision_weight_grad_changes_wgrad():
+    torch.manual_seed(0)
+    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+    def weight_grad(hp):
+        dtype = {"weight_grad": "bf16"} if hp else {}
+        cfg = QuantConfig(enabled=True, dtype_recipe="fp8", dtype=dtype)
+        q = QuantLinear.from_linear(lin, cfg)
+        q(x.clone()).square().mean().backward()
+        return q.weight.grad
+
+    g_hp = weight_grad(True)
+    g_fp8 = weight_grad(False)
+    assert torch.isfinite(g_hp).all() and torch.isfinite(g_fp8).all()
+    # hp wgrad skips fp8 rounding of grad/act, so it differs from the fp8 wgrad
+    rel = (g_hp.float() - g_fp8.float()).norm() / g_fp8.float().norm()
+    assert rel > 1e-3
+
+
+@fp8_only
 def test_preserves_batch_dims():
     lin = nn.Linear(64, 48, bias=False).cuda().to(torch.bfloat16)
     q = QuantLinear.from_linear(lin, _cfg())

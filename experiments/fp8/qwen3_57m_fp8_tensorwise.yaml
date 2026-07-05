@@ -28,9 +28,12 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  fp8: true
-  fp8_recipe: tensorwise
-  fp8_exclude_lm_head: true
+  quant:
+    enabled: true
+    dtype_recipe: fp8
+    scaling:
+      granularity: tensorwise
+    exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8/qwen3_57m_fp8_tensorwise/
   checkpoint_every: 5000
