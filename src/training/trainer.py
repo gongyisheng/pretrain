@@ -149,6 +149,9 @@ class Trainer:
             worker_init_fn=Trainer._worker_init_fn,
         )
 
+        # Quantization: swap eligible nn.Linear modules to QuantLinear
+        apply_quantization(self.model, config)
+
         # Optimizer & scheduler
         self.optimizer = build_optimizer(self.model, config)
         self.scheduler = build_scheduler(self.optimizer, config)
@@ -163,10 +166,6 @@ class Trainer:
         self.scaler = torch.amp.GradScaler(
             enabled=(self.use_amp and self.amp_dtype == torch.float16)
         )
-
-        # Quantization: swap eligible nn.Linear modules to QuantLinear. Must run
-        # before torch.compile so the tracer sees the swapped modules.
-        apply_quantization(self.model, config)
 
         # Disable assert_indirect_indexing to avoid spurious CUDA assertions during
         # torchinductor autotuning, which may dispatch kernel test runs on a stream
