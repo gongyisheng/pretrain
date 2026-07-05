@@ -1,6 +1,6 @@
 # FP8 vs bf16 Training Ablation
 
-Compare end-task loss and throughput between FP8 (in-house `src/quant/` framework, cuBLASLt FP8 GEMM via `torch._scaled_mm`) and a bf16 baseline at Qwen3-57M, sweeping two FP8 scaling granularities.
+Compare end-task loss and throughput between FP8 (in-house `src/quant/` framework, cuBLASLt FP8 GEMM via `torch._scaled_mm`) and a bf16 baseline at Qwen3-51M, sweeping two FP8 scaling granularities.
 
 ## Hypothesis
 
@@ -22,10 +22,10 @@ All hyperparameters are matched between bf16 and fp8. The only independent varia
 
 | Config | d_model | layers | heads/kv | inter_size | quant | granularity | Approx params |
 |---|---|---|---|---|---|---|---|
-| qwen3_57m_bf16 | 512 | 8 | 8/4 | 2048 | off | — | ~57M |
-| qwen3_57m_fp8_tensorwise | 512 | 8 | 8/4 | 2048 | fp8 | tensorwise | ~57M |
-| qwen3_57m_fp8_rowwise | 512 | 8 | 8/4 | 2048 | fp8 | rowwise | ~57M |
-| qwen3_57m_fp8_rowwise_with_gw_hp | 512 | 8 | 8/4 | 2048 | fp8 | rowwise + gw_hp | ~57M |
+| qwen3_51m_bf16 | 512 | 8 | 8/4 | 2048 | off | — | ~51M |
+| qwen3_51m_fp8_tensorwise | 512 | 8 | 8/4 | 2048 | fp8 | tensorwise | ~51M |
+| qwen3_51m_fp8_rowwise | 512 | 8 | 8/4 | 2048 | fp8 | rowwise | ~51M |
+| qwen3_51m_fp8_rowwise_with_gw_hp | 512 | 8 | 8/4 | 2048 | fp8 | rowwise + gw_hp | ~51M |
 
 `exclude: [lm_head]` for all FP8 runs (lm_head stays in bf16; numerically sensitive under tied embeddings). fp8 uses `dtype_recipe: fp8` → weight/act `fp8_e4m3`, grad `fp8_e5m2`.
 
@@ -53,20 +53,20 @@ Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 60
 The script runs the bf16 baseline followed by both FP8 recipes.
 
 ```bash
-nohup bash experiments/fp8/run_57m.sh > logs/fp8_57m.log 2>&1 &
+nohup bash experiments/fp8/run.sh > logs/fp8_51m.log 2>&1 &
 ```
 
 ## Results
 
 | Model | Precision | Recipe | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
 |---|---|---|---|---|---|---|
-| 57M | bf16 | — | | | | 1.00× |
-| 57M | fp8 | tensorwise | | | | |
-| 57M | fp8 | rowwise | | | | |
-| 57M | fp8 | rowwise_with_gw_hp | | | | |
+| 51M | bf16 | — | | | | 1.00× |
+| 51M | fp8 | tensorwise | | | | |
+| 51M | fp8 | rowwise | | | | |
+| 51M | fp8 | rowwise_with_gw_hp | | | | |
 
 ## Notes
 
 - Compare `tensorwise` vs `rowwise` vs `rowwise_with_gw_hp` for the loss/throughput trade-off.
 - If `lm_head` ends up dominating final loss noise, drop it from `exclude` only after the dense-only ablation is clean.
-- Throughput gain at 57M is modest — the model is small enough that non-GEMM kernels are a meaningful fraction of step time.
+- Throughput gain at 51M is modest — the model is small enough that non-GEMM kernels are a meaningful fraction of step time.

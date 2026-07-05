@@ -28,16 +28,17 @@ training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
-  early_stop: 5000
   mixed_precision: bf16
   quant:
     enabled: true
     dtype_recipe: fp8
+    dtype:
+      weight_grad: bf16
     scaling:
-      granularity: tensorwise
+      granularity: rowwise
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8/qwen3_57m_fp8_tensorwise/
+  checkpoint_dir: checkpoints/fp8/qwen3_51m_fp8_rowwise_with_gw_hp/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -54,5 +55,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-fp8
-  wandb_run_name: qwen3-57m-fp8-tensorwise
+  wandb_run_name: qwen3-51m-fp8-rowwise-with-gw-hp
   log_every: 10
