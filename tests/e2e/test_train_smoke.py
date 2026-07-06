@@ -49,4 +49,4 @@ def test_gpt2_dry_run():
 
 def test_qwen3_dry_run():
     _require_tokenizer()
-    _run_dry_run("configs/qwen3_57m.yaml")
+    _run_dry_run("configs/qwen3_51m.yaml")
