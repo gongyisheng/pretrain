@@ -493,11 +493,10 @@ def test_quant_defaults_disabled():
 
 def test_quant_operand_defaults_follow_mixed_precision():
     r = _only_rule(TrainingConfig(mixed_precision="bf16", quant={"enabled": True}))
-    # input_grad/weight_grad default to grad
+    # every operand defaults to the compute dtype
     assert r.dtype == {
         "weight": "bf16",
         "act": "bf16",
-        "grad": "bf16",
         "input_grad": "bf16",
         "weight_grad": "bf16",
     }
@@ -513,7 +512,6 @@ def test_quant_operand_defaults_follow_mixed_precision():
     assert r2.dtype == {
         "weight": "fp8",
         "act": "bf16",
-        "grad": "bf16",
         "input_grad": "bf16",
         "weight_grad": "bf16",
     }
@@ -526,8 +524,10 @@ def test_quant_disabled_rule_dtype_stays_empty():
 
 
 def test_quant_dtype_is_mixable():
-    q = QuantConfig(enabled=True, dtype={"weight": "fp8", "act": "fp8", "grad": "bf16"})
-    assert q.dtype["weight"] == "fp8" and q.dtype["grad"] == "bf16"
+    q = QuantConfig(
+        enabled=True, dtype={"weight": "fp8", "act": "fp8", "weight_grad": "bf16"}
+    )
+    assert q.dtype["weight"] == "fp8" and q.dtype["weight_grad"] == "bf16"
 
 
 def test_quant_dtype_recipe_fp8():
@@ -535,15 +535,15 @@ def test_quant_dtype_recipe_fp8():
     assert q.dtype == {
         "weight": "fp8_e4m3",
         "act": "fp8_e4m3",
-        "grad": "fp8_e5m2",
-        "input_grad": "fp8_e5m2",  # defaults to grad
-        "weight_grad": "fp8_e5m2",  # defaults to grad
+        "input_grad": "fp8_e5m2",
+        "weight_grad": "fp8_e5m2",
     }
 
 
 def test_quant_dtype_recipe_respects_explicit_operand():
-    q = QuantConfig(enabled=True, dtype_recipe="fp8", dtype={"grad": "bf16"})
-    assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["grad"] == "bf16"
+    # explicit weight_grad: bf16 overrides the recipe (torchao *_with_gw_hp)
+    q = QuantConfig(enabled=True, dtype_recipe="fp8", dtype={"weight_grad": "bf16"})
+    assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["weight_grad"] == "bf16"
 
 
 def test_quant_unknown_recipe_raises():
@@ -564,9 +564,8 @@ def test_quant_disabled_skips_validation():
 
 
 def test_quant_rejects_unknown_format():
-    # int8 is a roadmap format (not in QUANT_FORMATS yet) -> unknown fmt
     with pytest.raises(ValueError, match="unknown quant fmt"):
-        QuantConfig(enabled=True, dtype={"weight": "int8"})
+        QuantConfig(enabled=True, dtype={"weight": "not_a_fmt"})
 
 
 def test_quant_accepts_rowwise_granularity():
@@ -581,11 +580,10 @@ def test_quant_default_granularity_is_tensorwise():
     assert q.scaling["granularity"] == "tensorwise"
 
 
-def test_quant_backward_grads_default_to_grad():
+def test_quant_recipe_sets_both_backward_grads():
     r = TrainingConfig(quant={"enabled": True, "dtype_recipe": "fp8"}).quant[0]
-    assert (
-        r.dtype["input_grad"] == r.dtype["weight_grad"] == r.dtype["grad"] == "fp8_e5m2"
-    )
+    assert r.dtype["input_grad"] == r.dtype["weight_grad"] == "fp8_e5m2"
+    assert "grad" not in r.dtype
 
 
 def test_quant_weight_grad_hp_override():
@@ -629,7 +627,6 @@ def test_training_config_accepts_list_of_rules():
     assert tc.quant[1].dtype == {
         "weight": "fp8",
         "act": "bf16",
-        "grad": "bf16",
         "input_grad": "bf16",
         "weight_grad": "bf16",
     }

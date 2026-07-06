@@ -9,7 +9,6 @@ from src.quant import (
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,
     QUANT_OPERANDS,
-    QUANT_DTYPE_KEYS,
 )
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
@@ -147,10 +146,6 @@ class QuantConfig:
             for operand, fmt in QUANT_DTYPE_RECIPES[self.dtype_recipe].items():
                 self.dtype.setdefault(operand, fmt)  # explicit dtype wins
 
-        if "grad" in self.dtype:
-            self.dtype.setdefault("input_grad", self.dtype["grad"])
-            self.dtype.setdefault("weight_grad", self.dtype["grad"])
-
         self.scaling.setdefault("granularity", "tensorwise")
         granularity = self.scaling["granularity"]
         if granularity not in QUANT_GRANULARITY:
@@ -160,10 +155,10 @@ class QuantConfig:
             )
 
         for operand, fmt in self.dtype.items():
-            if operand not in QUANT_DTYPE_KEYS:
+            if operand not in QUANT_OPERANDS:
                 raise ValueError(
                     f"unknown quant dtype key: {operand!r}; "
-                    f"expected one of {sorted(QUANT_DTYPE_KEYS)}"
+                    f"expected one of {sorted(QUANT_OPERANDS)}"
                 )
             if fmt not in QUANT_FORMATS:
                 raise ValueError(
@@ -219,8 +214,6 @@ class TrainingConfig:
             if rule.enabled:
                 for operand in QUANT_OPERANDS:
                     rule.dtype.setdefault(operand, amp_dtype)
-                rule.dtype.setdefault("input_grad", rule.dtype["grad"])
-                rule.dtype.setdefault("weight_grad", rule.dtype["grad"])
             normalized.append(rule)
         self.quant = normalized
 

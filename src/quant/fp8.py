@@ -50,7 +50,7 @@ def fp8_gemm(
     transposed contiguous view.
     """
     if rowwise:
-        a_fp8, a_scale = quantize_fp8(a, a_dtype, dim=-1)  # (M, 1)
+        a_fp8, a_scale = quantize_fp8(a, a_dtype, dim=-1) # (M, 1)
         b_fp8, b_scale = quantize_fp8(b, b_dtype, dim=0)  # (1, N)
     else:
         a_fp8, a_scale = quantize_fp8(a, a_dtype)

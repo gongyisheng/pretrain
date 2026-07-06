@@ -15,19 +15,23 @@ _FP8_DTYPE = {
 }
 
 
-def quant_dtype(fmt: str) -> Optional[torch.dtype]:
-    """The fp8 dtype an operand with this fmt quantizes to, or None when the
-    fmt is a passthrough dtype (fp32/fp16/bf16) that stays high precision."""
+def is_fp8(fmt: str) -> bool:
+    return fmt in _FP8_DTYPE
+
+
+def is_int8(fmt: str) -> bool:
+    return fmt == "int8"
+
+
+def is_quantized(fmt: str) -> bool:
+    return is_fp8(fmt) or is_int8(fmt)
+
+
+def str_to_dtype_fp8(fmt: str) -> Optional[torch.dtype]:
     return _FP8_DTYPE.get(fmt)
 
 
 def should_quantize(fqn: str, cfg: QuantConfig) -> bool:
-    """Whether the rule `cfg` applies to the module at `fqn`.
-
-    Matches iff (include empty OR fqn matches an include glob) AND fqn matches
-    no exclude glob. Exclude wins over include. Globs match either the full FQN
-    or the leaf name, so bare patterns like "q_proj" hit any depth.
-    """
 
     def matches(patterns: list[str]) -> bool:
         leaf = fqn.rsplit(".", 1)[-1]
@@ -41,9 +45,7 @@ def should_quantize(fqn: str, cfg: QuantConfig) -> bool:
 
 
 def resolve_rule(fqn: str, rules: list[QuantConfig]) -> Optional[QuantConfig]:
-    """First enabled rule that applies to `fqn`, or None (leave high precision).
 
-    Rules are tried in order, so put more specific rules first."""
     for rule in rules:
         if rule.enabled and should_quantize(fqn, rule):
             return rule
