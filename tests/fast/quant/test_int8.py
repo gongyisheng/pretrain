@@ -99,7 +99,9 @@ def test_int8_gemm_rowwise_tighter_than_tensorwise():
     b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)
     ref = a.float() @ b.float()
     tw = (int8_gemm(a, b, torch.float32).float() - ref).norm() / ref.norm()
-    rw = (int8_gemm(a, b, torch.float32, rowwise=True).float() - ref).norm() / ref.norm()
+    rw = (
+        int8_gemm(a, b, torch.float32, rowwise=True).float() - ref
+    ).norm() / ref.norm()
     assert rw <= tw
 
 

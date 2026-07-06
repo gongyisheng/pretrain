@@ -16,9 +16,7 @@ QUANT_PASSTHROUGH = frozenset({"fp32", "fp16", "bf16"})
 
 # Operand formats. fp8 variants quantize (`fp8` is an alias for `fp8_e4m3`).
 # TODO: add "int4", "fp4_mx", "fp4_nv" as their kernels land.
-QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset(
-    {"fp8", "fp8_e4m3", "fp8_e5m2", "int8"}
-)
+QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset({"fp8", "fp8_e4m3", "fp8_e5m2", "int8"})
 
 # Shared scale granularities.
 # TODO: add "blockwise" (with block_size) once its scaling kernels land.
