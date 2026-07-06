@@ -5,7 +5,13 @@ import torch.nn as nn
 
 from src.quant.fp8 import fp8_gemm, fake_quantize_fp8
 from src.quant.int8 import int8_gemm, fake_quantize_int8
-from src.quant.utils import str_to_dtype_fp8, is_fp8, is_int8, is_quantized
+from src.quant.utils import (
+    str_to_dtype_fp8,
+    str_to_qmax_int8s,
+    is_fp8,
+    is_int8s,
+    is_quantized,
+)
 from src.utils.config import QuantConfig
 
 
@@ -13,8 +19,8 @@ def _fake_quant(x, fmt, dim):
     """dequant(quant(x)) for one operand in its format; identity if passthrough."""
     if is_fp8(fmt):
         return fake_quantize_fp8(x, str_to_dtype_fp8(fmt), dim=dim)
-    if is_int8(fmt):
-        return fake_quantize_int8(x, dim=dim)
+    if is_int8s(fmt):
+        return fake_quantize_int8(x, str_to_qmax_int8s(fmt), dim=dim)
     return x
 
 
@@ -34,8 +40,15 @@ def _gemm(a, b, a_fmt, b_fmt, out_dtype, rowwise=False):
             str_to_dtype_fp8(b_fmt),
             rowwise=rowwise,
         )
-    if is_int8(a_fmt) and is_int8(b_fmt):
-        return int8_gemm(a, b, out_dtype, rowwise=rowwise)
+    if is_int8s(a_fmt) and is_int8s(b_fmt):
+        return int8_gemm(
+            a,
+            b,
+            out_dtype,
+            str_to_qmax_int8s(a_fmt),
+            str_to_qmax_int8s(b_fmt),
+            rowwise=rowwise,
+        )
     if is_quantized(a_fmt):
         a = _fake_quant(a, a_fmt, dim=-1 if rowwise else None)
     if is_quantized(b_fmt):
