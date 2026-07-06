@@ -27,7 +27,12 @@ def _gemm(a, b, a_fmt, b_fmt, out_dtype, rowwise=False):
     """
     if is_fp8(a_fmt) and is_fp8(b_fmt):
         return fp8_gemm(
-            a, b, out_dtype, str_to_dtype_fp8(a_fmt), str_to_dtype_fp8(b_fmt), rowwise=rowwise
+            a,
+            b,
+            out_dtype,
+            str_to_dtype_fp8(a_fmt),
+            str_to_dtype_fp8(b_fmt),
+            rowwise=rowwise,
         )
     if is_int8(a_fmt) and is_int8(b_fmt):
         return int8_gemm(a, b, out_dtype, rowwise=rowwise)
@@ -82,7 +87,12 @@ class QuantizedLinearFn(torch.autograd.Function):
         )
         # dW = gᵀ @ X         (N,M)@(M,K) -> (N,K)
         dw = _gemm(
-            g.t(), x2d, cfg.dtype["weight_grad"], cfg.dtype["act"], compute_dtype, rowwise
+            g.t(),
+            x2d,
+            cfg.dtype["weight_grad"],
+            cfg.dtype["act"],
+            compute_dtype,
+            rowwise,
         )
         db = g.sum(dim=0) if ctx.has_bias else None
 
