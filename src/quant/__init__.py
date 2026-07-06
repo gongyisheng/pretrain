@@ -11,30 +11,34 @@ converter `apply_quantization` (Task 6) must therefore lazy-import its deps.
 
 from __future__ import annotations
 
-# Passthrough dtypes stay high precision (not quantized). Any fmt outside this
-# set is a quantization format.
+
 QUANT_PASSTHROUGH = frozenset({"fp32", "fp16", "bf16"})
 
 # Operand formats. fp8 variants quantize (`fp8` is an alias for `fp8_e4m3`).
-# TODO: add "int8", "int4", "fp4_mx", "fp4_nv" as their kernels land.
-QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset({"fp8", "fp8_e4m3", "fp8_e5m2"})
+# TODO: add "int4", "fp4_mx", "fp4_nv" as their kernels land.
+QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset(
+    {"fp8", "fp8_e4m3", "fp8_e5m2", "int8"}
+)
 
 # Shared scale granularities.
 # TODO: add "blockwise" (with block_size) once its scaling kernels land.
 QUANT_GRANULARITY = frozenset({"tensorwise", "rowwise"})
 
 # Named dtype recipes: fill the per-operand `dtype` map with a standard setup.
-# TODO: add "int8", "int4", "mxfp4", "nvfp4" recipes once supported.
+# TODO: add "int4", "mxfp4", "nvfp4" recipes once supported.
 QUANT_DTYPE_RECIPES = {
-    "fp8": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad": "fp8_e5m2"},
+    "fp8": {
+        "weight": "fp8_e4m3",
+        "act": "fp8_e4m3",
+        "input_grad": "fp8_e5m2",
+        "weight_grad": "fp8_e5m2",
+    },
+    "int8": {
+        "weight": "int8",
+        "act": "int8",
+        "input_grad": "int8",
+        "weight_grad": "int8",
+    },
 }
 
-# The three GEMM operand roles a QuantConfig.dtype map may set; these are
-# auto-filled with the run's compute dtype when unset.
-QUANT_OPERANDS = ("weight", "act", "grad")
-
-# Extra dtype keys — the grad-output dtype per backward GEMM, each defaulting to
-# `grad`. `input_grad` is the dgrad GEMM (dX = dY@W); `weight_grad` is the wgrad
-# GEMM (dW = dYᵀ@X). Set either to a passthrough dtype (bf16) to keep that
-# gradient out of fp8 (e.g. weight_grad: bf16 = torchao's `*_with_gw_hp`).
-QUANT_DTYPE_KEYS = QUANT_OPERANDS + ("input_grad", "weight_grad")
+QUANT_OPERANDS = ("weight", "act", "input_grad", "weight_grad")

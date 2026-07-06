@@ -21,8 +21,12 @@ fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
 
 
 def _cfg(grad="bf16"):
-    # recipe fills weight/act=fp8_e4m3; grad overridden explicitly
-    return QuantConfig(enabled=True, dtype_recipe="fp8", dtype={"grad": grad})
+    # recipe fills weight/act=fp8_e4m3; both backward grads overridden explicitly
+    return QuantConfig(
+        enabled=True,
+        dtype_recipe="fp8",
+        dtype={"input_grad": grad, "weight_grad": grad},
+    )
 
 
 @fp8_only
