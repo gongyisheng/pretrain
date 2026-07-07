@@ -9,6 +9,7 @@ from src.layers.mlp import (
     ExpertBias,
     MLP_REGISTRY,
     MoERouter,
+    ROUTER_SCORE_FNS,
     SparseMoEBlock,
     grouped_mlp,
     gated_mlp,
@@ -188,6 +189,82 @@ def test_moe_router_weights_unnormalized():
     assert (top_weights > 0).all()
     sums = top_weights.sum(dim=-1)
     assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
+
+
+def test_moe_router_default_score_fn_is_softmax():
+    torch.manual_seed(0)
+    router = MoERouter(d_model=64, n_routed_experts=8, n_routed_experts_per_token=2)
+    x = torch.randn(32, 64)
+    _, _, router_probs = router(x)
+    # softmax gives a distribution over experts.
+    sums = router_probs.sum(dim=-1)
+    assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+
+
+def test_moe_router_sigmoid_scores_are_independent():
+    torch.manual_seed(0)
+    router = MoERouter(
+        d_model=64,
+        n_routed_experts=8,
+        n_routed_experts_per_token=2,
+        router_score_fn="sigmoid",
+    )
+    x = torch.randn(32, 64)
+    _, _, router_probs = router(x)
+    # sigmoid scores each expert in (0, 1) and does not normalize across experts.
+    assert (router_probs > 0).all() and (router_probs < 1).all()
+    sums = router_probs.sum(dim=-1)
+    assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
+
+
+def test_moe_router_sigmoid_matches_logits():
+    torch.manual_seed(0)
+    router = MoERouter(
+        d_model=64,
+        n_routed_experts=8,
+        n_routed_experts_per_token=2,
+        router_score_fn="sigmoid",
+    )
+    x = torch.randn(32, 64)
+    _, _, router_probs = router(x)
+    expected = router.gate(x.float()).sigmoid()
+    assert torch.allclose(router_probs, expected, atol=1e-6)
+
+
+def test_moe_router_sigmoid_weights_normalized():
+    torch.manual_seed(0)
+    router = MoERouter(
+        d_model=64,
+        n_routed_experts=8,
+        n_routed_experts_per_token=2,
+        normalize=True,
+        router_score_fn="sigmoid",
+    )
+    x = torch.randn(32, 64)
+    _, top_weights, _ = router(x)
+    sums = top_weights.sum(dim=-1)
+    assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+
+
+def test_moe_router_unknown_score_fn_raises():
+    with pytest.raises(KeyError):
+        MoERouter(
+            d_model=64,
+            n_routed_experts=8,
+            n_routed_experts_per_token=2,
+            router_score_fn="argmax",
+        )
+
+
+def test_sparse_moe_block_forwards_score_fn_to_router():
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        aux_loss=True,
+        router_score_fn="sigmoid",
+    )
+    assert block.router.score_fn is ROUTER_SCORE_FNS["sigmoid"]
 
 
 def test_moe_router_gate_weight_stays_fp32_across_dtype_casts():

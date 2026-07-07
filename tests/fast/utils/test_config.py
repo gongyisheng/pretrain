@@ -340,6 +340,41 @@ def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
         ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4})
 
 
+def test_modelconfig_moe_router_score_fn_defaults_softmax():
+    cfg = ModelConfig(
+        d_model=64,
+        mlp_cls="moe",
+        mlp_kwargs={"n_routed_experts": 4, "aux_loss": True},
+    )
+    assert cfg.mlp_kwargs["router_score_fn"] == "softmax"
+
+
+def test_modelconfig_moe_router_score_fn_sigmoid_kept():
+    cfg = ModelConfig(
+        d_model=64,
+        mlp_cls="moe",
+        mlp_kwargs={
+            "n_routed_experts": 4,
+            "aux_loss": True,
+            "router_score_fn": "sigmoid",
+        },
+    )
+    assert cfg.mlp_kwargs["router_score_fn"] == "sigmoid"
+
+
+def test_modelconfig_moe_unknown_router_score_fn_raises():
+    with pytest.raises(ValueError, match="router_score_fn must be one of"):
+        ModelConfig(
+            d_model=64,
+            mlp_cls="moe",
+            mlp_kwargs={
+                "n_routed_experts": 4,
+                "aux_loss": True,
+                "router_score_fn": "argmax",
+            },
+        )
+
+
 def test_modelconfig_unknown_activation_raises():
     with pytest.raises(ValueError, match="Unknown activation"):
         ModelConfig(mlp_kwargs={"activation": "mish"})

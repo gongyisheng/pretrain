@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 import yaml
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.layers.mlp import ROUTER_SCORE_FNS
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
 from src.training.fp8 import FP8_RECIPES
@@ -68,6 +69,12 @@ class ModelConfig:
             self.mlp_kwargs.setdefault("n_routed_experts_per_token", 2)
             self.mlp_kwargs.setdefault("n_shared_experts", 0)
             self.mlp_kwargs.setdefault("bias", False)
+            self.mlp_kwargs.setdefault("router_score_fn", "softmax")
+            if self.mlp_kwargs["router_score_fn"] not in ROUTER_SCORE_FNS:
+                raise ValueError(
+                    f"router_score_fn must be one of {sorted(ROUTER_SCORE_FNS)}; "
+                    f"got {self.mlp_kwargs['router_score_fn']!r}"
+                )
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
             # exclusive balancing strategies; exactly one must be enabled.
             self.mlp_kwargs.setdefault("expert_bias", False)

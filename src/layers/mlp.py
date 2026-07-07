@@ -4,6 +4,12 @@ import torch.nn as nn
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
+ROUTER_SCORE_FNS = {
+    "softmax": lambda logits: logits.softmax(dim=-1),
+    "sigmoid": lambda logits: logits.sigmoid(),
+}
+
+
 @torch.compile
 def gated_mlp(
     x: torch.Tensor,
@@ -237,11 +243,13 @@ class MoERouter(nn.Module):
         normalize: bool = True,
         expert_bias: bool = False,
         expert_bias_update_rate: float = 0.001,
+        router_score_fn: str = "softmax",
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
         self.n_routed_experts_per_token = n_routed_experts_per_token
         self.normalize = normalize
+        self.score_fn = ROUTER_SCORE_FNS[router_score_fn]
         self.gate = nn.Linear(d_model, n_routed_experts, bias=False)
         self.expert_bias = (
             ExpertBias(n_routed_experts, expert_bias_update_rate)
@@ -262,7 +270,7 @@ class MoERouter(nn.Module):
         # autocast would downcast the matmul, undoing the fp32 pin.
         with torch.amp.autocast(device_type=x.device.type, enabled=False):
             logits = self.gate(x.float())
-            router_probs = logits.softmax(-1)
+            router_probs = self.score_fn(logits)
         if self.expert_bias is not None:
             top_indices = torch.topk(self.expert_bias(router_probs), k, dim=-1).indices
             top_weights = router_probs.gather(-1, top_indices)
@@ -324,6 +332,7 @@ class SparseMoEBlock(nn.Module):
         aux_loss_coef: float = 0.01,
         expert_bias: bool = False,
         expert_bias_update_rate: float = 0.001,
+        router_score_fn: str = "softmax",
         activation: str = "silu",
         gated: bool = True,
         bias: bool = False,
@@ -350,6 +359,7 @@ class SparseMoEBlock(nn.Module):
             n_routed_experts_per_token,
             expert_bias=expert_bias,
             expert_bias_update_rate=expert_bias_update_rate,
+            router_score_fn=router_score_fn,
         )
 
         # DeepSeekMoE shared experts: always-on FFN run on every token, merged
