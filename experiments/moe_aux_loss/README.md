@@ -28,7 +28,7 @@ each varying only `aux_loss_coef` over `{0, 1e-3, 1e-2, 1e-1, 1e-0}`.
 | n_experts / top-k | 64 / 8 |
 | n_shared_experts | 0 |
 | intermediate_size (per expert) | 192 |
-| batch × grad_accum × seq | 64 × 4 × 1024 (≈0.26M tok/step) |
+| batch × grad_accum × seq | 32 × 8 × 1024 (≈0.26M tok/step) |
 | max_steps | 50000 (≈13B tokens) |
 | lr / min_lr / warmup | 1e-3 / 1e-4 / 1500 |
 
