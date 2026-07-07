@@ -34,6 +34,7 @@ training:
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
+  eval_batch_size: 16
 optimizer:
   name: muon
   lr: 5e-4

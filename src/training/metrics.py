@@ -236,7 +236,7 @@ class MetricsTracker:
         if self.is_moe and self._moe_expert_load is not None:
             maxvio = metric_utils.compute_moe_maxvio(self._moe_expert_load)
             for name, v in maxvio.items():
-                d[f"train-moe/maxvio/{name}"] = v
+                d[f"train-moe/maxvio_batch/{name}"] = v
 
         if self.config.task == "pretrain":
             d["train/perplexity"] = metric_utils.compute_perplexity(loss)
@@ -375,10 +375,10 @@ class MetricsTracker:
 
         if self.is_moe and self._eval_moe_expert_load[0]:
             batch_load = [torch.stack(loads) for loads in self._eval_moe_expert_load]
-            for name, v in metric_utils.compute_moe_global_maxvio(batch_load).items():
-                d[f"val-moe/maxvio_global/{name}"] = v
             for name, v in metric_utils.compute_moe_batch_maxvio(batch_load).items():
                 d[f"val-moe/maxvio_batch/{name}"] = v
+            for name, v in metric_utils.compute_moe_global_maxvio(batch_load).items():
+                d[f"val-moe/maxvio_global/{name}"] = v
 
         self.logger.log(d, step=step)
         print(self._format_eval_msg(d, avg_loss))
