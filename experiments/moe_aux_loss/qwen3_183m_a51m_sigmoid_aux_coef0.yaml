@@ -14,9 +14,11 @@ model:
     intermediate_size: 192
     n_routed_experts: 64
     n_routed_experts_per_token: 8
-    aux_loss: true
-    aux_loss_coef: 1e-1
     dropout: 0.0
+    router_score_fn: sigmoid
+    aux_loss: true
+    aux_loss_coef: 0
+    expert_bias: false
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -35,7 +37,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_aux_loss/qwen3_183m_a51m_aux_coef1e-1/
+  checkpoint_dir: checkpoints/moe_aux_loss/qwen3_183m_a51m_sigmoid_aux_coef0/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -56,5 +58,5 @@ scheduler:
   min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-aux-loss
-  wandb_run_name: qwen3-183m-a51m-auxloss-coef1e-1
+  wandb_run_name: qwen3-183m-a51m-sigmoid-auxloss-coef0
   log_every: 100

@@ -1,18 +1,14 @@
 #!/bin/bash
-# MoE router score-fn comparison: sigmoid gating swept over aux_loss_coef, with a
-# single softmax reference point (aux1e-3). coef=0 keeps aux_loss on (MaxVio still
-# logged) but applies no balancing pressure.
+# MoE router score-fn comparison: sigmoid vs softmax gating, both at aux_loss_coef=1e-3.
 # Usage: nohup bash experiments/moe_router_score_fn/run.sh > logs/moe_router_score_fn.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
 
-coefs=(1e-2 1e-3 1e-4 0)
-
-configs=("qwen3_188m_a51m_softmax_aux1e-3")  # single softmax reference point
-for coef in "${coefs[@]}"; do
-    configs+=("qwen3_188m_a51m_sigmoid_aux${coef}")
-done
+configs=(
+    "qwen3_188m_a51m_softmax_aux1e-3"
+    "qwen3_188m_a51m_sigmoid_aux1e-3"
+)
 
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="

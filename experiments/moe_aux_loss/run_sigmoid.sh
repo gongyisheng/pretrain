@@ -1,6 +1,6 @@
 #!/bin/bash
-# MoE Switch aux-loss coefficient sweep (find best aux_loss_coef).
-# Usage: nohup bash experiments/moe_aux_loss/run.sh > logs/moe_aux_loss.log 2>&1 &
+# MoE Switch aux-loss coefficient sweep, sigmoid router (183m testbed: 64 routed, top-8, no shared).
+# Usage: nohup bash experiments/moe_aux_loss/run_sigmoid.sh > logs/moe_aux_loss_sigmoid.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
@@ -9,7 +9,7 @@ coefs=(0 1e-3 1e-2 1e-1 1e-0)
 
 configs=()
 for c in "${coefs[@]}"; do
-    configs+=("qwen3_183m_a51m_aux_coef${c}")
+    configs+=("qwen3_183m_a51m_sigmoid_aux_coef${c}")
 done
 
 for config in "${configs[@]}"; do
@@ -20,4 +20,4 @@ for config in "${configs[@]}"; do
     echo ""
 done
 
-echo "=== All moe_aux_loss runs complete ==="
+echo "=== All moe_aux_loss sigmoid runs complete ==="
