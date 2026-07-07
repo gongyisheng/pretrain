@@ -10,10 +10,10 @@ rates=(1e-5 1e-4 1e-3 1e-2)
 configs=()
 
 # Aux-loss baseline (same testbed) as a benchmark for loss-free expert bias.
-configs+=("qwen3_183m_a51m_aux_coef1e-3")
+configs+=("qwen3_188m_a51m_aux_coef1e-3")
 
 for r in "${rates[@]}"; do
-    configs+=("qwen3_183m_a51m_expert_bias_rate${r}")
+    configs+=("qwen3_188m_a51m_expert_bias_rate${r}")
 done
 
 for config in "${configs[@]}"; do

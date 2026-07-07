@@ -40,9 +40,6 @@ Config filename = ckpt dir = W&B run name. `s` = `n_shared_experts`, `k` = top-k
 | `qwen3_188m_a51m_s2_r6` | 2 | 6 | 188M | 51M |
 | `qwen3_190m_a51m_s3_r5` | 3 | 5 | 190M | 51M |
 | `qwen3_193m_a51m_s4_r4` | 4 | 4 | 193M | 51M |
-| `qwen3_195m_a51m_s5_r3` | 5 | 3 | 195M | 51M |
-| `qwen3_197m_a51m_s6_r2` | 6 | 2 | 197M | 51M |
-| `qwen3_200m_a51m_s7_r1` | 7 | 1 | 200M | 51M |
 | `qwen3_51m` | — | — | 51M | 51M |
 
 `qwen3_51m` is the dense reference: a plain SwiGLU MLP with `intermediate_size: 1536`
@@ -56,7 +53,7 @@ warmup 1500, bf16.
 ## Running
 
 ```bash
-# All 7 configs sequentially:
+# All configs sequentially:
 nohup bash experiments/moe_shared_experts/run.sh > logs/moe_shared_experts.log 2>&1 &
 
 # Single config:
@@ -74,9 +71,6 @@ W&B project: `pretrain-moe-shared-experts`.
 | `qwen3_188m_a51m_s2_r6` | 2 | 6 | 51M | |
 | `qwen3_190m_a51m_s3_r5` | 3 | 5 | 51M | |
 | `qwen3_193m_a51m_s4_r4` | 4 | 4 | 51M | |
-| `qwen3_195m_a51m_s5_r3` | 5 | 3 | 51M | |
-| `qwen3_197m_a51m_s6_r2` | 6 | 2 | 51M | |
-| `qwen3_200m_a51m_s7_r1` | 7 | 1 | 51M | |
 | `qwen3_51m` | — | — | 51M | |
 
 ## Notes

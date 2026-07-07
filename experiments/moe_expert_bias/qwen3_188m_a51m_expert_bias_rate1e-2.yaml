@@ -8,18 +8,22 @@ model:
     n_heads: 8
     n_kv_heads: 4
     qk_norm: true
+    dropout: 0.0
   mlp_cls: moe
   mlp_kwargs:
     intermediate_size: 192
     n_routed_experts: 64
-    n_routed_experts_per_token: 3
-    n_shared_experts: 5
-    aux_loss: true
-    aux_loss_coef: 0.001
+    n_routed_experts_per_token: 6
+    n_shared_experts: 2
+    dropout: 0.0
+    aux_loss: false
+    expert_bias: true
+    expert_bias_update_rate: 1e-2
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
+  dropout_embd: 0.0
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k
@@ -33,7 +37,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_shared_experts/qwen3_195m_a51m_s5_r3/
+  checkpoint_dir: checkpoints/moe_expert_bias/qwen3_188m_a51m_expert_bias_rate1e-2/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -53,6 +57,6 @@ scheduler:
   warmup_steps: 1500
   min_lr: 1e-4
 logging:
-  wandb_project: pretrain-moe-shared-experts
-  wandb_run_name: qwen3-195m-a51m-s5-r3
+  wandb_project: pretrain-moe-expert-bias
+  wandb_run_name: qwen3-188m-a51m-expertbias-rate1e-2
   log_every: 100

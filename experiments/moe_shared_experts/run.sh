@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 dir=experiments/moe_shared_experts
 
-splits=("0 8" "1 7" "2 6" "3 5" "4 4" "5 3" "6 2" "7 1")
+splits=("0 8" "1 7" "2 6" "3 5" "4 4")
 
 configs=("$dir"/qwen3_51m.yaml)  # dense reference at the same active capacity
 for sk in "${splits[@]}"; do

@@ -16,16 +16,18 @@ bracket the useful range; a finer sweep follows once the range is known.
 
 ## Setup
 
-Fixed testbed: `qwen3_183m_a51m` architecture (183M total, ~51M active), 64
-experts, top-8, no expert capacity limit. `expert_bias: true` (so `aux_loss` is off);
-only `expert_bias_update_rate` varies. Active intermediate width
-`k·is = 8·192 = 1536` (3·d_model, Qwen3-0.6B FFN ratio). Same testbed as
-`../moe_aux_loss/` so the two balancing schemes are directly comparable.
+Fixed testbed: `qwen3_188m_a51m` architecture (188M total, ~51M active), 64
+routed experts + 2 always-on shared experts, top-6 routed, no expert capacity
+limit. `expert_bias: true` (so `aux_loss` is off); only `expert_bias_update_rate`
+varies. Active intermediate width `(s + k)·is = 8·192 = 1536` (3·d_model,
+Qwen3-0.6B FFN ratio); the expert bias balances only the 6 routed experts. Same
+testbed as `../moe_aux_loss/` so the two balancing schemes are directly comparable.
 
 | Param | Value |
 |-------|-------|
 | d_model / n_layers | 512 / 8 |
-| n_experts / top-k | 64 / 8 |
+| n_routed_experts / top-k | 64 / 6 |
+| n_shared_experts | 2 |
 | intermediate_size (per expert) | 192 |
 | batch × grad_accum × seq | 64 × 4 × 1024 (≈0.26M tok/step) |
 | max_steps | 50000 (≈13B tokens) |
@@ -33,24 +35,24 @@ only `expert_bias_update_rate` varies. Active intermediate width
 
 | Config | expert_bias_update_rate |
 |--------|-------------------------|
-| `qwen3_183m_a51m_expert_bias_rate1e-5` | 0.00001 |
-| `qwen3_183m_a51m_expert_bias_rate1e-4` | 0.0001 |
-| `qwen3_183m_a51m_expert_bias_rate1e-3` | 0.001 (DeepSeek-V3 default) |
-| `qwen3_183m_a51m_expert_bias_rate1e-2` | 0.01 |
+| `qwen3_188m_a51m_expert_bias_rate1e-5` | 0.00001 |
+| `qwen3_188m_a51m_expert_bias_rate1e-4` | 0.0001 |
+| `qwen3_188m_a51m_expert_bias_rate1e-3` | 0.001 (DeepSeek-V3 default) |
+| `qwen3_188m_a51m_expert_bias_rate1e-2` | 0.01 |
 
 Plus an aux-loss baseline on the same testbed as a benchmark for the loss-free
 expert-bias scheme (`expert_bias: false`, `aux_loss: true`):
 
 | Config | aux_loss_coef |
 |--------|---------------|
-| `qwen3_183m_a51m_aux_coef1e-3` | 0.001 |
+| `qwen3_188m_a51m_aux_coef1e-3` | 0.001 |
 
 ## Run
 
 ```bash
 nohup bash experiments/moe_expert_bias/run.sh > logs/moe_expert_bias.log 2>&1 &
 # single:
-uv run python scripts/train.py --config experiments/moe_expert_bias/qwen3_183m_a51m_expert_bias_rate1e-3.yaml
+uv run python scripts/train.py --config experiments/moe_expert_bias/qwen3_188m_a51m_expert_bias_rate1e-3.yaml
 ```
 
 ## Results
