@@ -42,3 +42,6 @@ logs/
 nohup.out
 *.log
 tmp/
+
+# dev folder
+experiments/moe_dev/

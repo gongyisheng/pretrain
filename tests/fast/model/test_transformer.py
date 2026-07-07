@@ -87,6 +87,8 @@ def _moe_cfg(impl):
         mlp_kwargs={
             "intermediate_size": 64,
             "n_routed_experts": 4,
+            "aux_loss": True,
+            "aux_loss_coef": 1e-3,
             "n_routed_experts_per_token": 2,
             "activation": "silu",
             "gated": True,

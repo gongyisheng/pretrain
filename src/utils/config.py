@@ -69,13 +69,16 @@ class ModelConfig:
             self.mlp_kwargs.setdefault("n_shared_experts", 0)
             self.mlp_kwargs.setdefault("bias", False)
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
-            # exclusive balancing strategies; aux_loss defaults on unless the
-            # bias rule is requested.
+            # exclusive balancing strategies; exactly one must be enabled.
             self.mlp_kwargs.setdefault("expert_bias", False)
-            self.mlp_kwargs.setdefault("aux_loss", not self.mlp_kwargs["expert_bias"])
+            self.mlp_kwargs.setdefault("aux_loss", False)
+            if not self.mlp_kwargs["aux_loss"] and not self.mlp_kwargs["expert_bias"]:
+                raise ValueError(
+                    "exactly one of aux_loss / expert_bias must be enabled; both are off"
+                )
             if self.mlp_kwargs["aux_loss"] and self.mlp_kwargs["expert_bias"]:
                 raise ValueError(
-                    "aux_loss and expert_bias are mutually exclusive MoE balancing strategies"
+                    "aux_loss and expert_bias are mutually exclusive; both are on"
                 )
             if self.mlp_kwargs["expert_bias"]:
                 self.mlp_kwargs.setdefault("expert_bias_update_rate", 0.001)

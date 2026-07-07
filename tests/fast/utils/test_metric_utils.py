@@ -66,6 +66,8 @@ def _qwen3_moe_cfg(impl):
         mlp_cls="moe",
         mlp_kwargs={
             "n_routed_experts": 4,
+            "aux_loss": True,
+            "aux_loss_coef": 1e-3,
             "n_routed_experts_per_token": 2,
             "intermediate_size": 128,
         },
@@ -596,6 +598,8 @@ def test_compute_flops_per_token_moe_uses_k_active():
         mlp_cls="moe",
         mlp_kwargs={
             "n_routed_experts": 8,
+            "aux_loss": True,
+            "aux_loss_coef": 1e-3,
             "n_routed_experts_per_token": 2,
             "intermediate_size": 128,
             "gated": True,

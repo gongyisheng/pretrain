@@ -294,7 +294,11 @@ model:
 
 @pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
 def test_modelconfig_resolves_intermediate_size(mlp_cls):
-    extra = {"n_routed_experts": 4} if mlp_cls == "moe" else {}
+    extra = (
+        {"n_routed_experts": 4, "aux_loss": True, "aux_loss_coef": 1e-3}
+        if mlp_cls == "moe"
+        else {}
+    )
     cfg = ModelConfig(d_model=128, mlp_cls=mlp_cls, mlp_kwargs=dict(extra))
     assert cfg.mlp_kwargs["intermediate_size"] == 4 * 128
     # explicit value preserved
@@ -305,12 +309,14 @@ def test_modelconfig_resolves_intermediate_size(mlp_cls):
 
 
 def test_modelconfig_moe_expert_bias_defaults():
-    # default: aux-loss balancing, no expert_bias
-    cfg = ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4})
+    # aux_loss on: expert_bias defaults off, aux_loss_coef defaulted
+    cfg = ModelConfig(
+        d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4, "aux_loss": True}
+    )
     assert cfg.mlp_kwargs["expert_bias"] is False
     assert cfg.mlp_kwargs["aux_loss"] is True
     assert cfg.mlp_kwargs["aux_loss_coef"] == 0.01
-    # expert_bias on: aux_loss defaults off, bias update rate defaulted
+    # expert_bias on: aux_loss stays off, bias update rate defaulted
     cfg2 = ModelConfig(
         d_model=64,
         mlp_cls="moe",
@@ -322,12 +328,16 @@ def test_modelconfig_moe_expert_bias_defaults():
 
 
 def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    # both on
+    with pytest.raises(ValueError, match="both are on"):
         ModelConfig(
             d_model=64,
             mlp_cls="moe",
             mlp_kwargs={"n_routed_experts": 4, "aux_loss": True, "expert_bias": True},
         )
+    # both off (defaults) — must opt into exactly one
+    with pytest.raises(ValueError, match="both are off"):
+        ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4})
 
 
 def test_modelconfig_unknown_activation_raises():
@@ -407,6 +417,8 @@ def _moe_train_config(mixed_precision):
         "n_routed_experts": 4,
         "n_routed_experts_per_token": 2,
         "intermediate_size": 64,
+        "aux_loss": True,
+        "aux_loss_coef": 1e-3,
     }
     return TrainConfig(
         model=ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs=mlp_kwargs),

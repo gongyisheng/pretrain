@@ -383,6 +383,8 @@ def _make_moe_cfg() -> TrainConfig:
     cfg.model.mlp_cls = "moe"
     cfg.model.mlp_kwargs = {
         "n_routed_experts": 4,
+        "aux_loss": True,
+        "aux_loss_coef": 1e-3,
         "n_routed_experts_per_token": 2,
         "n_shared_experts": 1,
         "intermediate_size": 32,
