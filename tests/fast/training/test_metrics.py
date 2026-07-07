@@ -366,10 +366,12 @@ def test_train_moe_maxvio_logged_per_layer():
     _moe_on_step(tracker, model, opt, step=0)
     d = tracker.log_train(step=1, model=model, optimizer=opt)
 
-    assert "train-moe/maxvio/layer_0" in d and "train-moe/maxvio/layer_1" in d
-    assert "train-moe/maxvio/mean" in d and "train-moe/maxvio/max" in d
-    assert d["train-moe/maxvio/max"] >= d["train-moe/maxvio/mean"] - 1e-9
-    assert all(d[k] >= 0.0 for k in d if k.startswith("train-moe/maxvio/"))
+    assert (
+        "train-moe/maxvio_batch/layer_0" in d and "train-moe/maxvio_batch/layer_1" in d
+    )
+    assert "train-moe/maxvio_batch/mean" in d and "train-moe/maxvio_batch/max" in d
+    assert d["train-moe/maxvio_batch/max"] >= d["train-moe/maxvio_batch/mean"] - 1e-9
+    assert all(d[k] >= 0.0 for k in d if k.startswith("train-moe/maxvio_batch/"))
 
 
 def test_train_moe_maxvio_uses_latest_step():
@@ -391,7 +393,7 @@ def test_train_moe_maxvio_uses_latest_step():
     _moe_on_step(tracker, model, opt, step=1)
     d = tracker.log_train(step=2, model=model, optimizer=opt)
     # latest load [10,0,5,5]: max=10, mean=5 -> (10-5)/5 = 1.0
-    assert d["train-moe/maxvio/layer_0"] == pytest.approx(1.0)
+    assert d["train-moe/maxvio_batch/layer_0"] == pytest.approx(1.0)
 
 
 def test_eval_moe_maxvio_logs_both_variants():
