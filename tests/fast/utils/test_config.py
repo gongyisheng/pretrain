@@ -401,15 +401,13 @@ def test_training_fp8_recipe_unchecked_when_disabled():
 # ==================== dropless MoE + precision guard ====================
 
 
-def _moe_train_config(mixed_precision, expert_capacity_factor=None):
-    """Build a minimal TrainConfig with dropless (or capped) MoE."""
+def _moe_train_config(mixed_precision):
+    """Build a minimal TrainConfig with dropless MoE."""
     mlp_kwargs = {
         "n_routed_experts": 4,
         "n_routed_experts_per_token": 2,
         "intermediate_size": 64,
     }
-    if expert_capacity_factor is not None:
-        mlp_kwargs["expert_capacity_factor"] = expert_capacity_factor
     return TrainConfig(
         model=ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs=mlp_kwargs),
         training=TrainingConfig(mixed_precision=mixed_precision),
@@ -429,10 +427,3 @@ def test_dropless_moe_requires_bf16_no_raises():
 def test_dropless_moe_bf16_ok():
     cfg = _moe_train_config("bf16")
     assert cfg.training.mixed_precision == "bf16"
-
-
-def test_capacity_capped_moe_any_precision_ok():
-    # expert_capacity_factor set → capacity-capped path; no restriction
-    _moe_train_config("fp16", expert_capacity_factor=1.25)
-    _moe_train_config("no", expert_capacity_factor=1.25)
-    _moe_train_config("bf16", expert_capacity_factor=1.25)

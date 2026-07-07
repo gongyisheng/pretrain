@@ -67,7 +67,6 @@ class ModelConfig:
         if self.mlp_cls == "moe":
             self.mlp_kwargs.setdefault("n_routed_experts_per_token", 2)
             self.mlp_kwargs.setdefault("n_shared_experts", 0)
-            self.mlp_kwargs.setdefault("expert_capacity_factor", None)
             self.mlp_kwargs.setdefault("bias", False)
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
             # exclusive balancing strategies; aux_loss defaults on unless the
@@ -224,16 +223,11 @@ class TrainConfig:
 
     def _validate_moe_compile_precision(self):
         m = self.model
-        if (
-            m.mlp_cls == "moe"
-            and m.mlp_kwargs.get("expert_capacity_factor") is None
-            and self.training.mixed_precision != "bf16"
-        ):
+        if m.mlp_cls == "moe" and self.training.mixed_precision != "bf16":
             raise ValueError(
-                "dropless MoE (mlp_cls='moe', expert_capacity_factor=None) requires "
+                "dropless MoE (mlp_cls='moe') requires "
                 f"training.mixed_precision='bf16'; got {self.training.mixed_precision!r}. "
-                "torch._grouped_mm is bf16-only under torch.compile. Use mixed_precision: bf16, "
-                "or set expert_capacity_factor to use the capacity-capped path."
+                "torch._grouped_mm is bf16-only under torch.compile."
             )
 
     def to_dict(self):

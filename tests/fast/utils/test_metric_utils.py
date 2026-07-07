@@ -264,8 +264,7 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
     model_cfg = _CFG_FACTORIES[arch_id](impl)
     model = build_model(_FakeTrainConfig(model_cfg))
     is_moe = model_cfg.mlp_cls == "moe"
-    dropless = is_moe and model_cfg.mlp_kwargs.get("expert_capacity_factor") is None
-    if dropless:
+    if is_moe:
         for block in model.blocks:
             block.attn = torch.compile(block.attn, backend="eager")
         compiled = model
