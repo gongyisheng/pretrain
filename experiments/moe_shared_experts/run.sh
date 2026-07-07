@@ -9,7 +9,7 @@ dir=experiments/moe_shared_experts
 
 splits=("0 8" "1 7" "2 6" "3 5" "4 4" "5 3" "6 2" "7 1")
 
-configs=()
+configs=("$dir"/qwen3_51m.yaml)  # dense reference at the same active capacity
 for sk in "${splits[@]}"; do
   read -r s k <<< "$sk"
   match=("$dir"/*_s"${s}"_r"${k}".yaml)
