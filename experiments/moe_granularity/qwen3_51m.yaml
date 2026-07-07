@@ -24,8 +24,8 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 16
-  gradient_accumulation_steps: 16
+  batch_size: 64
+  gradient_accumulation_steps: 4
   max_steps: 50000
   mixed_precision: bf16
   activation_checkpointing: false
@@ -34,7 +34,7 @@ training:
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
-  eval_batch_size: 16
+  eval_batch_size: 64
 optimizer:
   name: muon
   lr: 5e-4
