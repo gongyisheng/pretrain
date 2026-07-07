@@ -378,6 +378,7 @@ class Trainer:
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
             self.metrics.on_train_step(
                 loss=accum_loss,
                 grad_norm=grad_norm_val,
@@ -387,6 +388,8 @@ class Trainer:
                 scale_before=scale_before,
                 aux_loss=aux_loss,
             )
+            self.model.post_step()
+
             self.scheduler.step()
 
             # Defer loss sync to next iteration (save tensor, read later)
@@ -474,7 +477,6 @@ class Trainer:
                 loss=loss.item(),
                 logits=logits,
                 labels=labels,
-                model=self.model,
                 aux_loss=aux_loss.item() if aux_loss is not None else None,
                 tokenizer=self.tokenizer,
                 eot_token_id=self.eot_token_id,

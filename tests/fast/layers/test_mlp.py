@@ -356,14 +356,15 @@ def test_sparse_moe_block_records_expert_load():
         n_routed_experts=4,
         n_routed_experts_per_token=2,
     )
+    block.train()
     x = torch.randn(2, 8, 64)  # T=16 tokens, k=2 -> 32 routings
     block(x)
-    load = block.expert_load
+    load = block.expert_load_accum
     assert load.shape == (4,)
     assert load.sum().item() == 16 * 2
     assert not load.requires_grad
     # Buffer is non-persistent (excluded from state_dict).
-    assert "expert_load" not in block.state_dict()
+    assert "expert_load_accum" not in block.state_dict()
 
 
 def test_sparse_moe_block_aux_loss_coef_stored():
@@ -419,15 +420,43 @@ def test_sparse_moe_block_expert_bias_updates_in_train_only():
 
     block.eval()
     block(x)
+    block.post_step()
     assert (
         torch.count_nonzero(block.router.expert_bias.bias) == 0
-    )  # no update during eval
+    )  # eval forward doesn't accumulate load, so post_step is a no-op for the bias
 
     block.train()
     block(x)
     assert (
+        torch.count_nonzero(block.router.expert_bias.bias) == 0
+    )  # forward only accumulates load; bias unchanged until post_step
+    block.post_step()
+    assert (
         torch.count_nonzero(block.router.expert_bias.bias) > 0
-    )  # imbalanced load moves bias
+    )  # imbalanced load moves bias at the step boundary
+
+
+def test_sparse_moe_block_post_step_accumulates_across_microbatches():
+    torch.manual_seed(0)
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        aux_loss=False,
+        expert_bias=True,
+    )
+    block.train()
+    x = torch.randn(4, 16, 64)  # 64 tokens, k=2 -> 128 routings per micro-batch
+
+    block(x)
+    block(x)  # two micro-batches accumulate before the step boundary
+    assert block.expert_load_accum.sum().item() == 2 * 64 * 2
+
+    block.post_step()
+    # post_step consumes the accumulated load (bias update) and resets it.
+    assert block.expert_load_accum.sum().item() == 0
+    assert "expert_load_accum" not in block.state_dict()  # non-persistent
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +872,6 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
         expert_up_bias=None if gated else block.expert_up_bias,
         expert_down_bias=block.expert_down_bias,
     )
-    assert block.expert_load[3].item() == 0
     assert torch.allclose(out, out_ref, atol=1e-4)
     assert torch.allclose(aux, aux_ref, atol=1e-4)
 

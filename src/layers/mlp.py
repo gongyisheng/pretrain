@@ -330,7 +330,6 @@ class SparseMoEBlock(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
-        # Defaults/validation (intermediate_size, activation) live in ModelConfig.
         if aux_loss and expert_bias:
             raise ValueError(
                 "aux_loss and expert_bias are mutually exclusive MoE balancing strategies"
@@ -396,11 +395,8 @@ class SparseMoEBlock(nn.Module):
         )
         self.expert_dropout = nn.Dropout(dropout)
 
-        # Per-expert token routing load from the most recent forward, for
-        # load-balance monitoring (MaxVio). Non-persistent; written in-place so
-        # torch.compile records a buffer mutation rather than graph-breaking.
         self.register_buffer(
-            "expert_load",
+            "expert_load_accum",
             torch.zeros(n_routed_experts, dtype=torch.long),
             persistent=False,
         )
@@ -429,7 +425,8 @@ class SparseMoEBlock(nn.Module):
         token_ids_sorted = token_ids[order]
         weights_sorted = weights[order]
         expert_counts = torch.bincount(expert_ids_sorted, minlength=E)
-        self.expert_load.copy_(expert_counts.detach())
+        if self.training:
+            self.expert_load_accum += expert_counts.detach()
         offs = expert_counts.cumsum(0).to(torch.int32)
         x_sorted = x_flat[token_ids_sorted]
 
@@ -453,10 +450,7 @@ class SparseMoEBlock(nn.Module):
         output.index_add_(0, token_ids_sorted, expert_out)
 
         aux_loss = None
-        if self.expert_bias:
-            if self.training:
-                self.router.update_expert_bias(expert_counts)
-        elif self.aux_loss:
+        if self.aux_loss:
             with torch.no_grad():
                 f = expert_counts.to(x.dtype) / BS  # (E,)
             P = router_probs.mean(0)  # (E,)
@@ -467,6 +461,12 @@ class SparseMoEBlock(nn.Module):
             shared_out, _ = self.shared_expert(x)
             output = output + shared_out
         return output, aux_loss
+
+    @torch.no_grad()
+    def post_step(self):
+        if self.expert_bias:
+            self.router.update_expert_bias(self.expert_load_accum)
+            self.expert_load_accum.zero_()
 
     @classmethod
     def compute_flops(

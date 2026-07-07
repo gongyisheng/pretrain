@@ -40,7 +40,7 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 
 def collect_moe_blocks(model: torch.nn.Module) -> list[SparseMoEBlock]:
     """All SparseMoEBlock submodules, in order. Resolve once and cache — each
-    block exposes its last-forward routing load via `expert_load`."""
+    block exposes its per-step accumulated routing load via `expert_load_accum`."""
     return [m for m in model.modules() if isinstance(m, SparseMoEBlock)]
 
 

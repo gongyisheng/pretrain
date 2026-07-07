@@ -96,7 +96,6 @@ class MetricsTracker:
         self._eval_bpb_bytes = 0
         self._eval_acc_correct = 0
         self._eval_acc_total = 0
-        self._eval_moe_expert_load_sum = None
 
     # ------------------------------------------------------------------
     # Model summary
@@ -195,7 +194,7 @@ class MetricsTracker:
             if self._moe_blocks is None:
                 self._moe_blocks = metric_utils.collect_moe_blocks(model)
             for acc, b in zip(self._moe_expert_load_sum, self._moe_blocks):
-                acc += b.expert_load.to(dtype=acc.dtype, device=acc.device)
+                acc += b.expert_load_accum.to(dtype=acc.dtype, device=acc.device)
 
     def log_train(
         self,
@@ -304,18 +303,6 @@ class MetricsTracker:
         self._eval_bpb_bytes = 0
         self._eval_acc_correct = 0
         self._eval_acc_total = 0
-        # Per-layer routing load summed over eval batches; log_eval computes
-        # MaxVio on the average. Blocks reuse the cache on_train_step populated.
-        self._eval_moe_expert_load_sum = (
-            [
-                torch.zeros(
-                    self._n_routed_experts, dtype=torch.float32, device=self.device
-                )
-                for _ in range(self._n_moe_layers)
-            ]
-            if self.is_moe
-            else None
-        )
 
     def on_eval_step(
         self,
@@ -323,7 +310,6 @@ class MetricsTracker:
         loss: float,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        model: torch.nn.Module | None = None,
         aux_loss: float | None = None,
         tokenizer=None,
         eot_token_id: int | None = None,
@@ -331,8 +317,7 @@ class MetricsTracker:
         """Accumulate one eval batch's contributions (loss, accuracy, bpb).
 
         tokenizer (for bpb byte-counting) and eot_token_id (excluded from SFT
-        accuracy) are passed per call rather than held on the tracker. `model`
-        (MoE only) resolves MoE blocks once for load-balance monitoring.
+        accuracy) are passed per call rather than held on the tracker.
         """
         self._eval_loss_sum += loss
         self._eval_n_batches += 1
@@ -352,12 +337,6 @@ class MetricsTracker:
             self._eval_bpb_bytes += metric_utils.compute_decoded_byte_len(
                 tokenizer, target_ids
             )
-
-        if self.is_moe and model is not None:
-            if self._moe_blocks is None:
-                self._moe_blocks = metric_utils.collect_moe_blocks(model)
-            for acc, b in zip(self._eval_moe_expert_load_sum, self._moe_blocks):
-                acc += b.expert_load.to(dtype=acc.dtype, device=acc.device)
 
     def log_eval(
         self, *, step: int, train_avg_acc: float | None = None
@@ -399,10 +378,6 @@ class MetricsTracker:
                 d["val/train_acc"] = train_avg_acc
         if self.is_moe and avg_aux_loss is not None:
             d["val/aux_loss"] = avg_aux_loss - self._aux_floor
-        if self.is_moe and self._eval_moe_expert_load_sum is not None:
-            loads = [acc / n_batches for acc in self._eval_moe_expert_load_sum]
-            for name, v in metric_utils.compute_moe_maxvio(loads).items():
-                d[f"val/moe_maxvio/{name}"] = v
 
         self.logger.log(d, step=step)
         print(self._format_eval_msg(d, avg_loss))

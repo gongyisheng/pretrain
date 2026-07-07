@@ -132,3 +132,8 @@ class TransformerLM(nn.Module):
         if not return_logits:
             return x
         return self.lm_head(x), aux_total
+
+    def post_step(self):
+        for module in self.modules():
+            if module is not self and hasattr(module, "post_step"):
+                module.post_step()
