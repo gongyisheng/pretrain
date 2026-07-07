@@ -752,14 +752,3 @@ def test_compute_moe_maxvio_aggregates_per_layer():
     assert out["layer_1"] == pytest.approx(0.0)
     assert out["mean"] == pytest.approx(0.5)
     assert out["max"] == pytest.approx(1.0)
-
-
-def test_collect_moe_blocks_finds_all_blocks():
-    from src.layers.mlp import SparseMoEBlock
-
-    model = torch.nn.Module()
-    model.a = SparseMoEBlock(d_model=32, intermediate_size=64, n_routed_experts=4)
-    model.b = SparseMoEBlock(d_model=32, intermediate_size=64, n_routed_experts=4)
-    blocks = metric_utils.collect_moe_blocks(model)
-    assert blocks == [model.a, model.b]
-    assert all(b.expert_load_accum.shape == (4,) for b in blocks)

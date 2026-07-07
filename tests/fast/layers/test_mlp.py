@@ -7,6 +7,7 @@ from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.mlp import (
     DenseMLPBlock,
     ExpertBias,
+    ExpertLoad,
     MLP_REGISTRY,
     MoERouter,
     ROUTER_SCORE_FNS,
@@ -426,6 +427,24 @@ def test_sparse_moe_block_aux_loss_has_grad():
     assert block.router.gate.weight.grad is not None
 
 
+def test_expert_load_record_and_reset():
+    load = ExpertLoad(n_experts=4)
+    counts = torch.tensor([1, 2, 3, 4])
+    # training routes into train_load (accumulates), leaving eval_load untouched.
+    load.record_load(counts, training=True)
+    load.record_load(counts, training=True)
+    assert load.train_load.tolist() == [2, 4, 6, 8]
+    assert load.eval_load.tolist() == [0, 0, 0, 0]
+    # eval overwrites eval_load with the current batch, leaving train_load.
+    load.record_load(torch.tensor([5, 6, 7, 8]), training=False)
+    assert load.eval_load.tolist() == [5, 6, 7, 8]
+    assert load.train_load.tolist() == [2, 4, 6, 8]
+    load.reset_train_load()
+    load.reset_eval_load()
+    assert load.train_load.tolist() == [0, 0, 0, 0]
+    assert load.eval_load.tolist() == [0, 0, 0, 0]
+
+
 def test_sparse_moe_block_records_expert_load():
     block = SparseMoEBlock(
         d_model=64,
@@ -436,12 +455,12 @@ def test_sparse_moe_block_records_expert_load():
     block.train()
     x = torch.randn(2, 8, 64)  # T=16 tokens, k=2 -> 32 routings
     block(x)
-    load = block.expert_load_accum
+    load = block.expert_load.train_load
     assert load.shape == (4,)
     assert load.sum().item() == 16 * 2
     assert not load.requires_grad
     # Buffer is non-persistent (excluded from state_dict).
-    assert "expert_load_accum" not in block.state_dict()
+    assert "expert_load.train_load" not in block.state_dict()
 
 
 def test_sparse_moe_block_aux_loss_coef_stored():
@@ -528,12 +547,12 @@ def test_sparse_moe_block_post_step_accumulates_across_microbatches():
 
     block(x)
     block(x)  # two micro-batches accumulate before the step boundary
-    assert block.expert_load_accum.sum().item() == 2 * 64 * 2
+    assert block.expert_load.train_load.sum().item() == 2 * 64 * 2
 
     block.post_step()
     # post_step consumes the accumulated load (bias update) and resets it.
-    assert block.expert_load_accum.sum().item() == 0
-    assert "expert_load_accum" not in block.state_dict()  # non-persistent
+    assert block.expert_load.train_load.sum().item() == 0
+    assert "expert_load.train_load" not in block.state_dict()  # non-persistent
 
 
 # ---------------------------------------------------------------------------

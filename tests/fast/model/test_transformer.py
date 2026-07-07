@@ -147,6 +147,29 @@ def test_moe_forward_returns_aux(impl, device):
     assert aux.item() >= 0.0
 
 
+def test_forward_meta_follows_training_mode():
+    from src.layers.mlp import SparseMoEBlock
+
+    model = build_model(_moe_cfg("sdpa"))
+    blocks = [m for m in model.modules() if isinstance(m, SparseMoEBlock)]
+    assert len(blocks) == model.config.n_layers
+
+    model.train()
+    meta = model.forward_meta()
+    assert len(meta) == model.config.n_layers
+    # train mode -> each dict's expert_load is the block's own buffer (identity)
+    assert meta[0]["expert_load"] is blocks[0].expert_load.train_load
+    assert all(m["expert_load"].shape == (4,) for m in meta)
+
+    model.eval()
+    assert model.forward_meta()[0]["expert_load"] is blocks[0].expert_load.eval_load
+
+
+def test_forward_meta_empty_for_dense():
+    model = build_model(_qwen3_cfg("sdpa"))
+    assert model.forward_meta() == []
+
+
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_intra_doc_blocks_cross_doc(impl, device):
     """Intra-doc mask: modifying doc0 tokens must not change doc1 outputs."""

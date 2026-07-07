@@ -477,6 +477,7 @@ class Trainer:
                 loss=loss.item(),
                 logits=logits,
                 labels=labels,
+                model=self.model,
                 aux_loss=aux_loss.item() if aux_loss is not None else None,
                 tokenizer=self.tokenizer,
                 eot_token_id=self.eot_token_id,

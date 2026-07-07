@@ -224,6 +224,29 @@ class ExpertBias(nn.Module):
         return n_experts  # the bias buffer
 
 
+class ExpertLoad(nn.Module):
+    def __init__(self, n_experts: int):
+        super().__init__()
+        self.register_buffer(
+            "train_load", torch.zeros(n_experts, dtype=torch.long), persistent=False
+        )
+        self.register_buffer(
+            "eval_load", torch.zeros(n_experts, dtype=torch.long), persistent=False
+        )
+
+    def record_load(self, counts: torch.Tensor, training: bool) -> None:
+        if training:
+            self.train_load += counts
+        else:
+            self.eval_load.copy_(counts)
+
+    def reset_train_load(self) -> None:
+        self.train_load.zero_()
+
+    def reset_eval_load(self) -> None:
+        self.eval_load.zero_()
+
+
 class MoERouter(nn.Module):
     """MoE top-k router with fp32-pinned gate weight.
 
@@ -405,11 +428,7 @@ class SparseMoEBlock(nn.Module):
         )
         self.expert_dropout = nn.Dropout(dropout)
 
-        self.register_buffer(
-            "expert_load_accum",
-            torch.zeros(n_routed_experts, dtype=torch.long),
-            persistent=False,
-        )
+        self.expert_load = ExpertLoad(n_routed_experts)
 
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)
@@ -435,8 +454,7 @@ class SparseMoEBlock(nn.Module):
         token_ids_sorted = token_ids[order]
         weights_sorted = weights[order]
         expert_counts = torch.bincount(expert_ids_sorted, minlength=E)
-        if self.training:
-            self.expert_load_accum += expert_counts.detach()
+        self.expert_load.record_load(expert_counts.detach(), self.training)
         offs = expert_counts.cumsum(0).to(torch.int32)
         x_sorted = x_flat[token_ids_sorted]
 
@@ -475,8 +493,16 @@ class SparseMoEBlock(nn.Module):
     @torch.no_grad()
     def post_step(self):
         if self.expert_bias:
-            self.router.update_expert_bias(self.expert_load_accum)
-            self.expert_load_accum.zero_()
+            self.router.update_expert_bias(self.expert_load.train_load)
+            self.expert_load.reset_train_load()
+
+    def forward_meta(self) -> dict:
+        """Routing metadata from the last forward. `expert_load` is the accumulated
+        train counts in train mode, the current batch's counts in eval mode."""
+        load = (
+            self.expert_load.train_load if self.training else self.expert_load.eval_load
+        )
+        return {"expert_load": load}
 
     @classmethod
     def compute_flops(
