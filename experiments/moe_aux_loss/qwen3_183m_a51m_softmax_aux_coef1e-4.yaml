@@ -15,7 +15,7 @@ model:
     n_routed_experts: 64
     n_routed_experts_per_token: 8
     aux_loss: true
-    aux_loss_coef: 1e-0
+    aux_loss_coef: 1e-4
     dropout: 0.0
   norm_cls: rmsnorm
   pos_emb_cls: rope
@@ -35,7 +35,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_aux_loss/qwen3_183m_a51m_softmax_aux_coef1e-0/
+  checkpoint_dir: checkpoints/moe_aux_loss/qwen3_183m_a51m_softmax_aux_coef1e-4/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -56,5 +56,5 @@ scheduler:
   min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-aux-loss
-  wandb_run_name: qwen3-183m-a51m-softmax-auxloss-coef1e-0
+  wandb_run_name: qwen3-183m-a51m-softmax-auxloss-coef1e-4
   log_every: 100

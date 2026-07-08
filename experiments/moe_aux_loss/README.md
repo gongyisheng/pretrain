@@ -20,7 +20,7 @@ different-magnitude scores into the aux-loss and may prefer different `α`.
 Fixed testbed: `qwen3_183m` (183M total, ~51M active), 64 experts, top-8, no shared
 experts, no capacity limit. Active intermediate width `k·is = 8·192 = 1536`
 (3·d_model, Qwen3-0.6B FFN ratio). Two sweeps — **softmax** and **sigmoid** router —
-each varying only `aux_loss_coef` over `{0, 1e-3, 1e-2, 1e-1, 1e-0}`.
+each varying only `aux_loss_coef` over `{0, 1e-4, 1e-3, 1e-2, 1e-1}`.
 
 | Param | Value |
 |-------|-------|
@@ -35,10 +35,10 @@ each varying only `aux_loss_coef` over `{0, 1e-3, 1e-2, 1e-1, 1e-0}`.
 | Config | aux_loss_coef |
 |--------|---------------|
 | `qwen3_183m_a51m_softmax_aux_coef0` / `qwen3_183m_a51m_sigmoid_aux_coef0` | 0 (no balancing baseline) |
+| `..._aux_coef1e-4` | 0.0001 |
 | `..._aux_coef1e-3` | 0.001 |
 | `..._aux_coef1e-2` | 0.01 (Switch default) |
 | `..._aux_coef1e-1` | 0.1 |
-| `..._aux_coef1e-0` | 1.0 |
 
 ## Run
 
@@ -61,21 +61,21 @@ each sweep on its own.
 
 | aux_loss_coef | val_loss | val_aux_loss (balance) | notes |
 |---------------|----------|------------------------|-------|
-| 0     | | | no balancing |
-| 0.001 | | | |
-| 0.01  | | | |
-| 0.1   | | | |
-| 1.0   | | | |
+| 0      | | | no balancing |
+| 0.0001 | | | |
+| 0.001  | | | |
+| 0.01   | | | |
+| 0.1    | | | |
 
 **sigmoid**
 
 | aux_loss_coef | val_loss | val_aux_loss (balance) | notes |
 |---------------|----------|------------------------|-------|
-| 0     | | | no balancing |
-| 0.001 | | | |
-| 0.01  | | | |
-| 0.1   | | | |
-| 1.0   | | | |
+| 0      | | | no balancing |
+| 0.0001 | | | |
+| 0.001  | | | |
+| 0.01   | | | |
+| 0.1    | | | |
 
 Best per score fn: _TBD_ → pick finer range from here.
 

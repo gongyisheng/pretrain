@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-coefs=(0 1e-3 1e-2 1e-1 1e-0)
+coefs=(0 1e-4 1e-3 1e-2 1e-1)
 
 configs=()
 for c in "${coefs[@]}"; do
