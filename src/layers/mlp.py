@@ -372,6 +372,7 @@ class SparseMoEBlock(nn.Module):
         self.n_shared_experts = n_shared_experts
         self.aux_loss = aux_loss
         self.aux_loss_coef = aux_loss_coef
+        self.router_score_fn = router_score_fn
         self.expert_bias = expert_bias
         self.expert_bias_update_rate = expert_bias_update_rate
         self.gated = gated
@@ -481,7 +482,11 @@ class SparseMoEBlock(nn.Module):
         if self.aux_loss:
             with torch.no_grad():
                 f = expert_counts.to(x.dtype) / BS  # (E,)
-            P = router_probs.mean(0)  # (E,)
+            probs = router_probs
+            # normalize sigmoid token probs, softmax no-op
+            if self.router_score_fn == "sigmoid":
+                probs = probs / (probs.sum(-1, keepdim=True) + 1e-9)
+            P = probs.mean(0)  # (E,)
             aux_loss = E * (f * P).sum()
 
         output = output.view(B, S, D)

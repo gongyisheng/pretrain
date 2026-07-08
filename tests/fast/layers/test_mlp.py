@@ -414,6 +414,27 @@ def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
     assert aux_loss.item() >= 0.0
 
 
+def test_sparse_moe_sigmoid_aux_loss_normalized():
+    """Sigmoid scores are unnormalized (each in (0,1), summing to ~E/2), so the
+    Switch balance loss must normalize per-token probs before computing P.
+    Without it, aux ~ E*k/2 at init and the router can minimize it by shrinking
+    all probs (aux -> 0, logged value goes negative) instead of balancing load.
+    With normalization the loss is ~k, matching softmax."""
+    torch.manual_seed(0)
+    k, E = 8, 64
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        router_score_fn="sigmoid",
+    )
+    x = torch.randn(8, 32, 64)
+    _, aux_loss = block(x)
+    # Normalized balance loss is ~k at init; unnormalized would be ~E*k/2 = 256.
+    assert aux_loss.item() < 4 * k
+
+
 def test_sparse_moe_block_aux_loss_has_grad():
     block = SparseMoEBlock(
         d_model=64,
