@@ -8,7 +8,7 @@ Too little warmup risks early instability (large updates before optimizer state 
 
 ## Setup
 
-Fixed: Qwen3 183M-A51M (64 routed experts, top-8, softmax router, aux-loss 1e-3), `seq_len=1024`, `lr=1e-3`, `min_lr=1e-4`, cosine schedule over `max_steps=50000`, Muon optimizer, `batch_size=16`, `grad_accum=16`, `early_stop=10000`. Only `warmup_steps` varies.
+Fixed: Qwen3 183M-A51M (64 routed experts, top-8, sigmoid router, aux-loss 1e-3), `seq_len=1024`, `lr=1e-3`, `min_lr=1e-4`, cosine schedule over `max_steps=50000`, Muon optimizer, `batch_size=16`, `grad_accum=16`, `early_stop=10000`. Only `warmup_steps` varies.
 
 | Config | warmup_steps | % of schedule |
 |---|---|---|
