@@ -1,6 +1,7 @@
 #!/bin/bash
-# MoE warmup-steps sweep (183m_a51m testbed: 64 routed, top-8, softmax router, aux-loss 1e-3).
-# Usage: nohup bash experiments/moe_warmup/run.sh > logs/moe_warmup.log 2>&1 &
+# MoE warmup-steps sweep, sigmoid router, aux-loss 1e-3.
+# Model: qwen3_183m_a51m -> 64 routed, top-8, 0 shared.
+# Usage: nohup bash experiments/moe_warmup/run_s0r8.sh > logs/moe_warmup_s0r8.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
@@ -20,4 +21,4 @@ for config in "${configs[@]}"; do
     echo ""
 done
 
-echo "=== All moe_warmup runs complete ==="
+echo "=== All moe_warmup s0r8 runs complete ==="
