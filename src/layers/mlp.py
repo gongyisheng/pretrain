@@ -4,12 +4,6 @@ import torch.nn as nn
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
-ROUTER_SCORE_FNS = {
-    "softmax": lambda logits: logits.softmax(dim=-1),
-    "sigmoid": lambda logits: logits.sigmoid(),
-}
-
-
 @torch.compile
 def gated_mlp(
     x: torch.Tensor,
@@ -247,6 +241,12 @@ class ExpertLoad(nn.Module):
         self.eval_load.zero_()
 
 
+MOE_ROUTER_SCORE_FNS = {
+    "softmax": lambda logits: logits.softmax(dim=-1),
+    "sigmoid": lambda logits: logits.sigmoid(),
+}
+
+
 class MoERouter(nn.Module):
     """MoE top-k router with fp32-pinned gate weight.
 
@@ -272,7 +272,7 @@ class MoERouter(nn.Module):
         self.n_routed_experts = n_routed_experts
         self.n_routed_experts_per_token = n_routed_experts_per_token
         self.normalize = normalize
-        self.score_fn = ROUTER_SCORE_FNS[router_score_fn]
+        self.score_fn = MOE_ROUTER_SCORE_FNS[router_score_fn]
         self.gate = nn.Linear(d_model, n_routed_experts, bias=False)
         self.expert_bias = (
             ExpertBias(n_routed_experts, expert_bias_update_rate)

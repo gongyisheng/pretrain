@@ -10,7 +10,7 @@ from src.layers.mlp import (
     ExpertLoad,
     MLP_REGISTRY,
     MoERouter,
-    ROUTER_SCORE_FNS,
+    MOE_ROUTER_SCORE_FNS,
     SparseMoEBlock,
     grouped_mlp,
     gated_mlp,
@@ -265,7 +265,7 @@ def test_sparse_moe_block_forwards_score_fn_to_router():
         aux_loss=True,
         router_score_fn="sigmoid",
     )
-    assert block.router.score_fn is ROUTER_SCORE_FNS["sigmoid"]
+    assert block.router.score_fn is MOE_ROUTER_SCORE_FNS["sigmoid"]
 
 
 def test_moe_router_gate_weight_stays_fp32_across_dtype_casts():
