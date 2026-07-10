@@ -99,6 +99,7 @@ class DataConfig:
     data_dir: str = "data/"
     val_split: float = 0.01
     num_workers: int = 4
+    prefetch_factor: int = 4
     packing: bool = True
     tokenizer_path: str = "tokenizers/custom_bpe"
 

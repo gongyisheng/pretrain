@@ -128,7 +128,7 @@ class Trainer:
             num_workers=n_worker,
             pin_memory=True,
             persistent_workers=n_worker > 0,
-            prefetch_factor=1 if n_worker > 0 else None,
+            prefetch_factor=config.data.prefetch_factor if n_worker > 0 else None,
             generator=g,
             worker_init_fn=Trainer._worker_init_fn,
         )
@@ -139,7 +139,7 @@ class Trainer:
             num_workers=n_worker,
             pin_memory=True,
             persistent_workers=n_worker > 0,
-            prefetch_factor=1 if n_worker > 0 else None,
+            prefetch_factor=config.data.prefetch_factor if n_worker > 0 else None,
             generator=g,
             worker_init_fn=Trainer._worker_init_fn,
         )
