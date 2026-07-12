@@ -40,7 +40,6 @@ Each `{gate}` ∈ {`softmax`, `sigmoid`}:
 
 | Config | expert_bias_update_rate |
 |--------|-------------------------|
-| `qwen3_188m_a51m_{gate}_expert_bias_rate1e-5` | 0.00001 |
 | `qwen3_188m_a51m_{gate}_expert_bias_rate1e-4` | 0.0001 |
 | `qwen3_188m_a51m_{gate}_expert_bias_rate1e-3` | 0.001 (DeepSeek-V3 default) |
 | `qwen3_188m_a51m_{gate}_expert_bias_rate1e-2` | 0.01 |
@@ -65,12 +64,10 @@ uv run python scripts/train.py --config experiments/moe_expert_bias/qwen3_188m_a
 
 | gate | scheme | param | val_loss | notes |
 |------|--------|-------|----------|-------|
-| softmax | expert_bias | u=0.00001 | | |
 | softmax | expert_bias | u=0.0001 | | |
 | softmax | expert_bias | u=0.001  | | DeepSeek-V3 default |
 | softmax | expert_bias | u=0.01   | | |
 | softmax | aux_loss    | coef=0.001 | | benchmark baseline |
-| sigmoid | expert_bias | u=0.00001 | | |
 | sigmoid | expert_bias | u=0.0001 | | |
 | sigmoid | expert_bias | u=0.001  | | DeepSeek-V3 default |
 | sigmoid | expert_bias | u=0.01   | | |
