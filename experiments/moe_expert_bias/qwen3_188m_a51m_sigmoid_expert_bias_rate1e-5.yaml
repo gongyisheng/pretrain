@@ -18,7 +18,8 @@ model:
     dropout: 0.0
     aux_loss: false
     expert_bias: true
-    expert_bias_update_rate: 1e-4
+    expert_bias_update_rate: 1e-5
+    router_score_fn: sigmoid
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -37,7 +38,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_expert_bias/qwen3_188m_a51m_expert_bias_rate1e-4/
+  checkpoint_dir: checkpoints/moe_expert_bias/qwen3_188m_a51m_sigmoid_expert_bias_rate1e-5/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -58,5 +59,5 @@ scheduler:
   min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-expert-bias
-  wandb_run_name: qwen3-188m-a51m-expertbias-rate1e-4
+  wandb_run_name: qwen3-188m-a51m-sigmoid-expertbias-rate1e-5
   log_every: 100

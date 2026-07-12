@@ -1,6 +1,6 @@
 #!/bin/bash
-# MoE auxiliary-loss-free expert-bias update-rate sweep (find best update rate).
-# Usage: nohup bash experiments/moe_expert_bias/run.sh > logs/moe_expert_bias.log 2>&1 &
+# MoE aux-loss-free expert-bias update-rate sweep, softmax router.
+# Usage: nohup bash experiments/moe_expert_bias/run_softmax.sh > logs/moe_expert_bias_softmax.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
@@ -10,10 +10,10 @@ rates=(1e-5 1e-4 1e-3 1e-2)
 configs=()
 
 # Aux-loss baseline (same testbed) as a benchmark for loss-free expert bias.
-configs+=("qwen3_188m_a51m_aux_coef1e-3")
+configs+=("qwen3_188m_a51m_softmax_aux_coef1e-3")
 
 for r in "${rates[@]}"; do
-    configs+=("qwen3_188m_a51m_expert_bias_rate${r}")
+    configs+=("qwen3_188m_a51m_softmax_expert_bias_rate${r}")
 done
 
 for config in "${configs[@]}"; do
@@ -24,4 +24,4 @@ for config in "${configs[@]}"; do
     echo ""
 done
 
-echo "=== All moe_expert_bias runs complete ==="
+echo "=== All moe_expert_bias softmax runs complete ==="
