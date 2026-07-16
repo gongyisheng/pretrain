@@ -14,8 +14,10 @@ model:
     n_routed_experts: 64
     n_routed_experts_per_token: 6
     n_shared_experts: 2
-    aux_loss: true
-    aux_loss_coef: 0.001
+    aux_loss: false
+    expert_bias: true
+    expert_bias_update_rate: 0.001
+    router_score_fn: sigmoid
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -27,8 +29,8 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 64
-  gradient_accumulation_steps: 4
+  batch_size: 32
+  gradient_accumulation_steps: 8
   max_steps: 50000
   mixed_precision: bf16
   activation_checkpointing: false

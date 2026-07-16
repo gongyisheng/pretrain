@@ -25,7 +25,8 @@ Common backbone (Qwen3-style, all runs identical except the MLP split):
 | norm / pos_emb | rmsnorm / rope (θ=10000) |
 
 Invariant: active experts per token `s + k = 8`, so active intermediate `= 1536` (≈51M
-active params) and FLOPs/token are constant. All cells use `moe` with `aux_loss_coef=0.001`
+active params) and FLOPs/token are constant. All cells use `moe` with aux-loss-free
+load balancing (`expert_bias: true`, `expert_bias_update_rate=0.001`)
 and no expert capacity limit (no token drops). `s0_r8` is the pure-routed benchmark (no shared
 expert); as `s` grows the always-on shared FFN takes over more of the fixed budget.
 
@@ -46,9 +47,9 @@ Config filename = ckpt dir = W&B run name. `s` = `n_shared_experts`, `k` = top-k
 (= the MoE's active intermediate `8·192`), so its total ≈ active ≈ 51M. It bounds what the
 same active-FLOP budget buys with no routing at all.
 
-Training (all runs): batch 64 × grad-accum 4 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
+Training (all runs): batch 32 × grad-accum 8 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
 50000 (~13B tokens, fixed budget for a controlled comparison), cosine LR 1e-3 → 1e-4,
-warmup 1500, bf16.
+warmup 1500, bf16. Router uses a sigmoid score fn (`router_score_fn: sigmoid`).
 
 ## Running
 
