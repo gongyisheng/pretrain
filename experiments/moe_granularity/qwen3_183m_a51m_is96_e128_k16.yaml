@@ -8,11 +8,14 @@ model:
     n_heads: 8
     n_kv_heads: 4
     qk_norm: true
-  mlp_cls: dense
+  mlp_cls: moe
   mlp_kwargs:
-    intermediate_size: 1536
-    activation: silu
-    gated: true
+    intermediate_size: 96
+    n_routed_experts: 128
+    n_routed_experts_per_token: 16
+    expert_bias: true
+    expert_bias_update_rate: 1e-3
+    router_score_fn: sigmoid
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -30,14 +33,14 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_granularity/qwen3_51m/
+  checkpoint_dir: checkpoints/moe_granularity/qwen3_183m_a51m_is96_e128_k16/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
   eval_batch_size: 64
 optimizer:
   name: muon
-  lr: 5e-4
+  lr: 1e-3
   weight_decay: 0.1
   betas:
   - 0.9
@@ -48,8 +51,8 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 1500
-  min_lr: 5e-5
+  min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-granularity
-  wandb_run_name: qwen3-51m
-  log_every: 10
+  wandb_run_name: qwen3-183m-a51m-is96-e128-k16
+  log_every: 100

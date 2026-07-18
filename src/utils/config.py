@@ -69,7 +69,7 @@ class ModelConfig:
             self.mlp_kwargs.setdefault("n_routed_experts_per_token", 2)
             self.mlp_kwargs.setdefault("n_shared_experts", 0)
             self.mlp_kwargs.setdefault("bias", False)
-            self.mlp_kwargs.setdefault("router_score_fn", "softmax")
+            self.mlp_kwargs.setdefault("router_score_fn", "sigmoid")
             if self.mlp_kwargs["router_score_fn"] not in MOE_ROUTER_SCORE_FNS:
                 raise ValueError(
                     f"router_score_fn must be one of {sorted(MOE_ROUTER_SCORE_FNS)}; "

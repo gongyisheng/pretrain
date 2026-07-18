@@ -340,26 +340,26 @@ def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
         ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4})
 
 
-def test_modelconfig_moe_router_score_fn_defaults_softmax():
+def test_modelconfig_moe_router_score_fn_defaults_sigmoid():
     cfg = ModelConfig(
         d_model=64,
         mlp_cls="moe",
         mlp_kwargs={"n_routed_experts": 4, "aux_loss": True},
     )
-    assert cfg.mlp_kwargs["router_score_fn"] == "softmax"
+    assert cfg.mlp_kwargs["router_score_fn"] == "sigmoid"
 
 
-def test_modelconfig_moe_router_score_fn_sigmoid_kept():
+def test_modelconfig_moe_router_score_fn_softmax_kept():
     cfg = ModelConfig(
         d_model=64,
         mlp_cls="moe",
         mlp_kwargs={
             "n_routed_experts": 4,
             "aux_loss": True,
-            "router_score_fn": "sigmoid",
+            "router_score_fn": "softmax",
         },
     )
-    assert cfg.mlp_kwargs["router_score_fn"] == "sigmoid"
+    assert cfg.mlp_kwargs["router_score_fn"] == "softmax"
 
 
 def test_modelconfig_moe_unknown_router_score_fn_raises():
