@@ -11,10 +11,13 @@ model:
   mlp_cls: moe
   mlp_kwargs:
     intermediate_size: 192
-    n_routed_experts: 16
-    n_routed_experts_per_token: 8
-    aux_loss: true
-    aux_loss_coef: 0.001
+    n_routed_experts: 128
+    n_routed_experts_per_token: 6
+    n_shared_experts: 2
+    aux_loss: false
+    expert_bias: true
+    expert_bias_update_rate: 0.001
+    router_score_fn: sigmoid
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -32,7 +35,7 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_pool_scaling/qwen3_70m_a51m_is192_e16_k8/
+  checkpoint_dir: checkpoints/moe_sparsity/qwen3_339m_a51m_is192_e128_s2r6/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -52,6 +55,6 @@ scheduler:
   warmup_steps: 1500
   min_lr: 1e-4
 logging:
-  wandb_project: pretrain-moe-pool-scaling
-  wandb_run_name: qwen3-70m-a51m-is192-e16-k8
+  wandb_project: pretrain-moe-sparsity
+  wandb_run_name: qwen3-339m-a51m-is192-e128-s2r6
   log_every: 100
