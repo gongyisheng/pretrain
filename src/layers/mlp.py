@@ -266,7 +266,7 @@ class MoERouter(nn.Module):
         normalize: bool = True,
         expert_bias: bool = False,
         expert_bias_update_rate: float = 0.001,
-        router_score_fn: str = "softmax",
+        router_score_fn: str = "sigmoid",
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
@@ -355,7 +355,7 @@ class SparseMoEBlock(nn.Module):
         aux_loss_coef: float = 0.001,
         expert_bias: bool = False,
         expert_bias_update_rate: float = 0.001,
-        router_score_fn: str = "softmax",
+        router_score_fn: str = "sigmoid",
         activation: str = "silu",
         gated: bool = True,
         bias: bool = False,

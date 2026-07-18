@@ -192,14 +192,15 @@ def test_moe_router_weights_unnormalized():
     assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
 
 
-def test_moe_router_default_score_fn_is_softmax():
+def test_moe_router_default_score_fn_is_sigmoid():
     torch.manual_seed(0)
     router = MoERouter(d_model=64, n_routed_experts=8, n_routed_experts_per_token=2)
     x = torch.randn(32, 64)
     _, _, router_probs = router(x)
-    # softmax gives a distribution over experts.
+    # sigmoid scores each expert independently in (0, 1); no cross-expert normalization.
+    assert (router_probs > 0).all() and (router_probs < 1).all()
     sums = router_probs.sum(dim=-1)
-    assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+    assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
 
 
 def test_moe_router_sigmoid_scores_are_independent():
@@ -749,7 +750,9 @@ def test_sparse_moe_compute_parameters_expert_bias():
 def test_moe_router_matches_ref(normalize, dtype, atol):
     torch.manual_seed(0)
     d_model, n_routed_experts, k = 64, 8, 2
-    router = MoERouter(d_model, n_routed_experts, k, normalize=normalize).to(dtype)
+    router = MoERouter(
+        d_model, n_routed_experts, k, normalize=normalize, router_score_fn="softmax"
+    ).to(dtype)
     router.eval()
     x = torch.randn(32, d_model, dtype=dtype)
     top_idx, top_w, probs = router(x)
@@ -765,7 +768,9 @@ def test_moe_router_matches_ref(normalize, dtype, atol):
 def test_moe_router_matches_ref_under_saturation(dtype, atol):
     torch.manual_seed(0)
     d_model, n_routed_experts, k = 512, 64, 4
-    router = MoERouter(d_model, n_routed_experts, k).to(dtype)
+    router = MoERouter(d_model, n_routed_experts, k, router_score_fn="softmax").to(
+        dtype
+    )
     router.eval()
     x = torch.randn(256, d_model, dtype=dtype) * 30
     top_idx, top_w, probs = router(x)
@@ -802,6 +807,7 @@ def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
         dropout=0.0,
         gated=gated,
         activation=activation,
+        router_score_fn="softmax",
     )
     with torch.no_grad():
         w1 = block.expert_gate_up if gated else block.expert_up
@@ -844,6 +850,7 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
         n_routed_experts=n_routed_experts,
         n_routed_experts_per_token=top_k,
         dropout=0.0,
+        router_score_fn="softmax",
     )
     with torch.no_grad():
         torch.nn.init.normal_(ours.expert_gate_up, std=0.02)
@@ -977,6 +984,7 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
         gated=gated,
         activation="silu" if gated else "gelu",
         bias=True,
+        router_score_fn="softmax",
     )
     with torch.no_grad():
         w1 = block.expert_gate_up if gated else block.expert_up
