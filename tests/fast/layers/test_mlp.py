@@ -262,6 +262,7 @@ def test_sparse_moe_block_forwards_score_fn_to_router():
         d_model=64,
         intermediate_size=128,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         aux_loss=True,
         router_score_fn="sigmoid",
     )
@@ -486,14 +487,22 @@ def test_sparse_moe_block_records_expert_load():
 
 def test_sparse_moe_block_aux_loss_coef_stored():
     block = SparseMoEBlock(
-        d_model=64, intermediate_size=128, n_routed_experts=4, aux_loss_coef=0.05
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        aux_loss_coef=0.05,
     )
     assert block.aux_loss_coef == 0.05
 
 
 def test_sparse_moe_block_aux_loss_false_returns_none():
     block = SparseMoEBlock(
-        d_model=64, intermediate_size=128, n_routed_experts=4, aux_loss=False
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        aux_loss=False,
     )
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
@@ -505,6 +514,7 @@ def test_sparse_moe_block_expert_bias_returns_no_aux_loss():
         d_model=64,
         intermediate_size=128,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         aux_loss=False,
         expert_bias=True,
     )
@@ -519,6 +529,7 @@ def test_sparse_moe_block_aux_loss_and_expert_bias_mutually_exclusive():
             d_model=64,
             intermediate_size=128,
             n_routed_experts=4,
+            n_routed_experts_per_token=2,
             aux_loss=True,
             expert_bias=True,
         )
@@ -530,6 +541,7 @@ def test_sparse_moe_block_expert_bias_updates_in_train_only():
         d_model=64,
         intermediate_size=128,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         aux_loss=False,
         expert_bias=True,
     )
@@ -582,7 +594,12 @@ def test_sparse_moe_block_post_step_accumulates_across_microbatches():
 
 
 def test_sparse_moe_no_shared_experts_by_default():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+    )
     assert block.shared_expert is None
 
 
@@ -594,6 +611,7 @@ def test_sparse_moe_shared_expert_width_and_shape(n_shared_experts, gated):
         d_model=64,
         intermediate_size=inter,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         n_shared_experts=n_shared_experts,
         gated=gated,
     )
@@ -613,6 +631,7 @@ def test_sparse_moe_shared_expert_adds_to_routed_output():
         d_model=64,
         intermediate_size=32,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         n_shared_experts=2,
         dropout=0.0,
     )

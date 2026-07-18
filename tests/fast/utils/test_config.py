@@ -315,7 +315,7 @@ def test_modelconfig_moe_expert_bias_defaults():
     )
     assert cfg.mlp_kwargs["expert_bias"] is False
     assert cfg.mlp_kwargs["aux_loss"] is True
-    assert cfg.mlp_kwargs["aux_loss_coef"] == 0.01
+    assert cfg.mlp_kwargs["aux_loss_coef"] == 0.001
     # expert_bias on: aux_loss stays off, bias update rate defaulted
     cfg2 = ModelConfig(
         d_model=64,

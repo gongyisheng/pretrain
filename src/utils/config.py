@@ -66,7 +66,6 @@ class ModelConfig:
                 f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
             )
         if self.mlp_cls == "moe":
-            self.mlp_kwargs.setdefault("n_routed_experts_per_token", 2)
             self.mlp_kwargs.setdefault("n_shared_experts", 0)
             self.mlp_kwargs.setdefault("bias", False)
             self.mlp_kwargs.setdefault("router_score_fn", "sigmoid")
@@ -90,7 +89,7 @@ class ModelConfig:
             if self.mlp_kwargs["expert_bias"]:
                 self.mlp_kwargs.setdefault("expert_bias_update_rate", 0.001)
             if self.mlp_kwargs["aux_loss"]:
-                self.mlp_kwargs.setdefault("aux_loss_coef", 0.01)
+                self.mlp_kwargs.setdefault("aux_loss_coef", 0.001)
 
 
 @dataclass
