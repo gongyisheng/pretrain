@@ -175,7 +175,8 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
-        self.model = torch.compile(self.model)
+        if config.training.enable_torch_compile:
+            self.model = torch.compile(self.model)
 
         # Activation checkpointing
         if config.training.activation_checkpointing:

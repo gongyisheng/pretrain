@@ -178,6 +178,7 @@ class TrainingConfig:
     loss_fn: str = "cross_entropy"
     label_smoothing: float = 0.0  # for CE loss only
     activation_checkpointing: bool = False
+    enable_torch_compile: bool = True
     use_deterministic_algo: bool = False
     seed: int = 42
     grad_clip: float = 1.0
