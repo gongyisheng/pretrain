@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -33,7 +34,12 @@ from src.training.trainer import Trainer
 
 
 def run_benchmark(
-    config_path, steps=10, warmup=5, cuda_profiler=False, enable_torch_compile=True
+    config_path,
+    steps=10,
+    warmup=5,
+    cuda_profiler=False,
+    enable_torch_compile=True,
+    emit_nvtx=False,
 ):
     """Run a training throughput benchmark using the Trainer.
 
@@ -42,6 +48,10 @@ def run_benchmark(
 
     enable_torch_compile=False skips only the whole-model torch.compile; ops with
     their own explicit compile (flex_attention, loss) stay compiled.
+
+    emit_nvtx=True wraps training in torch.autograd.profiler.emit_nvtx so nsys
+    tags each kernel with its aten op (forward `aten::X` vs backward `XBackward0`)
+    and input shapes.
     """
     total_steps = warmup + steps
     overrides = [
@@ -83,7 +93,13 @@ def run_benchmark(
 
     trainer.logger.register_on_log_hook(on_log)
 
-    trainer.train()
+    nvtx_ctx = (
+        torch.autograd.profiler.emit_nvtx(record_shapes=True)
+        if emit_nvtx
+        else contextlib.nullcontext()
+    )
+    with nvtx_ctx:
+        trainer.train()
 
     # Safety net: stop if training exited before the stop step was logged.
     if cuda_profiler and started and not stopped:
@@ -155,6 +171,12 @@ def main():
         "--capture-range=cudaProfilerApi), excluding compile/autotune warmup.",
     )
     parser.add_argument(
+        "--emit-nvtx",
+        action="store_true",
+        help="Wrap training in emit_nvtx so nsys labels each kernel with its aten "
+        "op (forward aten::X vs backward XBackward0) and input shapes.",
+    )
+    parser.add_argument(
         "--save", type=str, default=None, help="Save results JSON to this path"
     )
     args = parser.parse_args()
@@ -168,6 +190,7 @@ def main():
         warmup=args.warmup,
         cuda_profiler=args.cuda_profiler,
         enable_torch_compile=not args.disable_torch_compile,
+        emit_nvtx=args.emit_nvtx,
     )
 
     if args.save:
