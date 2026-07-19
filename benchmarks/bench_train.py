@@ -7,22 +7,28 @@ excluding warmup steps (torch.compile tracing, CUDA caching, etc.).
 
 Usage:
     # Benchmark GPT-2 124M
-    python benchmarks/trainer/bench_train.py --config configs/gpt2_124m.yaml
+    python benchmarks/bench_train.py --config configs/gpt2_124m.yaml
 
-    # Benchmark Qwen3 57M
-    python benchmarks/trainer/bench_train.py --config configs/qwen3_57m.yaml
+    # Benchmark Qwen3 51M
+    python benchmarks/bench_train.py --config configs/qwen3_51m.yaml
 
-    # Benchmark Qwen3 MoE 133M
-    python benchmarks/trainer/bench_train.py --config configs/qwen3_moe_133m.yaml
+    # Benchmark Qwen3 MoE 183M (51M active)
+    python benchmarks/bench_train.py --config configs/qwen3_183m_a51m.yaml
 
-    # Run all model configs
-    python benchmarks/trainer/bench_train.py --all
+    # Run eager, no torch.compile (for A/B against the compiled run)
+    python benchmarks/bench_train.py --config configs/gpt2_124m.yaml --disable-torch-compile
 """
 
 import argparse
 import json
 import os
 import sys
+
+# torch reads TORCH_COMPILE_DISABLE when its dynamo module is first imported, so
+# this must be set before `import torch` — a later os.environ assignment is
+# ignored. Pre-scan argv so the --disable-torch-compile flag takes effect here.
+if "--disable-torch-compile" in sys.argv:
+    os.environ["TORCH_COMPILE_DISABLE"] = "1"
 
 import torch
 
@@ -85,11 +91,13 @@ def run_benchmark(config_path, steps=10, warmup=5):
         "measured_tokens": measured_tokens,
         "tok_per_sec": round(tok_per_sec),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+        "torch_compile": os.environ.get("TORCH_COMPILE_DISABLE") != "1",
     }
 
     print(f"\n{'=' * 60}")
     print(f"  {results['model']} | {results['params_M']}M")
     print(f"  GPU: {results['gpu']}")
+    print(f"  Compile: {'on' if results['torch_compile'] else 'off (eager)'}")
     print(
         f"  {results['measured_steps']} steps in {results['elapsed_sec']:.1f}s (after {warmup} warmup)"
     )
@@ -99,57 +107,11 @@ def run_benchmark(config_path, steps=10, warmup=5):
     return results
 
 
-def run_all_benchmarks(steps=10, warmup=5):
-    """Run benchmarks for all model configs."""
-    configs = [
-        "configs/gpt2_124m.yaml",
-        "configs/qwen3_57m.yaml",
-        "configs/qwen3_moe_133m.yaml",
-    ]
-
-    all_results = []
-    for config_path in configs:
-        if not os.path.exists(config_path):
-            print(f"Skipping {config_path} (not found)")
-            continue
-        results = run_benchmark(config_path, steps=steps, warmup=warmup)
-        all_results.append(results)
-        torch.cuda.empty_cache()
-
-    # Summary table
-    print(f"\n{'=' * 60}")
-    print(f"{'SUMMARY':^60}")
-    print(f"{'=' * 60}")
-    print(f"{'Model':<12} {'Params':>8} {'tok/s':>12} {'elapsed':>10}")
-    print(f"{'-' * 60}")
-    for r in all_results:
-        print(
-            f"{r['model']:<12} {r['params_M']:>7.1f}M {r['tok_per_sec']:>12,} {r['elapsed_sec']:>9.1f}s"
-        )
-    print(f"{'=' * 60}")
-
-    # Save results
-    os.makedirs("logs/benchmarks", exist_ok=True)
-    out_path = "logs/benchmarks/train_benchmark.json"
-    with open(out_path, "w") as f:
-        json.dump(all_results, f, indent=2)
-    print(f"\nResults saved to {out_path}")
-
-    return all_results
-
-
 def main():
     parser = argparse.ArgumentParser(description="Training throughput benchmark")
+    parser.add_argument("--config", type=str, help="Path to config YAML")
     parser.add_argument(
-        "--config",
-        type=str, 
-        help="Path to config YAML"
-    )
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=10,
-        help="Measured steps to run (default: 10)"
+        "--steps", type=int, default=10, help="Measured steps to run (default: 10)"
     )
     parser.add_argument(
         "--warmup",
@@ -158,24 +120,17 @@ def main():
         help="Warmup steps excluded from measurement (default: 5)",
     )
     parser.add_argument(
-        "--all",
+        "--disable-torch-compile",
         action="store_true",
-        help="Run all model configs"
+        help="Disable torch.compile (run eager). Handled before torch import via argv scan.",
     )
     parser.add_argument(
-        "--save",
-        type=str,
-        default=None,
-        help="Save results JSON to this path"
+        "--save", type=str, default=None, help="Save results JSON to this path"
     )
     args = parser.parse_args()
 
-    if args.all:
-        run_all_benchmarks(steps=args.steps, warmup=args.warmup)
-        return
-
     if not args.config:
-        parser.error("--config is required (or use --all)")
+        parser.error("--config is required")
 
     results = run_benchmark(args.config, steps=args.steps, warmup=args.warmup)
 
