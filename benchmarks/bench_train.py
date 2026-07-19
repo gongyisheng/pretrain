@@ -38,7 +38,7 @@ from src.utils.config import load_config
 from src.training.trainer import Trainer
 
 
-def run_benchmark(config_path, steps=10, warmup=5):
+def run_benchmark(config_path, steps=10, warmup=5, cuda_profiler=False):
     """Run a training throughput benchmark using the Trainer.
 
     Runs all steps in a single train() call. Registers an on_log hook
@@ -56,23 +56,43 @@ def run_benchmark(config_path, steps=10, warmup=5):
     config = load_config(config_path, overrides=overrides)
     trainer = Trainer(config, wandb_enabled=False)
 
+    # With --cuda-profiler (set by profile_train.sh), bracket only the measured
+    # steps with cudaProfilerStart/Stop. Paired with nsys
+    # --capture-range=cudaProfilerApi, this records steady state and excludes the
+    # compile/autotune warmup. The log hook fires after each step, so starting at
+    # `step == warmup` captures steps warmup+1..total_steps (the averaged region).
+    started = stopped = False
+
     perf_metrics = []
-    trainer.logger.register_on_log_hook(
-        lambda step, metrics: perf_metrics.append(
+
+    def on_log(step, metrics):
+        nonlocal started, stopped
+        perf_metrics.append(
             {
                 "step": step,
                 "tokens_per_sec": metrics["perf/tokens_per_sec"],
                 "total_tokens": metrics["train/total_tokens"],
             }
         )
-    )
+        if cuda_profiler and not started and step >= warmup:
+            torch.cuda.profiler.start()
+            started = True
+        if cuda_profiler and started and not stopped and step >= total_steps:
+            torch.cuda.profiler.stop()
+            stopped = True
+
+    trainer.logger.register_on_log_hook(on_log)
 
     trainer.train()
+
+    # Safety net: stop if training exited before the stop step was logged.
+    if cuda_profiler and started and not stopped:
+        torch.cuda.profiler.stop()
 
     # Average tokens_per_sec from measured steps (warmup excluded)
     measured = [m for m in perf_metrics if m["step"] > warmup]
     tok_per_sec = sum(m["tokens_per_sec"] for m in measured) / len(measured)
-    measured_tokens = steps * trainer.tokens_per_step
+    measured_tokens = steps * trainer.metrics.tokens_per_step
     elapsed = measured_tokens / tok_per_sec if tok_per_sec > 0 else 0
 
     results = {
@@ -82,7 +102,7 @@ def run_benchmark(config_path, steps=10, warmup=5):
         "batch_size": config.training.batch_size,
         "grad_accum": config.training.gradient_accumulation_steps,
         "seq_len": config.max_seq_len,
-        "tokens_per_step": trainer.tokens_per_step,
+        "tokens_per_step": trainer.metrics.tokens_per_step,
         "mixed_precision": config.training.mixed_precision,
         "activation_checkpointing": config.training.activation_checkpointing,
         "warmup_steps": warmup,
@@ -125,6 +145,12 @@ def main():
         help="Disable torch.compile (run eager). Handled before torch import via argv scan.",
     )
     parser.add_argument(
+        "--cuda-profiler",
+        action="store_true",
+        help="Bracket the measured steps with cudaProfilerStart/Stop (for nsys "
+        "--capture-range=cudaProfilerApi), excluding compile/autotune warmup.",
+    )
+    parser.add_argument(
         "--save", type=str, default=None, help="Save results JSON to this path"
     )
     args = parser.parse_args()
@@ -132,7 +158,12 @@ def main():
     if not args.config:
         parser.error("--config is required")
 
-    results = run_benchmark(args.config, steps=args.steps, warmup=args.warmup)
+    results = run_benchmark(
+        args.config,
+        steps=args.steps,
+        warmup=args.warmup,
+        cuda_profiler=args.cuda_profiler,
+    )
 
     if args.save:
         os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
