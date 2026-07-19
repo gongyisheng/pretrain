@@ -408,7 +408,7 @@ def dense_mlp_ref(
 def moe_router_ref(
     x: torch.Tensor,
     gate_weight: torch.Tensor,
-    n_experts_per_token: int,
+    n_routed_experts_per_token: int,
     normalize: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Eager MoE router: softmax(x @ gate.T) → topk → optional sum-to-1 normalize.
@@ -419,7 +419,9 @@ def moe_router_ref(
     dtype = x.dtype
     logits = x.float() @ gate_weight.float().T
     router_probs = logits.softmax(-1)
-    top_weights, top_indices = torch.topk(router_probs, n_experts_per_token, dim=-1)
+    top_weights, top_indices = torch.topk(
+        router_probs, n_routed_experts_per_token, dim=-1
+    )
     if normalize:
         top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
     return top_indices, top_weights.to(dtype), router_probs.to(dtype)
@@ -429,17 +431,22 @@ def sparse_moe_block_ref(
     x: torch.Tensor,
     gate_weight: torch.Tensor,
     expert_down: torch.Tensor,
-    n_experts_per_token: int,
+    n_routed_experts_per_token: int,
     activation: str = "silu",
     expert_gate_up: torch.Tensor | None = None,
     expert_up: torch.Tensor | None = None,
     normalize: bool = True,
+    expert_gate_up_bias: torch.Tensor | None = None,
+    expert_up_bias: torch.Tensor | None = None,
+    expert_down_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eager sparse MoE: naive per-(token, slot) expert dispatch.
 
     Mirrors MLP's gated/ungated split:
       - gated   (expert_gate_up given): hidden = act(gate)*up via GATED_ACTIVATIONS_REFS
       - ungated (expert_up given):      hidden = act(up)      via UNGATED_ACTIVATIONS_REFS
+    Optional bias tensors (expert_gate_up_bias/expert_up_bias/expert_down_bias) are
+    applied per-expert when provided.
     Returns (output (B,S,D), aux_loss scalar) — Switch Transformer load-balancing loss.
     """
     if (expert_gate_up is None) == (expert_up is None):
@@ -452,22 +459,28 @@ def sparse_moe_block_ref(
     x_flat = x.view(T, D)
 
     top_indices, top_weights, router_probs = moe_router_ref(
-        x_flat, gate_weight, n_experts_per_token, normalize=normalize
+        x_flat, gate_weight, n_routed_experts_per_token, normalize=normalize
     )
 
     output = torch.zeros_like(x_flat)
     for t in range(T):
-        for slot in range(n_experts_per_token):
+        for slot in range(n_routed_experts_per_token):
             e = top_indices[t, slot].item()
             w = top_weights[t, slot]
             if expert_gate_up is not None:
                 gate_up = x_flat[t] @ expert_gate_up[e].T  # (2*I,)
+                if expert_gate_up_bias is not None:
+                    gate_up = gate_up + expert_gate_up_bias[e]
                 g, u = gate_up.chunk(2, dim=-1)
                 hidden = GATED_ACTIVATIONS_REFS[activation](g, u)  # (I,)
             else:
                 up = x_flat[t] @ expert_up[e].T  # (I,)
+                if expert_up_bias is not None:
+                    up = up + expert_up_bias[e]
                 hidden = UNGATED_ACTIVATIONS_REFS[activation](up)
             out_t = hidden @ expert_down[e].T  # (D,)
+            if expert_down_bias is not None:
+                out_t = out_t + expert_down_bias[e]
             output[t] = output[t] + w * out_t
 
     # Switch Transformer aux loss: E * sum_i (f_i * P_i), f_i = #tokens routed to i / T.

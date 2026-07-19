@@ -132,3 +132,24 @@ class TransformerLM(nn.Module):
         if not return_logits:
             return x
         return self.lm_head(x), aux_total
+
+    def post_step(self):
+        for module in self.modules():
+            if module is not self and hasattr(module, "post_step"):
+                module.post_step()
+
+    def forward_meta(self) -> list[dict]:
+        """Per-layer metadata produced by the forward pass (side-channel to the
+        returned logits/aux loss), one dict per sublayer that exposes it, in
+        layer order. Dispatches to each sublayer's forward_meta like post_step;
+        [] for dense models.
+
+        Mode follows self.training: in train mode, routing counts accumulated
+        across micro-batches (reset per optim step); in eval mode, the current
+        batch's counts.
+        """
+        meta = []
+        for module in self.modules():
+            if module is not self and hasattr(module, "forward_meta"):
+                meta.append(module.forward_meta())
+        return meta

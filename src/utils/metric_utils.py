@@ -10,7 +10,6 @@ import statistics
 
 import torch
 
-from src.layers.mlp import SparseMoEBlock
 from src.model.transformer import TransformerLM
 from src.utils.config import TrainConfig
 
@@ -38,12 +37,6 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def collect_moe_blocks(model: torch.nn.Module) -> list[SparseMoEBlock]:
-    """All SparseMoEBlock submodules, in order. Resolve once and cache — each
-    block exposes its last-forward routing load via `expert_load`."""
-    return [m for m in model.modules() if isinstance(m, SparseMoEBlock)]
-
-
 def compute_maxvio(expert_counts: torch.Tensor) -> float:
     """Maximal load violation for one MoE layer (arXiv:2408.15664):
     `(max_i load_i - mean load) / mean load`. 0 = perfectly balanced; 1.0 means
@@ -56,16 +49,38 @@ def compute_maxvio(expert_counts: torch.Tensor) -> float:
     return ((counts.max() - mean) / mean).item()
 
 
+def aggregate_maxvio(per_layer: list[float]) -> dict[str, float]:
+    """Wrap per-layer MaxVio values into ``{"layer_{i}": v, "mean", "max"}``."""
+    out = {f"layer_{i}": v for i, v in enumerate(per_layer)}
+    out["mean"] = statistics.mean(per_layer)
+    out["max"] = max(per_layer)
+    return out
+
+
 def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
     """Per-layer and aggregate MaxVio from accumulated expert load counts.
 
     Returns ``{"layer_{i}": v, ..., "mean": ..., "max": ...}``.
     """
-    per_layer = [compute_maxvio(c) for c in load_per_layer]
-    out = {f"layer_{i}": v for i, v in enumerate(per_layer)}
-    out["mean"] = statistics.mean(per_layer)
-    out["max"] = max(per_layer)
-    return out
+    return aggregate_maxvio([compute_maxvio(c) for c in load_per_layer])
+
+
+def compute_moe_global_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
+    """MaxVio of the load summed over batches, from stacked ``[n_batch, E]``
+    counts per layer, then aggregate.
+    """
+    return aggregate_maxvio([compute_maxvio(loads.sum(0)) for loads in load_per_layer])
+
+
+def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
+    """Mean per-batch MaxVio from stacked ``[n_batch, E]`` counts per layer,
+    then aggregate.
+    """
+    per_layer = [
+        statistics.mean([compute_maxvio(row) for row in loads])
+        for loads in load_per_layer
+    ]
+    return aggregate_maxvio(per_layer)
 
 
 # ---------------------------------------------------------------------------
@@ -73,40 +88,85 @@ def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
+def _esd_alpha(eigs: torch.Tensor) -> float:
+    """Power-law exponent α of the ESD tail (Martin & Mahoney / WeightWatcher).
+
+    Fits p(λ) ∝ λ^(-α) to the upper tail λ ≥ xmin of the eigenvalue spectrum
+    (eigs = σ² of the weight). For each candidate xmin (every eigenvalue) the
+    continuous MLE α = 1 + n / Σ ln(λ_tail / xmin) is computed, and the xmin
+    minimizing the KS distance between the empirical and fitted tail CDFs is
+    chosen. Lower α (heavier tail, ~2–4) tracks a more correlated / better-fit
+    weight; α → large signals a near-random spectrum. Returns NaN if fewer than
+    four positive eigenvalues survive.
+    """
+    eigs = torch.sort(eigs.flatten()).values
+    eigs = eigs[eigs > 0]
+    n = eigs.numel()
+    if n < 4:
+        return float("nan")
+    logs = eigs.log()
+    # suffix[i] = Σ_{j>=i} log λ_j  →  Σ_{j>=i} ln(λ_j / λ_i) = suffix[i] - nt·logs[i]
+    suffix = torch.flip(torch.cumsum(torch.flip(logs, [0]), 0), [0])
+    idx = torch.arange(n, device=eigs.device)
+    nt = (n - idx).to(logs.dtype)  # tail size for xmin = eigs[i]
+    alpha = 1.0 + nt / (suffix - nt * logs).clamp_min(1e-12)
+    # KS distance per candidate xmin: max over the tail of |emp_cdf - fit_cdf|.
+    log_ratio = logs.unsqueeze(0) - logs.unsqueeze(1)  # [i,j] = ln(λ_j / λ_i)
+    fit_cdf = 1.0 - torch.exp(-(alpha.unsqueeze(1) - 1.0) * log_ratio)
+    rank = (idx.unsqueeze(0) - idx.unsqueeze(1) + 1).to(logs.dtype)  # [i,j]=j-i+1
+    emp_cdf = rank / nt.unsqueeze(1)
+    tail = idx.unsqueeze(0) >= idx.unsqueeze(1)  # j >= i
+    ks = torch.where(tail, (emp_cdf - fit_cdf).abs(), logs.new_zeros(())).amax(1)
+    ks = torch.where(nt >= 2, ks, logs.new_full((), float("inf")))
+    return alpha[ks.argmin()].item()
+
+
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """srank / pr of a 2D weight's σ² spectrum, both effective-rank measures.
+    """srank / pr / esd_alpha of a weight's σ² spectrum.
 
     srank = stable rank (‖W‖_F² / σ_max²), top-heavy — a rank-1 collapse canary.
     pr = participation ratio ((Σσ²)² / Σσ⁴ = 1/Σpᵢ²), the bulk effective
     dimension; squaring suppresses the noise floor for a cleaner collapse trend.
+    esd_alpha = power-law exponent of the eigenvalue tail (see `_esd_alpha`).
 
     srank for monitoring rank-1 collapse
     pr for monitoring graded collapse
+    esd_alpha for monitoring heavy-tailed self-regularization
+
+    Accepts a 2D matrix or a stacked 3D tensor `(E, out, in)` (MoE experts);
+    for 3D the SVD is batched over the leading dim and the per-expert metrics
+    are averaged.
     """
-    s = torch.linalg.svdvals(weight.float())
-    s = s[s > 0]
-    if s.numel() == 0:
-        return {"srank": 0.0, "pr": 0.0}
+    s = torch.linalg.svdvals(weight.float())  # (..., k)
     energy = s.pow(2)
+    total = energy.sum(-1)
+    if (total == 0).any():
+        return {"srank": 0.0, "pr": 0.0, "esd_alpha": 0.0}
+    srank = total / energy[..., 0]
+    pr = total.pow(2) / energy.pow(2).sum(-1)
+    alphas = [_esd_alpha(e) for e in energy.reshape(-1, energy.shape[-1])]
+    alphas = [a for a in alphas if not math.isnan(a)]
+    esd_alpha = statistics.mean(alphas) if alphas else float("nan")
     return {
-        "srank": (energy.sum() / energy[0]).item(),
-        "pr": (energy.sum().pow(2) / energy.pow(2).sum()).item(),
+        "srank": srank.mean().item(),
+        "pr": pr.mean().item(),
+        "esd_alpha": esd_alpha,
     }
 
 
 def compute_layer_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
-    """Per-2D-weight spectral metrics, keyed by parameter name.
+    """Per-weight spectral metrics, keyed by parameter name.
 
-    Covers every floating-point 2D parameter except rope buffers and
-    embeddings (names containing "emb"). The caller
-    applies the logging namespace (e.g. an "optim/" prefix). The "_orig_mod."
-    prefix added by torch.compile is stripped. SVD on every weight is costly,
-    so this is gated behind config.logging.log_optimizer_svd_metrics and only
-    runs on log-cadence steps.
+    Covers every floating-point 2D parameter and stacked 3D MoE expert tensors
+    `(E, out, in)` (averaged per-expert), except rope buffers and embeddings
+    (names containing "emb"). The caller applies the logging namespace (e.g. an
+    "optim/" prefix). The "_orig_mod." prefix added by torch.compile is
+    stripped. SVD on every weight is costly, so this is gated behind
+    config.logging.log_optimizer_svd_metrics and only runs on log-cadence steps.
     """
     metrics: dict[str, dict[str, float]] = {}
     for name, param in model.named_parameters():
-        if param.ndim != 2 or not param.is_floating_point():
+        if param.ndim not in (2, 3) or not param.is_floating_point():
             continue
         name = name.removeprefix("_orig_mod.")
         if name.startswith("rope.") or "emb" in name:

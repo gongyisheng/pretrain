@@ -128,18 +128,18 @@ class Trainer:
             num_workers=n_worker,
             pin_memory=True,
             persistent_workers=n_worker > 0,
-            prefetch_factor=1 if n_worker > 0 else None,
+            prefetch_factor=config.data.prefetch_factor if n_worker > 0 else None,
             generator=g,
             worker_init_fn=Trainer._worker_init_fn,
         )
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=config.training.batch_size,
+            batch_size=config.training.eval_batch_size,
             shuffle=False,
             num_workers=n_worker,
             pin_memory=True,
             persistent_workers=n_worker > 0,
-            prefetch_factor=1 if n_worker > 0 else None,
+            prefetch_factor=config.data.prefetch_factor if n_worker > 0 else None,
             generator=g,
             worker_init_fn=Trainer._worker_init_fn,
         )
@@ -171,12 +171,7 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
-        if self.is_moe and config.model.mlp_kwargs["expert_capacity_factor"] is None:
-            # Dynamic capacity uses .item() — can't compile the full model
-            for block in self.model.blocks:
-                block.attn = torch.compile(block.attn)
-        else:
-            self.model = torch.compile(self.model)
+        self.model = torch.compile(self.model)
 
         # Activation checkpointing
         if config.training.activation_checkpointing:
@@ -383,7 +378,8 @@ class Trainer:
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            self.metrics.on_step(
+
+            self.metrics.on_train_step(
                 loss=accum_loss,
                 grad_norm=grad_norm_val,
                 model=self.model,
@@ -392,6 +388,8 @@ class Trainer:
                 scale_before=scale_before,
                 aux_loss=aux_loss,
             )
+            self.model.post_step()
+
             self.scheduler.step()
 
             # Defer loss sync to next iteration (save tensor, read later)
@@ -463,7 +461,7 @@ class Trainer:
 
     @torch.no_grad()
     def _evaluate(self):
-        self.metrics.eval_begin(self.model)
+        self.metrics.eval_begin()
         for i, batch in enumerate(self.val_loader):
             if (
                 self.config.training.eval_steps > 0
@@ -475,10 +473,11 @@ class Trainer:
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
                 loss = compute_loss(logits, labels, self.config.training.loss_fn)
-            self.metrics.eval_step(
+            self.metrics.on_eval_step(
                 loss=loss.item(),
                 logits=logits,
                 labels=labels,
+                model=self.model,
                 aux_loss=aux_loss.item() if aux_loss is not None else None,
                 tokenizer=self.tokenizer,
                 eot_token_id=self.eot_token_id,
@@ -536,7 +535,12 @@ class Trainer:
                     "attn_implementation"
                 ],
             )
-            logits, _ = self.model(idx_cond, position_ids=pos_ids, attn_mask=attn_mask)
+            with torch.amp.autocast(
+                self.device, dtype=self.amp_dtype, enabled=self.use_amp
+            ):
+                logits, _ = self.model(
+                    idx_cond, position_ids=pos_ids, attn_mask=attn_mask
+                )
             logits = logits[:, -1, :]  # take last token's logits
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(

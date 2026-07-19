@@ -1,8 +1,10 @@
 """Pretrain an LLM."""
 
 import argparse
-import sys
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import sys
 sys.path.insert(0, ".")
 
 from src.utils.config import load_config

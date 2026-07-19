@@ -62,6 +62,9 @@ def _make_config(
             vocab_size=64,
             attn_kwargs={"n_heads": 2},
             mlp_cls=mlp_cls,
+            mlp_kwargs=(
+                {"aux_loss": True, "aux_loss_coef": 1e-3} if mlp_cls == "moe" else {}
+            ),
         ),
         training=TrainingConfig(
             fp8=fp8,

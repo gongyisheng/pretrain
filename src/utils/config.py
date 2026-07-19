@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 import yaml
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.layers.mlp import MOE_ROUTER_SCORE_FNS
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
 from src.training.fp8 import FP8_RECIPES
@@ -65,22 +66,30 @@ class ModelConfig:
                 f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
             )
         if self.mlp_cls == "moe":
-            self.mlp_kwargs.setdefault("n_experts_per_token", 2)
-            self.mlp_kwargs.setdefault("expert_capacity_factor", None)
+            self.mlp_kwargs.setdefault("n_shared_experts", 0)
             self.mlp_kwargs.setdefault("bias", False)
+            self.mlp_kwargs.setdefault("router_score_fn", "sigmoid")
+            if self.mlp_kwargs["router_score_fn"] not in MOE_ROUTER_SCORE_FNS:
+                raise ValueError(
+                    f"router_score_fn must be one of {sorted(MOE_ROUTER_SCORE_FNS)}; "
+                    f"got {self.mlp_kwargs['router_score_fn']!r}"
+                )
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
-            # exclusive balancing strategies; aux_loss defaults on unless the
-            # bias rule is requested.
+            # exclusive balancing strategies; exactly one must be enabled.
             self.mlp_kwargs.setdefault("expert_bias", False)
-            self.mlp_kwargs.setdefault("aux_loss", not self.mlp_kwargs["expert_bias"])
+            self.mlp_kwargs.setdefault("aux_loss", False)
+            if not self.mlp_kwargs["aux_loss"] and not self.mlp_kwargs["expert_bias"]:
+                raise ValueError(
+                    "exactly one of aux_loss / expert_bias must be enabled; both are off"
+                )
             if self.mlp_kwargs["aux_loss"] and self.mlp_kwargs["expert_bias"]:
                 raise ValueError(
-                    "aux_loss and expert_bias are mutually exclusive MoE balancing strategies"
+                    "aux_loss and expert_bias are mutually exclusive; both are on"
                 )
             if self.mlp_kwargs["expert_bias"]:
                 self.mlp_kwargs.setdefault("expert_bias_update_rate", 0.001)
             if self.mlp_kwargs["aux_loss"]:
-                self.mlp_kwargs.setdefault("aux_loss_coef", 0.01)
+                self.mlp_kwargs.setdefault("aux_loss_coef", 0.001)
 
 
 @dataclass
@@ -89,6 +98,7 @@ class DataConfig:
     data_dir: str = "data/"
     val_split: float = 0.01
     num_workers: int = 4
+    prefetch_factor: int = 4
     packing: bool = True
     tokenizer_path: str = "tokenizers/custom_bpe"
 
@@ -125,6 +135,7 @@ class TrainingConfig:
     checkpoint_every: int = 5000
     eval_every: int = 100
     eval_steps: int = 25
+    eval_batch_size: int = 16
     eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
     fp8: bool = False
@@ -164,6 +175,7 @@ class OptimizerConfig:
     muon_ns_coefficients: List[float] = field(
         default_factory=lambda: [3.4445, -4.775, 2.0315]
     )
+    muon_ns_max_batch_elems: int = 8_000_000  # tuned on 5090/6000 pro blackwell
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str = "match_rms_adamw"
 
@@ -215,6 +227,18 @@ class TrainConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+    def __post_init__(self):
+        self._validate_moe_compile_precision()
+
+    def _validate_moe_compile_precision(self):
+        m = self.model
+        if m.mlp_cls == "moe" and self.training.mixed_precision != "bf16":
+            raise ValueError(
+                "dropless MoE (mlp_cls='moe') requires "
+                f"training.mixed_precision='bf16'; got {self.training.mixed_precision!r}. "
+                "torch._grouped_mm is bf16-only under torch.compile."
+            )
 
     def to_dict(self):
         return asdict(self)

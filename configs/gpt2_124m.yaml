@@ -33,7 +33,7 @@ training:
   checkpoint_dir: checkpoints/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
 optimizer:
   name: adamw
   lr: 6e-4
