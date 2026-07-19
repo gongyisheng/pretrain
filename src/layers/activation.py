@@ -4,8 +4,9 @@ Two function families, keyed by the same short activation name:
 
 - ``UNGATED_ACTIVATIONS``: unary ``x → act(x)`` — used by an ungated FFN as
   ``act(up_proj(x))``.
-- ``GATED_ACTIVATIONS``: fused ``(gate, up) → act(gate) * up`` — used by a
-  gated (GLU-family) FFN. Fused via ``@torch.compile``.
+- ``GATED_ACTIVATIONS``: ``(gate, up) → act(gate) * up`` — used by a
+  gated (GLU-family) FFN. These are plain elementwise ops; fusion comes from
+  the whole-model ``torch.compile`` in the trainer, not a per-op decorator.
 
 Squared variants follow **Rule A**: the unary activation is squared; the
 gated form is ``squared_unary(gate) * up``. So ``silu2_glu`` is
@@ -65,56 +66,46 @@ def leaky_relu2(x: torch.Tensor) -> torch.Tensor:
     return F.leaky_relu(x, 0.01) ** 2
 
 
-# --- Gated (GLU) activations: (gate, up) → act(gate) * up, fused ---
+# --- Gated (GLU) activations: (gate, up) → act(gate) * up ---
 
 
-@torch.compile
 def relu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.relu(gate) * up
 
 
-@torch.compile
 def gelu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.gelu(gate) * up
 
 
-@torch.compile
 def silu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.silu(gate) * up
 
 
-@torch.compile
 def leaky_relu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.leaky_relu(gate, 0.01) * up
 
 
-@torch.compile
 def relu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (F.relu(gate) ** 2) * up
 
 
-@torch.compile
 def gelu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (F.gelu(gate) ** 2) * up
 
 
-@torch.compile
 def silu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (F.silu(gate) ** 2) * up
 
 
-@torch.compile
 def leaky_relu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (F.leaky_relu(gate, 0.01) ** 2) * up
 
 
-@torch.compile
 def bilinear(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """Bilinear GLU: gate * up. No unary activation. Shazeer 2020."""
     return gate * up
 
 
-@torch.compile
 def bilinear2(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """Squared Bilinear GLU: gate² * up."""
     return (gate**2) * up
@@ -147,7 +138,6 @@ def powlu(x: torch.Tensor) -> torch.Tensor:
     return torch.where(x > 0, pos, neg)
 
 
-@torch.compile
 def powlu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return powlu(gate) * up
 
