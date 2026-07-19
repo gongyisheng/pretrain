@@ -12,7 +12,6 @@ import torch.nn as nn
 from src.layers.norm import LayerNorm, RMSNorm
 
 
-@torch.compile(dynamic=True)
 def _aggregate(V: torch.Tensor, K: torch.Tensor, w_proj: torch.Tensor) -> torch.Tensor:
     """Fused: dot-product logits → softmax → weighted sum.
 

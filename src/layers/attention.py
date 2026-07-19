@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from src.layers.pos_emb import RoPE
 
 
-@torch.compile
 def _sdpa(q, k, v, attn_mask=None, is_causal=False, sm_scale=None):
     if sm_scale is None:
         sm_scale = 1.0 / (q.shape[-1] ** 0.5)

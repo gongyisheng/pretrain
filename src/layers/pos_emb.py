@@ -33,7 +33,6 @@ class LearnedPositionalEmbedding(nn.Module):
         return max_seq_len * d_model
 
 
-@torch.compile
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Fused: rotate-half → scale by cos/sin → add."""
     d = x.shape[-1]

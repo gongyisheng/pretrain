@@ -65,78 +65,81 @@ def relu_ref(x: torch.Tensor) -> torch.Tensor:
 
 def gelu_ref(x: torch.Tensor) -> torch.Tensor:
     """Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2))). Matches F.gelu(approximate='none')."""
-    return 0.5 * x * (1.0 + torch.erf(x / math.sqrt(2.0)))
+    xf = x.float()
+    return (0.5 * xf * (1.0 + torch.erf(xf / math.sqrt(2.0)))).to(x.dtype)
 
 
 def silu_ref(x: torch.Tensor) -> torch.Tensor:
     """silu(x) = x * sigmoid(x)."""
-    return x * torch.sigmoid(x)
+    xf = x.float()
+    return (xf * torch.sigmoid(xf)).to(x.dtype)
 
 
 def leaky_relu_ref(x: torch.Tensor) -> torch.Tensor:
     """leaky_relu(x, 0.01) = x if x > 0 else 0.01 * x."""
-    return torch.where(x > 0, x, 0.01 * x)
+    xf = x.float()
+    return torch.where(xf > 0, xf, 0.01 * xf).to(x.dtype)
 
 
 def relu2_ref(x: torch.Tensor) -> torch.Tensor:
-    return relu_ref(x) ** 2
+    return (relu_ref(x.float()) ** 2).to(x.dtype)
 
 
 def gelu2_ref(x: torch.Tensor) -> torch.Tensor:
-    return gelu_ref(x) ** 2
+    return (gelu_ref(x.float()) ** 2).to(x.dtype)
 
 
 def silu2_ref(x: torch.Tensor) -> torch.Tensor:
-    return silu_ref(x) ** 2
+    return (silu_ref(x.float()) ** 2).to(x.dtype)
 
 
 def leaky_relu2_ref(x: torch.Tensor) -> torch.Tensor:
-    return leaky_relu_ref(x) ** 2
+    return (leaky_relu_ref(x.float()) ** 2).to(x.dtype)
 
 
 # --- Gated (GLU family): (gate, up) → act(gate) * up ---
 
 
 def relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return relu_ref(gate) * up
+    return (relu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
 def gelu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return gelu_ref(gate) * up
+    return (gelu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
 def silu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return silu_ref(gate) * up
+    return (silu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
 def leaky_relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return leaky_relu_ref(gate) * up
+    return (leaky_relu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
 def relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return (relu_ref(gate) ** 2) * up
+    return ((relu_ref(gate.float()) ** 2) * up.float()).to(gate.dtype)
 
 
 def gelu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return (gelu_ref(gate) ** 2) * up
+    return ((gelu_ref(gate.float()) ** 2) * up.float()).to(gate.dtype)
 
 
 def silu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return (silu_ref(gate) ** 2) * up
+    return ((silu_ref(gate.float()) ** 2) * up.float()).to(gate.dtype)
 
 
 def leaky_relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return (leaky_relu_ref(gate) ** 2) * up
+    return ((leaky_relu_ref(gate.float()) ** 2) * up.float()).to(gate.dtype)
 
 
 def bilinear_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """Bilinear GLU: gate * up (no unary activation). From Shazeer 2020."""
-    return gate * up
+    return (gate.float() * up.float()).to(gate.dtype)
 
 
 def bilinear2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """Squared Bilinear GLU: gate² * up (squared identity activation on gate)."""
-    return (gate**2) * up
+    return ((gate.float() ** 2) * up.float()).to(gate.dtype)
 
 
 def powlu_ref(x: torch.Tensor) -> torch.Tensor:
@@ -153,7 +156,7 @@ def powlu_ref(x: torch.Tensor) -> torch.Tensor:
 
 def powlu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """PowLU GLU: powlu(gate) * up. The gated form from arXiv:2605.25704."""
-    return powlu_ref(gate) * up
+    return (powlu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
 UNGATED_ACTIVATIONS_REFS = {

@@ -4,7 +4,6 @@ import torch.nn as nn
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
-@torch.compile
 def gated_mlp(
     x: torch.Tensor,
     w_gate_up: torch.Tensor,
@@ -31,7 +30,6 @@ def gated_mlp(
     return out
 
 
-@torch.compile
 def ungated_mlp(
     x: torch.Tensor,
     w_up: torch.Tensor,
