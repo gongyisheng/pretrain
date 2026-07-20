@@ -486,8 +486,6 @@ class SparseMoEBlock(nn.Module):
             b_down=self.expert_down_bias,
         )
         expert_out = expert_out * weights_sorted
-        # In latent mode, dropout is applied on the routed-expert output in
-        # latent space ℓ (before latent_up_proj projects back to d_model).
         expert_out = self.expert_dropout(expert_out)
 
         # unsort, sum
