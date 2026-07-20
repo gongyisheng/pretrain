@@ -635,3 +635,40 @@ def test_training_config_accepts_list_of_rules():
 def test_quant_disabled_stays_disabled():
     tc = TrainingConfig(quant={"enabled": False})
     assert _only_rule(tc).enabled is False
+
+
+# ==================== latent_moe / latent_dim ====================
+
+
+def test_modelconfig_latent_moe_default_off():
+    cfg = ModelConfig(
+        d_model=64,
+        mlp_cls="moe",
+        mlp_kwargs={"n_routed_experts": 4, "aux_loss": True},
+    )
+    assert cfg.mlp_kwargs["latent_moe"] is False
+    assert "latent_dim" not in cfg.mlp_kwargs
+
+
+@pytest.mark.parametrize("latent_dim", [None, 0, -4, 3.5])
+def test_modelconfig_latent_moe_requires_positive_latent_dim(latent_dim):
+    kwargs = {"n_routed_experts": 4, "aux_loss": True, "latent_moe": True}
+    if latent_dim is not None:
+        kwargs["latent_dim"] = latent_dim
+    with pytest.raises(ValueError, match="latent_dim must be a positive int"):
+        ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs=kwargs)
+
+
+def test_modelconfig_latent_moe_valid():
+    cfg = ModelConfig(
+        d_model=64,
+        mlp_cls="moe",
+        mlp_kwargs={
+            "n_routed_experts": 4,
+            "aux_loss": True,
+            "latent_moe": True,
+            "latent_dim": 16,
+        },
+    )
+    assert cfg.mlp_kwargs["latent_moe"] is True
+    assert cfg.mlp_kwargs["latent_dim"] == 16

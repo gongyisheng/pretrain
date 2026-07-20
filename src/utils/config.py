@@ -96,6 +96,18 @@ class ModelConfig:
                 self.mlp_kwargs.setdefault("expert_bias_update_rate", 0.001)
             if self.mlp_kwargs["aux_loss"]:
                 self.mlp_kwargs.setdefault("aux_loss_coef", 0.001)
+            self.mlp_kwargs.setdefault("latent_moe", False)
+            if self.mlp_kwargs["latent_moe"]:
+                latent_dim = self.mlp_kwargs.get("latent_dim")
+                if (
+                    not isinstance(latent_dim, int)
+                    or isinstance(latent_dim, bool)
+                    or latent_dim <= 0
+                ):
+                    raise ValueError(
+                        f"latent_dim must be a positive int when latent_moe=True; "
+                        f"got {latent_dim!r}"
+                    )
 
 
 @dataclass
