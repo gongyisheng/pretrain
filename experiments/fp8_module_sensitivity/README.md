@@ -10,13 +10,11 @@ FP8 GEMM (E4M3 forward operands, E5M2 grad) injects rounding noise into whicheve
 - **MLP** (`gate_up_proj`, `down_proj`) is the widest hidden GEMM and carries most of the FLOPs; its output re-enters the residual stream directly.
 - **`lm_head`** is `(d_model, vocab=50257)`, the single largest GEMM, and its output feeds straight into cross-entropy where small logit errors move the loss. Expected most sensitive under `tensorwise` (one coarse scale over a 50K-wide output).
 
-The `fp8_all` run (all three quantized) is the additivity check: if the loss increase over bf16 is roughly the sum of the three solo increases, the module effects are independent; if it's larger, they interact.
-
 ## Untied embeddings — why 77M
 
-`apply_quantization` **skips** a `lm_head` whose weight is tied to the embedding table (swapping it would break the tie), so an `lm_head` FP8 run is a no-op on a tied model. To make the output head a separately quantizable projection, every config here sets `tie_word_embeddings: false`. Untying adds `vocab × d_model` = 50257 × 512 ≈ 25.7M params, so the model is **~77M** (vs the tied ~51M). The untied architecture is held constant across all five runs, so the only variable is which module is FP8.
+`apply_quantization` **skips** a `lm_head` whose weight is tied to the embedding table (swapping it would break the tie), so an `lm_head` FP8 run is a no-op on a tied model. To make the output head a separately quantizable projection, every config here sets `tie_word_embeddings: false`. Untying adds `vocab × d_model` = 50257 × 512 ≈ 25.7M params, so the model is **~77M** (vs the tied ~51M). The untied architecture is held constant across all four runs, so the only variable is which module is FP8.
 
-Note: `QuantConfig.exclude` defaults to `["lm_head"]`; each FP8 config here sets `exclude: []` explicitly so the `lm_head` and `all` runs actually quantize the head.
+Note: `QuantConfig.exclude` defaults to `["lm_head"]`; each FP8 config here sets `exclude: []` explicitly so the `lm_head` run actually quantizes the head.
 
 ## Setup
 
@@ -28,7 +26,6 @@ All runs share the model, data, schedule, and optimizer; the only independent va
 | qwen3_77m_fp8_attn | attention | `[blocks.*.attn.*]` | 32 (4×8) |
 | qwen3_77m_fp8_mlp | MLP | `[blocks.*.mlp.*]` | 16 (2×8) |
 | qwen3_77m_fp8_lm_head | output head | `[lm_head]` | 1 |
-| qwen3_77m_fp8_all | all three | — (nothing excluded) | 49 |
 
 - Model: d_model=512, 8 layers, gqa 8/4, qk_norm, intermediate_size=1536, rope θ=10000, `tie_word_embeddings: false` (~77M).
 - FP8: `dtype_recipe: fp8` (weight/act `fp8_e4m3`, grad `fp8_e5m2`), `scaling.granularity: tensorwise`, `exclude: []`. Only the matched GEMM operands are cast to FP8 on the fly; everything else stays bf16/fp32, hp master weights preserved.
@@ -40,7 +37,7 @@ Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 60
 
 ## Run
 
-Runs the bf16 baseline, then each module in FP8, then all.
+Runs the bf16 baseline, then each module in FP8.
 
 ```bash
 nohup bash experiments/fp8_module_sensitivity/run.sh > logs/fp8_module_sensitivity.log 2>&1 &
@@ -56,9 +53,8 @@ nohup bash experiments/fp8_module_sensitivity/run.sh > logs/fp8_module_sensitivi
 | attention | 32 | TBD | TBD | TBD | TBD |
 | MLP | 16 | TBD | TBD | TBD | TBD |
 | lm_head | 1 | TBD | TBD | TBD | TBD |
-| all | 49 | TBD | TBD | TBD | TBD |
 
-Sensitivity ranking = modules sorted by Δ Loss (descending). Compare `all` Δ against the sum of the three solo Δ's for additivity.
+Sensitivity ranking = modules sorted by Δ Loss (descending).
 
 ## Notes
 
