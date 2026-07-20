@@ -64,11 +64,10 @@ acc lifts active back to ≈ the 51M benchmark by scaling top-k.
 ## Run
 
 ```bash
-# all three groups
-nohup bash experiments/latent_moe/run.sh all > logs/latent_moe.log 2>&1 &
-
-# one group at a time
-bash experiments/latent_moe/run.sh base   # or: eff | acc
+# one group per script
+nohup bash experiments/latent_moe/run_base.sh > logs/latent_moe_base.log 2>&1 &
+nohup bash experiments/latent_moe/run_eff.sh  > logs/latent_moe_eff.log  2>&1 &
+nohup bash experiments/latent_moe/run_acc.sh  > logs/latent_moe_acc.log  2>&1 &
 
 # a single config
 uv run python scripts/train.py --config experiments/latent_moe/qwen3_190m_a54m_l256_e128_k12.yaml
