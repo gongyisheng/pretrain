@@ -537,18 +537,22 @@ class SparseMoEBlock(nn.Module):
         gated=True,
         bias=False,
         expert_bias=False,
+        latent_moe=False,
+        latent_dim=None,
         **_,
     ):
         d_ff = intermediate_size
+        edim = latent_dim if latent_moe else d_model
         router = MoERouter.compute_flops(
             d_model, n_routed_experts, expert_bias=expert_bias
         )
         if gated:
-            expert = 6 * d_model * d_ff
-            b = (2 * d_ff + d_model) if bias else 0
+            expert = 6 * edim * d_ff
+            b = (2 * d_ff + edim) if bias else 0
         else:
-            expert = 4 * d_model * d_ff
-            b = (d_ff + d_model) if bias else 0
+            expert = 4 * edim * d_ff
+            b = (d_ff + edim) if bias else 0
+        proj = 4 * d_model * latent_dim if latent_moe else 0
         shared = (
             DenseMLPBlock.compute_flops(
                 d_model,
@@ -559,7 +563,7 @@ class SparseMoEBlock(nn.Module):
             if n_shared_experts > 0
             else 0
         )
-        return router + n_routed_experts_per_token * (expert + b) + shared
+        return router + n_routed_experts_per_token * (expert + b) + proj + shared
 
     @classmethod
     def compute_parameters(
@@ -573,22 +577,25 @@ class SparseMoEBlock(nn.Module):
         gated=True,
         bias=False,
         expert_bias=False,
+        latent_moe=False,
+        latent_dim=None,
         active=False,
         **_,
     ) -> int:
         d_ff = intermediate_size
+        edim = latent_dim if latent_moe else d_model
         router = MoERouter.compute_parameters(
             d_model, n_routed_experts, expert_bias=expert_bias
         )
         # active counts only the k experts that actually run per token.
         n = n_routed_experts_per_token if active else n_routed_experts
         if gated:
-            expert = 3 * d_ff * d_model
-            b = (2 * d_ff + d_model) if bias else 0
+            expert = 3 * d_ff * edim
+            b = (2 * d_ff + edim) if bias else 0
         else:
-            expert = 2 * d_ff * d_model
-            b = (d_ff + d_model) if bias else 0
-        # Shared experts always run, so they count toward both active and total.
+            expert = 2 * d_ff * edim
+            b = (d_ff + edim) if bias else 0
+        proj = 2 * d_model * latent_dim if latent_moe else 0
         shared = (
             DenseMLPBlock.compute_parameters(
                 d_model,
@@ -599,7 +606,7 @@ class SparseMoEBlock(nn.Module):
             if n_shared_experts > 0
             else 0
         )
-        return router + n * (expert + b) + shared
+        return router + n * (expert + b) + proj + shared
 
 
 MLP_REGISTRY = {"dense": DenseMLPBlock, "moe": SparseMoEBlock}

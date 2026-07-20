@@ -1133,3 +1133,55 @@ def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol):
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
     assert torch.allclose(aux, aux_ref, atol=atol)
+
+
+# ---------------------------------------------------------------------------
+# SparseMoEBlock — latent cost accounting
+# ---------------------------------------------------------------------------
+
+
+def test_sparse_moe_latent_param_count_matches_module():
+    d_model, inter, E, k, ell = 64, 32, 4, 2, 16
+    block = SparseMoEBlock(
+        d_model=d_model,
+        intermediate_size=inter,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        latent_moe=True,
+        latent_dim=ell,
+    )
+    counted = SparseMoEBlock.compute_parameters(
+        d_model,
+        intermediate_size=inter,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        latent_moe=True,
+        latent_dim=ell,
+    )
+    actual = sum(p.numel() for p in block.parameters())
+    assert counted == actual
+
+
+def test_sparse_moe_latent_compute_flops_gated():
+    d_model, inter, E, k, ell = 64, 32, 8, 2, 16
+    f = SparseMoEBlock.compute_flops(
+        d_model,
+        intermediate_size=inter,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        latent_moe=True,
+        latent_dim=ell,
+    )
+    router = 2 * d_model * E
+    expert = 6 * ell * inter  # expert I/O axis is ℓ, not d_model
+    proj = 4 * d_model * ell  # W↓ + W↑, once per token
+    assert f == router + k * expert + proj
+
+
+def test_sparse_moe_latent_flops_less_than_dense_moe():
+    kwargs = dict(
+        intermediate_size=128, n_routed_experts=8, n_routed_experts_per_token=2
+    )
+    dense = SparseMoEBlock.compute_flops(256, **kwargs)
+    latent = SparseMoEBlock.compute_flops(256, latent_moe=True, latent_dim=64, **kwargs)
+    assert latent < dense
