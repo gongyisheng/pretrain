@@ -25,6 +25,12 @@ import json
 import os
 import sys
 
+# torch reads TORCH_COMPILE_DISABLE when its dynamo module is first imported, so
+# this must be set before `import torch` — a later os.environ assignment is
+# ignored. Pre-scan argv so the --disable-torch-compile flag takes effect here.
+if "--disable-torch-compile" in sys.argv:
+    os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
 import torch
 
 sys.path.insert(0, ".")
@@ -100,6 +106,10 @@ def run_benchmark(
     )
     with nvtx_ctx:
         trainer.train()
+
+    # Safety net: stop if training exited before the stop step was logged.
+    if cuda_profiler and started and not stopped:
+        torch.cuda.profiler.stop()
 
     # Safety net: stop if training exited before the stop step was logged.
     if cuda_profiler and started and not stopped:
