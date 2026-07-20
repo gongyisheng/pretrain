@@ -29,7 +29,7 @@ All hyperparameters are matched between bf16 and fp8. The only independent varia
 
 `exclude: [lm_head]` for all FP8 runs (lm_head stays in bf16; numerically sensitive under tied embeddings). fp8 uses `dtype_recipe: fp8` → weight/act `fp8_e4m3`, grad `fp8_e5m2`.
 
-All runs: seq_len=1024, batch=16, grad_accum=16 (effective batch=256, ~262K tok/step), 50K steps (~13B tokens), lr=6e-4, cosine schedule with 1500 warmup, min_lr=6e-5, OpenWebText.
+All runs: seq_len=1024, batch=16, grad_accum=16 (effective batch=256, ~262K tok/step), 50K steps (~13B tokens), Muon optimizer (`muon_adjust_lr_fn: match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup, min_lr=5e-5, OpenWebText.
 
 ## What runs in FP8
 
