@@ -10,7 +10,6 @@ import statistics
 
 import torch
 
-from src.layers.mlp import SparseMoEBlock
 from src.model.transformer import TransformerLM
 from src.utils.config import TrainConfig
 
@@ -38,12 +37,6 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def collect_moe_blocks(model: torch.nn.Module) -> list[SparseMoEBlock]:
-    """All SparseMoEBlock submodules, in order. Resolve once and cache — each
-    block exposes its last-forward routing load via `expert_load`."""
-    return [m for m in model.modules() if isinstance(m, SparseMoEBlock)]
-
-
 def compute_maxvio(expert_counts: torch.Tensor) -> float:
     """Maximal load violation for one MoE layer (arXiv:2408.15664):
     `(max_i load_i - mean load) / mean load`. 0 = perfectly balanced; 1.0 means
@@ -56,16 +49,38 @@ def compute_maxvio(expert_counts: torch.Tensor) -> float:
     return ((counts.max() - mean) / mean).item()
 
 
+def aggregate_maxvio(per_layer: list[float]) -> dict[str, float]:
+    """Wrap per-layer MaxVio values into ``{"layer_{i}": v, "mean", "max"}``."""
+    out = {f"layer_{i}": v for i, v in enumerate(per_layer)}
+    out["mean"] = statistics.mean(per_layer)
+    out["max"] = max(per_layer)
+    return out
+
+
 def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
     """Per-layer and aggregate MaxVio from accumulated expert load counts.
 
     Returns ``{"layer_{i}": v, ..., "mean": ..., "max": ...}``.
     """
-    per_layer = [compute_maxvio(c) for c in load_per_layer]
-    out = {f"layer_{i}": v for i, v in enumerate(per_layer)}
-    out["mean"] = statistics.mean(per_layer)
-    out["max"] = max(per_layer)
-    return out
+    return aggregate_maxvio([compute_maxvio(c) for c in load_per_layer])
+
+
+def compute_moe_global_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
+    """MaxVio of the load summed over batches, from stacked ``[n_batch, E]``
+    counts per layer, then aggregate.
+    """
+    return aggregate_maxvio([compute_maxvio(loads.sum(0)) for loads in load_per_layer])
+
+
+def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
+    """Mean per-batch MaxVio from stacked ``[n_batch, E]`` counts per layer,
+    then aggregate.
+    """
+    per_layer = [
+        statistics.mean([compute_maxvio(row) for row in loads])
+        for loads in load_per_layer
+    ]
+    return aggregate_maxvio(per_layer)
 
 
 # ---------------------------------------------------------------------------

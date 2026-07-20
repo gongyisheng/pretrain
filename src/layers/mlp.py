@@ -14,10 +14,8 @@ def gated_mlp(
 ) -> torch.Tensor:
     """Fused gated MLP: gate_up matmul → chunk → act(gate, up) → down matmul.
 
-    Shapes are unified via `@` (matmul broadcasts arbitrary leading dims):
-      - Dense (used by DenseMLPBlock): x (..., D); w_gate_up (2*I, D); w_down (D, I).
-      - Batched (used by MoE):         x (E, C, D); w_gate_up (E, 2*I, D); w_down (E, D, I).
-    Bias is 1D for the dense form and 2D for the batched form (auto-broadcasts).
+    Shapes: x (..., D); w_gate_up (2*I, D); w_down (D, I); 1D biases. Leading
+    dims broadcast through `@`.
     """
     gate_up = x @ w_gate_up.mT
     if b_gate_up is not None:
@@ -42,9 +40,7 @@ def ungated_mlp(
 ) -> torch.Tensor:
     """Fused ungated MLP: up matmul → act(up) → down matmul.
 
-    Shapes (parallel to gated_mlp):
-      - Dense:   x (..., D); w_up (I, D); w_down (D, I).
-      - Batched: x (E, C, D); w_up (E, I, D); w_down (E, D, I).
+    Shapes (parallel to gated_mlp): x (..., D); w_up (I, D); w_down (D, I).
     """
     up = x @ w_up.mT
     if b_up is not None:
@@ -183,88 +179,6 @@ class DenseMLPBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def _route(
-    top_indices: torch.Tensor,
-    top_weights: torch.Tensor,
-    n_routed_experts: int,
-    capacity_factor: float,
-) -> tuple:
-    """Sort-based MoE token routing with fixed capacity (drops overflow tokens).
-
-    Args:
-        top_indices: (T, k) — expert indices per token
-        top_weights: (T, k) — routing weights per token
-        n_routed_experts: total number of experts
-        capacity_factor: fixed capacity = T * k * factor / E
-
-    Returns:
-        expert_ids, token_ids, weights, positions, capacity, expert_counts
-    """
-    T, k = top_indices.shape
-    E = n_routed_experts
-    device = top_indices.device
-
-    flat_expert_ids = top_indices.reshape(-1)
-    flat_token_ids = (
-        torch.arange(T, device=device).unsqueeze(1).expand(T, k).reshape(-1)
-    )
-    flat_weights = top_weights.reshape(-1)
-
-    sorted_expert_ids, sorted_order = flat_expert_ids.sort(stable=True)
-    sorted_token_ids = flat_token_ids[sorted_order]
-    sorted_weights = flat_weights[sorted_order]
-
-    expert_counts = torch.bincount(sorted_expert_ids.long(), minlength=E)
-    capacity = int(T * k * capacity_factor / E)
-
-    offsets = torch.zeros(E, dtype=torch.long, device=device)
-    offsets[1:] = expert_counts[:-1].cumsum(0)
-    positions = torch.arange(T * k, device=device) - offsets[sorted_expert_ids]
-    keep_mask = positions < capacity
-
-    return (
-        sorted_expert_ids[keep_mask],
-        sorted_token_ids[keep_mask],
-        sorted_weights[keep_mask],
-        positions[keep_mask],
-        capacity,
-        expert_counts,
-    )
-
-
-def _scatter_in(
-    x_flat: torch.Tensor,
-    expert_ids: torch.Tensor,
-    token_ids: torch.Tensor,
-    positions: torch.Tensor,
-    E: int,
-    capacity: int,
-) -> torch.Tensor:
-    """Scatter tokens into padded expert input (E, capacity, D)."""
-    D = x_flat.shape[1]
-    padded = x_flat.new_zeros(E, capacity, D)
-    padded[expert_ids, positions] = x_flat[token_ids]
-    return padded
-
-
-def _scatter_out(
-    expert_out: torch.Tensor,
-    expert_ids: torch.Tensor,
-    token_ids: torch.Tensor,
-    positions: torch.Tensor,
-    weights: torch.Tensor,
-    T: int,
-) -> torch.Tensor:
-    """Gather expert outputs and scatter-add to token positions."""
-    gathered = expert_out[expert_ids, positions]
-    weighted = gathered * weights.unsqueeze(-1)
-    output = torch.zeros(
-        T, gathered.shape[-1], device=expert_out.device, dtype=weighted.dtype
-    )
-    output.scatter_add_(0, token_ids.unsqueeze(-1).expand_as(weighted), weighted)
-    return output
-
-
 class ExpertBias(nn.Module):
     """Auxiliary-loss-free load-balancing bias (arXiv:2408.15664).
 
@@ -302,6 +216,35 @@ class ExpertBias(nn.Module):
         return n_experts  # the bias buffer
 
 
+class ExpertLoad(nn.Module):
+    def __init__(self, n_experts: int):
+        super().__init__()
+        self.register_buffer(
+            "train_load", torch.zeros(n_experts, dtype=torch.long), persistent=False
+        )
+        self.register_buffer(
+            "eval_load", torch.zeros(n_experts, dtype=torch.long), persistent=False
+        )
+
+    def record_load(self, counts: torch.Tensor, training: bool) -> None:
+        if training:
+            self.train_load += counts
+        else:
+            self.eval_load.copy_(counts)
+
+    def reset_train_load(self) -> None:
+        self.train_load.zero_()
+
+    def reset_eval_load(self) -> None:
+        self.eval_load.zero_()
+
+
+MOE_ROUTER_SCORE_FNS = {
+    "softmax": lambda logits: logits.softmax(dim=-1),
+    "sigmoid": lambda logits: logits.sigmoid(),
+}
+
+
 class MoERouter(nn.Module):
     """MoE top-k router with fp32-pinned gate weight.
 
@@ -321,11 +264,13 @@ class MoERouter(nn.Module):
         normalize: bool = True,
         expert_bias: bool = False,
         expert_bias_update_rate: float = 0.001,
+        router_score_fn: str = "sigmoid",
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
         self.n_routed_experts_per_token = n_routed_experts_per_token
         self.normalize = normalize
+        self.score_fn = MOE_ROUTER_SCORE_FNS[router_score_fn]
         self.gate = nn.Linear(d_model, n_routed_experts, bias=False)
         self.expert_bias = (
             ExpertBias(n_routed_experts, expert_bias_update_rate)
@@ -346,7 +291,7 @@ class MoERouter(nn.Module):
         # autocast would downcast the matmul, undoing the fp32 pin.
         with torch.amp.autocast(device_type=x.device.type, enabled=False):
             logits = self.gate(x.float())
-            router_probs = logits.softmax(-1)
+            router_probs = self.score_fn(logits)
         if self.expert_bias is not None:
             top_indices = torch.topk(self.expert_bias(router_probs), k, dim=-1).indices
             top_weights = router_probs.gather(-1, top_indices)
@@ -355,6 +300,11 @@ class MoERouter(nn.Module):
         if self.normalize:
             top_weights = top_weights / (top_weights.sum(-1, keepdim=True) + 1e-9)
         return top_indices, top_weights.to(dtype), router_probs.to(dtype)
+
+    def update_expert_bias(self, expert_counts: torch.Tensor):
+        """Nudge the load-balancing bias toward uniform load. No-op if disabled."""
+        if self.expert_bias is not None:
+            self.expert_bias.update(expert_counts)
 
     @classmethod
     def compute_flops(cls, d_model: int, n_experts: int, *, expert_bias=False) -> int:
@@ -372,15 +322,11 @@ class MoERouter(nn.Module):
 
 
 class SparseMoEBlock(nn.Module):
-    """Sparse Mixture-of-Experts MLP block with two expert-dispatch paths.
+    """Sparse Mixture-of-Experts MLP block (dropless dispatch).
 
-    Expert weights are stored as stacked (E, out, in) tensors. Routing chooses
-    the dispatch path by `expert_capacity_factor`:
-      - None (default, dropless): tokens are sorted by expert and run through a
-        variable-group GEMM (`grouped_mlp` / torch._grouped_mm) with no padding
-        and no dropped tokens.
-      - set (capacity-capped): tokens are sorted, padded to a fixed (E, C, D)
-        capacity (overflow dropped), and run through batched `torch.bmm`.
+    Expert weights are stored as stacked (E, out, in) tensors. Tokens are sorted
+    by expert and run through a variable-group GEMM (`grouped_mlp` /
+    torch._grouped_mm) with no padding and no dropped tokens.
 
     Per forward pass:
       - Tokens are routed to top-k experts via MoERouter.
@@ -401,20 +347,19 @@ class SparseMoEBlock(nn.Module):
         *,
         intermediate_size: int,
         n_routed_experts: int,
-        n_routed_experts_per_token: int = 2,
+        n_routed_experts_per_token: int,
         n_shared_experts: int = 0,
         aux_loss: bool = True,
-        aux_loss_coef: float = 0.01,
-        expert_capacity_factor: float = None,
+        aux_loss_coef: float = 0.001,
         expert_bias: bool = False,
         expert_bias_update_rate: float = 0.001,
+        router_score_fn: str = "sigmoid",
         activation: str = "silu",
         gated: bool = True,
         bias: bool = False,
         dropout: float = 0.0,
     ):
         super().__init__()
-        # Defaults/validation (intermediate_size, activation) live in ModelConfig.
         if aux_loss and expert_bias:
             raise ValueError(
                 "aux_loss and expert_bias are mutually exclusive MoE balancing strategies"
@@ -425,8 +370,9 @@ class SparseMoEBlock(nn.Module):
         self.n_shared_experts = n_shared_experts
         self.aux_loss = aux_loss
         self.aux_loss_coef = aux_loss_coef
-        self.expert_capacity_factor = expert_capacity_factor
+        self.router_score_fn = router_score_fn
         self.expert_bias = expert_bias
+        self.expert_bias_update_rate = expert_bias_update_rate
         self.gated = gated
         self.act_fn = registry[activation]
         self.router = MoERouter(
@@ -435,6 +381,7 @@ class SparseMoEBlock(nn.Module):
             n_routed_experts_per_token,
             expert_bias=expert_bias,
             expert_bias_update_rate=expert_bias_update_rate,
+            router_score_fn=router_score_fn,
         )
 
         # DeepSeekMoE shared experts: always-on FFN run on every token, merged
@@ -480,119 +427,85 @@ class SparseMoEBlock(nn.Module):
         )
         self.expert_dropout = nn.Dropout(dropout)
 
-        # Per-expert token routing load from the most recent forward, for
-        # load-balance monitoring (MaxVio). Non-persistent; written in-place so
-        # torch.compile records a buffer mutation rather than graph-breaking.
-        self.register_buffer(
-            "expert_load",
-            torch.zeros(n_routed_experts, dtype=torch.long),
-            persistent=False,
-        )
+        self.expert_load = ExpertLoad(n_routed_experts)
 
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)
         B, S, D = x.shape
-        T = B * S
+        BS = B * S
         k = self.n_routed_experts_per_token
         E = self.n_routed_experts
-        x_flat = x.view(T, D)
+        x_flat = x.view(BS, D)
 
+        # top_indices: (BS, k), top_weights: (BS, k), router_probs: (BS, E)
         top_indices, top_weights, router_probs = self.router(x_flat)
-        # top_indices: (T, k)   top_weights: (T, k)   router_probs: (T, E)
 
         w_in = self.expert_gate_up if self.gated else self.expert_up
         b_in = self.expert_gate_up_bias if self.gated else self.expert_up_bias
 
-        if self.expert_capacity_factor is not None:
-            # --- Capacity-capped path (drops overflow; static shapes) ---
-            (
-                sorted_expert_ids,
-                sorted_token_ids,
-                sorted_weights,
-                positions,
-                capacity,
-                expert_counts,
-            ) = _route(top_indices, top_weights, E, self.expert_capacity_factor)
-            self.expert_load.copy_(expert_counts.detach())
-            padded_input = _scatter_in(
-                x_flat, sorted_expert_ids, sorted_token_ids, positions, E, capacity
-            )
-            if self.gated:
-                expert_out = gated_mlp(
-                    padded_input,
-                    self.expert_gate_up,
-                    self.expert_down,
-                    self.act_fn,
-                    self.expert_gate_up_bias,
-                    self.expert_down_bias,
-                )
-            else:
-                expert_out = ungated_mlp(
-                    padded_input,
-                    self.expert_up,
-                    self.expert_down,
-                    self.act_fn,
-                    self.expert_up_bias,
-                    self.expert_down_bias,
-                )
-            expert_out = self.expert_dropout(expert_out)
-            output = _scatter_out(
-                expert_out,
-                sorted_expert_ids,
-                sorted_token_ids,
-                positions,
-                sorted_weights,
-                T,
-            )
-        else:
-            # --- Dropless grouped-GEMM path (no padding, no drops) ---
-            flat_expert_ids = top_indices.reshape(-1)
-            flat_token_ids = (
-                torch.arange(T, device=x.device).unsqueeze(1).expand(T, k).reshape(-1)
-            )
-            flat_weights = top_weights.reshape(-1)
-            sorted_expert_ids, order = flat_expert_ids.sort(stable=True)
-            sorted_token_ids = flat_token_ids[order]
-            sorted_weights = flat_weights[order]
-            expert_counts = torch.bincount(sorted_expert_ids.long(), minlength=E)
-            self.expert_load.copy_(expert_counts.detach())
-            offs = expert_counts.cumsum(0).to(torch.int32)
-            x_sorted = x_flat[sorted_token_ids]
-            expert_out = grouped_mlp(
-                x_sorted,
-                w_in,
-                self.expert_down,
-                self.act_fn,
-                offs,
-                self.gated,
-                row_expert_ids=sorted_expert_ids if b_in is not None else None,
-                b_in=b_in,
-                b_down=self.expert_down_bias,
-            )
-            expert_out = self.expert_dropout(expert_out)
-            weighted = expert_out * sorted_weights.unsqueeze(-1)
-            output = x_flat.new_zeros(T, D, dtype=weighted.dtype)
-            output.scatter_add_(
-                0, sorted_token_ids.unsqueeze(-1).expand_as(weighted), weighted
-            )
+        # flatten
+        expert_ids = top_indices.reshape(-1)
+        token_ids = torch.arange(BS, device=x.device).repeat_interleave(k)
+        weights = top_weights.reshape(-1, 1)
 
-        if self.expert_bias:
-            if self.training:
-                self.router.expert_bias.update(expert_counts)
-            aux_loss = None
-        elif self.aux_loss:
+        # sort
+        expert_ids_sorted, order = expert_ids.sort(stable=True)
+        token_ids_sorted = token_ids[order]
+        weights_sorted = weights[order]
+        expert_counts = torch.bincount(expert_ids_sorted, minlength=E)
+        self.expert_load.record_load(expert_counts.detach(), self.training)
+        offs = expert_counts.cumsum(0).to(torch.int32)
+        x_sorted = x_flat[token_ids_sorted]
+
+        # grouped mm
+        expert_out = grouped_mlp(
+            x_sorted,
+            w_in,
+            self.expert_down,
+            self.act_fn,
+            offs,
+            self.gated,
+            row_expert_ids=expert_ids_sorted if b_in is not None else None,
+            b_in=b_in,
+            b_down=self.expert_down_bias,
+        )
+        expert_out = expert_out * weights_sorted
+        expert_out = self.expert_dropout(expert_out)
+
+        # unsort, sum
+        output = torch.zeros_like(x_flat)
+        output.index_add_(0, token_ids_sorted, expert_out)
+
+        aux_loss = None
+        if self.aux_loss:
             with torch.no_grad():
-                f = expert_counts.to(x.dtype) / T  # (E,)
-            P = router_probs.mean(0)  # (E,)
+                f = expert_counts.to(x.dtype) / BS  # (E,)
+            probs = router_probs
+            # normalize sigmoid token probs, softmax no-op
+            if self.router_score_fn == "sigmoid":
+                probs = probs / (probs.sum(-1, keepdim=True) + 1e-9)
+            P = probs.mean(0)  # (E,)
             aux_loss = E * (f * P).sum()
-        else:
-            aux_loss = None
 
         output = output.view(B, S, D)
         if self.shared_expert is not None:
             shared_out, _ = self.shared_expert(x)
             output = output + shared_out
         return output, aux_loss
+
+    @torch.no_grad()
+    def post_step(self):
+        if self.expert_bias:
+            self.router.update_expert_bias(self.expert_load.train_load)
+            self.expert_load.reset_train_load()
+
+    def forward_meta(self) -> dict:
+        """Routing metadata from the last forward. `expert_load` is the accumulated
+        train counts in train mode, the current batch's counts in eval mode."""
+        load = (
+            self.expert_load.train_load if self.training else self.expert_load.eval_load
+        )
+        return {"expert_load": load}
 
     @classmethod
     def compute_flops(

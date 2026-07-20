@@ -7,8 +7,10 @@ from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.mlp import (
     DenseMLPBlock,
     ExpertBias,
+    ExpertLoad,
     MLP_REGISTRY,
     MoERouter,
+    MOE_ROUTER_SCORE_FNS,
     SparseMoEBlock,
     grouped_mlp,
     gated_mlp,
@@ -190,6 +192,84 @@ def test_moe_router_weights_unnormalized():
     assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
 
 
+def test_moe_router_default_score_fn_is_sigmoid():
+    torch.manual_seed(0)
+    router = MoERouter(d_model=64, n_routed_experts=8, n_routed_experts_per_token=2)
+    x = torch.randn(32, 64)
+    _, _, router_probs = router(x)
+    # sigmoid scores each expert independently in (0, 1); no cross-expert normalization.
+    assert (router_probs > 0).all() and (router_probs < 1).all()
+    sums = router_probs.sum(dim=-1)
+    assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
+
+
+def test_moe_router_sigmoid_scores_are_independent():
+    torch.manual_seed(0)
+    router = MoERouter(
+        d_model=64,
+        n_routed_experts=8,
+        n_routed_experts_per_token=2,
+        router_score_fn="sigmoid",
+    )
+    x = torch.randn(32, 64)
+    _, _, router_probs = router(x)
+    # sigmoid scores each expert in (0, 1) and does not normalize across experts.
+    assert (router_probs > 0).all() and (router_probs < 1).all()
+    sums = router_probs.sum(dim=-1)
+    assert not torch.allclose(sums, torch.ones_like(sums), atol=1e-3)
+
+
+def test_moe_router_sigmoid_matches_logits():
+    torch.manual_seed(0)
+    router = MoERouter(
+        d_model=64,
+        n_routed_experts=8,
+        n_routed_experts_per_token=2,
+        router_score_fn="sigmoid",
+    )
+    x = torch.randn(32, 64)
+    _, _, router_probs = router(x)
+    expected = router.gate(x.float()).sigmoid()
+    assert torch.allclose(router_probs, expected, atol=1e-6)
+
+
+def test_moe_router_sigmoid_weights_normalized():
+    torch.manual_seed(0)
+    router = MoERouter(
+        d_model=64,
+        n_routed_experts=8,
+        n_routed_experts_per_token=2,
+        normalize=True,
+        router_score_fn="sigmoid",
+    )
+    x = torch.randn(32, 64)
+    _, top_weights, _ = router(x)
+    sums = top_weights.sum(dim=-1)
+    assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+
+
+def test_moe_router_unknown_score_fn_raises():
+    with pytest.raises(KeyError):
+        MoERouter(
+            d_model=64,
+            n_routed_experts=8,
+            n_routed_experts_per_token=2,
+            router_score_fn="argmax",
+        )
+
+
+def test_sparse_moe_block_forwards_score_fn_to_router():
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        aux_loss=True,
+        router_score_fn="sigmoid",
+    )
+    assert block.router.score_fn is MOE_ROUTER_SCORE_FNS["sigmoid"]
+
+
 def test_moe_router_gate_weight_stays_fp32_across_dtype_casts():
     router = MoERouter(d_model=64, n_routed_experts=8, n_routed_experts_per_token=2)
     assert router.gate.weight.dtype == torch.float32
@@ -336,6 +416,27 @@ def test_sparse_moe_block_aux_loss_is_scalar_and_nonneg():
     assert aux_loss.item() >= 0.0
 
 
+def test_sparse_moe_sigmoid_aux_loss_normalized():
+    """Sigmoid scores are unnormalized (each in (0,1), summing to ~E/2), so the
+    Switch balance loss must normalize per-token probs before computing P.
+    Without it, aux ~ E*k/2 at init and the router can minimize it by shrinking
+    all probs (aux -> 0, logged value goes negative) instead of balancing load.
+    With normalization the loss is ~k, matching softmax."""
+    torch.manual_seed(0)
+    k, E = 8, 64
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        router_score_fn="sigmoid",
+    )
+    x = torch.randn(8, 32, 64)
+    _, aux_loss = block(x)
+    # Normalized balance loss is ~k at init; unnormalized would be ~E*k/2 = 256.
+    assert aux_loss.item() < 4 * k
+
+
 def test_sparse_moe_block_aux_loss_has_grad():
     block = SparseMoEBlock(
         d_model=64,
@@ -349,6 +450,24 @@ def test_sparse_moe_block_aux_loss_has_grad():
     assert block.router.gate.weight.grad is not None
 
 
+def test_expert_load_record_and_reset():
+    load = ExpertLoad(n_experts=4)
+    counts = torch.tensor([1, 2, 3, 4])
+    # training routes into train_load (accumulates), leaving eval_load untouched.
+    load.record_load(counts, training=True)
+    load.record_load(counts, training=True)
+    assert load.train_load.tolist() == [2, 4, 6, 8]
+    assert load.eval_load.tolist() == [0, 0, 0, 0]
+    # eval overwrites eval_load with the current batch, leaving train_load.
+    load.record_load(torch.tensor([5, 6, 7, 8]), training=False)
+    assert load.eval_load.tolist() == [5, 6, 7, 8]
+    assert load.train_load.tolist() == [2, 4, 6, 8]
+    load.reset_train_load()
+    load.reset_eval_load()
+    assert load.train_load.tolist() == [0, 0, 0, 0]
+    assert load.eval_load.tolist() == [0, 0, 0, 0]
+
+
 def test_sparse_moe_block_records_expert_load():
     block = SparseMoEBlock(
         d_model=64,
@@ -356,26 +475,35 @@ def test_sparse_moe_block_records_expert_load():
         n_routed_experts=4,
         n_routed_experts_per_token=2,
     )
+    block.train()
     x = torch.randn(2, 8, 64)  # T=16 tokens, k=2 -> 32 routings
     block(x)
-    load = block.expert_load
+    load = block.expert_load.train_load
     assert load.shape == (4,)
     assert load.sum().item() == 16 * 2
     assert not load.requires_grad
     # Buffer is non-persistent (excluded from state_dict).
-    assert "expert_load" not in block.state_dict()
+    assert "expert_load.train_load" not in block.state_dict()
 
 
 def test_sparse_moe_block_aux_loss_coef_stored():
     block = SparseMoEBlock(
-        d_model=64, intermediate_size=128, n_routed_experts=4, aux_loss_coef=0.05
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        aux_loss_coef=0.05,
     )
     assert block.aux_loss_coef == 0.05
 
 
 def test_sparse_moe_block_aux_loss_false_returns_none():
     block = SparseMoEBlock(
-        d_model=64, intermediate_size=128, n_routed_experts=4, aux_loss=False
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        aux_loss=False,
     )
     x = torch.randn(2, 8, 64)
     _, aux_loss = block(x)
@@ -387,6 +515,7 @@ def test_sparse_moe_block_expert_bias_returns_no_aux_loss():
         d_model=64,
         intermediate_size=128,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         aux_loss=False,
         expert_bias=True,
     )
@@ -401,6 +530,7 @@ def test_sparse_moe_block_aux_loss_and_expert_bias_mutually_exclusive():
             d_model=64,
             intermediate_size=128,
             n_routed_experts=4,
+            n_routed_experts_per_token=2,
             aux_loss=True,
             expert_bias=True,
         )
@@ -412,6 +542,7 @@ def test_sparse_moe_block_expert_bias_updates_in_train_only():
         d_model=64,
         intermediate_size=128,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         aux_loss=False,
         expert_bias=True,
     )
@@ -419,15 +550,43 @@ def test_sparse_moe_block_expert_bias_updates_in_train_only():
 
     block.eval()
     block(x)
+    block.post_step()
     assert (
         torch.count_nonzero(block.router.expert_bias.bias) == 0
-    )  # no update during eval
+    )  # eval forward doesn't accumulate load, so post_step is a no-op for the bias
 
     block.train()
     block(x)
     assert (
+        torch.count_nonzero(block.router.expert_bias.bias) == 0
+    )  # forward only accumulates load; bias unchanged until post_step
+    block.post_step()
+    assert (
         torch.count_nonzero(block.router.expert_bias.bias) > 0
-    )  # imbalanced load moves bias
+    )  # imbalanced load moves bias at the step boundary
+
+
+def test_sparse_moe_block_post_step_accumulates_across_microbatches():
+    torch.manual_seed(0)
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        aux_loss=False,
+        expert_bias=True,
+    )
+    block.train()
+    x = torch.randn(4, 16, 64)  # 64 tokens, k=2 -> 128 routings per micro-batch
+
+    block(x)
+    block(x)  # two micro-batches accumulate before the step boundary
+    assert block.expert_load.train_load.sum().item() == 2 * 64 * 2
+
+    block.post_step()
+    # post_step consumes the accumulated load (bias update) and resets it.
+    assert block.expert_load.train_load.sum().item() == 0
+    assert "expert_load.train_load" not in block.state_dict()  # non-persistent
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +595,12 @@ def test_sparse_moe_block_expert_bias_updates_in_train_only():
 
 
 def test_sparse_moe_no_shared_experts_by_default():
-    block = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+    )
     assert block.shared_expert is None
 
 
@@ -448,6 +612,7 @@ def test_sparse_moe_shared_expert_width_and_shape(n_shared_experts, gated):
         d_model=64,
         intermediate_size=inter,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         n_shared_experts=n_shared_experts,
         gated=gated,
     )
@@ -467,6 +632,7 @@ def test_sparse_moe_shared_expert_adds_to_routed_output():
         d_model=64,
         intermediate_size=32,
         n_routed_experts=4,
+        n_routed_experts_per_token=2,
         n_shared_experts=2,
         dropout=0.0,
     )
@@ -584,7 +750,9 @@ def test_sparse_moe_compute_parameters_expert_bias():
 def test_moe_router_matches_ref(normalize, dtype, atol):
     torch.manual_seed(0)
     d_model, n_routed_experts, k = 64, 8, 2
-    router = MoERouter(d_model, n_routed_experts, k, normalize=normalize).to(dtype)
+    router = MoERouter(
+        d_model, n_routed_experts, k, normalize=normalize, router_score_fn="softmax"
+    ).to(dtype)
     router.eval()
     x = torch.randn(32, d_model, dtype=dtype)
     top_idx, top_w, probs = router(x)
@@ -600,7 +768,9 @@ def test_moe_router_matches_ref(normalize, dtype, atol):
 def test_moe_router_matches_ref_under_saturation(dtype, atol):
     torch.manual_seed(0)
     d_model, n_routed_experts, k = 512, 64, 4
-    router = MoERouter(d_model, n_routed_experts, k).to(dtype)
+    router = MoERouter(d_model, n_routed_experts, k, router_score_fn="softmax").to(
+        dtype
+    )
     router.eval()
     x = torch.randn(256, d_model, dtype=dtype) * 30
     top_idx, top_w, probs = router(x)
@@ -637,6 +807,7 @@ def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
         dropout=0.0,
         gated=gated,
         activation=activation,
+        router_score_fn="softmax",
     )
     with torch.no_grad():
         w1 = block.expert_gate_up if gated else block.expert_up
@@ -679,6 +850,7 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
         n_routed_experts=n_routed_experts,
         n_routed_experts_per_token=top_k,
         dropout=0.0,
+        router_score_fn="softmax",
     )
     with torch.no_grad():
         torch.nn.init.normal_(ours.expert_gate_up, std=0.02)
@@ -812,6 +984,7 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
         gated=gated,
         activation="silu" if gated else "gelu",
         bias=True,
+        router_score_fn="softmax",
     )
     with torch.no_grad():
         w1 = block.expert_gate_up if gated else block.expert_up
@@ -843,7 +1016,6 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
         expert_up_bias=None if gated else block.expert_up_bias,
         expert_down_bias=block.expert_down_bias,
     )
-    assert block.expert_load[3].item() == 0
     assert torch.allclose(out, out_ref, atol=1e-4)
     assert torch.allclose(aux, aux_ref, atol=1e-4)
 

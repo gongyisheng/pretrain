@@ -133,7 +133,7 @@ class Trainer:
             num_workers=n_worker,
             pin_memory=True,
             persistent_workers=n_worker > 0,
-            prefetch_factor=1 if n_worker > 0 else None,
+            prefetch_factor=config.data.prefetch_factor if n_worker > 0 else None,
             generator=g,
             worker_init_fn=Trainer._worker_init_fn,
         )
@@ -144,7 +144,7 @@ class Trainer:
             num_workers=n_worker,
             pin_memory=True,
             persistent_workers=n_worker > 0,
-            prefetch_factor=1 if n_worker > 0 else None,
+            prefetch_factor=config.data.prefetch_factor if n_worker > 0 else None,
             generator=g,
             worker_init_fn=Trainer._worker_init_fn,
         )
@@ -175,7 +175,8 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
-        self.model = torch.compile(self.model)
+        if config.training.enable_torch_compile:
+            self.model = torch.compile(self.model)
 
         # Activation checkpointing
         if config.training.activation_checkpointing:
@@ -382,6 +383,7 @@ class Trainer:
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
             self.metrics.on_train_step(
                 loss=accum_loss,
                 grad_norm=grad_norm_val,
@@ -391,6 +393,8 @@ class Trainer:
                 scale_before=scale_before,
                 aux_loss=aux_loss,
             )
+            self.model.post_step()
+
             self.scheduler.step()
 
             # Defer loss sync to next iteration (save tensor, read later)

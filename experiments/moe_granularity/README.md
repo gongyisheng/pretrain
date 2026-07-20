@@ -25,8 +25,9 @@ Common backbone (Qwen3-style, identical across all runs except the MLP block):
 | norm / pos_emb | rmsnorm / rope (θ=10000) |
 
 Invariants across the MoE sweep: pool `E·is = 12288`, active `k·is = 1536`, sparsity
-`k/E = 1/8` (12.5%). `is` = per-expert `intermediate_size`. All MoE cells use
-`aux_loss_coef=0.001` and no expert capacity limit (no token drops).
+`k/E = 1/8` (12.5%). `is` = per-expert `intermediate_size`. All MoE cells use a sigmoid
+router gate with expert-bias load balancing (`expert_bias_update_rate=1e-3`, aux-loss-free,
+arXiv:2408.15664) and no expert capacity limit (no token drops).
 
 The active width `k·is = 1536 = 3·d_model` is the Qwen3-0.6B FFN ratio. **Granularity** is
 `G = d_ff / d_expert` (DeepSeekMoE / fine-grained scaling laws), where `d_expert = is` and
@@ -40,17 +41,11 @@ Config filename = ckpt dir = W&B run name. `m` = split factor = `G = 1536/is`.
 
 | Config | m | is | E | k | Total | Active |
 |--------|:-:|---:|---:|---:|:-----:|:------:|
-| `qwen3_183m_a51m_is1536_e8_k1`  | 1 | 1536 |  8 | 1 | 183M | 51M |
-| `qwen3_183m_a51m_is768_e16_k2`  | 2 |  768 | 16 | 2 | 183M | 51M |
-| `qwen3_183m_a51m_is384_e32_k4`  | 4 |  384 | 32 | 4 | 183M | 51M |
-| `qwen3_183m_a51m_is192_e64_k8`  | 8 |  192 | 64 | 8 | 183M | 51M |
-| `qwen3_51m`                     | — | 1536 |  — | — |  51M | 51M |
-
-`qwen3_51m` is the dense reference (no routing): a plain gated SwiGLU FFN of width
-`is=1536` (3·d_model), i.e. the same active FFN width as every MoE cell. It tests whether
-routing buys anything over a dense FFN of equal active size. It has marginally fewer params
-than the iso-active MoE cells (50.9M vs ~51M active), so it is an upper-bound anchor for the
-granularity axis, not an iso-compute point.
+| `qwen3_183m_a51m_is1536_e8_k1`   |  1 | 1536 |   8 |  1 | 183M | 51M |
+| `qwen3_183m_a51m_is768_e16_k2`   |  2 |  768 |  16 |  2 | 183M | 51M |
+| `qwen3_183m_a51m_is384_e32_k4`   |  4 |  384 |  32 |  4 | 183M | 51M |
+| `qwen3_183m_a51m_is192_e64_k8`   |  8 |  192 |  64 |  8 | 183M | 51M |
+| `qwen3_183m_a51m_is96_e128_k16`  | 16 |   96 | 128 | 16 | 183M | 51M |
 
 Training (all runs): batch 64 × grad-accum 4 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
 50000 (~13B tokens), cosine LR 1e-3 → 1e-4, warmup 1500, bf16.
@@ -71,15 +66,18 @@ W&B project: `pretrain-moe-granularity`.
 
 | Config | m | is | E | k | Final val loss |
 |--------|:-:|---:|---:|---:|:--------------:|
-| `qwen3_183m_a51m_is1536_e8_k1`  | 1 | 1536 |  8 | 1 | |
-| `qwen3_183m_a51m_is768_e16_k2`  | 2 |  768 | 16 | 2 | |
-| `qwen3_183m_a51m_is384_e32_k4`  | 4 |  384 | 32 | 4 | |
-| `qwen3_183m_a51m_is192_e64_k8`  | 8 |  192 | 64 | 8 | |
-| `qwen3_51m`                     | — | 1536 |  — | — | |
+| `qwen3_183m_a51m_is1536_e8_k1`   |  1 | 1536 |   8 |  1 | |
+| `qwen3_183m_a51m_is768_e16_k2`   |  2 |  768 |  16 |  2 | |
+| `qwen3_183m_a51m_is384_e32_k4`   |  4 |  384 |  32 |  4 | |
+| `qwen3_183m_a51m_is192_e64_k8`   |  8 |  192 |  64 |  8 | |
+| `qwen3_183m_a51m_is96_e128_k16`  | 16 |   96 | 128 | 16 | |
 
 ## Notes
 
 - Total params (183M) and active params (51M) are constant across the MoE sweep by
   construction; the only knob is `m`. So any val-loss trend is a pure granularity effect.
 - The coarse end (`is=1536, E=8, k=1`) is top-1 routing (Switch-style); the fine end
-  (`is=192, E=64, k=8`) routes to 8 of 64. Sparsity (12.5%) is held fixed throughout.
+  (`is=96, E=128, k=16`) routes to 16 of 128. Sparsity (12.5%) is held fixed throughout.
+- Load balancing is aux-loss-free: a sigmoid router gate with per-expert bias updated at
+  rate 1e-3 (arXiv:2408.15664), so val loss reflects only the LM objective, not an
+  auxiliary balancing term.

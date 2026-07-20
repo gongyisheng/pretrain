@@ -47,10 +47,14 @@ profile_one() {
         --capture-range-end=stop \
         --force-overwrite=true \
         uv run python benchmarks/bench_train.py \
-            --config "$CONFIG" --steps "$STEPS" --warmup "$WARMUP" --cuda-profiler $extra_flag
+            --config "$CONFIG" --steps "$STEPS" --warmup "$WARMUP" \
+            --cuda-profiler --emit-nvtx $extra_flag
 
     # Per-kernel summary: call count + total/avg/min/max time, sorted by time%.
-    nsys stats --report cuda_gpu_kern_sum "${rep}.nsys-rep" | tee "${rep}.kernels.txt"
+    # --force-export re-exports the .sqlite from the current .nsys-rep (else a
+    # stale export from a prior run makes nsys stats error out).
+    nsys stats --force-export=true --report cuda_gpu_kern_sum "${rep}.nsys-rep" \
+        | tee "${rep}.kernels.txt"
     echo "saved: ${rep}.nsys-rep and ${rep}.kernels.txt"
     echo
 }

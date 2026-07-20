@@ -66,6 +66,8 @@ def _qwen3_moe_cfg(impl):
         mlp_cls="moe",
         mlp_kwargs={
             "n_routed_experts": 4,
+            "aux_loss": True,
+            "aux_loss_coef": 1e-3,
             "n_routed_experts_per_token": 2,
             "intermediate_size": 128,
         },
@@ -264,8 +266,7 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
     model_cfg = _CFG_FACTORIES[arch_id](impl)
     model = build_model(_FakeTrainConfig(model_cfg))
     is_moe = model_cfg.mlp_cls == "moe"
-    dropless = is_moe and model_cfg.mlp_kwargs.get("expert_capacity_factor") is None
-    if dropless:
+    if is_moe:
         for block in model.blocks:
             block.attn = torch.compile(block.attn, backend="eager")
         compiled = model
@@ -597,6 +598,8 @@ def test_compute_flops_per_token_moe_uses_k_active():
         mlp_cls="moe",
         mlp_kwargs={
             "n_routed_experts": 8,
+            "aux_loss": True,
+            "aux_loss_coef": 1e-3,
             "n_routed_experts_per_token": 2,
             "intermediate_size": 128,
             "gated": True,
@@ -749,14 +752,3 @@ def test_compute_moe_maxvio_aggregates_per_layer():
     assert out["layer_1"] == pytest.approx(0.0)
     assert out["mean"] == pytest.approx(0.5)
     assert out["max"] == pytest.approx(1.0)
-
-
-def test_collect_moe_blocks_finds_all_blocks():
-    from src.layers.mlp import SparseMoEBlock
-
-    model = torch.nn.Module()
-    model.a = SparseMoEBlock(d_model=32, intermediate_size=64, n_routed_experts=4)
-    model.b = SparseMoEBlock(d_model=32, intermediate_size=64, n_routed_experts=4)
-    blocks = metric_utils.collect_moe_blocks(model)
-    assert blocks == [model.a, model.b]
-    assert all(b.expert_load.shape == (4,) for b in blocks)

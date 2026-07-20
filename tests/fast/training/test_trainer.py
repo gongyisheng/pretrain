@@ -98,7 +98,8 @@ def _tiny_moe_config(tmp_dir):
                 "intermediate_size": 32,
                 "n_routed_experts": 4,
                 "n_routed_experts_per_token": 2,
-                "aux_loss_coef": 0.01,
+                "aux_loss": True,
+                "aux_loss_coef": 1e-3,
             },
         ),
         data=DataConfig(

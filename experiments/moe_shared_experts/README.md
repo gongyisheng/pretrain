@@ -25,7 +25,8 @@ Common backbone (Qwen3-style, all runs identical except the MLP split):
 | norm / pos_emb | rmsnorm / rope (θ=10000) |
 
 Invariant: active experts per token `s + k = 8`, so active intermediate `= 1536` (≈51M
-active params) and FLOPs/token are constant. All cells use `moe` with `aux_loss_coef=0.001`
+active params) and FLOPs/token are constant. All cells use `moe` with aux-loss-free
+load balancing (`expert_bias: true`, `expert_bias_update_rate=0.001`)
 and no expert capacity limit (no token drops). `s0_r8` is the pure-routed benchmark (no shared
 expert); as `s` grows the always-on shared FFN takes over more of the fixed budget.
 
@@ -40,18 +41,20 @@ Config filename = ckpt dir = W&B run name. `s` = `n_shared_experts`, `k` = top-k
 | `qwen3_188m_a51m_s2_r6` | 2 | 6 | 188M | 51M |
 | `qwen3_190m_a51m_s3_r5` | 3 | 5 | 190M | 51M |
 | `qwen3_193m_a51m_s4_r4` | 4 | 4 | 193M | 51M |
-| `qwen3_195m_a51m_s5_r3` | 5 | 3 | 195M | 51M |
-| `qwen3_197m_a51m_s6_r2` | 6 | 2 | 197M | 51M |
-| `qwen3_200m_a51m_s7_r1` | 7 | 1 | 200M | 51M |
+| `qwen3_51m` | — | — | 51M | 51M |
 
-Training (all runs): batch 64 × grad-accum 4 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
+`qwen3_51m` is the dense reference: a plain SwiGLU MLP with `intermediate_size: 1536`
+(= the MoE's active intermediate `8·192`), so its total ≈ active ≈ 51M. It bounds what the
+same active-FLOP budget buys with no routing at all.
+
+Training (all runs): batch 32 × grad-accum 8 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
 50000 (~13B tokens, fixed budget for a controlled comparison), cosine LR 1e-3 → 1e-4,
-warmup 1500, bf16.
+warmup 1500, bf16. Router uses a sigmoid score fn (`router_score_fn: sigmoid`).
 
 ## Running
 
 ```bash
-# All 7 configs sequentially:
+# All configs sequentially:
 nohup bash experiments/moe_shared_experts/run.sh > logs/moe_shared_experts.log 2>&1 &
 
 # Single config:
@@ -69,9 +72,7 @@ W&B project: `pretrain-moe-shared-experts`.
 | `qwen3_188m_a51m_s2_r6` | 2 | 6 | 51M | |
 | `qwen3_190m_a51m_s3_r5` | 3 | 5 | 51M | |
 | `qwen3_193m_a51m_s4_r4` | 4 | 4 | 51M | |
-| `qwen3_195m_a51m_s5_r3` | 5 | 3 | 51M | |
-| `qwen3_197m_a51m_s6_r2` | 6 | 2 | 51M | |
-| `qwen3_200m_a51m_s7_r1` | 7 | 1 | 51M | |
+| `qwen3_51m` | — | — | 51M | |
 
 ## Notes
 

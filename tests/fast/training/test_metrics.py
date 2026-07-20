@@ -11,6 +11,7 @@ import math
 import pytest
 import torch
 
+from src.model import build_model
 from src.training.metrics import MetricsTracker
 from src.utils.config import ModelConfig, TrainConfig
 
@@ -287,6 +288,8 @@ def test_eval_moe_aux_loss_subtracts_floor():
             mlp_cls="moe",
             mlp_kwargs={
                 "n_routed_experts": 4,
+                "aux_loss": True,
+                "aux_loss_coef": 1e-3,
                 "n_routed_experts_per_token": 2,
                 "intermediate_size": 128,
             },
@@ -294,11 +297,15 @@ def test_eval_moe_aux_loss_subtracts_floor():
     )
     cfg.task = "pretrain"
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    model = build_model(cfg)
+    model.eval()
     floor = tracker._aux_floor
     tracker.eval_begin()
     logits = torch.randn(1, 4, 256)
     labels = torch.randint(0, 256, (1, 4))
-    tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, aux_loss=floor + 0.5)
+    tracker.on_eval_step(
+        loss=2.0, logits=logits, labels=labels, model=model, aux_loss=floor + 0.5
+    )
     d = tracker.log_eval(step=1)
     assert d["val/aux_loss"] == pytest.approx(0.5)
 
@@ -314,6 +321,8 @@ def _moe_cfg():
             mlp_cls="moe",
             mlp_kwargs={
                 "n_routed_experts": 4,
+                "aux_loss": True,
+                "aux_loss_coef": 1e-3,
                 "n_routed_experts_per_token": 2,
                 "intermediate_size": 128,
             },
@@ -321,6 +330,12 @@ def _moe_cfg():
     )
     cfg.task = "pretrain"
     return cfg
+
+
+def _moe_blocks(model):
+    from src.layers.mlp import SparseMoEBlock
+
+    return [m for m in model.modules() if isinstance(m, SparseMoEBlock)]
 
 
 def _moe_on_step(tracker, model, opt, step):
@@ -338,94 +353,90 @@ def _moe_on_step(tracker, model, opt, step):
 
 
 def test_train_moe_maxvio_logged_per_layer():
-    from src.layers.mlp import SparseMoEBlock
-
     cfg = _moe_cfg()
     cfg.logging.log_every = 1
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
-    model = torch.nn.Module()
-    model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
-    model.l1 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    model = build_model(cfg)
     opt = torch.optim.SGD(model.parameters(), lr=1e-3)
 
     tracker.train_begin()
-    model.l0(torch.randn(2, 8, 64))
-    model.l1(torch.randn(2, 8, 64))
+    blocks = _moe_blocks(model)
+    blocks[0].expert_load.train_load.copy_(torch.tensor([10, 0, 5, 5]))
+    blocks[1].expert_load.train_load.copy_(torch.tensor([4, 4, 4, 4]))
     _moe_on_step(tracker, model, opt, step=0)
     d = tracker.log_train(step=1, model=model, optimizer=opt)
 
-    assert "train/moe_maxvio/layer_0" in d and "train/moe_maxvio/layer_1" in d
-    assert "train/moe_maxvio/mean" in d and "train/moe_maxvio/max" in d
-    assert d["train/moe_maxvio/max"] >= d["train/moe_maxvio/mean"] - 1e-9
-    assert all(d[k] >= 0.0 for k in d if k.startswith("train/moe_maxvio/"))
+    assert (
+        "train-moe/maxvio_batch/layer_0" in d and "train-moe/maxvio_batch/layer_1" in d
+    )
+    assert "train-moe/maxvio_batch/mean" in d and "train-moe/maxvio_batch/max" in d
+    assert d["train-moe/maxvio_batch/max"] >= d["train-moe/maxvio_batch/mean"] - 1e-9
+    assert all(d[k] >= 0.0 for k in d if k.startswith("train-moe/maxvio_batch/"))
 
 
-def test_train_moe_maxvio_is_window_averaged():
-    # Train MaxVio sums per-step routing load over the log window (one entry
-    # per on_train_step) and computes maxvio on the average. Two steps stamping
-    # [10,0,5,5] and [0,10,5,5] sum to [10,10,10,10] (balanced) -> maxvio 0,
-    # confirming window accumulation, not last-step-only.
-    from src.layers.mlp import SparseMoEBlock
-
+def test_train_moe_maxvio_uses_latest_step():
+    # Train MaxVio reflects only the latest step's routing load (cached each
+    # on_train_step, overwriting the prior). Step 0 stamps a balanced load and
+    # step 1 a maximally-skewed one: the logged value tracks step 1 (maxvio 1.0),
+    # confirming last-step semantics, not window accumulation.
     cfg = _moe_cfg()
     cfg.logging.log_every = 2
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
-    model = torch.nn.Module()
-    model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+    model = build_model(cfg)
     opt = torch.optim.SGD(model.parameters(), lr=1e-3)
 
     tracker.train_begin()
-    model.l0.expert_load.copy_(torch.tensor([10, 0, 5, 5]))
+    block = _moe_blocks(model)[0]
+    block.expert_load.train_load.copy_(torch.tensor([5, 5, 5, 5]))
     _moe_on_step(tracker, model, opt, step=0)
-    model.l0.expert_load.copy_(torch.tensor([0, 10, 5, 5]))
+    block.expert_load.train_load.copy_(torch.tensor([10, 0, 5, 5]))
     _moe_on_step(tracker, model, opt, step=1)
     d = tracker.log_train(step=2, model=model, optimizer=opt)
-    assert d["train/moe_maxvio/layer_0"] == pytest.approx(0.0)
+    # latest load [10,0,5,5]: max=10, mean=5 -> (10-5)/5 = 1.0
+    assert d["train-moe/maxvio_batch/layer_0"] == pytest.approx(1.0)
 
 
-def test_eval_moe_maxvio_logged_per_layer():
-    from src.layers.mlp import SparseMoEBlock
-
-    tracker = MetricsTracker(_moe_cfg(), device="cpu", logger=FakeLogger())
-    model = torch.nn.Module()
-    model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
-    model.l1 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+def test_eval_moe_maxvio_logs_both_variants():
+    cfg = _moe_cfg()
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    model = build_model(cfg)
+    model.eval()  # eval mode -> forward_meta returns eval_load
+    blocks = _moe_blocks(model)
     logits = torch.randn(1, 4, 256)
     labels = torch.randint(0, 256, (1, 4))
 
     tracker.eval_begin()
-    for _ in range(3):  # accumulate across batches
-        model.l0(torch.randn(2, 8, 64))
-        model.l1(torch.randn(2, 8, 64))
-        tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, model=model)
+    blocks[0].expert_load.eval_load.copy_(torch.tensor([10, 0, 5, 5]))
+    blocks[1].expert_load.eval_load.copy_(torch.tensor([4, 4, 4, 4]))
+    tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, model=model)
     d = tracker.log_eval(step=1)
 
-    assert "val/moe_maxvio/layer_0" in d and "val/moe_maxvio/layer_1" in d
-    assert "val/moe_maxvio/mean" in d and "val/moe_maxvio/max" in d
-    assert d["val/moe_maxvio/max"] >= d["val/moe_maxvio/mean"] - 1e-9
-    assert all(d[k] >= 0.0 for k in d if k.startswith("val/moe_maxvio/"))
+    for variant in ("maxvio_global", "maxvio_batch"):
+        assert f"val-moe/{variant}/layer_0" in d and f"val-moe/{variant}/layer_1" in d
+        assert f"val-moe/{variant}/mean" in d and f"val-moe/{variant}/max" in d
+    assert all(v >= 0.0 for k, v in d.items() if k.startswith("val-moe/"))
 
 
-def test_eval_moe_maxvio_is_load_averaged():
-    # Eval MaxVio sums per-layer routing load over eval batches and computes
-    # maxvio on the average. Batches [10,0,5,5] and [0,10,5,5] sum to
-    # [10,10,10,10] (balanced) -> maxvio 0, confirming load accumulation across
-    # batches (not last-batch-only, which would give 1.0).
-    from src.layers.mlp import SparseMoEBlock
-
-    tracker = MetricsTracker(_moe_cfg(), device="cpu", logger=FakeLogger())
-    model = torch.nn.Module()
-    model.l0 = SparseMoEBlock(d_model=64, intermediate_size=128, n_routed_experts=4)
+def test_eval_moe_maxvio_global_vs_batch_semantics():
+    # global sums load across batches then computes one MaxVio; batch computes
+    # MaxVio per batch then averages. Batches [10,0,5,5] and [0,10,5,5] sum to
+    # [10,10,10,10] -> global 0, but each batch has MaxVio 1.0 -> batch avg 1.0.
+    cfg = _moe_cfg()
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    model = build_model(cfg)
+    model.eval()  # eval mode -> forward_meta returns eval_load
+    block = _moe_blocks(model)[0]
     logits = torch.randn(1, 4, 256)
     labels = torch.randint(0, 256, (1, 4))
 
-    batches = [[10, 0, 5, 5], [0, 10, 5, 5]]
     tracker.eval_begin()
-    for counts in batches:
-        model.l0.expert_load.copy_(torch.tensor(counts))
+    for counts in ([10, 0, 5, 5], [0, 10, 5, 5]):
+        block.expert_load.eval_load.copy_(torch.tensor(counts))
         tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, model=model)
     d = tracker.log_eval(step=1)
-    assert d["val/moe_maxvio/layer_0"] == pytest.approx(0.0)
+
+    assert d["val-moe/maxvio_global/layer_0"] == pytest.approx(0.0)
+    assert d["val-moe/maxvio_batch/layer_0"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +464,8 @@ def test_print_model_summary_moe(capsys):
             mlp_cls="moe",
             mlp_kwargs={
                 "n_routed_experts": 4,
+                "aux_loss": True,
+                "aux_loss_coef": 1e-3,
                 "n_routed_experts_per_token": 2,
                 "intermediate_size": 128,
             },

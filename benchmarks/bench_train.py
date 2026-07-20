@@ -15,11 +15,12 @@ Usage:
     # Benchmark Qwen3 MoE 183M (51M active)
     python benchmarks/bench_train.py --config configs/qwen3_183m_a51m.yaml
 
-    # Run eager, no torch.compile (for A/B against the compiled run)
+    # Model eager (flex_attention + loss still compiled), for A/B against full compile
     python benchmarks/bench_train.py --config configs/gpt2_124m.yaml --disable-torch-compile
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -38,11 +39,25 @@ from src.utils.config import load_config
 from src.training.trainer import Trainer
 
 
-def run_benchmark(config_path, steps=10, warmup=5, cuda_profiler=False):
+def run_benchmark(
+    config_path,
+    steps=10,
+    warmup=5,
+    cuda_profiler=False,
+    enable_torch_compile=True,
+    emit_nvtx=False,
+):
     """Run a training throughput benchmark using the Trainer.
 
     Runs all steps in a single train() call. Registers an on_log hook
     to capture throughput, excluding warmup steps.
+
+    enable_torch_compile=False skips only the whole-model torch.compile; ops with
+    their own explicit compile (flex_attention, loss) stay compiled.
+
+    emit_nvtx=True wraps training in torch.autograd.profiler.emit_nvtx so nsys
+    tags each kernel with its aten op (forward `aten::X` vs backward `XBackward0`)
+    and input shapes.
     """
     total_steps = warmup + steps
     overrides = [
@@ -51,6 +66,7 @@ def run_benchmark(config_path, steps=10, warmup=5, cuda_profiler=False):
         f"training.eval_every={total_steps + 1}",
         f"training.checkpoint_every={total_steps + 1}",
         "logging.log_every=1",
+        f"training.enable_torch_compile={enable_torch_compile}",
     ]
 
     config = load_config(config_path, overrides=overrides)
@@ -83,7 +99,17 @@ def run_benchmark(config_path, steps=10, warmup=5, cuda_profiler=False):
 
     trainer.logger.register_on_log_hook(on_log)
 
-    trainer.train()
+    nvtx_ctx = (
+        torch.autograd.profiler.emit_nvtx(record_shapes=True)
+        if emit_nvtx
+        else contextlib.nullcontext()
+    )
+    with nvtx_ctx:
+        trainer.train()
+
+    # Safety net: stop if training exited before the stop step was logged.
+    if cuda_profiler and started and not stopped:
+        torch.cuda.profiler.stop()
 
     # Safety net: stop if training exited before the stop step was logged.
     if cuda_profiler and started and not stopped:
@@ -111,13 +137,16 @@ def run_benchmark(config_path, steps=10, warmup=5, cuda_profiler=False):
         "measured_tokens": measured_tokens,
         "tok_per_sec": round(tok_per_sec),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
-        "torch_compile": os.environ.get("TORCH_COMPILE_DISABLE") != "1",
+        "torch_compile": enable_torch_compile,
     }
 
     print(f"\n{'=' * 60}")
     print(f"  {results['model']} | {results['params_M']}M")
     print(f"  GPU: {results['gpu']}")
-    print(f"  Compile: {'on' if results['torch_compile'] else 'off (eager)'}")
+    compile_label = (
+        "on" if enable_torch_compile else "model off (flex/loss still compiled)"
+    )
+    print(f"  Compile: {compile_label}")
     print(
         f"  {results['measured_steps']} steps in {results['elapsed_sec']:.1f}s (after {warmup} warmup)"
     )
@@ -142,13 +171,20 @@ def main():
     parser.add_argument(
         "--disable-torch-compile",
         action="store_true",
-        help="Disable torch.compile (run eager). Handled before torch import via argv scan.",
+        help="Skip the whole-model torch.compile (model runs eager). "
+        "flex_attention and loss keep their own explicit compile.",
     )
     parser.add_argument(
         "--cuda-profiler",
         action="store_true",
         help="Bracket the measured steps with cudaProfilerStart/Stop (for nsys "
         "--capture-range=cudaProfilerApi), excluding compile/autotune warmup.",
+    )
+    parser.add_argument(
+        "--emit-nvtx",
+        action="store_true",
+        help="Wrap training in emit_nvtx so nsys labels each kernel with its aten "
+        "op (forward aten::X vs backward XBackward0) and input shapes.",
     )
     parser.add_argument(
         "--save", type=str, default=None, help="Save results JSON to this path"
@@ -163,6 +199,8 @@ def main():
         steps=args.steps,
         warmup=args.warmup,
         cuda_profiler=args.cuda_profiler,
+        enable_torch_compile=not args.disable_torch_compile,
+        emit_nvtx=args.emit_nvtx,
     )
 
     if args.save:
