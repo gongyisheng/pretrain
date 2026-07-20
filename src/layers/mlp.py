@@ -486,6 +486,8 @@ class SparseMoEBlock(nn.Module):
             b_down=self.expert_down_bias,
         )
         expert_out = expert_out * weights_sorted
+        # In latent mode, dropout is applied on the routed-expert output in
+        # latent space ℓ (before latent_up_proj projects back to d_model).
         expert_out = self.expert_dropout(expert_out)
 
         # unsort, sum
@@ -595,6 +597,8 @@ class SparseMoEBlock(nn.Module):
         else:
             expert = 2 * d_ff * edim
             b = (d_ff + edim) if bias else 0
+        # Latent projections always run (like shared experts), so they count
+        # toward both active and total params — outside the `n *` factor.
         proj = 2 * d_model * latent_dim if latent_moe else 0
         shared = (
             DenseMLPBlock.compute_parameters(

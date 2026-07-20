@@ -1090,9 +1090,10 @@ def test_sparse_moe_latent_output_shape():
     assert aux.ndim == 0
 
 
+@pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
-def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol):
+def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
     torch.manual_seed(0)
     d_model, inter, E, k, ell = 64, 32, 4, 2, 16
     block = SparseMoEBlock(
@@ -1104,6 +1105,7 @@ def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol):
         gated=gated,
         activation=activation,
         router_score_fn="softmax",
+        bias=bias,
         latent_moe=True,
         latent_dim=ell,
     )
@@ -1113,6 +1115,10 @@ def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol):
         torch.nn.init.normal_(block.expert_down, std=0.02)
         torch.nn.init.normal_(block.latent_down_proj.weight, std=0.02)
         torch.nn.init.normal_(block.latent_up_proj.weight, std=0.02)
+        if bias:
+            b1 = block.expert_gate_up_bias if gated else block.expert_up_bias
+            torch.nn.init.normal_(b1, std=0.02)
+            torch.nn.init.normal_(block.expert_down_bias, std=0.02)
     block.to(dtype)
     block.eval()
 
@@ -1127,12 +1133,62 @@ def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol):
         normalize=True,
         expert_gate_up=block.expert_gate_up if gated else None,
         expert_up=None if gated else block.expert_up,
+        expert_gate_up_bias=(block.expert_gate_up_bias if gated and bias else None),
+        expert_up_bias=(block.expert_up_bias if not gated and bias else None),
+        expert_down_bias=block.expert_down_bias if bias else None,
         latent_down_weight=block.latent_down_proj.weight,
         latent_up_weight=block.latent_up_proj.weight,
     )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
     assert torch.allclose(aux, aux_ref, atol=atol)
+
+
+def test_sparse_moe_latent_with_shared_experts_matches_ref_plus_shared():
+    """LatentMoE + shared experts: shared experts run at d_model and are not
+    modeled by sparse_moe_block_ref, so verify the coupling directly — total
+    output must equal the ref's routed-only output plus the shared expert's
+    own output on the same input."""
+    torch.manual_seed(0)
+    d_model, inter, E, k, ell = 64, 32, 4, 2, 16
+    block = SparseMoEBlock(
+        d_model=d_model,
+        intermediate_size=inter,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        n_shared_experts=1,
+        dropout=0.0,
+        gated=True,
+        activation="silu",
+        router_score_fn="softmax",
+        latent_moe=True,
+        latent_dim=ell,
+    )
+    with torch.no_grad():
+        torch.nn.init.normal_(block.expert_gate_up, std=0.02)
+        torch.nn.init.normal_(block.expert_down, std=0.02)
+        torch.nn.init.normal_(block.latent_down_proj.weight, std=0.02)
+        torch.nn.init.normal_(block.latent_up_proj.weight, std=0.02)
+    block.eval()
+
+    x = torch.randn(2, 8, d_model)
+    out, aux = block(x)
+
+    routed_ref, aux_ref = sparse_moe_block_ref(
+        x,
+        block.router.gate.weight,
+        block.expert_down,
+        n_routed_experts_per_token=k,
+        activation="silu",
+        normalize=True,
+        expert_gate_up=block.expert_gate_up,
+        latent_down_weight=block.latent_down_proj.weight,
+        latent_up_weight=block.latent_up_proj.weight,
+    )
+    shared_out, _ = block.shared_expert(x)
+
+    assert torch.allclose(out, routed_ref + shared_out, atol=1e-5)
+    assert torch.allclose(aux, aux_ref, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------
