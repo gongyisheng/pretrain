@@ -1038,3 +1038,98 @@ def test_grouped_mlp_casts_to_autocast_dtype():
     # eager (no autocast) preserves fp32
     out_eager = grouped_mlp(x, w_in, w_down, act, offs, True)
     assert out_eager.dtype == torch.float32
+
+
+def test_sparse_moe_latent_off_by_default():
+    block = SparseMoEBlock(
+        d_model=64,
+        intermediate_size=32,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+    )
+    assert block.latent_moe is False
+    assert block.latent_down_proj is None
+    assert block.latent_up_proj is None
+    # expert I/O axis is d_model when latent is off
+    assert block.expert_down.shape == (4, 64, 32)
+    assert block.expert_gate_up.shape == (4, 2 * 32, 64)
+
+
+def test_sparse_moe_latent_weight_shapes():
+    d_model, inter, E, k, ell = 64, 32, 4, 2, 16
+    block = SparseMoEBlock(
+        d_model=d_model,
+        intermediate_size=inter,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        latent_moe=True,
+        latent_dim=ell,
+    )
+    assert block.latent_down_proj.weight.shape == (ell, d_model)
+    assert block.latent_up_proj.weight.shape == (d_model, ell)
+    assert block.expert_gate_up.shape == (E, 2 * inter, ell)
+    assert block.expert_down.shape == (E, ell, inter)
+    # router still scores at d_model
+    assert block.router.gate.weight.shape == (E, d_model)
+
+
+def test_sparse_moe_latent_output_shape():
+    d_model, ell = 64, 16
+    block = SparseMoEBlock(
+        d_model=d_model,
+        intermediate_size=32,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        latent_moe=True,
+        latent_dim=ell,
+    )
+    block.eval()
+    x = torch.randn(2, 8, d_model)
+    out, aux = block(x)
+    assert out.shape == (2, 8, d_model)
+    assert aux.ndim == 0
+
+
+@pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
+@pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
+def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol):
+    torch.manual_seed(0)
+    d_model, inter, E, k, ell = 64, 32, 4, 2, 16
+    block = SparseMoEBlock(
+        d_model=d_model,
+        intermediate_size=inter,
+        n_routed_experts=E,
+        n_routed_experts_per_token=k,
+        dropout=0.0,
+        gated=gated,
+        activation=activation,
+        router_score_fn="softmax",
+        latent_moe=True,
+        latent_dim=ell,
+    )
+    with torch.no_grad():
+        w1 = block.expert_gate_up if gated else block.expert_up
+        torch.nn.init.normal_(w1, std=0.02)
+        torch.nn.init.normal_(block.expert_down, std=0.02)
+        torch.nn.init.normal_(block.latent_down_proj.weight, std=0.02)
+        torch.nn.init.normal_(block.latent_up_proj.weight, std=0.02)
+    block.to(dtype)
+    block.eval()
+
+    x = torch.randn(2, 8, d_model, dtype=dtype)
+    out, aux = block(x)
+    out_ref, aux_ref = sparse_moe_block_ref(
+        x,
+        block.router.gate.weight,
+        block.expert_down,
+        n_routed_experts_per_token=k,
+        activation=activation,
+        normalize=True,
+        expert_gate_up=block.expert_gate_up if gated else None,
+        expert_up=None if gated else block.expert_up,
+        latent_down_weight=block.latent_down_proj.weight,
+        latent_up_weight=block.latent_up_proj.weight,
+    )
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+    assert torch.allclose(aux, aux_ref, atol=atol)
