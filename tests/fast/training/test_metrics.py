@@ -321,6 +321,41 @@ def test_eval_moe_aux_loss_subtracts_floor():
     assert d["val/aux_loss"] == pytest.approx(0.5)
 
 
+def test_aux_floor_is_coef_weighted():
+    cfg = TrainConfig(
+        model=ModelConfig(
+            d_model=64,
+            n_layers=2,
+            vocab_size=256,
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "n_routed_experts_per_token": 2,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                    },
+                    "layer_idx": [0],
+                },
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "n_routed_experts_per_token": 3,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-2,
+                    },
+                },
+            ],
+        )
+    )
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    # floor = 1e-3*2 + 1e-2*3 = 0.032
+    assert abs(tracker._aux_floor - (1e-3 * 2 + 1e-2 * 3)) < 1e-9
+
+
 def _moe_cfg():
     cfg = TrainConfig(
         model=ModelConfig(
@@ -515,7 +550,8 @@ def test_metrics_tracker_aux_floor_and_n_moe_layers_on_dense_first_stack():
 
     n_layers=4 but n_moe_layers=3 (layer 0 is dense): the old buggy
     `n_layers * k` formula would give 4*2=8; the correct per-layer-sum formula
-    gives 3*2=6. Also pins the mixed-stack model-summary label.
+    gives 3*2=6, coef-weighted (aux_loss_coef=1e-3) to 3*2*1e-3=6e-3. Also pins
+    the mixed-stack model-summary label.
     """
     from src.utils.config import TrainConfig, TrainingConfig
 
@@ -523,7 +559,8 @@ def test_metrics_tracker_aux_floor_and_n_moe_layers_on_dense_first_stack():
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
 
-    assert tracker._aux_floor == 6  # 3 MoE layers * k(2), NOT n_layers(4) * k = 8
+    # 3 MoE layers * k(2) * coef(1e-3), NOT n_layers(4) * k = 8
+    assert abs(tracker._aux_floor - 6e-3) < 1e-9
     assert tracker._n_moe_layers == 3
 
 
@@ -533,9 +570,9 @@ def test_metrics_tracker_aux_floor_scoped_to_aux_loss_layers_only():
     so a floor computed over ALL MoE layers (including expert_bias ones, which
     contribute nothing to that sum) over-counts.
 
-    4-layer stack: layer 0 MoE+aux_loss (k=2), layers 1-3 MoE+expert_bias (k=2
-    each). All-MoE-layers formula (the bug): 4 layers * k(2) = 8. Correct:
-    only layer 0 counts -> 1 * k(2) = 2.
+    4-layer stack: layer 0 MoE+aux_loss (k=2, coef=1e-3), layers 1-3
+    MoE+expert_bias (k=2 each). All-MoE-layers formula (the bug): 4 layers *
+    k(2) = 8. Correct: only layer 0 counts -> 1 * k(2) * coef(1e-3) = 2e-3.
     """
     from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
 
@@ -570,7 +607,8 @@ def test_metrics_tracker_aux_floor_scoped_to_aux_loss_layers_only():
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
 
-    assert tracker._aux_floor == 2  # only the 1 aux_loss layer * k(2), NOT 4*2=8
+    # only the 1 aux_loss layer * k(2) * coef(1e-3), NOT 4*2=8
+    assert abs(tracker._aux_floor - 2e-3) < 1e-9
     assert tracker._n_moe_layers == 4  # expert-load logging still covers all MoE layers
 
 

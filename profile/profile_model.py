@@ -72,7 +72,6 @@ def main():
         device,
         attn_implementation=config.model.attn_implementation,
     )
-    aux_coef = config.model.aux_loss_coef or 0.0
 
     def step():
         torch.cuda.nvtx.range_push("forward")
@@ -87,7 +86,7 @@ def main():
                 label_smoothing=config.training.label_smoothing,
             )
             if aux_loss is not None:
-                loss = loss + aux_coef * aux_loss
+                loss = loss + aux_loss
         torch.cuda.nvtx.range_pop()
         if not args.forward_only:
             torch.cuda.nvtx.range_push("backward")

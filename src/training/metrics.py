@@ -55,7 +55,7 @@ class MetricsTracker:
             # over layers using aux_loss (not expert_bias) — so the floor must
             # be scoped to those layers, not all MoE layers.
             self._aux_floor = sum(
-                kw["n_routed_experts_per_token"]
+                kw["aux_loss_coef"] * kw["n_routed_experts_per_token"]
                 for kw in config.model.aux_loss_layer_kwargs
             )
             # _n_moe_layers sizes the per-layer expert-load list for MaxVio

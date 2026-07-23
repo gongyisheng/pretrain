@@ -345,7 +345,7 @@ class Trainer:
                     )
                     loss = ce_loss
                     if aux_loss is not None:
-                        loss = loss + self.config.model.aux_loss_coef * aux_loss
+                        loss = loss + aux_loss
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()

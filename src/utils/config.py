@@ -232,17 +232,6 @@ class ModelConfig:
             for layer in range(n)
         ]
 
-        coefs = {
-            kw["aux_loss_coef"]
-            for cls, kw in self._layer_mlp
-            if cls == "moe" and kw.get("aux_loss")
-        }
-        if len(coefs) > 1:
-            raise ValueError(
-                "all MoE layers using aux_loss must share the same aux_loss_coef; "
-                f"got {sorted(coefs)}"
-            )
-
     def resolve_mlp(self, layer_idx: int) -> tuple[str, dict]:
         return self._layer_mlp[layer_idx]
 
@@ -256,21 +245,6 @@ class ModelConfig:
     @property
     def moe_layer_kwargs(self) -> list[dict]:
         return [kw for cls, kw in self._layer_mlp if cls == "moe"]
-
-    @property
-    def aux_loss_layer_kwargs(self) -> list[dict]:
-        return [
-            kw for cls, kw in self._layer_mlp if cls == "moe" and kw.get("aux_loss")
-        ]
-
-    @property
-    def aux_loss_coef(self) -> float | None:
-        coefs = {
-            kw["aux_loss_coef"]
-            for cls, kw in self._layer_mlp
-            if cls == "moe" and kw.get("aux_loss")
-        }
-        return coefs.pop() if coefs else None
 
 
 @dataclass

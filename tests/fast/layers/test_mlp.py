@@ -500,6 +500,24 @@ def test_sparse_moe_block_aux_loss_coef_stored():
     assert block.aux_loss_coef == 0.05
 
 
+def test_moe_block_scales_aux_by_its_coef():
+    torch.manual_seed(0)
+    common = dict(
+        intermediate_size=32,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        aux_loss=True,
+        expert_bias=False,
+    )
+    x = torch.randn(2, 8, 64)
+    b1 = SparseMoEBlock(64, aux_loss_coef=1e-3, **common)
+    b2 = SparseMoEBlock(64, aux_loss_coef=1e-2, **common)
+    b2.load_state_dict(b1.state_dict())  # identical weights -> identical unscaled aux
+    _, a1 = b1(x)
+    _, a2 = b2(x)
+    assert torch.allclose(a2, a1 * 10, rtol=1e-4)
+
+
 def test_sparse_moe_block_aux_loss_false_returns_none():
     block = SparseMoEBlock(
         d_model=64,
@@ -830,6 +848,7 @@ def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
         gated=gated,
         activation=activation,
         router_score_fn="softmax",
+        aux_loss_coef=1.0,  # ref returns unscaled aux; coef=1.0 keeps parity
     )
     with torch.no_grad():
         w1 = block.expert_gate_up if gated else block.expert_up
@@ -1007,6 +1026,7 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
         activation="silu" if gated else "gelu",
         bias=True,
         router_score_fn="softmax",
+        aux_loss_coef=1.0,  # ref returns unscaled aux; coef=1.0 keeps parity
     )
     with torch.no_grad():
         w1 = block.expert_gate_up if gated else block.expert_up

@@ -982,31 +982,36 @@ def test_mlp_out_of_range_raises():
         )
 
 
-def test_mlp_shared_aux_coef_mismatch_raises():
-    with pytest.raises(ValueError, match="aux_loss_coef"):
-        ModelConfig(
-            d_model=64,
-            n_layers=2,
-            mlp=[
-                {
-                    "mlp_cls": "moe",
-                    "mlp_kwargs": {
-                        "n_routed_experts": 4,
-                        "aux_loss": True,
-                        "aux_loss_coef": 1e-3,
-                    },
-                    "layer_idx": [0],
+def test_mlp_per_layer_aux_coef_allowed():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=2,
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 4,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-3,
                 },
-                {
-                    "mlp_cls": "moe",
-                    "mlp_kwargs": {
-                        "n_routed_experts": 4,
-                        "aux_loss": True,
-                        "aux_loss_coef": 1e-2,
-                    },
+                "layer_idx": [0],
+            },
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 4,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-2,
                 },
-            ],
-        )
+            },
+        ],
+    )
+    coefs = [kw["aux_loss_coef"] for kw in cfg.moe_layer_kwargs if kw.get("aux_loss")]
+    assert sorted(coefs) == [1e-3, 1e-2]
+    assert (
+        not hasattr(cfg, "aux_loss_coef")
+        or callable(getattr(type(cfg), "aux_loss_coef", None)) is False
+    )
 
 
 def test_all_configs_load_and_have_list_mlp():
