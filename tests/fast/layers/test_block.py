@@ -13,8 +13,12 @@ def _block_cfg(impl):
         vocab_size=256,
         attn_cls="mha",
         attn_kwargs={"n_heads": 4, "bias": True, "attn_implementation": impl},
-        mlp_cls="dense",
-        mlp_kwargs={"activation": "gelu", "gated": False, "bias": True},
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"activation": "gelu", "gated": False, "bias": True},
+            }
+        ],
         norm_cls="layernorm",
         pos_emb_cls="learned",
         pos_emb_kwargs={},

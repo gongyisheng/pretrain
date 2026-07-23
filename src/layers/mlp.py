@@ -213,7 +213,7 @@ class ExpertBias(nn.Module):
 
     @classmethod
     def compute_parameters(cls, n_experts: int) -> int:
-        return n_experts  # the bias buffer
+        return 0  # non-trainable buffer, excluded from the parameter count
 
 
 class ExpertLoad(nn.Module):

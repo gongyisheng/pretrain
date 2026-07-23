@@ -11,7 +11,7 @@ class TransformerLM(nn.Module):
     def __init__(self, config: ModelConfig, max_seq_len: int = 1024):
         super().__init__()
         self.config = config
-        self.is_moe = config.mlp_cls == "moe"
+        self.is_moe = config.is_moe
 
         # Pad vocab to multiple of 128 for better matmul alignment.
         pad = 128
@@ -92,10 +92,15 @@ class TransformerLM(nn.Module):
         )
         embeddings = padded_vocab * d_model + pos  # token_emb + (learned) pos_emb
 
-        # Every block has the same param count (depth-independent), so scale by n.
-        blocks = config.n_layers * TransformerBlock.compute_parameters(config)
-        blocks_active = config.n_layers * TransformerBlock.compute_parameters(
-            config, active=True
+        # Blocks may differ per layer (mixed dense/MoE stacks), so sum per layer
+        # rather than scaling one block's count by n_layers.
+        blocks = sum(
+            TransformerBlock.compute_parameters(config, layer_idx=i)
+            for i in range(config.n_layers)
+        )
+        blocks_active = sum(
+            TransformerBlock.compute_parameters(config, active=True, layer_idx=i)
+            for i in range(config.n_layers)
         )
         final_norm = NORM_REGISTRY[config.norm_cls].compute_parameters(
             d_model, **config.norm_kwargs

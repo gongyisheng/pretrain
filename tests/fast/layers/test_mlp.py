@@ -365,7 +365,9 @@ def test_moe_router_bias_stays_fp32_across_dtype_casts():
 
 def test_expert_bias_compute_cost():
     assert ExpertBias.compute_flops(8) == 8
-    assert ExpertBias.compute_parameters(8) == 8
+    # The bias is a non-trainable buffer, not an nn.Parameter, so it's excluded
+    # from the parameter count (matches sum(p.numel()) on the live module).
+    assert ExpertBias.compute_parameters(8) == 0
 
 
 def test_moe_router_compute_cost_with_expert_bias():
@@ -374,7 +376,8 @@ def test_moe_router_compute_cost_with_expert_bias():
     assert base_f == 2 * 64 * 8
     assert base_p == 64 * 8
     assert MoERouter.compute_flops(64, 8, expert_bias=True) == base_f + 8
-    assert MoERouter.compute_parameters(64, 8, expert_bias=True) == base_p + 8
+    # expert_bias adds a real FLOP (the bias add) but no trainable parameter.
+    assert MoERouter.compute_parameters(64, 8, expert_bias=True) == base_p
 
 
 def test_expert_bias_update_moves_toward_balance():
@@ -731,13 +734,32 @@ def test_sparse_moe_compute_parameters_expert_bias():
     )
     base = SparseMoEBlock.compute_parameters(64, **kwargs)
     with_bias = SparseMoEBlock.compute_parameters(64, expert_bias=True, **kwargs)
-    assert with_bias == base + 4  # +n_routed_experts for the load-balancing bias buffer
-    # active count includes the bias too
+    # expert_bias adds no trainable parameter (its bias is a non-trainable buffer).
+    assert with_bias == base
+    # active count is likewise unaffected by expert_bias
     base_active = SparseMoEBlock.compute_parameters(64, active=True, **kwargs)
     with_bias_active = SparseMoEBlock.compute_parameters(
         64, expert_bias=True, active=True, **kwargs
     )
-    assert with_bias_active == base_active + 4
+    assert with_bias_active == base_active
+
+
+def test_sparse_moe_compute_parameters_expert_bias_matches_live_module():
+    """Regression: analytic compute_parameters must equal the live module's
+    sum(p.numel()) for an expert_bias MoE block (the ExpertBias bias buffer is
+    excluded from both, since it's registered as a buffer, not a parameter)."""
+    kwargs = dict(
+        intermediate_size=128,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+        gated=True,
+        expert_bias=True,
+        aux_loss=False,
+    )
+    block = SparseMoEBlock(64, **kwargs)
+    live = sum(p.numel() for p in block.parameters())
+    analytic = SparseMoEBlock.compute_parameters(64, **kwargs)
+    assert analytic == live
 
 
 # ---------------------------------------------------------------------------
