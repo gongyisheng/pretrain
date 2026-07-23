@@ -79,4 +79,4 @@ W&B project: `pretrain-moe-sparsity`.
 - This is the fixed-active-size counterpart to `moe_granularity` (which fixes the pool and
   varies how it is split).
 - **Memory:** the largest cell (`E=256`, 642M total) holds ~10 GB of weights + optimizer state;
-  add `--training.activation_checkpointing=true` if it OOMs.
+  reduce `batch_size` (raising `gradient_accumulation_steps` to compensate) if it OOMs.

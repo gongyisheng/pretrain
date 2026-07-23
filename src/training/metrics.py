@@ -1,31 +1,3 @@
-"""MetricsTracker — the stateful assembly layer between pure metric math
-(`src/utils/metric_utils.py`) and dispatch (`src/utils/tracking_utils.py`).
-
-It owns everything that has state across a training run: per-window counters,
-log-cadence timing, cached optimizer step-norms, running token totals
-(tokens_per_step / total_tokens), and the eval accumulators. It calls
-`metric_utils` for arithmetic and a logger (WandbLogger) for dispatch; the
-trainer feeds it raw numbers and never assembles a log_dict itself.
-
-Setup (once):
-    print_model_summary()                 # startup banner: param counts + device
-    train_begin()                         # reset the log-window timer
-
-Lifecycle per optimizer step:
-    snapshot_pre_step(model, step)        # before optimizer.step() (snapshots
-                                          #   only on pre-log steps)
-    ...scaler.step / update...
-    on_train_step(loss=, grad_norm=, ...) # update counters + total_tokens,
-                                          #   cache step-norms
-    log_train(step=, model=, optimizer=)  # on cadence: assemble + dispatch,
-                                          #   else None
-
-Eval:
-    eval_begin()
-    on_eval_step(loss=, logits=, labels=, ...)   # per batch
-    log_eval(step=)                            # finalize + dispatch + print
-"""
-
 import time
 
 import torch
@@ -49,14 +21,20 @@ class MetricsTracker:
         self.device = device
         self.logger = logger
 
-        self.is_moe = config.model.mlp_cls == "moe"
+        self.is_moe = config.model.is_moe
         if self.is_moe:
-            self._aux_floor = (
-                config.model.n_layers
-                * config.model.mlp_kwargs["n_routed_experts_per_token"]
+            model = config.model
+            moe_kwargs = [
+                model.resolve_mlp(i)[1]
+                for i in range(model.n_layers)
+                if model.resolve_mlp(i)[0] == "moe"
+            ]
+            self._aux_floor = sum(
+                kw["aux_loss_coef"] * kw["n_routed_experts_per_token"]
+                for kw in moe_kwargs
+                if kw.get("aux_loss")
             )
-            # Every layer is MoE in these configs.
-            self._n_moe_layers = config.model.n_layers
+            self._n_moe_layers = len(moe_kwargs)
 
         self._flops_per_token = metric_utils.compute_flops_per_token(config)
         self._gpu_peak_flops = metric_utils.estimate_gpu_peak_flops(device)
@@ -106,7 +84,14 @@ class MetricsTracker:
         dense models report total + non-embedding.
         """
         counts = metric_utils.count_parameters(self.config)
-        label = f"{self.config.model.attn_cls}+{self.config.model.mlp_cls}"
+        model = self.config.model
+        attn_label = "/".join(
+            sorted({model.resolve_attn(i)[0] for i in range(model.n_layers)})
+        )
+        mlp_label = "/".join(
+            sorted({model.resolve_mlp(i)[0] for i in range(model.n_layers)})
+        )
+        label = f"{attn_label}+{mlp_label}"
         if self.is_moe:
             msg = (
                 f"Model: {label} | {counts['total'] / 1e6:.1f}M total params "
