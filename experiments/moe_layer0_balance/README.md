@@ -9,11 +9,11 @@ experts, and a few experts absorb a disproportionate share of load. Once the
 imbalance sets in early it can compound in later layers via load-balancing
 bias/aux-loss dynamics. Two remedies:
 
-- **`dense_first`**: replace layer 0's MoE with a dense SwiGLU MLP sized to
+- **dense_first**: replace layer 0's MoE with a dense SwiGLU MLP sized to
   match the MoE layers' active FFN width. No routing happens at layer 0 at
   all, so there's nothing to imbalance — trades this layer's conditional
   compute (a routing decision) for unconditional compute of the same size.
-- **shallow bias boost** (`l0rate*`): keep layer 0 as MoE but give it a higher
+- **l0 rate boost** (`l0rate*`): keep layer 0 as MoE but give it a higher
   `expert_bias_update_rate` (DeepSeek loss-free balancing, arXiv:2408.15664),
   so its per-expert bias corrects load imbalance faster than the other layers.
   Swept over layer-0 rates **2e-3 / 5e-3 / 1e-2** (2×/5×/10× the 1e-3 base);
@@ -70,7 +70,7 @@ arms, so they are compute-comparable per forward pass.
 ```bash
 # dense-first arm (baseline + dense_first):
 nohup bash experiments/moe_layer0_balance/run_dense_first.sh > logs/moe_layer0_balance_dense_first.log 2>&1 &
-# shallow bias boost sweep (layer-0 rate 2e-3 / 5e-3 / 1e-2):
+# l0 rate boost sweep (layer-0 rate 2e-3 / 5e-3 / 1e-2):
 nohup bash experiments/moe_layer0_balance/run_l0rate_boost.sh > logs/moe_layer0_balance_l0rate_boost.log 2>&1 &
 # single:
 uv run python scripts/train.py --config experiments/moe_layer0_balance/qwen3_188m_a51m.yaml
