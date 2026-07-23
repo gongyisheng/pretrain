@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Union
 import yaml
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.layers.attention import ATTN_REGISTRY
 from src.layers.mlp import MLP_REGISTRY, MOE_ROUTER_SCORE_FNS
 from src.quant import (
     QUANT_FORMATS,
@@ -23,8 +24,7 @@ class ModelConfig:
     n_layers: int = 12
     vocab_size: int = 50257
 
-    attn_cls: str = "gqa"
-    attn_kwargs: dict = field(default_factory=dict)
+    attn: list = field(default_factory=lambda: [{"attn_cls": "gqa", "attn_kwargs": {}}])
     mlp: list = field(default_factory=lambda: [{"mlp_cls": "dense", "mlp_kwargs": {}}])
     norm_cls: str = "rmsnorm"
     norm_kwargs: dict = field(default_factory=dict)
@@ -38,31 +38,95 @@ class ModelConfig:
     lm_head_bias: bool = False
 
     def __post_init__(self):
-        self.attn_kwargs.setdefault("attn_implementation", "flex_attention")
-        n_heads = self.attn_kwargs.get("n_heads")
+        self._resolve_attn()
+        self._resolve_mlp()
+
+    def _default_attn_kwargs(self, attn_cls: str, kwargs: dict) -> None:
+        """Fill defaults/validation for one attn item's kwargs, keyed on attn_cls."""
+        kwargs.setdefault("attn_implementation", "flex_attention")
+        n_heads = kwargs.get("n_heads")
         if n_heads is not None:
             # MLA sets its head dims explicitly, so d_model need not divide n_heads.
-            if self.attn_cls in ("mha", "gqa") and self.d_model % n_heads != 0:
+            if attn_cls in ("mha", "gqa") and self.d_model % n_heads != 0:
                 raise ValueError(
                     f"d_model ({self.d_model}) must be divisible by n_heads ({n_heads})"
                 )
-            if self.attn_cls == "gqa":
-                n_kv = self.attn_kwargs.setdefault("n_kv_heads", n_heads)
+            if attn_cls == "gqa":
+                n_kv = kwargs.setdefault("n_kv_heads", n_heads)
                 if n_heads % n_kv != 0:
                     raise ValueError(
                         f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv})"
                     )
-            elif self.attn_cls == "mla":
+            elif attn_cls == "mla":
                 # Decoupled-RoPE head dims default off d_model // n_heads;
                 # q_lora_rank=0 disables query compression.
                 head_dim = self.d_model // n_heads
-                self.attn_kwargs.setdefault("qk_nope_head_dim", head_dim)
-                self.attn_kwargs.setdefault("qk_rope_head_dim", max(head_dim // 2, 1))
-                self.attn_kwargs.setdefault("v_head_dim", head_dim)
-                self.attn_kwargs.setdefault("kv_lora_rank", 4 * head_dim)
-                self.attn_kwargs.setdefault("q_lora_rank", 0)
+                kwargs.setdefault("qk_nope_head_dim", head_dim)
+                kwargs.setdefault("qk_rope_head_dim", max(head_dim // 2, 1))
+                kwargs.setdefault("v_head_dim", head_dim)
+                kwargs.setdefault("kv_lora_rank", 4 * head_dim)
+                kwargs.setdefault("q_lora_rank", 0)
 
-        self._resolve_mlp()
+    def _resolve_attn(self) -> None:
+        if not self.attn:
+            raise ValueError("model.attn must have at least one item")
+        for item in self.attn:
+            if "attn_cls" not in item:
+                raise ValueError("each model.attn item requires 'attn_cls'")
+            if item["attn_cls"] not in ATTN_REGISTRY:
+                raise ValueError(
+                    f"unknown attn_cls: {item['attn_cls']!r}; "
+                    f"expected one of {sorted(ATTN_REGISTRY)}"
+                )
+            item.setdefault("attn_kwargs", {})
+            self._default_attn_kwargs(item["attn_cls"], item["attn_kwargs"])
+
+        n = self.n_layers
+        claimed: dict[int, int] = {}
+        bare: list[int] = []
+        for idx, item in enumerate(self.attn):
+            layer_idx = item.get("layer_idx")
+            if layer_idx is None:
+                bare.append(idx)
+                continue
+            seen = set()
+            for layer in layer_idx:
+                if layer in seen:
+                    raise ValueError(
+                        f"layer {layer} listed more than once in one attn item's layer_idx"
+                    )
+                seen.add(layer)
+                if not (0 <= layer < n):
+                    raise ValueError(f"layer_idx {layer} out of range [0, {n})")
+                if layer in claimed:
+                    raise ValueError(f"layer {layer} claimed by multiple attn items")
+                claimed[layer] = idx
+        if len(bare) > 1:
+            raise ValueError("at most one model.attn item may omit layer_idx")
+        if bare:
+            remaining = [layer for layer in range(n) if layer not in claimed]
+            self.attn[bare[0]]["layer_idx"] = remaining
+            for layer in remaining:
+                claimed[layer] = bare[0]
+        missing = [layer for layer in range(n) if layer not in claimed]
+        if missing:
+            raise ValueError(
+                f"layers {missing} have no attn item; add a fallback item without layer_idx"
+            )
+
+        self._layer_attn = [
+            (
+                self.attn[claimed[layer]]["attn_cls"],
+                self.attn[claimed[layer]]["attn_kwargs"],
+            )
+            for layer in range(n)
+        ]
+
+    def resolve_attn(self, layer_idx: int) -> tuple[str, dict]:
+        return self._layer_attn[layer_idx]
+
+    def layer_attn_classes(self) -> list[str]:
+        return [cls for cls, _ in self._layer_attn]
 
     def _default_mlp_kwargs(self, mlp_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one MLP item's kwargs, keyed on mlp_cls."""
@@ -493,13 +557,14 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
     )
 
     for kw in (
-        config.model.attn_kwargs,
         config.model.norm_kwargs,
         config.model.pos_emb_kwargs,
         config.model.residual_kwargs,
         config.tokenizer_training.method_kwargs,
     ):
         _coerce_kwargs(kw)
+    for item in config.model.attn:
+        _coerce_kwargs(item["attn_kwargs"])
     for item in config.model.mlp:
         _coerce_kwargs(item["mlp_kwargs"])
     for rule in config.training.quant:

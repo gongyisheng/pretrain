@@ -26,12 +26,16 @@ MINIMAL_CONFIG = {
         "d_model": 64,
         "n_layers": 2,
         "vocab_size": 256,
-        "attn_cls": "gqa",
-        "attn_kwargs": {
-            "n_heads": 4,
-            "dropout": 0.0,
-            "attn_implementation": "flex_attention",
-        },
+        "attn": [
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "dropout": 0.0,
+                    "attn_implementation": "flex_attention",
+                },
+            }
+        ],
         "mlp": [
             {
                 "mlp_cls": "dense",
@@ -80,14 +84,14 @@ MINIMAL_CONFIG = {
 
 def test_model_config_defaults():
     cfg = ModelConfig()
-    assert cfg.attn_cls == "gqa"
+    assert cfg.layer_attn_classes()[0] == "gqa"
     assert cfg.layer_mlp_classes()[0] == "dense"
     assert cfg.norm_cls == "rmsnorm"
     assert cfg.pos_emb_cls == "rope"
     assert cfg.residual_cls == "standard"
     # __post_init__ fills component defaults: attn_implementation for attn,
     # intermediate_size (4*d_model) for mlp.
-    assert cfg.attn_kwargs == {"attn_implementation": "flex_attention"}
+    assert cfg.resolve_attn(0)[1] == {"attn_implementation": "flex_attention"}
     assert cfg.resolve_mlp(0)[1] == {"intermediate_size": 4 * 768}
     assert cfg.norm_kwargs == {}
     assert cfg.pos_emb_kwargs == {}
@@ -110,7 +114,7 @@ def test_load_config_model_kwargs():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         cfg = load_config(path)
-        assert cfg.model.attn_kwargs["n_heads"] == 4
+        assert cfg.model.resolve_attn(0)[1]["n_heads"] == 4
         assert cfg.model.resolve_mlp(0)[1]["activation"] == "silu"
         assert cfg.model.pos_emb_kwargs["rope_theta"] == 1e4
 
@@ -121,8 +125,8 @@ def test_config_to_dict_roundtrip():
         config = load_config(path)
         d = config.to_dict()
         assert d["max_seq_len"] == 128
-        assert d["model"]["attn_cls"] == "gqa"
-        assert d["model"]["attn_kwargs"]["n_heads"] == 4
+        assert d["model"]["attn"][0]["attn_cls"] == "gqa"
+        assert d["model"]["attn"][0]["attn_kwargs"]["n_heads"] == 4
 
 
 # ==================== CLI overrides ====================
@@ -139,10 +143,13 @@ def test_config_cli_overrides():
 
 
 def test_config_cli_override_nested_kwargs():
+    # attn/mlp kwargs live inside per-layer list items now (not directly
+    # overridable by dotted path); exercise the same nested-dict-override
+    # mechanism against pos_emb_kwargs, which is still a flat dict field.
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
-        cfg = load_config(path, overrides=["model.attn_kwargs.n_heads=8"])
-        assert cfg.model.attn_kwargs["n_heads"] == 8
+        cfg = load_config(path, overrides=["model.pos_emb_kwargs.rope_theta=5000"])
+        assert cfg.model.pos_emb_kwargs["rope_theta"] == 5000
 
 
 # ==================== Nested coercion ====================
@@ -268,35 +275,149 @@ def test_default_eval_train_is_false():
 
 def test_attn_cls_defaults():
     # Default attn_cls is gqa
-    assert ModelConfig().attn_cls == "gqa"
-    assert ModelConfig(attn_cls="mha").attn_cls == "mha"
-    assert ModelConfig(attn_cls="mla").attn_cls == "mla"
+    assert ModelConfig().layer_attn_classes()[0] == "gqa"
+    assert (
+        ModelConfig(attn=[{"attn_cls": "mha", "attn_kwargs": {}}]).layer_attn_classes()[
+            0
+        ]
+        == "mha"
+    )
+    assert (
+        ModelConfig(attn=[{"attn_cls": "mla", "attn_kwargs": {}}]).layer_attn_classes()[
+            0
+        ]
+        == "mla"
+    )
 
 
 def test_attn_kwargs_preserved():
     # attn_implementation default is filled; explicit values are preserved
-    assert ModelConfig().attn_kwargs == {"attn_implementation": "flex_attention"}
-    assert ModelConfig(attn_kwargs={"n_heads": 8}).attn_kwargs["n_heads"] == 8
+    assert ModelConfig().resolve_attn(0)[1] == {"attn_implementation": "flex_attention"}
+    assert (
+        ModelConfig(
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 8}}]
+        ).resolve_attn(0)[1]["n_heads"]
+        == 8
+    )
 
 
 def test_attn_kwargs_round_trip_from_yaml(tmp_path):
     yaml_content = """
 model:
   arch: qwen3
-  attn_cls: mla
   d_model: 64
-  attn_kwargs:
-    n_heads: 8
-    kv_lora_rank: 32
-    qk_rope_head_dim: 16
+  attn:
+    - attn_cls: mla
+      attn_kwargs:
+        n_heads: 8
+        kv_lora_rank: 32
+        qk_rope_head_dim: 16
 """
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml_content)
     cfg = load_config(str(p))
-    assert cfg.model.attn_cls == "mla"
-    assert cfg.model.attn_kwargs["kv_lora_rank"] == 32
-    assert cfg.model.attn_kwargs["qk_rope_head_dim"] == 16
-    assert cfg.model.attn_kwargs["n_heads"] == 8
+    assert cfg.model.layer_attn_classes()[0] == "mla"
+    assert cfg.model.resolve_attn(0)[1]["kv_lora_rank"] == 32
+    assert cfg.model.resolve_attn(0)[1]["qk_rope_head_dim"] == 16
+    assert cfg.model.resolve_attn(0)[1]["n_heads"] == 8
+
+
+# ==================== per-layer attn schema + resolver ====================
+
+
+def test_attn_single_item_covers_all_layers():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}}],
+    )
+    assert cfg.layer_attn_classes() == ["gqa"] * 4
+    assert cfg.resolve_attn(0)[1]["n_kv_heads"] == 4  # per-item defaulting ran
+    assert cfg.resolve_attn(0)[1]["attn_implementation"] == "flex_attention"
+
+
+def test_attn_mixed_per_layer_complement():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        attn=[
+            {"attn_cls": "mha", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
+            {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}},
+        ],
+    )
+    assert cfg.layer_attn_classes() == ["mha", "gqa", "gqa", "gqa"]
+    assert cfg.attn[1]["layer_idx"] == [1, 2, 3]
+
+
+def test_attn_conflict_raises():
+    with pytest.raises(ValueError, match="claimed by multiple"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            attn=[
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0, 1]},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}},
+            ],
+        )
+
+
+def test_attn_gap_raises():
+    with pytest.raises(ValueError, match="no attn item|coverage"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            attn=[
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [1]},
+            ],
+        )
+
+
+def test_attn_two_bare_items_raise():
+    with pytest.raises(ValueError, match="at most one"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            attn=[
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}},
+            ],
+        )
+
+
+def test_attn_dup_index_within_item_raises():
+    with pytest.raises(ValueError, match="more than once in one attn item"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            attn=[
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0, 0]},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}},
+            ],
+        )
+
+
+def test_attn_defaulting_matches_mla_and_gqa():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=2,
+        attn=[{"attn_cls": "mla", "attn_kwargs": {"n_heads": 4}}],
+    )
+    kw = cfg.resolve_attn(0)[1]
+    assert kw["qk_nope_head_dim"] == 16 and kw["qk_rope_head_dim"] == 8
+    assert (
+        kw["v_head_dim"] == 16 and kw["kv_lora_rank"] == 64 and kw["q_lora_rank"] == 0
+    )
+
+
+def test_attn_n_heads_divisibility_raises():
+    with pytest.raises(ValueError, match="divisible by n_heads"):
+        ModelConfig(
+            d_model=64,
+            n_layers=2,
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 5}}],
+        )
 
 
 # ==================== component defaults + validation (moved into config) ====================
@@ -455,16 +576,26 @@ def test_modelconfig_gated_only_activation_rejected_when_ungated():
 
 def test_modelconfig_validates_attn_dims():
     with pytest.raises(ValueError, match="divisible by n_heads"):
-        ModelConfig(d_model=100, attn_kwargs={"n_heads": 3})
+        ModelConfig(
+            d_model=100, attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 3}}]
+        )
     with pytest.raises(ValueError, match="divisible by\\s+n_kv_heads"):
         ModelConfig(
-            d_model=64, attn_cls="gqa", attn_kwargs={"n_heads": 4, "n_kv_heads": 3}
+            d_model=64,
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 4, "n_kv_heads": 3},
+                }
+            ],
         )
 
 
 def test_modelconfig_gqa_defaults_n_kv_heads():
-    cfg = ModelConfig(d_model=64, attn_cls="gqa", attn_kwargs={"n_heads": 8})
-    assert cfg.attn_kwargs["n_kv_heads"] == 8  # defaults to n_heads
+    cfg = ModelConfig(
+        d_model=64, attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 8}}]
+    )
+    assert cfg.resolve_attn(0)[1]["n_kv_heads"] == 8  # defaults to n_heads
 
 
 # ==================== string-field validation ====================
