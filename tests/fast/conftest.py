@@ -54,7 +54,7 @@ def _set_default_device(request):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_matmul_precision():
+def _disable_tf32():
     """Force full-precision float32 matmul for every fast test.
 
     The Trainer (and e2e smoke tests that build one) enable TF32 process-wide
