@@ -31,8 +31,16 @@ MINIMAL_CONFIG = {
             "dropout": 0.0,
             "attn_implementation": "flex_attention",
         },
-        "mlp_cls": "dense",
-        "mlp_kwargs": {"activation": "silu", "gated": True, "intermediate_size": 0},
+        "mlp": [
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "activation": "silu",
+                    "gated": True,
+                    "intermediate_size": 0,
+                },
+            }
+        ],
         "pos_emb_cls": "rope",
         "pos_emb_kwargs": {"rope_theta": 1e4},
     },
@@ -72,14 +80,14 @@ MINIMAL_CONFIG = {
 def test_model_config_defaults():
     cfg = ModelConfig()
     assert cfg.attn_cls == "gqa"
-    assert cfg.mlp_cls == "dense"
+    assert cfg.layer_mlp_classes()[0] == "dense"
     assert cfg.norm_cls == "rmsnorm"
     assert cfg.pos_emb_cls == "rope"
     assert cfg.residual_cls == "standard"
     # __post_init__ fills component defaults: attn_implementation for attn,
     # intermediate_size (4*d_model) for mlp.
     assert cfg.attn_kwargs == {"attn_implementation": "flex_attention"}
-    assert cfg.mlp_kwargs == {"intermediate_size": 4 * 768}
+    assert cfg.resolve_mlp(0)[1] == {"intermediate_size": 4 * 768}
     assert cfg.norm_kwargs == {}
     assert cfg.pos_emb_kwargs == {}
     assert cfg.residual_kwargs == {}
@@ -102,7 +110,7 @@ def test_load_config_model_kwargs():
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         cfg = load_config(path)
         assert cfg.model.attn_kwargs["n_heads"] == 4
-        assert cfg.model.mlp_kwargs["activation"] == "silu"
+        assert cfg.model.resolve_mlp(0)[1]["activation"] == "silu"
         assert cfg.model.pos_emb_kwargs["rope_theta"] == 1e4
 
 
@@ -300,32 +308,50 @@ def test_modelconfig_resolves_intermediate_size(mlp_cls):
         if mlp_cls == "moe"
         else {}
     )
-    cfg = ModelConfig(d_model=128, mlp_cls=mlp_cls, mlp_kwargs=dict(extra))
-    assert cfg.mlp_kwargs["intermediate_size"] == 4 * 128
+    cfg = ModelConfig(
+        d_model=128, mlp=[{"mlp_cls": mlp_cls, "mlp_kwargs": dict(extra)}]
+    )
+    assert cfg.resolve_mlp(0)[1]["intermediate_size"] == 4 * 128
     # explicit value preserved
     cfg2 = ModelConfig(
-        d_model=128, mlp_cls=mlp_cls, mlp_kwargs={"intermediate_size": 256, **extra}
+        d_model=128,
+        mlp=[
+            {
+                "mlp_cls": mlp_cls,
+                "mlp_kwargs": {"intermediate_size": 256, **extra},
+            }
+        ],
     )
-    assert cfg2.mlp_kwargs["intermediate_size"] == 256
+    assert cfg2.resolve_mlp(0)[1]["intermediate_size"] == 256
 
 
 def test_modelconfig_moe_expert_bias_defaults():
     # aux_loss on: expert_bias defaults off, aux_loss_coef defaulted
     cfg = ModelConfig(
-        d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4, "aux_loss": True}
+        d_model=64,
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {"n_routed_experts": 4, "aux_loss": True},
+            }
+        ],
     )
-    assert cfg.mlp_kwargs["expert_bias"] is False
-    assert cfg.mlp_kwargs["aux_loss"] is True
-    assert cfg.mlp_kwargs["aux_loss_coef"] == 0.001
+    assert cfg.resolve_mlp(0)[1]["expert_bias"] is False
+    assert cfg.resolve_mlp(0)[1]["aux_loss"] is True
+    assert cfg.resolve_mlp(0)[1]["aux_loss_coef"] == 0.001
     # expert_bias on: aux_loss stays off, bias update rate defaulted
     cfg2 = ModelConfig(
         d_model=64,
-        mlp_cls="moe",
-        mlp_kwargs={"n_routed_experts": 4, "expert_bias": True},
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {"n_routed_experts": 4, "expert_bias": True},
+            }
+        ],
     )
-    assert cfg2.mlp_kwargs["aux_loss"] is False
-    assert cfg2.mlp_kwargs["expert_bias_update_rate"] == 0.001
-    assert "aux_loss_coef" not in cfg2.mlp_kwargs
+    assert cfg2.resolve_mlp(0)[1]["aux_loss"] is False
+    assert cfg2.resolve_mlp(0)[1]["expert_bias_update_rate"] == 0.001
+    assert "aux_loss_coef" not in cfg2.resolve_mlp(0)[1]
 
 
 def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
@@ -333,60 +359,97 @@ def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
     with pytest.raises(ValueError, match="both are on"):
         ModelConfig(
             d_model=64,
-            mlp_cls="moe",
-            mlp_kwargs={"n_routed_experts": 4, "aux_loss": True, "expert_bias": True},
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "expert_bias": True,
+                    },
+                }
+            ],
         )
     # both off (defaults) — must opt into exactly one
     with pytest.raises(ValueError, match="both are off"):
-        ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4})
+        ModelConfig(
+            d_model=64,
+            mlp=[{"mlp_cls": "moe", "mlp_kwargs": {"n_routed_experts": 4}}],
+        )
 
 
 def test_modelconfig_moe_router_score_fn_defaults_sigmoid():
     cfg = ModelConfig(
         d_model=64,
-        mlp_cls="moe",
-        mlp_kwargs={"n_routed_experts": 4, "aux_loss": True},
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {"n_routed_experts": 4, "aux_loss": True},
+            }
+        ],
     )
-    assert cfg.mlp_kwargs["router_score_fn"] == "sigmoid"
+    assert cfg.resolve_mlp(0)[1]["router_score_fn"] == "sigmoid"
 
 
 def test_modelconfig_moe_router_score_fn_softmax_kept():
     cfg = ModelConfig(
         d_model=64,
-        mlp_cls="moe",
-        mlp_kwargs={
-            "n_routed_experts": 4,
-            "aux_loss": True,
-            "router_score_fn": "softmax",
-        },
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 4,
+                    "aux_loss": True,
+                    "router_score_fn": "softmax",
+                },
+            }
+        ],
     )
-    assert cfg.mlp_kwargs["router_score_fn"] == "softmax"
+    assert cfg.resolve_mlp(0)[1]["router_score_fn"] == "softmax"
 
 
 def test_modelconfig_moe_unknown_router_score_fn_raises():
     with pytest.raises(ValueError, match="router_score_fn must be one of"):
         ModelConfig(
             d_model=64,
-            mlp_cls="moe",
-            mlp_kwargs={
-                "n_routed_experts": 4,
-                "aux_loss": True,
-                "router_score_fn": "argmax",
-            },
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "router_score_fn": "argmax",
+                    },
+                }
+            ],
         )
 
 
 def test_modelconfig_unknown_activation_raises():
     with pytest.raises(ValueError, match="Unknown activation"):
-        ModelConfig(mlp_kwargs={"activation": "mish"})
+        ModelConfig(mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "mish"}}])
 
 
 def test_modelconfig_gated_only_activation_rejected_when_ungated():
     # bilinear is gated-only; rejected for an ungated mlp
     with pytest.raises(ValueError, match="Unknown activation"):
-        ModelConfig(mlp_kwargs={"activation": "bilinear", "gated": False})
+        ModelConfig(
+            mlp=[
+                {
+                    "mlp_cls": "dense",
+                    "mlp_kwargs": {"activation": "bilinear", "gated": False},
+                }
+            ]
+        )
     # accepted when gated
-    ModelConfig(mlp_kwargs={"activation": "bilinear", "gated": True})
+    ModelConfig(
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"activation": "bilinear", "gated": True},
+            }
+        ]
+    )
 
 
 def test_modelconfig_validates_attn_dims():
@@ -454,7 +517,9 @@ def _moe_train_config(mixed_precision):
         "aux_loss_coef": 1e-3,
     }
     return TrainConfig(
-        model=ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs=mlp_kwargs),
+        model=ModelConfig(
+            d_model=64, mlp=[{"mlp_cls": "moe", "mlp_kwargs": mlp_kwargs}]
+        ),
         training=TrainingConfig(mixed_precision=mixed_precision),
     )
 
@@ -635,3 +700,128 @@ def test_training_config_accepts_list_of_rules():
 def test_quant_disabled_stays_disabled():
     tc = TrainingConfig(quant={"enabled": False})
     assert _only_rule(tc).enabled is False
+
+
+# ==================== per-layer mlp schema + resolver ====================
+
+
+def _moe_kwargs(**over):
+    base = {"n_routed_experts": 4, "expert_bias": True}
+    base.update(over)
+    return base
+
+
+def test_mlp_single_item_covers_all_layers():
+    cfg = ModelConfig(
+        d_model=64, n_layers=4, mlp=[{"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs()}]
+    )
+    assert cfg.layer_mlp_classes() == ["moe"] * 4
+    assert cfg.is_moe is True
+    # per-item defaulting ran
+    assert cfg.resolve_mlp(0)[1]["intermediate_size"] == 4 * 64
+
+
+def test_mlp_dense_first_layer_complement():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        mlp=[
+            {"mlp_cls": "dense", "mlp_kwargs": {}, "layer_idx": [0]},
+            {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs()},  # complement -> [1,2,3]
+        ],
+    )
+    assert cfg.layer_mlp_classes() == ["dense", "moe", "moe", "moe"]
+    assert cfg.mlp[1]["layer_idx"] == [1, 2, 3]
+
+
+def test_mlp_per_layer_expert_bias_rate():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=3,
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": _moe_kwargs(expert_bias_update_rate=0.004),
+                "layer_idx": [0],
+            },
+            {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs()},  # rate defaults to 0.001
+        ],
+    )
+    assert cfg.resolve_mlp(0)[1]["expert_bias_update_rate"] == 0.004
+    assert cfg.resolve_mlp(1)[1]["expert_bias_update_rate"] == 0.001
+
+
+def test_mlp_conflict_raises():
+    with pytest.raises(ValueError, match="claimed by multiple"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            mlp=[
+                {"mlp_cls": "dense", "layer_idx": [0]},
+                {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs(), "layer_idx": [0, 1]},
+                {"mlp_cls": "dense"},
+            ],
+        )
+
+
+def test_mlp_gap_raises():
+    with pytest.raises(ValueError, match="no mlp item|not claimed|coverage"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            mlp=[
+                {"mlp_cls": "dense", "layer_idx": [0]},
+                {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs(), "layer_idx": [1]},
+            ],
+        )
+
+
+def test_mlp_two_bare_items_raise():
+    with pytest.raises(ValueError, match="at most one"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            mlp=[
+                {"mlp_cls": "dense"},
+                {"mlp_cls": "dense"},
+            ],
+        )
+
+
+def test_mlp_out_of_range_raises():
+    with pytest.raises(ValueError, match="out of range"):
+        ModelConfig(
+            d_model=64,
+            n_layers=2,
+            mlp=[
+                {"mlp_cls": "dense", "layer_idx": [5]},
+                {"mlp_cls": "dense"},
+            ],
+        )
+
+
+def test_mlp_shared_aux_coef_mismatch_raises():
+    with pytest.raises(ValueError, match="aux_loss_coef"):
+        ModelConfig(
+            d_model=64,
+            n_layers=2,
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                    },
+                    "layer_idx": [0],
+                },
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-2,
+                    },
+                },
+            ],
+        )

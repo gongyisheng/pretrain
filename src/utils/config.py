@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Union
 import yaml
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
-from src.layers.mlp import MOE_ROUTER_SCORE_FNS
+from src.layers.mlp import MLP_REGISTRY, MOE_ROUTER_SCORE_FNS
 from src.quant import (
     QUANT_FORMATS,
     QUANT_GRANULARITY,
@@ -25,8 +25,7 @@ class ModelConfig:
 
     attn_cls: str = "gqa"
     attn_kwargs: dict = field(default_factory=dict)
-    mlp_cls: str = "dense"
-    mlp_kwargs: dict = field(default_factory=dict)
+    mlp: list = field(default_factory=lambda: [{"mlp_cls": "dense", "mlp_kwargs": {}}])
     norm_cls: str = "rmsnorm"
     norm_kwargs: dict = field(default_factory=dict)
     pos_emb_cls: str = "rope"
@@ -63,39 +62,128 @@ class ModelConfig:
                 self.attn_kwargs.setdefault("kv_lora_rank", 4 * head_dim)
                 self.attn_kwargs.setdefault("q_lora_rank", 0)
 
-        self.mlp_kwargs.setdefault("intermediate_size", 4 * self.d_model)
-        gated = self.mlp_kwargs.get("gated", True)
-        activation = self.mlp_kwargs.get("activation", "silu")
+        self._resolve_mlp()
+
+    def _default_mlp_kwargs(self, mlp_cls: str, kwargs: dict) -> None:
+        """Fill defaults/validation for one MLP item's kwargs, keyed on mlp_cls."""
+        kwargs.setdefault("intermediate_size", 4 * self.d_model)
+        gated = kwargs.get("gated", True)
+        activation = kwargs.get("activation", "silu")
         valid = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
         if activation not in valid:
             raise ValueError(
                 f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
             )
-        if self.mlp_cls == "moe":
-            self.mlp_kwargs.setdefault("n_shared_experts", 0)
-            self.mlp_kwargs.setdefault("bias", False)
-            self.mlp_kwargs.setdefault("router_score_fn", "sigmoid")
-            if self.mlp_kwargs["router_score_fn"] not in MOE_ROUTER_SCORE_FNS:
+        if mlp_cls == "moe":
+            kwargs.setdefault("n_shared_experts", 0)
+            kwargs.setdefault("bias", False)
+            kwargs.setdefault("router_score_fn", "sigmoid")
+            if kwargs["router_score_fn"] not in MOE_ROUTER_SCORE_FNS:
                 raise ValueError(
                     f"router_score_fn must be one of {sorted(MOE_ROUTER_SCORE_FNS)}; "
-                    f"got {self.mlp_kwargs['router_score_fn']!r}"
+                    f"got {kwargs['router_score_fn']!r}"
                 )
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
             # exclusive balancing strategies; exactly one must be enabled.
-            self.mlp_kwargs.setdefault("expert_bias", False)
-            self.mlp_kwargs.setdefault("aux_loss", False)
-            if not self.mlp_kwargs["aux_loss"] and not self.mlp_kwargs["expert_bias"]:
+            kwargs.setdefault("expert_bias", False)
+            kwargs.setdefault("aux_loss", False)
+            if not kwargs["aux_loss"] and not kwargs["expert_bias"]:
                 raise ValueError(
                     "exactly one of aux_loss / expert_bias must be enabled; both are off"
                 )
-            if self.mlp_kwargs["aux_loss"] and self.mlp_kwargs["expert_bias"]:
+            if kwargs["aux_loss"] and kwargs["expert_bias"]:
                 raise ValueError(
                     "aux_loss and expert_bias are mutually exclusive; both are on"
                 )
-            if self.mlp_kwargs["expert_bias"]:
-                self.mlp_kwargs.setdefault("expert_bias_update_rate", 0.001)
-            if self.mlp_kwargs["aux_loss"]:
-                self.mlp_kwargs.setdefault("aux_loss_coef", 0.001)
+            if kwargs["expert_bias"]:
+                kwargs.setdefault("expert_bias_update_rate", 0.001)
+            if kwargs["aux_loss"]:
+                kwargs.setdefault("aux_loss_coef", 0.001)
+
+    def _resolve_mlp(self) -> None:
+        if not self.mlp:
+            raise ValueError("model.mlp must have at least one item")
+        for item in self.mlp:
+            if "mlp_cls" not in item:
+                raise ValueError("each model.mlp item requires 'mlp_cls'")
+            if item["mlp_cls"] not in MLP_REGISTRY:
+                raise ValueError(
+                    f"unknown mlp_cls: {item['mlp_cls']!r}; "
+                    f"expected one of {sorted(MLP_REGISTRY)}"
+                )
+            item.setdefault("mlp_kwargs", {})
+            self._default_mlp_kwargs(item["mlp_cls"], item["mlp_kwargs"])
+
+        n = self.n_layers
+        claimed: dict[int, int] = {}  # layer -> item index
+        bare: list[int] = []
+        for idx, item in enumerate(self.mlp):
+            layer_idx = item.get("layer_idx")
+            if layer_idx is None:
+                bare.append(idx)
+                continue
+            for layer in layer_idx:
+                if not (0 <= layer < n):
+                    raise ValueError(f"layer_idx {layer} out of range [0, {n})")
+                if layer in claimed:
+                    raise ValueError(f"layer {layer} claimed by multiple mlp items")
+                claimed[layer] = idx
+        if len(bare) > 1:
+            raise ValueError("at most one model.mlp item may omit layer_idx")
+        if bare:
+            remaining = [layer for layer in range(n) if layer not in claimed]
+            self.mlp[bare[0]]["layer_idx"] = remaining
+            for layer in remaining:
+                claimed[layer] = bare[0]
+        missing = [layer for layer in range(n) if layer not in claimed]
+        if missing:
+            raise ValueError(
+                f"layers {missing} have no mlp item; add a fallback item without layer_idx"
+            )
+
+        # per-layer (cls, kwargs) map; plain attribute, not a dataclass field,
+        # so asdict()/to_dict() serialize only the `mlp` list.
+        self._layer_mlp = [
+            (
+                self.mlp[claimed[layer]]["mlp_cls"],
+                self.mlp[claimed[layer]]["mlp_kwargs"],
+            )
+            for layer in range(n)
+        ]
+
+        coefs = {
+            kw["aux_loss_coef"]
+            for cls, kw in self._layer_mlp
+            if cls == "moe" and kw.get("aux_loss")
+        }
+        if len(coefs) > 1:
+            raise ValueError(
+                "all MoE layers using aux_loss must share the same aux_loss_coef; "
+                f"got {sorted(coefs)}"
+            )
+
+    def resolve_mlp(self, layer_idx: int) -> tuple[str, dict]:
+        return self._layer_mlp[layer_idx]
+
+    def layer_mlp_classes(self) -> list[str]:
+        return [cls for cls, _ in self._layer_mlp]
+
+    @property
+    def is_moe(self) -> bool:
+        return any(cls == "moe" for cls, _ in self._layer_mlp)
+
+    @property
+    def moe_layer_kwargs(self) -> list[dict]:
+        return [kw for cls, kw in self._layer_mlp if cls == "moe"]
+
+    @property
+    def aux_loss_coef(self) -> float | None:
+        coefs = {
+            kw["aux_loss_coef"]
+            for cls, kw in self._layer_mlp
+            if cls == "moe" and kw.get("aux_loss")
+        }
+        return coefs.pop() if coefs else None
 
 
 @dataclass
@@ -290,9 +378,9 @@ class TrainConfig:
 
     def _validate_moe_compile_precision(self):
         m = self.model
-        if m.mlp_cls == "moe" and self.training.mixed_precision != "bf16":
+        if m.is_moe and self.training.mixed_precision != "bf16":
             raise ValueError(
-                "dropless MoE (mlp_cls='moe') requires "
+                "dropless MoE requires "
                 f"training.mixed_precision='bf16'; got {self.training.mixed_precision!r}. "
                 "torch._grouped_mm is bf16-only under torch.compile."
             )
@@ -395,13 +483,14 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
 
     for kw in (
         config.model.attn_kwargs,
-        config.model.mlp_kwargs,
         config.model.norm_kwargs,
         config.model.pos_emb_kwargs,
         config.model.residual_kwargs,
         config.tokenizer_training.method_kwargs,
     ):
         _coerce_kwargs(kw)
+    for item in config.model.mlp:
+        _coerce_kwargs(item["mlp_kwargs"])
     for rule in config.training.quant:
         _coerce_kwargs(rule.scaling)
 
