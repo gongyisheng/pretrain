@@ -39,10 +39,13 @@ def _cfg(task="pretrain", log_every=2, **logging):
             n_layers=2,
             d_model=64,
             vocab_size=256,
-            attn_cls="mha",
-            attn_kwargs={"n_heads": 2},
-            mlp_cls="dense",
-            mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
+            attn=[{"attn_cls": "mha", "attn_kwargs": {"n_heads": 2}}],
+            mlp=[
+                {
+                    "mlp_cls": "dense",
+                    "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+                }
+            ],
         )
     )
     cfg.task = task
@@ -283,16 +286,24 @@ def test_eval_moe_aux_loss_subtracts_floor():
             n_layers=2,
             d_model=64,
             vocab_size=256,
-            attn_cls="gqa",
-            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
-            mlp_cls="moe",
-            mlp_kwargs={
-                "n_routed_experts": 4,
-                "aux_loss": True,
-                "aux_loss_coef": 1e-3,
-                "n_routed_experts_per_token": 2,
-                "intermediate_size": 128,
-            },
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+                }
+            ],
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                        "n_routed_experts_per_token": 2,
+                        "intermediate_size": 128,
+                    },
+                }
+            ],
         )
     )
     cfg.task = "pretrain"
@@ -310,22 +321,65 @@ def test_eval_moe_aux_loss_subtracts_floor():
     assert d["val/aux_loss"] == pytest.approx(0.5)
 
 
+def test_aux_floor_is_coef_weighted():
+    cfg = TrainConfig(
+        model=ModelConfig(
+            d_model=64,
+            n_layers=2,
+            vocab_size=256,
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "n_routed_experts_per_token": 2,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                    },
+                    "layer_idx": [0],
+                },
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "n_routed_experts_per_token": 3,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-2,
+                    },
+                },
+            ],
+        )
+    )
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    # floor = 1e-3*2 + 1e-2*3 = 0.032
+    assert abs(tracker._aux_floor - (1e-3 * 2 + 1e-2 * 3)) < 1e-9
+
+
 def _moe_cfg():
     cfg = TrainConfig(
         model=ModelConfig(
             n_layers=2,
             d_model=64,
             vocab_size=256,
-            attn_cls="gqa",
-            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
-            mlp_cls="moe",
-            mlp_kwargs={
-                "n_routed_experts": 4,
-                "aux_loss": True,
-                "aux_loss_coef": 1e-3,
-                "n_routed_experts_per_token": 2,
-                "intermediate_size": 128,
-            },
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+                }
+            ],
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                        "n_routed_experts_per_token": 2,
+                        "intermediate_size": 128,
+                    },
+                }
+            ],
         )
     )
     cfg.task = "pretrain"
@@ -439,6 +493,167 @@ def test_eval_moe_maxvio_global_vs_batch_semantics():
     assert d["val-moe/maxvio_batch/layer_0"] == pytest.approx(1.0)
 
 
+def _dense_first_moe_rest_cfg():
+    """4-layer dense-first mixed stack: layer 0 dense, layers 1-3 MoE (k=2),
+    all 3 MoE layers using aux_loss.
+
+    n_layers (4) != n_moe_layers (3) on purpose: this is the config that would
+    catch a regression to the old `n_layers * k` aux-floor formula (8, wrong)
+    vs. the correct per-layer sum (3 * 2 = 6). All MoE layers use aux_loss here
+    (not expert_bias), so the aux-loss-layers-only floor and the all-MoE-layers
+    floor coincide (6 either way) — see
+    `test_metrics_tracker_aux_floor_scoped_to_aux_loss_layers_only` below for a
+    stack where they diverge.
+    """
+    from src.utils.config import ModelConfig
+
+    return ModelConfig(
+        d_model=64,
+        n_layers=4,
+        vocab_size=256,
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"intermediate_size": 128},
+                "layer_idx": [0],
+            },
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "intermediate_size": 128,
+                    "n_routed_experts": 4,
+                    "n_routed_experts_per_token": 2,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-3,
+                },
+            },
+        ],
+    )
+
+
+def test_metrics_moe_facts_with_dense_first_layer():
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _dense_first_moe_rest_cfg()
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    assert cfg.model.is_moe is True
+    m = cfg.model
+    moe_kwargs = [
+        m.resolve_mlp(i)[1] for i in range(m.n_layers) if m.resolve_mlp(i)[0] == "moe"
+    ]
+    # aux floor counts only MoE layers: 3 layers * k(2) = 6
+    assert sum(kw["n_routed_experts_per_token"] for kw in moe_kwargs) == 6
+    assert len(moe_kwargs) == 3
+
+
+def test_metrics_tracker_aux_floor_and_n_moe_layers_on_dense_first_stack():
+    """MetricsTracker itself (not just ModelConfig) must count only MoE layers.
+
+    n_layers=4 but n_moe_layers=3 (layer 0 is dense): the old buggy
+    `n_layers * k` formula would give 4*2=8; the correct per-layer-sum formula
+    gives 3*2=6, coef-weighted (aux_loss_coef=1e-3) to 3*2*1e-3=6e-3. Also pins
+    the mixed-stack model-summary label.
+    """
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _dense_first_moe_rest_cfg()
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+
+    # 3 MoE layers * k(2) * coef(1e-3), NOT n_layers(4) * k = 8
+    assert abs(tracker._aux_floor - 6e-3) < 1e-9
+    assert tracker._n_moe_layers == 3
+
+
+def test_metrics_tracker_aux_floor_scoped_to_aux_loss_layers_only():
+    """_aux_floor must sum k only over layers using aux_loss, not every MoE
+    layer: the model's reported aux loss sums only aux_loss-layer contributions,
+    so a floor computed over ALL MoE layers (including expert_bias ones, which
+    contribute nothing to that sum) over-counts.
+
+    4-layer stack: layer 0 MoE+aux_loss (k=2, coef=1e-3), layers 1-3
+    MoE+expert_bias (k=2 each). All-MoE-layers formula (the bug): 4 layers *
+    k(2) = 8. Correct: only layer 0 counts -> 1 * k(2) * coef(1e-3) = 2e-3.
+    """
+    from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+
+    model = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        vocab_size=256,
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "intermediate_size": 128,
+                    "n_routed_experts": 4,
+                    "n_routed_experts_per_token": 2,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-3,
+                },
+                "layer_idx": [0],
+            },
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "intermediate_size": 128,
+                    "n_routed_experts": 4,
+                    "n_routed_experts_per_token": 2,
+                    "expert_bias": True,
+                },
+            },
+        ],
+    )
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+
+    # only the 1 aux_loss layer * k(2) * coef(1e-3), NOT 4*2=8
+    assert abs(tracker._aux_floor - 2e-3) < 1e-9
+    assert tracker._n_moe_layers == 4  # expert-load logging still covers all MoE layers
+
+
+def test_print_model_summary_dense_first_moe_rest_label(capsys):
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _dense_first_moe_rest_cfg()
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker.print_model_summary()
+    out = capsys.readouterr().out
+    assert "Model: gqa+dense/moe" in out
+
+
+def _mha_first_gqa_rest_cfg():
+    """4-layer mixed-attn stack: layer 0 mha, layers 1-3 gqa. Both use n_heads=2
+    on d_model=64 (head_dim=32), so the shared-rope-head-dim check agrees."""
+    from src.utils.config import ModelConfig
+
+    return ModelConfig(
+        d_model=64,
+        n_layers=4,
+        vocab_size=256,
+        attn=[
+            {"attn_cls": "mha", "attn_kwargs": {"n_heads": 2}, "layer_idx": [0]},
+            {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1}},
+        ],
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
+    )
+
+
+def test_print_model_summary_mixed_attn_label(capsys):
+    """Mixed attn classes across layers render as a sorted 'cls/cls+...' label."""
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _mha_first_gqa_rest_cfg()
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker.print_model_summary()
+    out = capsys.readouterr().out
+    assert "Model: gqa/mha+dense" in out
+
+
 # ---------------------------------------------------------------------------
 # print_model_summary
 # ---------------------------------------------------------------------------
@@ -459,16 +674,24 @@ def test_print_model_summary_moe(capsys):
             n_layers=2,
             d_model=64,
             vocab_size=256,
-            attn_cls="gqa",
-            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
-            mlp_cls="moe",
-            mlp_kwargs={
-                "n_routed_experts": 4,
-                "aux_loss": True,
-                "aux_loss_coef": 1e-3,
-                "n_routed_experts_per_token": 2,
-                "intermediate_size": 128,
-            },
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+                }
+            ],
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                        "n_routed_experts_per_token": 2,
+                        "intermediate_size": 128,
+                    },
+                }
+            ],
         ),
     )
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())

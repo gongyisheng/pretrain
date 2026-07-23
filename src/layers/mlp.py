@@ -213,7 +213,7 @@ class ExpertBias(nn.Module):
 
     @classmethod
     def compute_parameters(cls, n_experts: int) -> int:
-        return n_experts  # the bias buffer
+        return 0  # non-trainable buffer, excluded from the parameter count
 
 
 class ExpertLoad(nn.Module):
@@ -337,8 +337,8 @@ class SparseMoEBlock(nn.Module):
     (SwiGLU experts); set `gated=False` for ungated experts.
 
     Note: aux_loss scale grows linearly with n_routed_experts_per_token (k). Under balanced
-    routing the expected value is approximately k. Callers using aux_loss_coef should
-    account for this when comparing runs across different k values.
+    routing the expected value is approximately k. The block applies `aux_loss_coef` itself,
+    so the returned aux is already scaled — each layer may use a different coef.
     """
 
     def __init__(
@@ -501,7 +501,7 @@ class SparseMoEBlock(nn.Module):
             if self.router_score_fn == "sigmoid":
                 probs = probs / (probs.sum(-1, keepdim=True) + 1e-9)
             P = probs.mean(0)  # (E,)
-            aux_loss = E * (f * P).sum()
+            aux_loss = self.aux_loss_coef * E * (f * P).sum()
 
         if self.latent_moe:
             output = self.latent_up_proj(output)

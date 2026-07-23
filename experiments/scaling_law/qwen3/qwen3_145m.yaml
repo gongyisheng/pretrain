@@ -3,13 +3,15 @@ model:
   d_model: 768
   n_layers: 12
   vocab_size: 50257
-  attn_cls: gqa
-  attn_kwargs:
-    n_heads: 12
-    n_kv_heads: 6
-    qk_norm: true
-  mlp_cls: dense
-  mlp_kwargs: {}
+  attn:
+  - attn_cls: gqa
+    attn_kwargs:
+      n_heads: 12
+      n_kv_heads: 6
+      qk_norm: true
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs: {}
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -25,7 +27,6 @@ training:
   gradient_accumulation_steps: 8
   max_steps: 120000
   mixed_precision: bf16
-  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/scaling_law/qwen3_145m/
   checkpoint_every: 5000

@@ -1,3 +1,4 @@
+import glob
 import tempfile
 import os
 import pytest
@@ -25,14 +26,26 @@ MINIMAL_CONFIG = {
         "d_model": 64,
         "n_layers": 2,
         "vocab_size": 256,
-        "attn_cls": "gqa",
-        "attn_kwargs": {
-            "n_heads": 4,
-            "dropout": 0.0,
-            "attn_implementation": "flex_attention",
-        },
-        "mlp_cls": "dense",
-        "mlp_kwargs": {"activation": "silu", "gated": True, "intermediate_size": 0},
+        "attn": [
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "dropout": 0.0,
+                    "attn_implementation": "flex_attention",
+                },
+            }
+        ],
+        "mlp": [
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "activation": "silu",
+                    "gated": True,
+                    "intermediate_size": 0,
+                },
+            }
+        ],
         "pos_emb_cls": "rope",
         "pos_emb_kwargs": {"rope_theta": 1e4},
     },
@@ -48,7 +61,6 @@ MINIMAL_CONFIG = {
         "gradient_accumulation_steps": 1,
         "max_steps": 10,
         "mixed_precision": "no",
-        "activation_checkpointing": False,
         "grad_clip": 1.0,
         "checkpoint_dir": "ckpt/",
         "checkpoint_every": 5,
@@ -71,15 +83,15 @@ MINIMAL_CONFIG = {
 
 def test_model_config_defaults():
     cfg = ModelConfig()
-    assert cfg.attn_cls == "gqa"
-    assert cfg.mlp_cls == "dense"
+    assert cfg.resolve_attn(0)[0] == "gqa"
+    assert cfg.resolve_mlp(0)[0] == "dense"
     assert cfg.norm_cls == "rmsnorm"
     assert cfg.pos_emb_cls == "rope"
     assert cfg.residual_cls == "standard"
     # __post_init__ fills component defaults: attn_implementation for attn,
     # intermediate_size (4*d_model) for mlp.
-    assert cfg.attn_kwargs == {"attn_implementation": "flex_attention"}
-    assert cfg.mlp_kwargs == {"intermediate_size": 4 * 768}
+    assert cfg.resolve_attn(0)[1] == {"attn_implementation": "flex_attention"}
+    assert cfg.resolve_mlp(0)[1] == {"intermediate_size": 4 * 768}
     assert cfg.norm_kwargs == {}
     assert cfg.pos_emb_kwargs == {}
     assert cfg.residual_kwargs == {}
@@ -101,8 +113,8 @@ def test_load_config_model_kwargs():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         cfg = load_config(path)
-        assert cfg.model.attn_kwargs["n_heads"] == 4
-        assert cfg.model.mlp_kwargs["activation"] == "silu"
+        assert cfg.model.resolve_attn(0)[1]["n_heads"] == 4
+        assert cfg.model.resolve_mlp(0)[1]["activation"] == "silu"
         assert cfg.model.pos_emb_kwargs["rope_theta"] == 1e4
 
 
@@ -112,8 +124,8 @@ def test_config_to_dict_roundtrip():
         config = load_config(path)
         d = config.to_dict()
         assert d["max_seq_len"] == 128
-        assert d["model"]["attn_cls"] == "gqa"
-        assert d["model"]["attn_kwargs"]["n_heads"] == 4
+        assert d["model"]["attn"][0]["attn_cls"] == "gqa"
+        assert d["model"]["attn"][0]["attn_kwargs"]["n_heads"] == 4
 
 
 # ==================== CLI overrides ====================
@@ -130,10 +142,13 @@ def test_config_cli_overrides():
 
 
 def test_config_cli_override_nested_kwargs():
+    # attn/mlp kwargs live inside per-layer list items now (not directly
+    # overridable by dotted path); exercise the same nested-dict-override
+    # mechanism against pos_emb_kwargs, which is still a flat dict field.
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_yaml(tmp, MINIMAL_CONFIG)
-        cfg = load_config(path, overrides=["model.attn_kwargs.n_heads=8"])
-        assert cfg.model.attn_kwargs["n_heads"] == 8
+        cfg = load_config(path, overrides=["model.pos_emb_kwargs.rope_theta=5000"])
+        assert cfg.model.pos_emb_kwargs["rope_theta"] == 5000
 
 
 # ==================== Nested coercion ====================
@@ -254,40 +269,193 @@ def test_default_eval_train_is_false():
     assert cfg.eval_train is False
 
 
-# ==================== attn_cls / attn_kwargs ====================
+# ==================== attn ====================
 
 
 def test_attn_cls_defaults():
     # Default attn_cls is gqa
-    assert ModelConfig().attn_cls == "gqa"
-    assert ModelConfig(attn_cls="mha").attn_cls == "mha"
-    assert ModelConfig(attn_cls="mla").attn_cls == "mla"
+    assert ModelConfig().resolve_attn(0)[0] == "gqa"
+    assert (
+        ModelConfig(attn=[{"attn_cls": "mha", "attn_kwargs": {}}]).resolve_attn(0)[0]
+        == "mha"
+    )
+    assert (
+        ModelConfig(attn=[{"attn_cls": "mla", "attn_kwargs": {}}]).resolve_attn(0)[0]
+        == "mla"
+    )
 
 
 def test_attn_kwargs_preserved():
     # attn_implementation default is filled; explicit values are preserved
-    assert ModelConfig().attn_kwargs == {"attn_implementation": "flex_attention"}
-    assert ModelConfig(attn_kwargs={"n_heads": 8}).attn_kwargs["n_heads"] == 8
+    assert ModelConfig().resolve_attn(0)[1] == {"attn_implementation": "flex_attention"}
+    assert (
+        ModelConfig(
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 8}}]
+        ).resolve_attn(0)[1]["n_heads"]
+        == 8
+    )
 
 
 def test_attn_kwargs_round_trip_from_yaml(tmp_path):
     yaml_content = """
 model:
   arch: qwen3
-  attn_cls: mla
   d_model: 64
-  attn_kwargs:
-    n_heads: 8
-    kv_lora_rank: 32
-    qk_rope_head_dim: 16
+  attn:
+    - attn_cls: mla
+      attn_kwargs:
+        n_heads: 8
+        kv_lora_rank: 32
+        qk_rope_head_dim: 16
 """
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml_content)
     cfg = load_config(str(p))
-    assert cfg.model.attn_cls == "mla"
-    assert cfg.model.attn_kwargs["kv_lora_rank"] == 32
-    assert cfg.model.attn_kwargs["qk_rope_head_dim"] == 16
-    assert cfg.model.attn_kwargs["n_heads"] == 8
+    assert cfg.model.resolve_attn(0)[0] == "mla"
+    assert cfg.model.resolve_attn(0)[1]["kv_lora_rank"] == 32
+    assert cfg.model.resolve_attn(0)[1]["qk_rope_head_dim"] == 16
+    assert cfg.model.resolve_attn(0)[1]["n_heads"] == 8
+
+
+# ==================== per-layer attn schema + resolver ====================
+
+
+def test_attn_single_item_covers_all_layers():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}}],
+    )
+    assert [cfg.resolve_attn(i)[0] for i in range(cfg.n_layers)] == ["gqa"] * 4
+    assert cfg.resolve_attn(0)[1]["n_kv_heads"] == 4  # per-item defaulting ran
+    assert cfg.resolve_attn(0)[1]["attn_implementation"] == "flex_attention"
+
+
+def test_attn_mixed_per_layer_complement():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        attn=[
+            {"attn_cls": "mha", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
+            {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}},
+        ],
+    )
+    assert [cfg.resolve_attn(i)[0] for i in range(cfg.n_layers)] == [
+        "mha",
+        "gqa",
+        "gqa",
+        "gqa",
+    ]
+    assert cfg.attn[1]["layer_idx"] == [1, 2, 3]
+
+
+def test_attn_conflict_raises():
+    with pytest.raises(ValueError, match="claimed by multiple"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            attn=[
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0, 1]},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}},
+            ],
+        )
+
+
+def test_attn_gap_raises():
+    with pytest.raises(ValueError, match="no attn item|coverage"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            attn=[
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [1]},
+            ],
+        )
+
+
+def test_attn_two_bare_items_raise():
+    with pytest.raises(ValueError, match="at most one"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            attn=[
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}},
+            ],
+        )
+
+
+def test_attn_dup_index_within_item_raises():
+    with pytest.raises(ValueError, match="more than once in one attn item"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            attn=[
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0, 0]},
+                {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}},
+            ],
+        )
+
+
+def test_attn_defaulting_matches_mla_and_gqa():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=2,
+        attn=[{"attn_cls": "mla", "attn_kwargs": {"n_heads": 4}}],
+    )
+    kw = cfg.resolve_attn(0)[1]
+    assert kw["qk_nope_head_dim"] == 16 and kw["qk_rope_head_dim"] == 8
+    assert (
+        kw["v_head_dim"] == 16 and kw["kv_lora_rank"] == 64 and kw["q_lora_rank"] == 0
+    )
+
+
+def test_attn_n_heads_divisibility_raises():
+    with pytest.raises(ValueError, match="divisible by n_heads"):
+        ModelConfig(
+            d_model=64,
+            n_layers=2,
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 5}}],
+        )
+
+
+def test_attn_implementation_must_be_shared_across_layers():
+    # The trainer builds one attention mask shared across layers, so layers
+    # cannot disagree on attn_implementation.
+    with pytest.raises(ValueError, match="attn_implementation"):
+        ModelConfig(
+            d_model=64,
+            n_layers=2,
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 4, "attn_implementation": "sdpa"},
+                    "layer_idx": [0],
+                },
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {
+                        "n_heads": 4,
+                        "attn_implementation": "flex_attention",
+                    },
+                },
+            ],
+        )
+
+
+def test_attn_implementation_shared_when_uniform():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=2,
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {"n_heads": 4, "attn_implementation": "sdpa"},
+            }
+        ],
+    )
+    assert cfg.attn_implementation == "sdpa"
 
 
 # ==================== component defaults + validation (moved into config) ====================
@@ -300,32 +468,50 @@ def test_modelconfig_resolves_intermediate_size(mlp_cls):
         if mlp_cls == "moe"
         else {}
     )
-    cfg = ModelConfig(d_model=128, mlp_cls=mlp_cls, mlp_kwargs=dict(extra))
-    assert cfg.mlp_kwargs["intermediate_size"] == 4 * 128
+    cfg = ModelConfig(
+        d_model=128, mlp=[{"mlp_cls": mlp_cls, "mlp_kwargs": dict(extra)}]
+    )
+    assert cfg.resolve_mlp(0)[1]["intermediate_size"] == 4 * 128
     # explicit value preserved
     cfg2 = ModelConfig(
-        d_model=128, mlp_cls=mlp_cls, mlp_kwargs={"intermediate_size": 256, **extra}
+        d_model=128,
+        mlp=[
+            {
+                "mlp_cls": mlp_cls,
+                "mlp_kwargs": {"intermediate_size": 256, **extra},
+            }
+        ],
     )
-    assert cfg2.mlp_kwargs["intermediate_size"] == 256
+    assert cfg2.resolve_mlp(0)[1]["intermediate_size"] == 256
 
 
 def test_modelconfig_moe_expert_bias_defaults():
     # aux_loss on: expert_bias defaults off, aux_loss_coef defaulted
     cfg = ModelConfig(
-        d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4, "aux_loss": True}
+        d_model=64,
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {"n_routed_experts": 4, "aux_loss": True},
+            }
+        ],
     )
-    assert cfg.mlp_kwargs["expert_bias"] is False
-    assert cfg.mlp_kwargs["aux_loss"] is True
-    assert cfg.mlp_kwargs["aux_loss_coef"] == 0.001
+    assert cfg.resolve_mlp(0)[1]["expert_bias"] is False
+    assert cfg.resolve_mlp(0)[1]["aux_loss"] is True
+    assert cfg.resolve_mlp(0)[1]["aux_loss_coef"] == 0.001
     # expert_bias on: aux_loss stays off, bias update rate defaulted
     cfg2 = ModelConfig(
         d_model=64,
-        mlp_cls="moe",
-        mlp_kwargs={"n_routed_experts": 4, "expert_bias": True},
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {"n_routed_experts": 4, "expert_bias": True},
+            }
+        ],
     )
-    assert cfg2.mlp_kwargs["aux_loss"] is False
-    assert cfg2.mlp_kwargs["expert_bias_update_rate"] == 0.001
-    assert "aux_loss_coef" not in cfg2.mlp_kwargs
+    assert cfg2.resolve_mlp(0)[1]["aux_loss"] is False
+    assert cfg2.resolve_mlp(0)[1]["expert_bias_update_rate"] == 0.001
+    assert "aux_loss_coef" not in cfg2.resolve_mlp(0)[1]
 
 
 def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
@@ -333,74 +519,121 @@ def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
     with pytest.raises(ValueError, match="both are on"):
         ModelConfig(
             d_model=64,
-            mlp_cls="moe",
-            mlp_kwargs={"n_routed_experts": 4, "aux_loss": True, "expert_bias": True},
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "expert_bias": True,
+                    },
+                }
+            ],
         )
     # both off (defaults) — must opt into exactly one
     with pytest.raises(ValueError, match="both are off"):
-        ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs={"n_routed_experts": 4})
+        ModelConfig(
+            d_model=64,
+            mlp=[{"mlp_cls": "moe", "mlp_kwargs": {"n_routed_experts": 4}}],
+        )
 
 
 def test_modelconfig_moe_router_score_fn_defaults_sigmoid():
     cfg = ModelConfig(
         d_model=64,
-        mlp_cls="moe",
-        mlp_kwargs={"n_routed_experts": 4, "aux_loss": True},
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {"n_routed_experts": 4, "aux_loss": True},
+            }
+        ],
     )
-    assert cfg.mlp_kwargs["router_score_fn"] == "sigmoid"
+    assert cfg.resolve_mlp(0)[1]["router_score_fn"] == "sigmoid"
 
 
 def test_modelconfig_moe_router_score_fn_softmax_kept():
     cfg = ModelConfig(
         d_model=64,
-        mlp_cls="moe",
-        mlp_kwargs={
-            "n_routed_experts": 4,
-            "aux_loss": True,
-            "router_score_fn": "softmax",
-        },
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 4,
+                    "aux_loss": True,
+                    "router_score_fn": "softmax",
+                },
+            }
+        ],
     )
-    assert cfg.mlp_kwargs["router_score_fn"] == "softmax"
+    assert cfg.resolve_mlp(0)[1]["router_score_fn"] == "softmax"
 
 
 def test_modelconfig_moe_unknown_router_score_fn_raises():
     with pytest.raises(ValueError, match="router_score_fn must be one of"):
         ModelConfig(
             d_model=64,
-            mlp_cls="moe",
-            mlp_kwargs={
-                "n_routed_experts": 4,
-                "aux_loss": True,
-                "router_score_fn": "argmax",
-            },
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "router_score_fn": "argmax",
+                    },
+                }
+            ],
         )
 
 
 def test_modelconfig_unknown_activation_raises():
     with pytest.raises(ValueError, match="Unknown activation"):
-        ModelConfig(mlp_kwargs={"activation": "mish"})
+        ModelConfig(mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "mish"}}])
 
 
 def test_modelconfig_gated_only_activation_rejected_when_ungated():
     # bilinear is gated-only; rejected for an ungated mlp
     with pytest.raises(ValueError, match="Unknown activation"):
-        ModelConfig(mlp_kwargs={"activation": "bilinear", "gated": False})
+        ModelConfig(
+            mlp=[
+                {
+                    "mlp_cls": "dense",
+                    "mlp_kwargs": {"activation": "bilinear", "gated": False},
+                }
+            ]
+        )
     # accepted when gated
-    ModelConfig(mlp_kwargs={"activation": "bilinear", "gated": True})
+    ModelConfig(
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"activation": "bilinear", "gated": True},
+            }
+        ]
+    )
 
 
 def test_modelconfig_validates_attn_dims():
     with pytest.raises(ValueError, match="divisible by n_heads"):
-        ModelConfig(d_model=100, attn_kwargs={"n_heads": 3})
+        ModelConfig(
+            d_model=100, attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 3}}]
+        )
     with pytest.raises(ValueError, match="divisible by\\s+n_kv_heads"):
         ModelConfig(
-            d_model=64, attn_cls="gqa", attn_kwargs={"n_heads": 4, "n_kv_heads": 3}
+            d_model=64,
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 4, "n_kv_heads": 3},
+                }
+            ],
         )
 
 
 def test_modelconfig_gqa_defaults_n_kv_heads():
-    cfg = ModelConfig(d_model=64, attn_cls="gqa", attn_kwargs={"n_heads": 8})
-    assert cfg.attn_kwargs["n_kv_heads"] == 8  # defaults to n_heads
+    cfg = ModelConfig(
+        d_model=64, attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 8}}]
+    )
+    assert cfg.resolve_attn(0)[1]["n_kv_heads"] == 8  # defaults to n_heads
 
 
 # ==================== string-field validation ====================
@@ -454,7 +687,9 @@ def _moe_train_config(mixed_precision):
         "aux_loss_coef": 1e-3,
     }
     return TrainConfig(
-        model=ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs=mlp_kwargs),
+        model=ModelConfig(
+            d_model=64, mlp=[{"mlp_cls": "moe", "mlp_kwargs": mlp_kwargs}]
+        ),
         training=TrainingConfig(mixed_precision=mixed_precision),
     )
 
@@ -643,11 +878,12 @@ def test_quant_disabled_stays_disabled():
 def test_modelconfig_latent_moe_default_off():
     cfg = ModelConfig(
         d_model=64,
-        mlp_cls="moe",
-        mlp_kwargs={"n_routed_experts": 4, "aux_loss": True},
+        mlp=[
+            {"mlp_cls": "moe", "mlp_kwargs": {"n_routed_experts": 4, "aux_loss": True}}
+        ],
     )
-    assert cfg.mlp_kwargs["latent_moe"] is False
-    assert "latent_dim" not in cfg.mlp_kwargs
+    assert cfg.resolve_mlp(0)[1]["latent_moe"] is False
+    assert "latent_dim" not in cfg.resolve_mlp(0)[1]
 
 
 @pytest.mark.parametrize("latent_dim", [None, 0, -4, 3.5])
@@ -656,19 +892,196 @@ def test_modelconfig_latent_moe_requires_positive_latent_dim(latent_dim):
     if latent_dim is not None:
         kwargs["latent_dim"] = latent_dim
     with pytest.raises(ValueError, match="latent_dim must be a positive int"):
-        ModelConfig(d_model=64, mlp_cls="moe", mlp_kwargs=kwargs)
+        ModelConfig(d_model=64, mlp=[{"mlp_cls": "moe", "mlp_kwargs": kwargs}])
 
 
 def test_modelconfig_latent_moe_valid():
     cfg = ModelConfig(
         d_model=64,
-        mlp_cls="moe",
-        mlp_kwargs={
-            "n_routed_experts": 4,
-            "aux_loss": True,
-            "latent_moe": True,
-            "latent_dim": 16,
-        },
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 4,
+                    "aux_loss": True,
+                    "latent_moe": True,
+                    "latent_dim": 16,
+                },
+            }
+        ],
     )
-    assert cfg.mlp_kwargs["latent_moe"] is True
-    assert cfg.mlp_kwargs["latent_dim"] == 16
+    assert cfg.resolve_mlp(0)[1]["latent_moe"] is True
+    assert cfg.resolve_mlp(0)[1]["latent_dim"] == 16
+
+
+# ==================== per-layer mlp schema + resolver ====================
+
+
+def _moe_kwargs(**over):
+    base = {"n_routed_experts": 4, "expert_bias": True}
+    base.update(over)
+    return base
+
+
+def test_mlp_single_item_covers_all_layers():
+    cfg = ModelConfig(
+        d_model=64, n_layers=4, mlp=[{"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs()}]
+    )
+    assert [cfg.resolve_mlp(i)[0] for i in range(cfg.n_layers)] == ["moe"] * 4
+    assert cfg.is_moe is True
+    # per-item defaulting ran
+    assert cfg.resolve_mlp(0)[1]["intermediate_size"] == 4 * 64
+
+
+def test_mlp_dense_first_layer_complement():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        mlp=[
+            {"mlp_cls": "dense", "mlp_kwargs": {}, "layer_idx": [0]},
+            {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs()},  # complement -> [1,2,3]
+        ],
+    )
+    assert [cfg.resolve_mlp(i)[0] for i in range(cfg.n_layers)] == [
+        "dense",
+        "moe",
+        "moe",
+        "moe",
+    ]
+    assert cfg.mlp[1]["layer_idx"] == [1, 2, 3]
+
+
+def test_mlp_per_layer_expert_bias_rate():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=3,
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": _moe_kwargs(expert_bias_update_rate=0.004),
+                "layer_idx": [0],
+            },
+            {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs()},  # rate defaults to 0.001
+        ],
+    )
+    assert cfg.resolve_mlp(0)[1]["expert_bias_update_rate"] == 0.004
+    assert cfg.resolve_mlp(1)[1]["expert_bias_update_rate"] == 0.001
+
+
+def test_mlp_conflict_raises():
+    with pytest.raises(ValueError, match="claimed by multiple"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            mlp=[
+                {"mlp_cls": "dense", "layer_idx": [0]},
+                {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs(), "layer_idx": [0, 1]},
+                {"mlp_cls": "dense"},
+            ],
+        )
+
+
+def test_mlp_within_item_duplicate_raises_clear_message():
+    with pytest.raises(ValueError, match="listed more than once in one mlp item"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            mlp=[
+                {"mlp_cls": "dense", "layer_idx": [0, 0]},
+                {"mlp_cls": "dense"},
+            ],
+        )
+
+
+def test_mlp_gap_raises():
+    with pytest.raises(ValueError, match="no mlp item|not claimed|coverage"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            mlp=[
+                {"mlp_cls": "dense", "layer_idx": [0]},
+                {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs(), "layer_idx": [1]},
+            ],
+        )
+
+
+def test_mlp_two_bare_items_raise():
+    with pytest.raises(ValueError, match="at most one"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            mlp=[
+                {"mlp_cls": "dense"},
+                {"mlp_cls": "dense"},
+            ],
+        )
+
+
+def test_mlp_out_of_range_raises():
+    with pytest.raises(ValueError, match="out of range"):
+        ModelConfig(
+            d_model=64,
+            n_layers=2,
+            mlp=[
+                {"mlp_cls": "dense", "layer_idx": [5]},
+                {"mlp_cls": "dense"},
+            ],
+        )
+
+
+def test_mlp_per_layer_aux_coef_allowed():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=2,
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 4,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-3,
+                },
+                "layer_idx": [0],
+            },
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 4,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-2,
+                },
+            },
+        ],
+    )
+    coefs = [
+        cfg.resolve_mlp(i)[1]["aux_loss_coef"]
+        for i in range(cfg.n_layers)
+        if cfg.resolve_mlp(i)[0] == "moe" and cfg.resolve_mlp(i)[1].get("aux_loss")
+    ]
+    assert sorted(coefs) == [1e-3, 1e-2]
+    assert (
+        not hasattr(cfg, "aux_loss_coef")
+        or callable(getattr(type(cfg), "aux_loss_coef", None)) is False
+    )
+
+
+def test_all_configs_load_and_have_list_mlp():
+    paths = glob.glob("configs/**/*.yaml", recursive=True) + glob.glob(
+        "experiments/**/*.yaml", recursive=True
+    )
+    assert paths
+    for p in paths:
+        cfg = load_config(p)
+        assert isinstance(cfg.model.mlp, list) and cfg.model.mlp
+        # resolver ran and covers every layer
+        assert all(cfg.model.resolve_mlp(i)[0] for i in range(cfg.model.n_layers))
+        assert isinstance(cfg.model.attn, list) and cfg.model.attn
+        assert all(cfg.model.resolve_attn(i)[0] for i in range(cfg.model.n_layers))
+
+
+def test_configs_model_key_order_d_model_n_layers_vocab_size_attn_mlp_first():
+    for p in ("configs/gpt2_124m.yaml", "configs/qwen3_51m.yaml"):
+        raw = yaml.safe_load(open(p))
+        keys = list(raw["model"].keys())
+        assert keys[:3] == ["d_model", "n_layers", "vocab_size"], (p, keys)
+        assert keys[3] == "attn" and keys[4] == "mlp", (p, keys)

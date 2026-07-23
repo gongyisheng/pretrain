@@ -153,10 +153,13 @@ def _model_cfg():
             d_model=64,
             n_layers=2,
             vocab_size=128,
-            attn_cls="gqa",
-            attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
-            mlp_cls="dense",
-            mlp_kwargs={"activation": "silu", "gated": True},
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
+            mlp=[
+                {
+                    "mlp_cls": "dense",
+                    "mlp_kwargs": {"activation": "silu", "gated": True},
+                }
+            ],
             norm_cls="rmsnorm",
             pos_emb_cls="rope",
         ),

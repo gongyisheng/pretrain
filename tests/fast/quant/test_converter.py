@@ -28,7 +28,10 @@ class _Tiny(nn.Module):
 def _cfg(quant, mixed_precision="bf16"):
     return TrainConfig(
         model=ModelConfig(
-            d_model=32, n_layers=1, vocab_size=64, attn_kwargs={"n_heads": 2}
+            d_model=32,
+            n_layers=1,
+            vocab_size=64,
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
         ),
         training=TrainingConfig(mixed_precision=mixed_precision, quant=quant),
     )
