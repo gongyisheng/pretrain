@@ -12,15 +12,16 @@ model:
     kv_lora_rank: 256
     q_lora_rank: 0
     dropout: 0.0
-  mlp_cls: dense
-  mlp_kwargs:
-    intermediate_size: 1536
-    dropout: 0.0
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
   dropout_embd: 0.0
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs:
+      intermediate_size: 1536
+      dropout: 0.0
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

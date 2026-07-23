@@ -1,3 +1,4 @@
+import glob
 import tempfile
 import os
 import pytest
@@ -825,3 +826,15 @@ def test_mlp_shared_aux_coef_mismatch_raises():
                 },
             ],
         )
+
+
+def test_all_configs_load_and_have_list_mlp():
+    paths = glob.glob("configs/**/*.yaml", recursive=True) + glob.glob(
+        "experiments/**/*.yaml", recursive=True
+    )
+    assert paths
+    for p in paths:
+        cfg = load_config(p)
+        assert isinstance(cfg.model.mlp, list) and cfg.model.mlp
+        # resolver ran and covers every layer
+        assert len(cfg.model.layer_mlp_classes()) == cfg.model.n_layers

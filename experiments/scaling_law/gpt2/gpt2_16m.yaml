@@ -7,11 +7,12 @@ model:
   attn_kwargs:
     n_heads: 4
     bias: true
-  mlp_cls: dense
-  mlp_kwargs:
-    bias: true
   norm_cls: layernorm
   pos_emb_cls: learned
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs:
+      bias: true
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

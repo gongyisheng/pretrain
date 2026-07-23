@@ -8,8 +8,6 @@ model:
     n_heads: 8
     n_kv_heads: 4
     qk_norm: true
-  mlp_cls: dense
-  mlp_kwargs: {}
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -17,6 +15,9 @@ model:
   residual_cls: attn_res
   residual_kwargs:
     seal_block_size: 2
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs: {}
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

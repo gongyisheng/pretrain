@@ -12,12 +12,13 @@ model:
     v_head_dim: 64
     kv_lora_rank: 64
     q_lora_rank: 0
-  mlp_cls: dense
-  mlp_kwargs: {}
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs: {}
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

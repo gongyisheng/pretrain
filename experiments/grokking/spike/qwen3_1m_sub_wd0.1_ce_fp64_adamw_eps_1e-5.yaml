@@ -9,12 +9,13 @@ model:
     n_heads: 4
     n_kv_heads: 2
     qk_norm: true
-  mlp_cls: dense
-  mlp_kwargs: {}
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs: {}
 data:
   dataset: grokking_sub_p97_f0.3
   tokenizer_path: tokenizers/grokking

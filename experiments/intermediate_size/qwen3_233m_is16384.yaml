@@ -8,13 +8,14 @@ model:
     n_heads: 8
     n_kv_heads: 4
     qk_norm: true
-  mlp_cls: dense
-  mlp_kwargs:
-    intermediate_size: 16384
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs:
+      intermediate_size: 16384
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

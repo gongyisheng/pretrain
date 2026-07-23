@@ -29,8 +29,12 @@ def _gpt2_cfg(impl):
         vocab_size=256,
         attn_cls="mha",
         attn_kwargs={"n_heads": 2, "attn_implementation": impl},
-        mlp_cls="dense",
-        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+            }
+        ],
     )
 
 
@@ -46,8 +50,7 @@ def _qwen3_cfg(impl):
             "qk_norm": True,
             "attn_implementation": impl,
         },
-        mlp_cls="dense",
-        mlp_kwargs={},
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
 
 
@@ -63,14 +66,18 @@ def _qwen3_moe_cfg(impl):
             "qk_norm": True,
             "attn_implementation": impl,
         },
-        mlp_cls="moe",
-        mlp_kwargs={
-            "n_routed_experts": 4,
-            "aux_loss": True,
-            "aux_loss_coef": 1e-3,
-            "n_routed_experts_per_token": 2,
-            "intermediate_size": 128,
-        },
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 4,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-3,
+                    "n_routed_experts_per_token": 2,
+                    "intermediate_size": 128,
+                },
+            }
+        ],
     )
 
 
@@ -81,8 +88,12 @@ def _gpt2_attn_res_cfg(impl):
         vocab_size=256,
         attn_cls="mha",
         attn_kwargs={"n_heads": 2, "attn_implementation": impl},
-        mlp_cls="dense",
-        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+            }
+        ],
         residual_cls="attn_res",
         residual_kwargs={"seal_block_size": 2},
     )
@@ -100,8 +111,7 @@ def _qwen3_attn_res_cfg(impl):
             "qk_norm": True,
             "attn_implementation": impl,
         },
-        mlp_cls="dense",
-        mlp_kwargs={},
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
         residual_cls="attn_res",
         residual_kwargs={"seal_block_size": 2},
     )
@@ -265,7 +275,7 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
     skip_if_unsupported(impl, device)
     model_cfg = _CFG_FACTORIES[arch_id](impl)
     model = build_model(_FakeTrainConfig(model_cfg))
-    is_moe = model_cfg.mlp_cls == "moe"
+    is_moe = model_cfg.is_moe
     if is_moe:
         for block in model.blocks:
             block.attn = torch.compile(block.attn, backend="eager")
@@ -434,8 +444,12 @@ def _gpt2_layernorm_learned_cfg(impl):
         vocab_size=256,
         attn_cls="mha",
         attn_kwargs={"n_heads": 2, "bias": True, "attn_implementation": impl},
-        mlp_cls="dense",
-        mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+            }
+        ],
         norm_cls="layernorm",
         pos_emb_cls="learned",
         tie_word_embeddings=False,
@@ -463,7 +477,7 @@ def test_count_parameters_matches_real_model(factory):
     assert c["non_emb"] == real_non_emb
     assert c["non_emb"] < c["total"]  # embeddings present
 
-    if cfg.model.mlp_cls == "moe":
+    if cfg.model.is_moe:
         assert c["active_non_emb"] < c["non_emb"]  # k experts < all experts
     else:
         assert c["active_non_emb"] == c["non_emb"]
@@ -537,13 +551,17 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
         vocab_size=256,
         attn_cls="mha",
         attn_kwargs={"n_heads": 2, "bias": True},
-        mlp_cls="dense",
-        mlp_kwargs={
-            "intermediate_size": 256,
-            "activation": "gelu",
-            "gated": False,
-            "bias": True,
-        },
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "intermediate_size": 256,
+                    "activation": "gelu",
+                    "gated": False,
+                    "bias": True,
+                },
+            }
+        ],
     )
     f = metric_utils.compute_flops_per_token(cfg)
     # head_dim=32, n_kv_heads=n_heads=2 (MHA), L=2, T=128. Per-layer components:
@@ -568,13 +586,17 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
         vocab_size=256,
         attn_cls="gqa",
         attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "bias": False},
-        mlp_cls="dense",
-        mlp_kwargs={
-            "intermediate_size": 256,
-            "activation": "silu",
-            "gated": True,
-            "bias": False,
-        },
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "intermediate_size": 256,
+                    "activation": "silu",
+                    "gated": True,
+                    "bias": False,
+                },
+            }
+        ],
     )
     f = metric_utils.compute_flops_per_token(cfg)
     # head_dim=16. Per-layer: attn = qkv(16384) + o(8192) + matmul(32768);
@@ -595,16 +617,20 @@ def test_compute_flops_per_token_moe_uses_k_active():
         vocab_size=256,
         attn_cls="gqa",
         attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
-        mlp_cls="moe",
-        mlp_kwargs={
-            "n_routed_experts": 8,
-            "aux_loss": True,
-            "aux_loss_coef": 1e-3,
-            "n_routed_experts_per_token": 2,
-            "intermediate_size": 128,
-            "gated": True,
-            "bias": False,
-        },
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "n_routed_experts": 8,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-3,
+                    "n_routed_experts_per_token": 2,
+                    "intermediate_size": 128,
+                    "gated": True,
+                    "bias": False,
+                },
+            }
+        ],
     )
     f = metric_utils.compute_flops_per_token(cfg)
     # head_dim=16. attn = 16384 + 8192 + 32768; norm = 384.
@@ -626,8 +652,7 @@ def test_compute_flops_per_token_ckpt_multiplier():
         vocab_size=256,
         attn_cls="gqa",
         attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
-        mlp_cls="dense",
-        mlp_kwargs={},
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
     cfg_off = TrainConfig(
         max_seq_len=128,
@@ -654,8 +679,7 @@ def test_compute_flops_per_token_lm_head_bias():
         vocab_size=128,
         attn_cls="gqa",
         attn_kwargs={"n_heads": 2},
-        mlp_cls="dense",
-        mlp_kwargs={},
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
     cfg_off = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=False))
     cfg_on = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=True))
@@ -672,8 +696,7 @@ def test_compute_flops_per_token_qk_norm():
         d_model=64,
         vocab_size=256,
         attn_cls="gqa",
-        mlp_cls="dense",
-        mlp_kwargs={},
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
     cfg_off = TrainConfig(
         max_seq_len=128,
@@ -704,8 +727,7 @@ def test_compute_flops_per_token_counts_attn_res_residual():
         vocab_size=256,
         attn_cls="gqa",
         attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
-        mlp_cls="dense",
-        mlp_kwargs={},
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
     std = TrainConfig(max_seq_len=64, model=ModelConfig(**base))
     ar = TrainConfig(

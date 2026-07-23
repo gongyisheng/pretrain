@@ -8,18 +8,19 @@ model:
     n_heads: 8
     n_kv_heads: 4
     qk_norm: true
-  mlp_cls: moe
-  mlp_kwargs:
-    intermediate_size: 384
-    n_routed_experts: 32
-    n_routed_experts_per_token: 4
-    expert_bias: true
-    expert_bias_update_rate: 1e-3
-    router_score_fn: sigmoid
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
+  mlp:
+  - mlp_cls: moe
+    mlp_kwargs:
+      intermediate_size: 384
+      n_routed_experts: 32
+      n_routed_experts_per_token: 4
+      expert_bias: true
+      expert_bias_update_rate: 1e-3
+      router_score_fn: sigmoid
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

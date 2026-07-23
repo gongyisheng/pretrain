@@ -72,7 +72,7 @@ def main():
         device,
         attn_implementation=config.model.attn_kwargs["attn_implementation"],
     )
-    aux_coef = config.model.mlp_kwargs.get("aux_loss_coef", 0.0)
+    aux_coef = config.model.aux_loss_coef or 0.0
 
     def step():
         torch.cuda.nvtx.range_push("forward")

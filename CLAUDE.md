@@ -42,7 +42,7 @@ nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 
 Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA + MLA, `ATTN_REGISTRY`; MLA = `MultiHeadLatentAttention`, DeepSeek-V2/V3 low-rank KV/Q compression with decoupled RoPE — `qk_rope_head_dim` carries position, the shared RoPE is sized to it in `transformer.py`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `residual.py` (`StandardResidual`/`AttnResidual`, `RESIDUAL_REGISTRY`), `block.py` (`TransformerBlock`). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/__init__.py` constructs it from the config. Layer ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, `_sdpa`, gated activations, moe routing/scatter/ffn) are plain module-level functions in their owning file, fused by the whole-model `torch.compile(model)` in the trainer — no per-op `@torch.compile` decorators. Explicit `torch.compile` is reserved for code that has no fused eager path or runs outside the compiled model: `loss.py` (loss is computed in the trainer, outside `self.model`) and `flex_attention`/`create_block_mask` (`_flex_attn`, `_create_block_mask_compiled`). Loss functions live in `src/training/loss.py` (`LOSS_REGISTRY`, `compute_loss`), selected via `config.training.loss_fn`.
 
-GPT-2-style configs use `attn_cls: mha`, `mlp_cls: dense`, `norm_cls: layernorm`, `pos_emb_cls: learned`, with `mlp_kwargs: {activation: gelu, gated: false, bias: true}`. Qwen3-style configs use `attn_cls: gqa`, `mlp_cls: dense`, `norm_cls: rmsnorm`, `pos_emb_cls: rope`. MoE configs use `mlp_cls: moe`.
+GPT-2-style configs use `attn_cls: mha`, `mlp: [{mlp_cls: dense, mlp_kwargs: {activation: gelu, gated: false, bias: true}}]`, `norm_cls: layernorm`, `pos_emb_cls: learned`. Qwen3-style configs use `attn_cls: gqa`, `mlp: [{mlp_cls: dense, mlp_kwargs: {...}}]`, `norm_cls: rmsnorm`, `pos_emb_cls: rope`. MoE configs use `mlp: [{mlp_cls: moe, mlp_kwargs: {...}}]`.
 
 ### Model registry
 
@@ -52,7 +52,7 @@ GPT-2-style configs use `attn_cls: mha`, `mlp_cls: dense`, `norm_cls: layernorm`
 
 `src/utils/config.py` defines nested dataclasses (`TrainConfig` → `ModelConfig`, `DataConfig`, `TrainingConfig`, `OptimizerConfig`, `SchedulerConfig`, `LoggingConfig`, `DebugConfig`). Loaded from YAML with CLI override support.
 
-`ModelConfig` uses a cls+kwargs schema: `attn_cls`/`attn_kwargs`, `mlp_cls`/`mlp_kwargs`, `norm_cls`/`norm_kwargs`, `pos_emb_cls`/`pos_emb_kwargs`, `residual_cls`/`residual_kwargs`. Each `*_cls` names a registry key; each `*_kwargs` dict is forwarded directly to the component constructor. Component classes own their parameter defaults. Top-level `ModelConfig` fields: `d_model`, `n_layers`, `vocab_size`, `dropout_embd`, `tie_word_embeddings`, `lm_head_bias`.
+`ModelConfig` uses a cls+kwargs schema for attn/norm/pos_emb/residual: `attn_cls`/`attn_kwargs`, `norm_cls`/`norm_kwargs`, `pos_emb_cls`/`pos_emb_kwargs`, `residual_cls`/`residual_kwargs`. Each `*_cls` names a registry key; each `*_kwargs` dict is forwarded directly to the component constructor. Component classes own their parameter defaults. MLP is the exception: `mlp` is a list of `{mlp_cls, mlp_kwargs, layer_idx?}` items — a single item with no `layer_idx` applies uniformly to every layer (the common case); additional items can scope an `mlp_cls`/`mlp_kwargs` override to specific layers via `layer_idx: [...]`, and at most one item may omit `layer_idx` to act as the fallback/complement for whichever layers the others didn't claim. `ModelConfig.resolve_mlp(i)` returns the resolved `(mlp_cls, mlp_kwargs)` for layer `i`; `layer_mlp_classes()`, `is_moe`, `moe_layer_kwargs`, and `aux_loss_coef` are derived from the same per-layer resolution. Top-level `ModelConfig` fields: `d_model`, `n_layers`, `vocab_size`, `dropout_embd`, `tie_word_embeddings`, `lm_head_bias`.
 
 ### Data pipeline
 
@@ -85,7 +85,7 @@ Every experiment folder must include a `README.md` with: hypothesis, setup table
 
 Experiment YAML configs should explicitly set `batch_size`, `gradient_accumulation_steps`, `checkpoint_every`, `eval_every`, and `eval_steps` to the default values from `src/utils/config.py`. Use `batch_size: 16`, `gradient_accumulation_steps: 16`, `checkpoint_every: 5000`, `eval_every: 100`, `eval_steps: 25` unless the experiment intentionally changes them (`checkpoint_every` is raised to 5000 from the config default of 500 to avoid excessive checkpoint writes across many runs).
 
-Model configs use the cls+kwargs schema. A Qwen3-style 57M config looks like:
+Model configs use the cls+kwargs schema (attn/norm/pos_emb/residual); `mlp` is a list of `{mlp_cls, mlp_kwargs, layer_idx?}` items. A Qwen3-style 57M config looks like:
 ```yaml
 model:
   d_model: 512
@@ -93,13 +93,15 @@ model:
   vocab_size: 50257
   attn_cls: gqa
   attn_kwargs: {n_heads: 8, n_kv_heads: 4, qk_norm: true}
-  mlp_cls: dense
-  mlp_kwargs: {activation: silu, gated: true}
+  mlp:
+    - {mlp_cls: dense, mlp_kwargs: {activation: silu, gated: true}}
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs: {rope_theta: 10000.0}
 ```
-MoE replaces `mlp_cls: dense` with `mlp_cls: moe` and adds `mlp_kwargs: {n_routed_experts: N, n_routed_experts_per_token: K, n_shared_experts: 0, ...}`.
+A single `mlp` item with no `layer_idx` applies uniformly to every layer (as above). To override specific layers, add more items with `layer_idx: [...]`; at most one item may omit `layer_idx`, and it acts as the fallback for whichever layers the others didn't claim.
+
+MoE replaces the single dense item with `mlp: [{mlp_cls: moe, mlp_kwargs: {n_routed_experts: N, n_routed_experts_per_token: K, n_shared_experts: 0, ...}}]`, and can add further items scoped with `layer_idx` (e.g. to keep layer 0 dense while the rest are MoE).
 
 Standard LR by model size (from scaling law experiments, `min_lr` = `lr / 10`):
 

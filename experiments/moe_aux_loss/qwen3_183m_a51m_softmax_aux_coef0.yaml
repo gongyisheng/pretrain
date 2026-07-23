@@ -9,19 +9,20 @@ model:
     n_kv_heads: 4
     qk_norm: true
     dropout: 0.0
-  mlp_cls: moe
-  mlp_kwargs:
-    intermediate_size: 192
-    n_routed_experts: 64
-    n_routed_experts_per_token: 8
-    aux_loss: true
-    aux_loss_coef: 0
-    dropout: 0.0
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
   dropout_embd: 0.0
+  mlp:
+  - mlp_cls: moe
+    mlp_kwargs:
+      intermediate_size: 192
+      n_routed_experts: 64
+      n_routed_experts_per_token: 8
+      aux_loss: true
+      aux_loss_coef: 0
+      dropout: 0.0
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

@@ -9,22 +9,23 @@ model:
     n_kv_heads: 4
     qk_norm: true
     dropout: 0.0
-  mlp_cls: moe
-  mlp_kwargs:
-    intermediate_size: 192
-    n_routed_experts: 64
-    n_routed_experts_per_token: 6
-    n_shared_experts: 2
-    dropout: 0.0
-    aux_loss: false
-    expert_bias: true
-    expert_bias_update_rate: 1e-3
-    router_score_fn: softmax
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
   dropout_embd: 0.0
+  mlp:
+  - mlp_cls: moe
+    mlp_kwargs:
+      intermediate_size: 192
+      n_routed_experts: 64
+      n_routed_experts_per_token: 6
+      n_shared_experts: 2
+      dropout: 0.0
+      aux_loss: false
+      expert_bias: true
+      expert_bias_update_rate: 1e-3
+      router_score_fn: softmax
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k
@@ -38,7 +39,8 @@ training:
   mixed_precision: bf16
   activation_checkpointing: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_expert_bias/qwen3_188m_a51m_softmax_expert_bias_rate1e-3/
+  checkpoint_dir: 
+    checkpoints/moe_expert_bias/qwen3_188m_a51m_softmax_expert_bias_rate1e-3/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
