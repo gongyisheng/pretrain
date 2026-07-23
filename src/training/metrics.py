@@ -51,9 +51,17 @@ class MetricsTracker:
 
         self.is_moe = config.model.is_moe
         if self.is_moe:
-            moe_kwargs = config.model.moe_layer_kwargs
-            self._aux_floor = sum(kw["n_routed_experts_per_token"] for kw in moe_kwargs)
-            self._n_moe_layers = len(moe_kwargs)
+            # _aux_floor centers the model's reported aux loss, which sums only
+            # over layers using aux_loss (not expert_bias) — so the floor must
+            # be scoped to those layers, not all MoE layers.
+            self._aux_floor = sum(
+                kw["n_routed_experts_per_token"]
+                for kw in config.model.aux_loss_layer_kwargs
+            )
+            # _n_moe_layers sizes the per-layer expert-load list for MaxVio
+            # logging (eval_begin), which covers every MoE layer regardless of
+            # its balancing strategy — so this stays scoped to all MoE layers.
+            self._n_moe_layers = len(config.model.moe_layer_kwargs)
 
         self._flops_per_token = metric_utils.compute_flops_per_token(config)
         self._gpu_peak_flops = metric_utils.estimate_gpu_peak_flops(device)

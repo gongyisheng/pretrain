@@ -122,6 +122,11 @@ class ModelConfig:
             if layer_idx is None:
                 bare.append(idx)
                 continue
+            if len(set(layer_idx)) != len(layer_idx):
+                dupe = next(layer for layer in layer_idx if layer_idx.count(layer) > 1)
+                raise ValueError(
+                    f"layer {dupe} listed more than once in one mlp item's layer_idx"
+                )
             for layer in layer_idx:
                 if not (0 <= layer < n):
                     raise ValueError(f"layer_idx {layer} out of range [0, {n})")
@@ -175,6 +180,12 @@ class ModelConfig:
     @property
     def moe_layer_kwargs(self) -> list[dict]:
         return [kw for cls, kw in self._layer_mlp if cls == "moe"]
+
+    @property
+    def aux_loss_layer_kwargs(self) -> list[dict]:
+        return [
+            kw for cls, kw in self._layer_mlp if cls == "moe" and kw.get("aux_loss")
+        ]
 
     @property
     def aux_loss_coef(self) -> float | None:

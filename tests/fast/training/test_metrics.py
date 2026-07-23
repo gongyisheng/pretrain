@@ -452,11 +452,16 @@ def test_eval_moe_maxvio_global_vs_batch_semantics():
 
 
 def _dense_first_moe_rest_cfg():
-    """4-layer dense-first mixed stack: layer 0 dense, layers 1-3 MoE (k=2).
+    """4-layer dense-first mixed stack: layer 0 dense, layers 1-3 MoE (k=2),
+    all 3 MoE layers using aux_loss.
 
     n_layers (4) != n_moe_layers (3) on purpose: this is the config that would
     catch a regression to the old `n_layers * k` aux-floor formula (8, wrong)
-    vs. the correct per-layer sum (3 * 2 = 6).
+    vs. the correct per-layer sum (3 * 2 = 6). All MoE layers use aux_loss here
+    (not expert_bias), so the aux-loss-layers-only floor and the all-MoE-layers
+    floor coincide (6 either way) — see
+    `test_metrics_tracker_aux_floor_scoped_to_aux_loss_layers_only` below for a
+    stack where they diverge.
     """
     from src.utils.config import ModelConfig
 
@@ -478,7 +483,8 @@ def _dense_first_moe_rest_cfg():
                     "intermediate_size": 128,
                     "n_routed_experts": 4,
                     "n_routed_experts_per_token": 2,
-                    "expert_bias": True,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-3,
                 },
             },
         ],
@@ -513,6 +519,54 @@ def test_metrics_tracker_aux_floor_and_n_moe_layers_on_dense_first_stack():
 
     assert tracker._aux_floor == 6  # 3 MoE layers * k(2), NOT n_layers(4) * k = 8
     assert tracker._n_moe_layers == 3
+
+
+def test_metrics_tracker_aux_floor_scoped_to_aux_loss_layers_only():
+    """_aux_floor must sum k only over layers using aux_loss, not every MoE
+    layer: the model's reported aux loss sums only aux_loss-layer contributions,
+    so a floor computed over ALL MoE layers (including expert_bias ones, which
+    contribute nothing to that sum) over-counts.
+
+    4-layer stack: layer 0 MoE+aux_loss (k=2), layers 1-3 MoE+expert_bias (k=2
+    each). All-MoE-layers formula (the bug): 4 layers * k(2) = 8. Correct:
+    only layer 0 counts -> 1 * k(2) = 2.
+    """
+    from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+
+    model = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        vocab_size=256,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "intermediate_size": 128,
+                    "n_routed_experts": 4,
+                    "n_routed_experts_per_token": 2,
+                    "aux_loss": True,
+                    "aux_loss_coef": 1e-3,
+                },
+                "layer_idx": [0],
+            },
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "intermediate_size": 128,
+                    "n_routed_experts": 4,
+                    "n_routed_experts_per_token": 2,
+                    "expert_bias": True,
+                },
+            },
+        ],
+    )
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+
+    assert tracker._aux_floor == 2  # only the 1 aux_loss layer * k(2), NOT 4*2=8
+    assert tracker._n_moe_layers == 4  # expert-load logging still covers all MoE layers
 
 
 def test_print_model_summary_dense_first_moe_rest_label(capsys):

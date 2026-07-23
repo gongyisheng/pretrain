@@ -765,6 +765,18 @@ def test_mlp_conflict_raises():
         )
 
 
+def test_mlp_within_item_duplicate_raises_clear_message():
+    with pytest.raises(ValueError, match="listed more than once in one mlp item"):
+        ModelConfig(
+            d_model=64,
+            n_layers=4,
+            mlp=[
+                {"mlp_cls": "dense", "layer_idx": [0, 0]},
+                {"mlp_cls": "dense"},
+            ],
+        )
+
+
 def test_mlp_gap_raises():
     with pytest.raises(ValueError, match="no mlp item|not claimed|coverage"):
         ModelConfig(
