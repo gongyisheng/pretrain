@@ -1,6 +1,9 @@
 # Phase 5 q_lora_rank sweep: 384 (nope=32, rope=32, v_head=64, kv_lora=512 fixed; center q_lora=0).
 max_seq_len: 1024
 model:
+  d_model: 512
+  n_layers: 8
+  vocab_size: 50257
   attn:
   - attn_cls: mla
     attn_kwargs:
@@ -13,9 +16,6 @@ model:
   mlp:
   - mlp_cls: dense
     mlp_kwargs: {}
-  d_model: 512
-  n_layers: 8
-  vocab_size: 50257
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:

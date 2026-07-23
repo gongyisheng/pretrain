@@ -1,5 +1,8 @@
 max_seq_len: 1024
 model:
+  d_model: 768
+  n_layers: 12
+  vocab_size: 50257
   attn:
   - attn_cls: mha
     attn_kwargs:
@@ -9,9 +12,6 @@ model:
   - mlp_cls: dense
     mlp_kwargs:
       bias: true
-  d_model: 768
-  n_layers: 12
-  vocab_size: 50257
   norm_cls: layernorm
   pos_emb_cls: learned
 data:

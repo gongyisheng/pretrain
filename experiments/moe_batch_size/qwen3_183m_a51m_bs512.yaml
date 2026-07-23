@@ -1,5 +1,8 @@
 max_seq_len: 1024
 model:
+  d_model: 512
+  n_layers: 8
+  vocab_size: 50257
   attn:
   - attn_cls: gqa
     attn_kwargs:
@@ -14,9 +17,6 @@ model:
       n_routed_experts_per_token: 8
       aux_loss: true
       aux_loss_coef: 0.001
-  d_model: 512
-  n_layers: 8
-  vocab_size: 50257
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
