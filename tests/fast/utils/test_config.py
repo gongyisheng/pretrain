@@ -83,8 +83,8 @@ MINIMAL_CONFIG = {
 
 def test_model_config_defaults():
     cfg = ModelConfig()
-    assert cfg.layer_attn_classes()[0] == "gqa"
-    assert cfg.layer_mlp_classes()[0] == "dense"
+    assert cfg.resolve_attn(0)[0] == "gqa"
+    assert cfg.resolve_mlp(0)[0] == "dense"
     assert cfg.norm_cls == "rmsnorm"
     assert cfg.pos_emb_cls == "rope"
     assert cfg.residual_cls == "standard"
@@ -274,17 +274,13 @@ def test_default_eval_train_is_false():
 
 def test_attn_cls_defaults():
     # Default attn_cls is gqa
-    assert ModelConfig().layer_attn_classes()[0] == "gqa"
+    assert ModelConfig().resolve_attn(0)[0] == "gqa"
     assert (
-        ModelConfig(attn=[{"attn_cls": "mha", "attn_kwargs": {}}]).layer_attn_classes()[
-            0
-        ]
+        ModelConfig(attn=[{"attn_cls": "mha", "attn_kwargs": {}}]).resolve_attn(0)[0]
         == "mha"
     )
     assert (
-        ModelConfig(attn=[{"attn_cls": "mla", "attn_kwargs": {}}]).layer_attn_classes()[
-            0
-        ]
+        ModelConfig(attn=[{"attn_cls": "mla", "attn_kwargs": {}}]).resolve_attn(0)[0]
         == "mla"
     )
 
@@ -315,7 +311,7 @@ model:
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml_content)
     cfg = load_config(str(p))
-    assert cfg.model.layer_attn_classes()[0] == "mla"
+    assert cfg.model.resolve_attn(0)[0] == "mla"
     assert cfg.model.resolve_attn(0)[1]["kv_lora_rank"] == 32
     assert cfg.model.resolve_attn(0)[1]["qk_rope_head_dim"] == 16
     assert cfg.model.resolve_attn(0)[1]["n_heads"] == 8
@@ -330,7 +326,7 @@ def test_attn_single_item_covers_all_layers():
         n_layers=4,
         attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4}}],
     )
-    assert cfg.layer_attn_classes() == ["gqa"] * 4
+    assert [cfg.resolve_attn(i)[0] for i in range(cfg.n_layers)] == ["gqa"] * 4
     assert cfg.resolve_attn(0)[1]["n_kv_heads"] == 4  # per-item defaulting ran
     assert cfg.resolve_attn(0)[1]["attn_implementation"] == "flex_attention"
 
@@ -344,7 +340,12 @@ def test_attn_mixed_per_layer_complement():
             {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}},
         ],
     )
-    assert cfg.layer_attn_classes() == ["mha", "gqa", "gqa", "gqa"]
+    assert [cfg.resolve_attn(i)[0] for i in range(cfg.n_layers)] == [
+        "mha",
+        "gqa",
+        "gqa",
+        "gqa",
+    ]
     assert cfg.attn[1]["layer_idx"] == [1, 2, 3]
 
 
@@ -884,7 +885,7 @@ def test_mlp_single_item_covers_all_layers():
     cfg = ModelConfig(
         d_model=64, n_layers=4, mlp=[{"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs()}]
     )
-    assert cfg.layer_mlp_classes() == ["moe"] * 4
+    assert [cfg.resolve_mlp(i)[0] for i in range(cfg.n_layers)] == ["moe"] * 4
     assert cfg.is_moe is True
     # per-item defaulting ran
     assert cfg.resolve_mlp(0)[1]["intermediate_size"] == 4 * 64
@@ -899,7 +900,12 @@ def test_mlp_dense_first_layer_complement():
             {"mlp_cls": "moe", "mlp_kwargs": _moe_kwargs()},  # complement -> [1,2,3]
         ],
     )
-    assert cfg.layer_mlp_classes() == ["dense", "moe", "moe", "moe"]
+    assert [cfg.resolve_mlp(i)[0] for i in range(cfg.n_layers)] == [
+        "dense",
+        "moe",
+        "moe",
+        "moe",
+    ]
     assert cfg.mlp[1]["layer_idx"] == [1, 2, 3]
 
 
@@ -1005,7 +1011,11 @@ def test_mlp_per_layer_aux_coef_allowed():
             },
         ],
     )
-    coefs = [kw["aux_loss_coef"] for kw in cfg.moe_layer_kwargs if kw.get("aux_loss")]
+    coefs = [
+        cfg.resolve_mlp(i)[1]["aux_loss_coef"]
+        for i in range(cfg.n_layers)
+        if cfg.resolve_mlp(i)[0] == "moe" and cfg.resolve_mlp(i)[1].get("aux_loss")
+    ]
     assert sorted(coefs) == [1e-3, 1e-2]
     assert (
         not hasattr(cfg, "aux_loss_coef")
@@ -1022,9 +1032,9 @@ def test_all_configs_load_and_have_list_mlp():
         cfg = load_config(p)
         assert isinstance(cfg.model.mlp, list) and cfg.model.mlp
         # resolver ran and covers every layer
-        assert len(cfg.model.layer_mlp_classes()) == cfg.model.n_layers
+        assert all(cfg.model.resolve_mlp(i)[0] for i in range(cfg.model.n_layers))
         assert isinstance(cfg.model.attn, list) and cfg.model.attn
-        assert len(cfg.model.layer_attn_classes()) == cfg.model.n_layers
+        assert all(cfg.model.resolve_attn(i)[0] for i in range(cfg.model.n_layers))
 
 
 def test_configs_model_key_order_d_model_n_layers_vocab_size_attn_mlp_first():

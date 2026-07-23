@@ -23,12 +23,18 @@ class MetricsTracker:
 
         self.is_moe = config.model.is_moe
         if self.is_moe:
+            model = config.model
+            moe_kwargs = [
+                model.resolve_mlp(i)[1]
+                for i in range(model.n_layers)
+                if model.resolve_mlp(i)[0] == "moe"
+            ]
             self._aux_floor = sum(
                 kw["aux_loss_coef"] * kw["n_routed_experts_per_token"]
-                for kw in config.model.moe_layer_kwargs
+                for kw in moe_kwargs
                 if kw.get("aux_loss")
             )
-            self._n_moe_layers = len(config.model.moe_layer_kwargs)
+            self._n_moe_layers = len(moe_kwargs)
 
         self._flops_per_token = metric_utils.compute_flops_per_token(config)
         self._gpu_peak_flops = metric_utils.estimate_gpu_peak_flops(device)
@@ -78,8 +84,13 @@ class MetricsTracker:
         dense models report total + non-embedding.
         """
         counts = metric_utils.count_parameters(self.config)
-        attn_label = "/".join(sorted(set(self.config.model.layer_attn_classes())))
-        mlp_label = "/".join(sorted(set(self.config.model.layer_mlp_classes())))
+        model = self.config.model
+        attn_label = "/".join(
+            sorted({model.resolve_attn(i)[0] for i in range(model.n_layers)})
+        )
+        mlp_label = "/".join(
+            sorted({model.resolve_mlp(i)[0] for i in range(model.n_layers)})
+        )
         label = f"{attn_label}+{mlp_label}"
         if self.is_moe:
             msg = (

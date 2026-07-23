@@ -5,6 +5,7 @@ import yaml
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.attention import ATTN_REGISTRY
 from src.layers.mlp import MLP_REGISTRY, MOE_ROUTER_SCORE_FNS
+from src.layers.pos_emb import POS_EMB_REGISTRY
 from src.quant import (
     QUANT_FORMATS,
     QUANT_GRANULARITY,
@@ -38,10 +39,10 @@ class ModelConfig:
     lm_head_bias: bool = False
 
     def __post_init__(self):
-        self._resolve_attn()
-        self._resolve_mlp()
+        self._post_init_attn()
+        self._post_init_mlp()
 
-    def _default_attn_kwargs(self, attn_cls: str, kwargs: dict) -> None:
+    def _set_default_attn_kwargs(self, attn_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one attn item's kwargs, keyed on attn_cls."""
         kwargs.setdefault("attn_implementation", "flex_attention")
         n_heads = kwargs.get("n_heads")
@@ -67,7 +68,7 @@ class ModelConfig:
                 kwargs.setdefault("kv_lora_rank", 4 * head_dim)
                 kwargs.setdefault("q_lora_rank", 0)
 
-    def _resolve_attn(self) -> None:
+    def _post_init_attn(self) -> None:
         if not self.attn:
             raise ValueError("model.attn must have at least one item")
         for item in self.attn:
@@ -79,7 +80,7 @@ class ModelConfig:
                     f"expected one of {sorted(ATTN_REGISTRY)}"
                 )
             item.setdefault("attn_kwargs", {})
-            self._default_attn_kwargs(item["attn_cls"], item["attn_kwargs"])
+            self._set_default_attn_kwargs(item["attn_cls"], item["attn_kwargs"])
 
         n = self.n_layers
         claimed: dict[int, int] = {}
@@ -129,18 +130,33 @@ class ModelConfig:
                 f"trainer builds one attention mask shared across layers); got {sorted(impls)}"
             )
 
+        if POS_EMB_REGISTRY[self.pos_emb_cls].rotary:
+            dims = set()
+            for attn_cls, attn_kwargs in self._layer_attn:
+                if attn_cls == "mla":
+                    dim = attn_kwargs.get("qk_rope_head_dim")
+                elif attn_kwargs.get("n_heads") is not None:
+                    dim = self.d_model // attn_kwargs["n_heads"]
+                else:
+                    dim = None
+                if dim is not None:
+                    dims.add(dim)
+            if len(dims) > 1:
+                raise ValueError(
+                    "rotary pos_emb requires a single rope head-dim across layers; "
+                    f"got {sorted(dims)}. Make qk_rope_head_dim / (d_model // "
+                    "n_heads) match."
+                )
+
     def resolve_attn(self, layer_idx: int) -> tuple[str, dict]:
         return self._layer_attn[layer_idx]
 
-    def layer_attn_classes(self) -> list[str]:
-        return [cls for cls, _ in self._layer_attn]
-
     @property
     def attn_implementation(self) -> str:
-        """Shared attn_implementation across all layers (validated in _resolve_attn)."""
+        """Shared attn_implementation across all layers (validated in _post_init_attn)."""
         return self._layer_attn[0][1]["attn_implementation"]
 
-    def _default_mlp_kwargs(self, mlp_cls: str, kwargs: dict) -> None:
+    def _set_default_mlp_kwargs(self, mlp_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one MLP item's kwargs, keyed on mlp_cls."""
         kwargs.setdefault("intermediate_size", 4 * self.d_model)
         gated = kwargs.get("gated", True)
@@ -176,7 +192,7 @@ class ModelConfig:
             if kwargs["aux_loss"]:
                 kwargs.setdefault("aux_loss_coef", 0.001)
 
-    def _resolve_mlp(self) -> None:
+    def _post_init_mlp(self) -> None:
         if not self.mlp:
             raise ValueError("model.mlp must have at least one item")
         for item in self.mlp:
@@ -188,7 +204,7 @@ class ModelConfig:
                     f"expected one of {sorted(MLP_REGISTRY)}"
                 )
             item.setdefault("mlp_kwargs", {})
-            self._default_mlp_kwargs(item["mlp_cls"], item["mlp_kwargs"])
+            self._set_default_mlp_kwargs(item["mlp_cls"], item["mlp_kwargs"])
 
         n = self.n_layers
         claimed: dict[int, int] = {}  # layer -> item index
@@ -235,16 +251,9 @@ class ModelConfig:
     def resolve_mlp(self, layer_idx: int) -> tuple[str, dict]:
         return self._layer_mlp[layer_idx]
 
-    def layer_mlp_classes(self) -> list[str]:
-        return [cls for cls, _ in self._layer_mlp]
-
     @property
     def is_moe(self) -> bool:
         return any(cls == "moe" for cls, _ in self._layer_mlp)
-
-    @property
-    def moe_layer_kwargs(self) -> list[dict]:
-        return [kw for cls, kw in self._layer_mlp if cls == "moe"]
 
 
 @dataclass

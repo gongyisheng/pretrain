@@ -124,8 +124,8 @@ def run_benchmark(
     results = {
         "config": config_path,
         "model": (
-            f"{'+'.join(dict.fromkeys(config.model.layer_attn_classes()))}"
-            f"+{'+'.join(dict.fromkeys(config.model.layer_mlp_classes()))}"
+            f"{'+'.join(dict.fromkeys(config.model.resolve_attn(i)[0] for i in range(config.model.n_layers)))}"
+            f"+{'+'.join(dict.fromkeys(config.model.resolve_mlp(i)[0] for i in range(config.model.n_layers)))}"
         ),
         "params_M": round(sum(p.numel() for p in trainer.model.parameters()) / 1e6, 1),
         "batch_size": config.training.batch_size,

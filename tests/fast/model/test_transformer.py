@@ -371,23 +371,23 @@ def test_mixed_attn_builds_and_counts():
 
 
 def test_mixed_attn_rope_headdim_mismatch_raises():
-    cfg = ModelConfig(
-        d_model=64,
-        n_layers=2,
-        vocab_size=256,
-        attn=[
-            {
-                "attn_cls": "gqa",
-                "attn_kwargs": {"n_heads": 4},
-                "layer_idx": [0],
-            },  # head_dim 16
-            {
-                "attn_cls": "mla",
-                "attn_kwargs": {"n_heads": 4, "qk_rope_head_dim": 8},
-            },  # rope dim 8
-        ],
-        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"intermediate_size": 128}}],
-        pos_emb_cls="rope",
-    )
+    # Validation lives in ModelConfig, so it raises at config construction.
     with pytest.raises(ValueError, match="rope head-dim"):
-        TransformerLM(cfg, max_seq_len=32)
+        ModelConfig(
+            d_model=64,
+            n_layers=2,
+            vocab_size=256,
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 4},
+                    "layer_idx": [0],
+                },  # head_dim 16
+                {
+                    "attn_cls": "mla",
+                    "attn_kwargs": {"n_heads": 4, "qk_rope_head_dim": 8},
+                },  # rope dim 8
+            ],
+            mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"intermediate_size": 128}}],
+            pos_emb_cls="rope",
+        )

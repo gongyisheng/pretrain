@@ -538,11 +538,13 @@ def test_metrics_moe_facts_with_dense_first_layer():
     model = _dense_first_moe_rest_cfg()
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
     assert cfg.model.is_moe is True
+    m = cfg.model
+    moe_kwargs = [
+        m.resolve_mlp(i)[1] for i in range(m.n_layers) if m.resolve_mlp(i)[0] == "moe"
+    ]
     # aux floor counts only MoE layers: 3 layers * k(2) = 6
-    assert (
-        sum(kw["n_routed_experts_per_token"] for kw in cfg.model.moe_layer_kwargs) == 6
-    )
-    assert len(cfg.model.moe_layer_kwargs) == 3
+    assert sum(kw["n_routed_experts_per_token"] for kw in moe_kwargs) == 6
+    assert len(moe_kwargs) == 3
 
 
 def test_metrics_tracker_aux_floor_and_n_moe_layers_on_dense_first_stack():
