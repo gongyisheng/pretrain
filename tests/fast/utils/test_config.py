@@ -270,7 +270,7 @@ def test_default_eval_train_is_false():
     assert cfg.eval_train is False
 
 
-# ==================== attn_cls / attn_kwargs ====================
+# ==================== attn ====================
 
 
 def test_attn_cls_defaults():
@@ -418,6 +418,44 @@ def test_attn_n_heads_divisibility_raises():
             n_layers=2,
             attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 5}}],
         )
+
+
+def test_attn_implementation_must_be_shared_across_layers():
+    # The trainer builds one attention mask shared across layers, so layers
+    # cannot disagree on attn_implementation.
+    with pytest.raises(ValueError, match="attn_implementation"):
+        ModelConfig(
+            d_model=64,
+            n_layers=2,
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 4, "attn_implementation": "sdpa"},
+                    "layer_idx": [0],
+                },
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {
+                        "n_heads": 4,
+                        "attn_implementation": "flex_attention",
+                    },
+                },
+            ],
+        )
+
+
+def test_attn_implementation_shared_when_uniform():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=2,
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {"n_heads": 4, "attn_implementation": "sdpa"},
+            }
+        ],
+    )
+    assert cfg.attn_implementation == "sdpa"
 
 
 # ==================== component defaults + validation (moved into config) ====================
