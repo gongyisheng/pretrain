@@ -585,6 +585,35 @@ def test_print_model_summary_dense_first_moe_rest_label(capsys):
     assert "Model: gqa+dense/moe" in out
 
 
+def _mha_first_gqa_rest_cfg():
+    """4-layer mixed-attn stack: layer 0 mha, layers 1-3 gqa. Both use n_heads=2
+    on d_model=64 (head_dim=32), so the shared-rope-head-dim check agrees."""
+    from src.utils.config import ModelConfig
+
+    return ModelConfig(
+        d_model=64,
+        n_layers=4,
+        vocab_size=256,
+        attn=[
+            {"attn_cls": "mha", "attn_kwargs": {"n_heads": 2}, "layer_idx": [0]},
+            {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1}},
+        ],
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
+    )
+
+
+def test_print_model_summary_mixed_attn_label(capsys):
+    """Mixed attn classes across layers render as a sorted 'cls/cls+...' label."""
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _mha_first_gqa_rest_cfg()
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker.print_model_summary()
+    out = capsys.readouterr().out
+    assert "Model: gqa/mha+dense" in out
+
+
 # ---------------------------------------------------------------------------
 # print_model_summary
 # ---------------------------------------------------------------------------

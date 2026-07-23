@@ -123,7 +123,10 @@ def run_benchmark(
 
     results = {
         "config": config_path,
-        "model": f"{config.model.attn_cls}+{'+'.join(dict.fromkeys(config.model.layer_mlp_classes()))}",
+        "model": (
+            f"{'+'.join(dict.fromkeys(config.model.layer_attn_classes()))}"
+            f"+{'+'.join(dict.fromkeys(config.model.layer_mlp_classes()))}"
+        ),
         "params_M": round(sum(p.numel() for p in trainer.model.parameters()) / 1e6, 1),
         "batch_size": config.training.batch_size,
         "grad_accum": config.training.gradient_accumulation_steps,

@@ -122,11 +122,23 @@ class ModelConfig:
             for layer in range(n)
         ]
 
+        impls = {kw["attn_implementation"] for _, kw in self._layer_attn}
+        if len(impls) > 1:
+            raise ValueError(
+                "all attn layers must share the same attn_implementation (the "
+                f"trainer builds one attention mask shared across layers); got {sorted(impls)}"
+            )
+
     def resolve_attn(self, layer_idx: int) -> tuple[str, dict]:
         return self._layer_attn[layer_idx]
 
     def layer_attn_classes(self) -> list[str]:
         return [cls for cls, _ in self._layer_attn]
+
+    @property
+    def attn_implementation(self) -> str:
+        """Shared attn_implementation across all layers (validated in _resolve_attn)."""
+        return self._layer_attn[0][1]["attn_implementation"]
 
     def _default_mlp_kwargs(self, mlp_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one MLP item's kwargs, keyed on mlp_cls."""

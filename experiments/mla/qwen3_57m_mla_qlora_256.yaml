@@ -1,24 +1,25 @@
 # Phase 5 q_lora_rank sweep: 256 (nope=32, rope=32, v_head=64, kv_lora=512 fixed; center q_lora=0).
 max_seq_len: 1024
 model:
+  attn:
+  - attn_cls: mla
+    attn_kwargs:
+      n_heads: 8
+      qk_nope_head_dim: 32
+      qk_rope_head_dim: 32
+      v_head_dim: 64
+      kv_lora_rank: 512
+      q_lora_rank: 256
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs: {}
   d_model: 512
   n_layers: 8
   vocab_size: 50257
-  attn_cls: mla
-  attn_kwargs:
-    n_heads: 8
-    qk_nope_head_dim: 32
-    qk_rope_head_dim: 32
-    v_head_dim: 64
-    kv_lora_rank: 512
-    q_lora_rank: 256
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
-  mlp:
-  - mlp_cls: dense
-    mlp_kwargs: {}
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

@@ -1,13 +1,17 @@
 max_seq_len: 1024
 model:
+  attn:
+  - attn_cls: gqa
+    attn_kwargs:
+      n_heads: 8
+      n_kv_heads: 4
+      qk_norm: true
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs: {}
   d_model: 512
   n_layers: 8
   vocab_size: 50257
-  attn_cls: gqa
-  attn_kwargs:
-    n_heads: 8
-    n_kv_heads: 4
-    qk_norm: true
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -15,9 +19,6 @@ model:
   residual_cls: attn_res
   residual_kwargs:
     seal_block_size: 2
-  mlp:
-  - mlp_cls: dense
-    mlp_kwargs: {}
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

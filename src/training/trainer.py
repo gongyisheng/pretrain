@@ -324,9 +324,7 @@ class Trainer:
                             position_ids,
                             self.device,
                             mask_dtype,
-                            attn_implementation=self.config.model.attn_kwargs[
-                                "attn_implementation"
-                            ],
+                            attn_implementation=self.config.model.attn_implementation,
                         )
                     else:
                         B, S = position_ids.shape
@@ -334,9 +332,7 @@ class Trainer:
                             B,
                             S,
                             self.device,
-                            attn_implementation=self.config.model.attn_kwargs[
-                                "attn_implementation"
-                            ],
+                            attn_implementation=self.config.model.attn_implementation,
                         )
                     logits, aux_loss = self.model(
                         input_ids, position_ids=position_ids, attn_mask=attn_mask
@@ -442,9 +438,7 @@ class Trainer:
                     position_ids,
                     self.device,
                     mask_dtype,
-                    attn_implementation=self.config.model.attn_kwargs[
-                        "attn_implementation"
-                    ],
+                    attn_implementation=self.config.model.attn_implementation,
                 )
             else:
                 B, S = position_ids.shape
@@ -452,9 +446,7 @@ class Trainer:
                     B,
                     S,
                     self.device,
-                    attn_implementation=self.config.model.attn_kwargs[
-                        "attn_implementation"
-                    ],
+                    attn_implementation=self.config.model.attn_implementation,
                 )
             logits, aux_loss = self.model(
                 input_ids, position_ids=position_ids, attn_mask=attn_mask
@@ -533,9 +525,7 @@ class Trainer:
                 B,
                 S,
                 self.device,
-                attn_implementation=self.config.model.attn_kwargs[
-                    "attn_implementation"
-                ],
+                attn_implementation=self.config.model.attn_implementation,
             )
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp

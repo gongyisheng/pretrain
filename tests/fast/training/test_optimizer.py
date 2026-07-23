@@ -37,7 +37,12 @@ def _make_cfg(tie: bool = False, lr_mult: dict | None = None) -> TrainConfig:
         d_model=64,
         n_layers=2,
         vocab_size=256,
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": True},
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2, "qk_norm": True},
+            }
+        ],
         tie_word_embeddings=tie,
     )
     cfg.optimizer = OptimizerConfig(
@@ -252,7 +257,7 @@ def test_regex_pattern_matches_multiple_params():
     """A regex like 'bias' should catch every param whose name contains 'bias'."""
     cfg = _make_cfg(tie=False, lr_mult={"bias": 0.5})
     # Enable some biases so we have params matching.
-    cfg.model.attn_kwargs["bias"] = True
+    cfg.model.attn[0]["attn_kwargs"]["bias"] = True
     cfg.model.mlp[0]["mlp_kwargs"]["bias"] = True
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
@@ -384,7 +389,12 @@ def _make_moe_cfg() -> TrainConfig:
         d_model=cfg.model.d_model,
         n_layers=cfg.model.n_layers,
         vocab_size=cfg.model.vocab_size,
-        attn_kwargs=dict(cfg.model.attn_kwargs),
+        attn=[
+            {
+                "attn_cls": cfg.model.attn[0]["attn_cls"],
+                "attn_kwargs": dict(cfg.model.attn[0]["attn_kwargs"]),
+            }
+        ],
         tie_word_embeddings=cfg.model.tie_word_embeddings,
         mlp=[
             {

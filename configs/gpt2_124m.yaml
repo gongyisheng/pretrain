@@ -1,16 +1,11 @@
 max_seq_len: 1024
 model:
-  d_model: 768
-  n_layers: 12
-  vocab_size: 50257
-  attn_cls: mha
-  attn_kwargs:
-    n_heads: 12
-    dropout: 0.0
-    bias: true
-  norm_cls: layernorm
-  pos_emb_cls: learned
-  dropout_embd: 0.0
+  attn:
+  - attn_cls: mha
+    attn_kwargs:
+      n_heads: 12
+      dropout: 0.0
+      bias: true
   mlp:
   - mlp_cls: dense
     mlp_kwargs:
@@ -18,6 +13,12 @@ model:
       gated: false
       bias: true
       dropout: 0.0
+  d_model: 768
+  n_layers: 12
+  vocab_size: 50257
+  norm_cls: layernorm
+  pos_emb_cls: learned
+  dropout_embd: 0.0
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k

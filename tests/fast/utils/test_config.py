@@ -981,3 +981,12 @@ def test_all_configs_load_and_have_list_mlp():
         assert isinstance(cfg.model.mlp, list) and cfg.model.mlp
         # resolver ran and covers every layer
         assert len(cfg.model.layer_mlp_classes()) == cfg.model.n_layers
+        assert isinstance(cfg.model.attn, list) and cfg.model.attn
+        assert len(cfg.model.layer_attn_classes()) == cfg.model.n_layers
+
+
+def test_configs_model_key_order_attn_mlp_first():
+    for p in ("configs/gpt2_124m.yaml", "configs/qwen3_51m.yaml"):
+        raw = yaml.safe_load(open(p))
+        keys = list(raw["model"].keys())
+        assert keys[0] == "attn" and keys[1] == "mlp", (p, keys)

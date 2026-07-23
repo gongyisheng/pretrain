@@ -50,8 +50,7 @@ def _tiny_config(tmp_dir):
             n_layers=2,
             d_model=64,
             vocab_size=4096,
-            attn_cls="mha",
-            attn_kwargs={"n_heads": 2, "bias": True},
+            attn=[{"attn_cls": "mha", "attn_kwargs": {"n_heads": 2, "bias": True}}],
             mlp=[
                 {
                     "mlp_cls": "dense",
@@ -96,7 +95,7 @@ def _tiny_moe_config(tmp_dir):
             n_layers=2,
             d_model=64,
             vocab_size=4096,
-            attn_kwargs={"n_heads": 2, "n_kv_heads": 2},
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2, "n_kv_heads": 2}}],
             mlp=[
                 {
                     "mlp_cls": "moe",

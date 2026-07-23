@@ -27,8 +27,12 @@ def _gpt2_cfg(impl):
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="mha",
-        attn_kwargs={"n_heads": 2, "attn_implementation": impl},
+        attn=[
+            {
+                "attn_cls": "mha",
+                "attn_kwargs": {"n_heads": 2, "attn_implementation": impl},
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -43,13 +47,17 @@ def _qwen3_cfg(impl):
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={
-            "n_heads": 2,
-            "n_kv_heads": 1,
-            "qk_norm": True,
-            "attn_implementation": impl,
-        },
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 2,
+                    "n_kv_heads": 1,
+                    "qk_norm": True,
+                    "attn_implementation": impl,
+                },
+            }
+        ],
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
 
@@ -59,13 +67,17 @@ def _qwen3_moe_cfg(impl):
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={
-            "n_heads": 2,
-            "n_kv_heads": 1,
-            "qk_norm": True,
-            "attn_implementation": impl,
-        },
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 2,
+                    "n_kv_heads": 1,
+                    "qk_norm": True,
+                    "attn_implementation": impl,
+                },
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "moe",
@@ -86,8 +98,12 @@ def _gpt2_attn_res_cfg(impl):
         n_layers=4,
         d_model=64,
         vocab_size=256,
-        attn_cls="mha",
-        attn_kwargs={"n_heads": 2, "attn_implementation": impl},
+        attn=[
+            {
+                "attn_cls": "mha",
+                "attn_kwargs": {"n_heads": 2, "attn_implementation": impl},
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -104,13 +120,17 @@ def _qwen3_attn_res_cfg(impl):
         n_layers=4,
         d_model=64,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={
-            "n_heads": 2,
-            "n_kv_heads": 1,
-            "qk_norm": True,
-            "attn_implementation": impl,
-        },
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 2,
+                    "n_kv_heads": 1,
+                    "qk_norm": True,
+                    "attn_implementation": impl,
+                },
+            }
+        ],
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
         residual_cls="attn_res",
         residual_kwargs={"seal_block_size": 2},
@@ -442,8 +462,16 @@ def _gpt2_layernorm_learned_cfg(impl):
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="mha",
-        attn_kwargs={"n_heads": 2, "bias": True, "attn_implementation": impl},
+        attn=[
+            {
+                "attn_cls": "mha",
+                "attn_kwargs": {
+                    "n_heads": 2,
+                    "bias": True,
+                    "attn_implementation": impl,
+                },
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -549,8 +577,7 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="mha",
-        attn_kwargs={"n_heads": 2, "bias": True},
+        attn=[{"attn_cls": "mha", "attn_kwargs": {"n_heads": 2, "bias": True}}],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -584,8 +611,12 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "bias": False},
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2, "bias": False},
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -615,8 +646,7 @@ def test_compute_flops_per_token_moe_uses_k_active():
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
         mlp=[
             {
                 "mlp_cls": "moe",
@@ -650,8 +680,7 @@ def test_compute_flops_per_token_ckpt_multiplier():
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
     cfg_off = TrainConfig(
@@ -677,8 +706,7 @@ def test_compute_flops_per_token_lm_head_bias():
         n_layers=1,
         d_model=32,
         vocab_size=128,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 2},
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
     cfg_off = TrainConfig(max_seq_len=64, model=ModelConfig(**base, lm_head_bias=False))
@@ -695,19 +723,30 @@ def test_compute_flops_per_token_qk_norm():
         n_layers=2,
         d_model=64,
         vocab_size=256,
-        attn_cls="gqa",
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
     cfg_off = TrainConfig(
         max_seq_len=128,
         model=ModelConfig(
-            **base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": False}
+            **base,
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2, "qk_norm": False},
+                }
+            ],
         ),
     )
     cfg_on = TrainConfig(
         max_seq_len=128,
         model=ModelConfig(
-            **base, attn_kwargs={"n_heads": 4, "n_kv_heads": 2, "qk_norm": True}
+            **base,
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2, "qk_norm": True},
+                }
+            ],
         ),
     )
     f_off = metric_utils.compute_flops_per_token(cfg_off)
@@ -725,8 +764,7 @@ def test_compute_flops_per_token_counts_attn_res_residual():
         n_layers=4,
         d_model=64,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
     )
     std = TrainConfig(max_seq_len=64, model=ModelConfig(**base))

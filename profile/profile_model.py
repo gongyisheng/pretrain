@@ -70,7 +70,7 @@ def main():
         B,
         S,
         device,
-        attn_implementation=config.model.attn_kwargs["attn_implementation"],
+        attn_implementation=config.model.attn_implementation,
     )
     aux_coef = config.model.aux_loss_coef or 0.0
 
