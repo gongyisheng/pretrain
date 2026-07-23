@@ -78,7 +78,7 @@ class Trainer:
 
         # Model
         self.model = build_model(config).to(self.device)
-        self.is_moe = config.model.mlp_cls == "moe"
+        self.is_moe = config.model.is_moe
 
         # Data
         if not os.path.isdir(config.data.data_dir):
@@ -349,10 +349,7 @@ class Trainer:
                     )
                     loss = ce_loss
                     if aux_loss is not None:
-                        loss = (
-                            loss
-                            + self.config.model.mlp_kwargs["aux_loss_coef"] * aux_loss
-                        )
+                        loss = loss + self.config.model.aux_loss_coef * aux_loss
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()

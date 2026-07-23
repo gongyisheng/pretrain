@@ -49,14 +49,11 @@ class MetricsTracker:
         self.device = device
         self.logger = logger
 
-        self.is_moe = config.model.mlp_cls == "moe"
+        self.is_moe = config.model.is_moe
         if self.is_moe:
-            self._aux_floor = (
-                config.model.n_layers
-                * config.model.mlp_kwargs["n_routed_experts_per_token"]
-            )
-            # Every layer is MoE in these configs.
-            self._n_moe_layers = config.model.n_layers
+            moe_kwargs = config.model.moe_layer_kwargs
+            self._aux_floor = sum(kw["n_routed_experts_per_token"] for kw in moe_kwargs)
+            self._n_moe_layers = len(moe_kwargs)
 
         self._flops_per_token = metric_utils.compute_flops_per_token(config)
         self._gpu_peak_flops = metric_utils.estimate_gpu_peak_flops(device)
@@ -106,7 +103,8 @@ class MetricsTracker:
         dense models report total + non-embedding.
         """
         counts = metric_utils.count_parameters(self.config)
-        label = f"{self.config.model.attn_cls}+{self.config.model.mlp_cls}"
+        mlp_label = "/".join(sorted(set(self.config.model.layer_mlp_classes())))
+        label = f"{self.config.model.attn_cls}+{mlp_label}"
         if self.is_moe:
             msg = (
                 f"Model: {label} | {counts['total'] / 1e6:.1f}M total params "

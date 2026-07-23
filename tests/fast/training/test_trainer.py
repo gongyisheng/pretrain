@@ -52,8 +52,12 @@ def _tiny_config(tmp_dir):
             vocab_size=4096,
             attn_cls="mha",
             attn_kwargs={"n_heads": 2, "bias": True},
-            mlp_cls="dense",
-            mlp_kwargs={"activation": "gelu", "gated": False, "bias": True},
+            mlp=[
+                {
+                    "mlp_cls": "dense",
+                    "mlp_kwargs": {"activation": "gelu", "gated": False, "bias": True},
+                }
+            ],
             norm_cls="layernorm",
             pos_emb_cls="learned",
         ),
@@ -93,14 +97,18 @@ def _tiny_moe_config(tmp_dir):
             d_model=64,
             vocab_size=4096,
             attn_kwargs={"n_heads": 2, "n_kv_heads": 2},
-            mlp_cls="moe",
-            mlp_kwargs={
-                "intermediate_size": 32,
-                "n_routed_experts": 4,
-                "n_routed_experts_per_token": 2,
-                "aux_loss": True,
-                "aux_loss_coef": 1e-3,
-            },
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "intermediate_size": 32,
+                        "n_routed_experts": 4,
+                        "n_routed_experts_per_token": 2,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                    },
+                }
+            ],
         ),
         data=DataConfig(
             dataset="test",

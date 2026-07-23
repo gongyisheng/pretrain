@@ -41,8 +41,12 @@ def _cfg(task="pretrain", log_every=2, **logging):
             vocab_size=256,
             attn_cls="mha",
             attn_kwargs={"n_heads": 2},
-            mlp_cls="dense",
-            mlp_kwargs={"gated": False, "bias": True, "activation": "gelu"},
+            mlp=[
+                {
+                    "mlp_cls": "dense",
+                    "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+                }
+            ],
         )
     )
     cfg.task = task
@@ -285,14 +289,18 @@ def test_eval_moe_aux_loss_subtracts_floor():
             vocab_size=256,
             attn_cls="gqa",
             attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
-            mlp_cls="moe",
-            mlp_kwargs={
-                "n_routed_experts": 4,
-                "aux_loss": True,
-                "aux_loss_coef": 1e-3,
-                "n_routed_experts_per_token": 2,
-                "intermediate_size": 128,
-            },
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                        "n_routed_experts_per_token": 2,
+                        "intermediate_size": 128,
+                    },
+                }
+            ],
         )
     )
     cfg.task = "pretrain"
@@ -318,14 +326,18 @@ def _moe_cfg():
             vocab_size=256,
             attn_cls="gqa",
             attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
-            mlp_cls="moe",
-            mlp_kwargs={
-                "n_routed_experts": 4,
-                "aux_loss": True,
-                "aux_loss_coef": 1e-3,
-                "n_routed_experts_per_token": 2,
-                "intermediate_size": 128,
-            },
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                        "n_routed_experts_per_token": 2,
+                        "intermediate_size": 128,
+                    },
+                }
+            ],
         )
     )
     cfg.task = "pretrain"
@@ -439,6 +451,41 @@ def test_eval_moe_maxvio_global_vs_batch_semantics():
     assert d["val-moe/maxvio_batch/layer_0"] == pytest.approx(1.0)
 
 
+def test_metrics_moe_facts_with_dense_first_layer():
+    from src.utils.config import TrainConfig, ModelConfig, TrainingConfig
+
+    model = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        vocab_size=256,
+        attn_cls="gqa",
+        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"intermediate_size": 128},
+                "layer_idx": [0],
+            },
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "intermediate_size": 128,
+                    "n_routed_experts": 4,
+                    "n_routed_experts_per_token": 2,
+                    "expert_bias": True,
+                },
+            },
+        ],
+    )
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    assert cfg.model.is_moe is True
+    # aux floor counts only MoE layers: 3 layers * k(2) = 6
+    assert (
+        sum(kw["n_routed_experts_per_token"] for kw in cfg.model.moe_layer_kwargs) == 6
+    )
+    assert len(cfg.model.moe_layer_kwargs) == 3
+
+
 # ---------------------------------------------------------------------------
 # print_model_summary
 # ---------------------------------------------------------------------------
@@ -461,14 +508,18 @@ def test_print_model_summary_moe(capsys):
             vocab_size=256,
             attn_cls="gqa",
             attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
-            mlp_cls="moe",
-            mlp_kwargs={
-                "n_routed_experts": 4,
-                "aux_loss": True,
-                "aux_loss_coef": 1e-3,
-                "n_routed_experts_per_token": 2,
-                "intermediate_size": 128,
-            },
+            mlp=[
+                {
+                    "mlp_cls": "moe",
+                    "mlp_kwargs": {
+                        "n_routed_experts": 4,
+                        "aux_loss": True,
+                        "aux_loss_coef": 1e-3,
+                        "n_routed_experts_per_token": 2,
+                        "intermediate_size": 128,
+                    },
+                }
+            ],
         ),
     )
     tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
