@@ -32,7 +32,6 @@ dev = [
     "transformers>=4.51",
     "ruff>=0.15.6",
     "pre-commit>=4.0",
-    "ruamel-yaml>=0.19.1",
 ]
 
 [tool.uv]
