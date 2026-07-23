@@ -442,14 +442,20 @@ def sparse_moe_block_ref(
     expert_gate_up_bias: torch.Tensor | None = None,
     expert_up_bias: torch.Tensor | None = None,
     expert_down_bias: torch.Tensor | None = None,
+    latent_down_weight: torch.Tensor | None = None,
+    latent_up_weight: torch.Tensor | None = None,
+    aux_loss_coef: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eager sparse MoE: naive per-(token, slot) expert dispatch.
 
     Mirrors MLP's gated/ungated split:
       - gated   (expert_gate_up given): hidden = act(gate)*up via GATED_ACTIVATIONS_REFS
       - ungated (expert_up given):      hidden = act(up)      via UNGATED_ACTIVATIONS_REFS
-    Optional bias tensors (expert_gate_up_bias/expert_up_bias/expert_down_bias) are
-    applied per-expert when provided.
+    Optional bias tensors are applied per-expert when provided.
+
+    LatentMoE (latent_down_weight (ℓ,d) and latent_up_weight (d,ℓ) given): experts run
+    in latent space ℓ. Routing still uses the original x at dim d; the per-token expert
+    input is x @ W↓ᵀ, expert outputs are accumulated in ℓ, then projected back via W↑.
     Returns (output (B,S,D), aux_loss scalar) — Switch Transformer load-balancing loss.
     """
     if (expert_gate_up is None) == (expert_up is None):
@@ -465,33 +471,41 @@ def sparse_moe_block_ref(
         x_flat, gate_weight, n_routed_experts_per_token, normalize=normalize
     )
 
-    output = torch.zeros_like(x_flat)
+    # Routed-expert input: latent (x @ W↓ᵀ) or original x.
+    expert_in = (
+        x_flat @ latent_down_weight.T if latent_down_weight is not None else x_flat
+    )
+    output = torch.zeros(
+        T, expert_in.shape[-1], dtype=x_flat.dtype, device=x_flat.device
+    )
     for t in range(T):
         for slot in range(n_routed_experts_per_token):
             e = top_indices[t, slot].item()
             w = top_weights[t, slot]
             if expert_gate_up is not None:
-                gate_up = x_flat[t] @ expert_gate_up[e].T  # (2*I,)
+                gate_up = expert_in[t] @ expert_gate_up[e].T
                 if expert_gate_up_bias is not None:
                     gate_up = gate_up + expert_gate_up_bias[e]
                 g, u = gate_up.chunk(2, dim=-1)
-                hidden = GATED_ACTIVATIONS_REFS[activation](g, u)  # (I,)
+                hidden = GATED_ACTIVATIONS_REFS[activation](g, u)
             else:
-                up = x_flat[t] @ expert_up[e].T  # (I,)
+                up = expert_in[t] @ expert_up[e].T
                 if expert_up_bias is not None:
                     up = up + expert_up_bias[e]
                 hidden = UNGATED_ACTIVATIONS_REFS[activation](up)
-            out_t = hidden @ expert_down[e].T  # (D,)
+            out_t = hidden @ expert_down[e].T
             if expert_down_bias is not None:
                 out_t = out_t + expert_down_bias[e]
             output[t] = output[t] + w * out_t
 
-    # Switch Transformer aux loss: E * sum_i (f_i * P_i), f_i = #tokens routed to i / T.
+    if latent_up_weight is not None:
+        output = output @ latent_up_weight.T  # ℓ → d
+
     expert_counts = torch.zeros(E, dtype=torch.long, device=x.device)
     ones = torch.ones_like(top_indices.flatten())
     expert_counts.scatter_add_(0, top_indices.flatten(), ones)
     f = expert_counts.to(x.dtype) / T
     P = router_probs.mean(0)
-    aux_loss = E * (f * P).sum()
+    aux_loss = aux_loss_coef * E * (f * P).sum()
 
     return output.view(B, S, D), aux_loss

@@ -1,0 +1,63 @@
+max_seq_len: 1024
+model:
+  d_model: 512
+  n_layers: 8
+  vocab_size: 50257
+  attn:
+  - attn_cls: gqa
+    attn_kwargs:
+      n_heads: 8
+      n_kv_heads: 4
+      qk_norm: true
+  mlp:
+  - mlp_cls: moe
+    mlp_kwargs:
+      intermediate_size: 192
+      n_routed_experts: 64
+      n_routed_experts_per_token: 6
+      n_shared_experts: 2
+      aux_loss: false
+      expert_bias: true
+      expert_bias_update_rate: 0.001
+      router_score_fn: sigmoid
+      latent_moe: true
+      latent_dim: 256
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs:
+    rope_theta: 10000.0
+data:
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
+  val_split: 0.01
+  num_workers: 4
+training:
+  batch_size: 32
+  gradient_accumulation_steps: 8
+  max_steps: 50000
+  mixed_precision: bf16
+  grad_clip: 1.0
+  checkpoint_dir: checkpoints/latent_moe/qwen3_115m_a46m_l256_e64/
+  checkpoint_every: 5000
+  eval_every: 100
+  eval_steps: 100
+  eval_batch_size: 64
+optimizer:
+  name: muon
+  lr: 1e-3
+  weight_decay: 0.1
+  betas:
+  - 0.9
+  - 0.95
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_adjust_lr_fn: match_rms_adamw
+scheduler:
+  name: cosine
+  warmup_steps: 1500
+  min_lr: 1e-4
+logging:
+  wandb_project: pretrain-latent-moe
+  wandb_run_name: qwen3-115m-a46m-l256-e64
+  log_every: 100

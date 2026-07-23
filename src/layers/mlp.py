@@ -358,6 +358,8 @@ class SparseMoEBlock(nn.Module):
         gated: bool = True,
         bias: bool = False,
         dropout: float = 0.0,
+        latent_moe: bool = False,
+        latent_dim: int | None = None,
     ):
         super().__init__()
         if aux_loss and expert_bias:
@@ -375,6 +377,9 @@ class SparseMoEBlock(nn.Module):
         self.expert_bias_update_rate = expert_bias_update_rate
         self.gated = gated
         self.act_fn = registry[activation]
+        self.latent_moe = latent_moe
+        self.latent_dim = latent_dim
+        expert_dim = latent_dim if latent_moe else d_model
         self.router = MoERouter(
             d_model,
             n_routed_experts,
@@ -403,7 +408,7 @@ class SparseMoEBlock(nn.Module):
         # Gated path fuses gate and up into one tensor (one bmm vs two).
         if gated:
             self.expert_gate_up = nn.Parameter(
-                torch.empty(n_routed_experts, 2 * intermediate_size, d_model)
+                torch.empty(n_routed_experts, 2 * intermediate_size, expert_dim)
             )
             self.expert_gate_up_bias = (
                 nn.Parameter(torch.zeros(n_routed_experts, 2 * intermediate_size))
@@ -412,7 +417,7 @@ class SparseMoEBlock(nn.Module):
             )
         else:
             self.expert_up = nn.Parameter(
-                torch.empty(n_routed_experts, intermediate_size, d_model)
+                torch.empty(n_routed_experts, intermediate_size, expert_dim)
             )
             self.expert_up_bias = (
                 nn.Parameter(torch.zeros(n_routed_experts, intermediate_size))
@@ -420,12 +425,21 @@ class SparseMoEBlock(nn.Module):
                 else None
             )
         self.expert_down = nn.Parameter(
-            torch.empty(n_routed_experts, d_model, intermediate_size)
+            torch.empty(n_routed_experts, expert_dim, intermediate_size)
         )
         self.expert_down_bias = (
-            nn.Parameter(torch.zeros(n_routed_experts, d_model)) if bias else None
+            nn.Parameter(torch.zeros(n_routed_experts, expert_dim)) if bias else None
         )
         self.expert_dropout = nn.Dropout(dropout)
+
+        # LatentMoE (arXiv:2601.18089): shared down/up projections wrap the routed
+        # experts, which run in latent space ℓ. Router + shared experts stay at d.
+        if latent_moe:
+            self.latent_down_proj = nn.Linear(d_model, latent_dim, bias=False)
+            self.latent_up_proj = nn.Linear(latent_dim, d_model, bias=False)
+        else:
+            self.latent_down_proj = None
+            self.latent_up_proj = None
 
         self.expert_load = ExpertLoad(n_routed_experts)
 
@@ -439,6 +453,8 @@ class SparseMoEBlock(nn.Module):
 
         # top_indices: (BS, k), top_weights: (BS, k), router_probs: (BS, E)
         top_indices, top_weights, router_probs = self.router(x_flat)
+
+        tokens = self.latent_down_proj(x_flat) if self.latent_moe else x_flat
 
         w_in = self.expert_gate_up if self.gated else self.expert_up
         b_in = self.expert_gate_up_bias if self.gated else self.expert_up_bias
@@ -455,7 +471,7 @@ class SparseMoEBlock(nn.Module):
         expert_counts = torch.bincount(expert_ids_sorted, minlength=E)
         self.expert_load.record_load(expert_counts.detach(), self.training)
         offs = expert_counts.cumsum(0).to(torch.int32)
-        x_sorted = x_flat[token_ids_sorted]
+        x_sorted = tokens[token_ids_sorted]
 
         # grouped mm
         expert_out = grouped_mlp(
@@ -473,7 +489,7 @@ class SparseMoEBlock(nn.Module):
         expert_out = self.expert_dropout(expert_out)
 
         # unsort, sum
-        output = torch.zeros_like(x_flat)
+        output = x_flat.new_zeros(BS, expert_out.shape[-1])
         output.index_add_(0, token_ids_sorted, expert_out)
 
         aux_loss = None
@@ -487,6 +503,8 @@ class SparseMoEBlock(nn.Module):
             P = probs.mean(0)  # (E,)
             aux_loss = self.aux_loss_coef * E * (f * P).sum()
 
+        if self.latent_moe:
+            output = self.latent_up_proj(output)
         output = output.view(B, S, D)
         if self.shared_expert is not None:
             shared_out, _ = self.shared_expert(x)
@@ -519,18 +537,22 @@ class SparseMoEBlock(nn.Module):
         gated=True,
         bias=False,
         expert_bias=False,
+        latent_moe=False,
+        latent_dim=None,
         **_,
     ):
         d_ff = intermediate_size
+        edim = latent_dim if latent_moe else d_model
         router = MoERouter.compute_flops(
             d_model, n_routed_experts, expert_bias=expert_bias
         )
         if gated:
-            expert = 6 * d_model * d_ff
-            b = (2 * d_ff + d_model) if bias else 0
+            expert = 6 * edim * d_ff
+            b = (2 * d_ff + edim) if bias else 0
         else:
-            expert = 4 * d_model * d_ff
-            b = (d_ff + d_model) if bias else 0
+            expert = 4 * edim * d_ff
+            b = (d_ff + edim) if bias else 0
+        proj = 4 * d_model * latent_dim if latent_moe else 0
         shared = (
             DenseMLPBlock.compute_flops(
                 d_model,
@@ -541,7 +563,7 @@ class SparseMoEBlock(nn.Module):
             if n_shared_experts > 0
             else 0
         )
-        return router + n_routed_experts_per_token * (expert + b) + shared
+        return router + n_routed_experts_per_token * (expert + b) + proj + shared
 
     @classmethod
     def compute_parameters(
@@ -555,22 +577,27 @@ class SparseMoEBlock(nn.Module):
         gated=True,
         bias=False,
         expert_bias=False,
+        latent_moe=False,
+        latent_dim=None,
         active=False,
         **_,
     ) -> int:
         d_ff = intermediate_size
+        edim = latent_dim if latent_moe else d_model
         router = MoERouter.compute_parameters(
             d_model, n_routed_experts, expert_bias=expert_bias
         )
         # active counts only the k experts that actually run per token.
         n = n_routed_experts_per_token if active else n_routed_experts
         if gated:
-            expert = 3 * d_ff * d_model
-            b = (2 * d_ff + d_model) if bias else 0
+            expert = 3 * d_ff * edim
+            b = (2 * d_ff + edim) if bias else 0
         else:
-            expert = 2 * d_ff * d_model
-            b = (d_ff + d_model) if bias else 0
-        # Shared experts always run, so they count toward both active and total.
+            expert = 2 * d_ff * edim
+            b = (d_ff + edim) if bias else 0
+        # Latent projections always run (like shared experts), so they count
+        # toward both active and total params — outside the `n *` factor.
+        proj = 2 * d_model * latent_dim if latent_moe else 0
         shared = (
             DenseMLPBlock.compute_parameters(
                 d_model,
@@ -581,7 +608,7 @@ class SparseMoEBlock(nn.Module):
             if n_shared_experts > 0
             else 0
         )
-        return router + n * (expert + b) + shared
+        return router + n * (expert + b) + proj + shared
 
 
 MLP_REGISTRY = {"dense": DenseMLPBlock, "moe": SparseMoEBlock}
