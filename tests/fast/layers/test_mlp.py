@@ -1138,6 +1138,7 @@ def test_sparse_moe_latent_output_shape():
 def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
     torch.manual_seed(0)
     d_model, inter, E, k, ell = 64, 32, 4, 2, 16
+    aux_loss_coef = 0.05
     block = SparseMoEBlock(
         d_model=d_model,
         intermediate_size=inter,
@@ -1147,7 +1148,7 @@ def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
         gated=gated,
         activation=activation,
         router_score_fn="softmax",
-        aux_loss_coef=1.0,  # ref returns unscaled aux; coef=1.0 keeps parity
+        aux_loss_coef=aux_loss_coef,
         bias=bias,
         latent_moe=True,
         latent_dim=ell,
@@ -1181,6 +1182,7 @@ def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
         expert_down_bias=block.expert_down_bias if bias else None,
         latent_down_weight=block.latent_down_proj.weight,
         latent_up_weight=block.latent_up_proj.weight,
+        aux_loss_coef=aux_loss_coef,
     )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
@@ -1194,6 +1196,7 @@ def test_sparse_moe_latent_with_shared_experts_matches_ref_plus_shared():
     own output on the same input."""
     torch.manual_seed(0)
     d_model, inter, E, k, ell = 64, 32, 4, 2, 16
+    aux_loss_coef = 0.05
     block = SparseMoEBlock(
         d_model=d_model,
         intermediate_size=inter,
@@ -1204,7 +1207,7 @@ def test_sparse_moe_latent_with_shared_experts_matches_ref_plus_shared():
         gated=True,
         activation="silu",
         router_score_fn="softmax",
-        aux_loss_coef=1.0,  # ref returns unscaled aux; coef=1.0 keeps parity
+        aux_loss_coef=aux_loss_coef,
         latent_moe=True,
         latent_dim=ell,
     )
@@ -1228,6 +1231,7 @@ def test_sparse_moe_latent_with_shared_experts_matches_ref_plus_shared():
         expert_gate_up=block.expert_gate_up,
         latent_down_weight=block.latent_down_proj.weight,
         latent_up_weight=block.latent_up_proj.weight,
+        aux_loss_coef=aux_loss_coef,
     )
     shared_out, _ = block.shared_expert(x)
 

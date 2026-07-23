@@ -444,6 +444,7 @@ def sparse_moe_block_ref(
     expert_down_bias: torch.Tensor | None = None,
     latent_down_weight: torch.Tensor | None = None,
     latent_up_weight: torch.Tensor | None = None,
+    aux_loss_coef: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eager sparse MoE: naive per-(token, slot) expert dispatch.
 
@@ -500,12 +501,11 @@ def sparse_moe_block_ref(
     if latent_up_weight is not None:
         output = output @ latent_up_weight.T  # ℓ → d
 
-    # Switch Transformer aux loss: E * sum_i (f_i * P_i), f_i = #tokens routed to i / T.
     expert_counts = torch.zeros(E, dtype=torch.long, device=x.device)
     ones = torch.ones_like(top_indices.flatten())
     expert_counts.scatter_add_(0, top_indices.flatten(), ones)
     f = expert_counts.to(x.dtype) / T
     P = router_probs.mean(0)
-    aux_loss = E * (f * P).sum()
+    aux_loss = aux_loss_coef * E * (f * P).sum()
 
     return output.view(B, S, D), aux_loss
