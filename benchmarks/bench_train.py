@@ -123,14 +123,16 @@ def run_benchmark(
 
     results = {
         "config": config_path,
-        "model": f"{config.model.attn_cls}+{config.model.mlp_cls}",
+        "model": (
+            f"{'+'.join(dict.fromkeys(config.model.resolve_attn(i)[0] for i in range(config.model.n_layers)))}"
+            f"+{'+'.join(dict.fromkeys(config.model.resolve_mlp(i)[0] for i in range(config.model.n_layers)))}"
+        ),
         "params_M": round(sum(p.numel() for p in trainer.model.parameters()) / 1e6, 1),
         "batch_size": config.training.batch_size,
         "grad_accum": config.training.gradient_accumulation_steps,
         "seq_len": config.max_seq_len,
         "tokens_per_step": trainer.metrics.tokens_per_step,
         "mixed_precision": config.training.mixed_precision,
-        "activation_checkpointing": config.training.activation_checkpointing,
         "warmup_steps": warmup,
         "measured_steps": steps,
         "elapsed_sec": round(elapsed, 2),

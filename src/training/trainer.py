@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-import torch.utils.checkpoint
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from tqdm import tqdm
 
@@ -78,7 +77,6 @@ class Trainer:
 
         # Model
         self.model = build_model(config).to(self.device)
-        self.is_moe = config.model.mlp_cls == "moe"
 
         # Data
         if not os.path.isdir(config.data.data_dir):
@@ -177,26 +175,6 @@ class Trainer:
 
         if config.training.enable_torch_compile:
             self.model = torch.compile(self.model)
-
-        # Activation checkpointing
-        if config.training.activation_checkpointing:
-            if self.is_moe:
-                print(
-                    "[trainer] WARNING: activation_checkpointing is not supported for MoE; skipping."
-                )
-            else:
-                for block in self.model.blocks:
-                    block._original_forward = block.forward
-
-                    def make_ckpt_forward(b):
-                        def ckpt_forward(x, **kwargs):
-                            return torch.utils.checkpoint.checkpoint(
-                                b._original_forward, x, use_reentrant=False, **kwargs
-                            )
-
-                        return ckpt_forward
-
-                    block.forward = make_ckpt_forward(block)
 
         # Metrics and Logging
         self.logger = WandbLogger(config, enabled=wandb_enabled)
@@ -324,9 +302,7 @@ class Trainer:
                             position_ids,
                             self.device,
                             mask_dtype,
-                            attn_implementation=self.config.model.attn_kwargs[
-                                "attn_implementation"
-                            ],
+                            attn_implementation=self.config.model.attn_implementation,
                         )
                     else:
                         B, S = position_ids.shape
@@ -334,9 +310,7 @@ class Trainer:
                             B,
                             S,
                             self.device,
-                            attn_implementation=self.config.model.attn_kwargs[
-                                "attn_implementation"
-                            ],
+                            attn_implementation=self.config.model.attn_implementation,
                         )
                     logits, aux_loss = self.model(
                         input_ids, position_ids=position_ids, attn_mask=attn_mask
@@ -349,10 +323,7 @@ class Trainer:
                     )
                     loss = ce_loss
                     if aux_loss is not None:
-                        loss = (
-                            loss
-                            + self.config.model.mlp_kwargs["aux_loss_coef"] * aux_loss
-                        )
+                        loss = loss + aux_loss
                     loss = loss / cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
@@ -445,9 +416,7 @@ class Trainer:
                     position_ids,
                     self.device,
                     mask_dtype,
-                    attn_implementation=self.config.model.attn_kwargs[
-                        "attn_implementation"
-                    ],
+                    attn_implementation=self.config.model.attn_implementation,
                 )
             else:
                 B, S = position_ids.shape
@@ -455,9 +424,7 @@ class Trainer:
                     B,
                     S,
                     self.device,
-                    attn_implementation=self.config.model.attn_kwargs[
-                        "attn_implementation"
-                    ],
+                    attn_implementation=self.config.model.attn_implementation,
                 )
             logits, aux_loss = self.model(
                 input_ids, position_ids=position_ids, attn_mask=attn_mask
@@ -536,9 +503,7 @@ class Trainer:
                 B,
                 S,
                 self.device,
-                attn_implementation=self.config.model.attn_kwargs[
-                    "attn_implementation"
-                ],
+                attn_implementation=self.config.model.attn_implementation,
             )
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp

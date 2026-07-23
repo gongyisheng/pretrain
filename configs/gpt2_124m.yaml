@@ -3,17 +3,19 @@ model:
   d_model: 768
   n_layers: 12
   vocab_size: 50257
-  attn_cls: mha
-  attn_kwargs:
-    n_heads: 12
-    dropout: 0.0
-    bias: true
-  mlp_cls: dense
-  mlp_kwargs:
-    activation: gelu
-    gated: false
-    bias: true
-    dropout: 0.0
+  attn:
+  - attn_cls: mha
+    attn_kwargs:
+      n_heads: 12
+      dropout: 0.0
+      bias: true
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs:
+      activation: gelu
+      gated: false
+      bias: true
+      dropout: 0.0
   norm_cls: layernorm
   pos_emb_cls: learned
   dropout_embd: 0.0
@@ -28,7 +30,6 @@ training:
   gradient_accumulation_steps: 4
   max_steps: 100000
   mixed_precision: bf16
-  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/
   checkpoint_every: 5000

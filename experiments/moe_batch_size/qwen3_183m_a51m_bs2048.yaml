@@ -3,18 +3,20 @@ model:
   d_model: 512
   n_layers: 8
   vocab_size: 50257
-  attn_cls: gqa
-  attn_kwargs:
-    n_heads: 8
-    n_kv_heads: 4
-    qk_norm: true
-  mlp_cls: moe
-  mlp_kwargs:
-    intermediate_size: 192
-    n_routed_experts: 64
-    n_routed_experts_per_token: 8
-    aux_loss: true
-    aux_loss_coef: 0.001
+  attn:
+  - attn_cls: gqa
+    attn_kwargs:
+      n_heads: 8
+      n_kv_heads: 4
+      qk_norm: true
+  mlp:
+  - mlp_cls: moe
+    mlp_kwargs:
+      intermediate_size: 192
+      n_routed_experts: 64
+      n_routed_experts_per_token: 8
+      aux_loss: true
+      aux_loss_coef: 0.001
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -30,7 +32,6 @@ training:
   gradient_accumulation_steps: 32
   max_steps: 50000
   mixed_precision: bf16
-  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/moe_batch_size/qwen3_183m_a51m_bs2048/
   checkpoint_every: 5000

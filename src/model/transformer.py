@@ -11,7 +11,6 @@ class TransformerLM(nn.Module):
     def __init__(self, config: ModelConfig, max_seq_len: int = 1024):
         super().__init__()
         self.config = config
-        self.is_moe = config.mlp_cls == "moe"
 
         # Pad vocab to multiple of 128 for better matmul alignment.
         pad = 128
@@ -21,11 +20,15 @@ class TransformerLM(nn.Module):
 
         pos_cls = POS_EMB_REGISTRY[config.pos_emb_cls]
         if pos_cls.rotary:
-            if config.attn_cls == "mla":
-                # MLA rotates only its decoupled rope part, not the full head.
-                head_dim = config.attn_kwargs["qk_rope_head_dim"]
-            else:
-                head_dim = config.d_model // config.attn_kwargs["n_heads"]
+            # Rope head-dim agreement across layers is validated in ModelConfig,
+            # so layer 0's is the shared value: qk_rope_head_dim for mla (only
+            # its decoupled rope part rotates), else d_model // n_heads.
+            attn_cls, attn_kwargs = config.resolve_attn(0)
+            head_dim = (
+                attn_kwargs["qk_rope_head_dim"]
+                if attn_cls == "mla"
+                else config.d_model // attn_kwargs["n_heads"]
+            )
             self.rope = pos_cls(head_dim, max_seq_len, **config.pos_emb_kwargs)
             self.pos_emb = None
         else:
@@ -92,10 +95,15 @@ class TransformerLM(nn.Module):
         )
         embeddings = padded_vocab * d_model + pos  # token_emb + (learned) pos_emb
 
-        # Every block has the same param count (depth-independent), so scale by n.
-        blocks = config.n_layers * TransformerBlock.compute_parameters(config)
-        blocks_active = config.n_layers * TransformerBlock.compute_parameters(
-            config, active=True
+        # Blocks may differ per layer (mixed dense/MoE stacks), so sum per layer
+        # rather than scaling one block's count by n_layers.
+        blocks = sum(
+            TransformerBlock.compute_parameters(config, layer_idx=i)
+            for i in range(config.n_layers)
+        )
+        blocks_active = sum(
+            TransformerBlock.compute_parameters(config, active=True, layer_idx=i)
+            for i in range(config.n_layers)
         )
         final_norm = NORM_REGISTRY[config.norm_cls].compute_parameters(
             d_model, **config.norm_kwargs
