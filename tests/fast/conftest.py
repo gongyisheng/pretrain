@@ -53,6 +53,27 @@ def _set_default_device(request):
     torch.set_default_device(prev)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_matmul_precision():
+    """Force full-precision float32 matmul for every fast test.
+
+    The Trainer (and e2e smoke tests that build one) enable TF32 process-wide
+    via torch.set_float32_matmul_precision("high"). Since e2e is collected
+    before tests/fast, that leaks into the float32 numerical-parity tests here.
+    Reset to full precision around each test so parity checks are deterministic.
+    """
+    prev_precision = torch.get_float32_matmul_precision()
+    prev_cuda_tf32 = torch.backends.cuda.matmul.allow_tf32
+    prev_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    yield
+    torch.set_float32_matmul_precision(prev_precision)
+    torch.backends.cuda.matmul.allow_tf32 = prev_cuda_tf32
+    torch.backends.cudnn.allow_tf32 = prev_cudnn_tf32
+
+
 @pytest.fixture(scope="session")
 def device(request) -> str:
     return _select_device(request.config)
