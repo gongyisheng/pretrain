@@ -451,10 +451,16 @@ def test_eval_moe_maxvio_global_vs_batch_semantics():
     assert d["val-moe/maxvio_batch/layer_0"] == pytest.approx(1.0)
 
 
-def test_metrics_moe_facts_with_dense_first_layer():
-    from src.utils.config import TrainConfig, ModelConfig, TrainingConfig
+def _dense_first_moe_rest_cfg():
+    """4-layer dense-first mixed stack: layer 0 dense, layers 1-3 MoE (k=2).
 
-    model = ModelConfig(
+    n_layers (4) != n_moe_layers (3) on purpose: this is the config that would
+    catch a regression to the old `n_layers * k` aux-floor formula (8, wrong)
+    vs. the correct per-layer sum (3 * 2 = 6).
+    """
+    from src.utils.config import ModelConfig
+
+    return ModelConfig(
         d_model=64,
         n_layers=4,
         vocab_size=256,
@@ -477,6 +483,12 @@ def test_metrics_moe_facts_with_dense_first_layer():
             },
         ],
     )
+
+
+def test_metrics_moe_facts_with_dense_first_layer():
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _dense_first_moe_rest_cfg()
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
     assert cfg.model.is_moe is True
     # aux floor counts only MoE layers: 3 layers * k(2) = 6
@@ -484,6 +496,34 @@ def test_metrics_moe_facts_with_dense_first_layer():
         sum(kw["n_routed_experts_per_token"] for kw in cfg.model.moe_layer_kwargs) == 6
     )
     assert len(cfg.model.moe_layer_kwargs) == 3
+
+
+def test_metrics_tracker_aux_floor_and_n_moe_layers_on_dense_first_stack():
+    """MetricsTracker itself (not just ModelConfig) must count only MoE layers.
+
+    n_layers=4 but n_moe_layers=3 (layer 0 is dense): the old buggy
+    `n_layers * k` formula would give 4*2=8; the correct per-layer-sum formula
+    gives 3*2=6. Also pins the mixed-stack model-summary label.
+    """
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _dense_first_moe_rest_cfg()
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+
+    assert tracker._aux_floor == 6  # 3 MoE layers * k(2), NOT n_layers(4) * k = 8
+    assert tracker._n_moe_layers == 3
+
+
+def test_print_model_summary_dense_first_moe_rest_label(capsys):
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _dense_first_moe_rest_cfg()
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker.print_model_summary()
+    out = capsys.readouterr().out
+    assert "Model: gqa+dense/moe" in out
 
 
 # ---------------------------------------------------------------------------
