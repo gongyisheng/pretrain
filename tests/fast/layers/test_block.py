@@ -11,8 +11,16 @@ def _block_cfg(impl):
         d_model=64,
         n_layers=1,
         vocab_size=256,
-        attn_cls="mha",
-        attn_kwargs={"n_heads": 4, "bias": True, "attn_implementation": impl},
+        attn=[
+            {
+                "attn_cls": "mha",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "bias": True,
+                    "attn_implementation": impl,
+                },
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "dense",

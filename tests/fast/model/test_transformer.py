@@ -14,8 +14,7 @@ def _cfg(max_seq_len=32, **model_over):
         d_model=64,
         n_layers=2,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "silu", "gated": True}}],
         norm_cls="rmsnorm",
         pos_emb_cls="rope",
@@ -30,7 +29,7 @@ def test_compute_flops_sums_components():
         _cfg()
     )  # gqa(n_heads=4,n_kv=2) + dense gated, d_model=64, L=2, T=32, vocab=256
     m = cfg.model
-    attn = GroupedQueryAttention.compute_flops(64, 32, **m.attn_kwargs)
+    attn = GroupedQueryAttention.compute_flops(64, 32, **m.resolve_attn(0)[1])
     mlp = DenseMLPBlock.compute_flops(
         64, **m.resolve_mlp(0)[1]
     )  # mlp flops are seq-len-independent
@@ -41,13 +40,17 @@ def test_compute_flops_sums_components():
 
 def _gpt2_cfg(impl):
     return _cfg(
-        attn_cls="mha",
-        attn_kwargs={
-            "n_heads": 2,
-            "qk_norm": False,
-            "bias": True,
-            "attn_implementation": impl,
-        },
+        attn=[
+            {
+                "attn_cls": "mha",
+                "attn_kwargs": {
+                    "n_heads": 2,
+                    "qk_norm": False,
+                    "bias": True,
+                    "attn_implementation": impl,
+                },
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -62,13 +65,17 @@ def _gpt2_cfg(impl):
 
 def _qwen3_cfg(impl):
     return _cfg(
-        attn_cls="gqa",
-        attn_kwargs={
-            "n_heads": 4,
-            "n_kv_heads": 2,
-            "qk_norm": True,
-            "attn_implementation": impl,
-        },
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "n_kv_heads": 2,
+                    "qk_norm": True,
+                    "attn_implementation": impl,
+                },
+            }
+        ],
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "silu", "gated": True}}],
         norm_cls="rmsnorm",
         pos_emb_cls="rope",
@@ -78,13 +85,17 @@ def _qwen3_cfg(impl):
 
 def _moe_cfg(impl):
     return _cfg(
-        attn_cls="gqa",
-        attn_kwargs={
-            "n_heads": 4,
-            "n_kv_heads": 2,
-            "qk_norm": True,
-            "attn_implementation": impl,
-        },
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "n_kv_heads": 2,
+                    "qk_norm": True,
+                    "attn_implementation": impl,
+                },
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "moe",
@@ -216,13 +227,17 @@ def test_transformer_matches_hf_qwen3_with_copied_weights():
         d_model=d_model,
         n_layers=n_layers,
         vocab_size=vocab_size,
-        attn_cls="gqa",
-        attn_kwargs={
-            "n_heads": n_heads,
-            "n_kv_heads": n_kv_heads,
-            "qk_norm": True,
-            "attn_implementation": "sdpa",  # CPU test; flex requires CUDA
-        },
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": n_heads,
+                    "n_kv_heads": n_kv_heads,
+                    "qk_norm": True,
+                    "attn_implementation": "sdpa",  # CPU test; flex requires CUDA
+                },
+            }
+        ],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -294,8 +309,7 @@ def test_mixed_dense_first_moe_rest_builds_and_counts():
         d_model=64,
         n_layers=4,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -328,3 +342,53 @@ def test_mixed_dense_first_moe_rest_builds_and_counts():
     pos = torch.arange(8).unsqueeze(0).expand(2, 8)
     model(x, position_ids=pos)
     assert len(model.forward_meta()) == 3
+
+
+def test_mixed_attn_builds_and_counts():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=4,
+        vocab_size=256,
+        attn=[
+            {"attn_cls": "mha", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
+            {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}},
+        ],
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"intermediate_size": 128}}],
+        pos_emb_cls="rope",
+    )
+    model = TransformerLM(cfg, max_seq_len=32)
+    from src.layers.attention import GroupedQueryAttention, MultiHeadAttention
+
+    assert isinstance(model.blocks[0].attn, MultiHeadAttention)
+    assert all(
+        isinstance(model.blocks[i].attn, GroupedQueryAttention) for i in (1, 2, 3)
+    )
+    assert model.compute_parameters(cfg, max_seq_len=32)["total"] == sum(
+        p.numel() for p in model.parameters()
+    )
+    x = torch.randint(0, 256, (2, 8))
+    pos = torch.arange(8).unsqueeze(0).expand(2, 8)
+    model(x, position_ids=pos)  # forward runs with the shared rope
+
+
+def test_mixed_attn_rope_headdim_mismatch_raises():
+    cfg = ModelConfig(
+        d_model=64,
+        n_layers=2,
+        vocab_size=256,
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {"n_heads": 4},
+                "layer_idx": [0],
+            },  # head_dim 16
+            {
+                "attn_cls": "mla",
+                "attn_kwargs": {"n_heads": 4, "qk_rope_head_dim": 8},
+            },  # rope dim 8
+        ],
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"intermediate_size": 128}}],
+        pos_emb_cls="rope",
+    )
+    with pytest.raises(ValueError, match="rope head-dim"):
+        TransformerLM(cfg, max_seq_len=32)

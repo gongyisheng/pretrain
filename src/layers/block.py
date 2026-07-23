@@ -27,11 +27,12 @@ class TransformerBlock(nn.Module):
             config.d_model, layer_idx, "mlp", **config.residual_kwargs
         )
         norm_cls = NORM_REGISTRY[config.norm_cls]
-        attn_cls = ATTN_REGISTRY[config.attn_cls]
+        attn_cls_name, attn_kwargs = config.resolve_attn(layer_idx)
+        attn_cls = ATTN_REGISTRY[attn_cls_name]
         mlp_cls_name, mlp_kwargs = config.resolve_mlp(layer_idx)
         mlp_cls = MLP_REGISTRY[mlp_cls_name]
         self.norm1 = norm_cls(config.d_model, **config.norm_kwargs)
-        self.attn = attn_cls(config.d_model, **config.attn_kwargs)
+        self.attn = attn_cls(config.d_model, **attn_kwargs)
         self.norm2 = norm_cls(config.d_model, **config.norm_kwargs)
         self.mlp = mlp_cls(config.d_model, **mlp_kwargs)
 
@@ -42,8 +43,9 @@ class TransformerBlock(nn.Module):
         residual term is depth-dependent for some strategies (e.g. attn_res),
         hence `layer_idx`.
         """
-        attn = ATTN_REGISTRY[config.attn_cls].compute_flops(
-            config.d_model, max_seq_len, **config.attn_kwargs
+        attn_cls_name, attn_kwargs = config.resolve_attn(layer_idx)
+        attn = ATTN_REGISTRY[attn_cls_name].compute_flops(
+            config.d_model, max_seq_len, **attn_kwargs
         )
         mlp_cls_name, mlp_kwargs = config.resolve_mlp(layer_idx)
         mlp = MLP_REGISTRY[mlp_cls_name].compute_flops(config.d_model, **mlp_kwargs)
@@ -66,8 +68,9 @@ class TransformerBlock(nn.Module):
         norm = 2 * NORM_REGISTRY[config.norm_cls].compute_parameters(
             config.d_model, **config.norm_kwargs
         )
-        attn = ATTN_REGISTRY[config.attn_cls].compute_parameters(
-            config.d_model, **config.attn_kwargs
+        attn_cls_name, attn_kwargs = config.resolve_attn(layer_idx)
+        attn = ATTN_REGISTRY[attn_cls_name].compute_parameters(
+            config.d_model, **attn_kwargs
         )
         mlp_cls_name, mlp_kwargs = config.resolve_mlp(layer_idx)
         mlp = MLP_REGISTRY[mlp_cls_name].compute_parameters(

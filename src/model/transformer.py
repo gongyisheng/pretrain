@@ -21,11 +21,7 @@ class TransformerLM(nn.Module):
 
         pos_cls = POS_EMB_REGISTRY[config.pos_emb_cls]
         if pos_cls.rotary:
-            if config.attn_cls == "mla":
-                # MLA rotates only its decoupled rope part, not the full head.
-                head_dim = config.attn_kwargs["qk_rope_head_dim"]
-            else:
-                head_dim = config.d_model // config.attn_kwargs["n_heads"]
+            head_dim = self._shared_rope_head_dim(config)
             self.rope = pos_cls(head_dim, max_seq_len, **config.pos_emb_kwargs)
             self.pos_emb = None
         else:
@@ -56,6 +52,26 @@ class TransformerLM(nn.Module):
             w1 = module.expert_gate_up if module.gated else module.expert_up
             nn.init.normal_(w1, mean=0.0, std=0.02)
             nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
+
+    @staticmethod
+    def _shared_rope_head_dim(config: ModelConfig) -> int:
+        """RoPE is one shared module, so every layer's rotary head-dim must
+        agree: `qk_rope_head_dim` for mla (it rotates only its decoupled rope
+        part, not the full head), else `d_model // n_heads`.
+        """
+        dims = set()
+        for i in range(config.n_layers):
+            attn_cls, attn_kwargs = config.resolve_attn(i)
+            if attn_cls == "mla":
+                dims.add(attn_kwargs["qk_rope_head_dim"])
+            else:
+                dims.add(config.d_model // attn_kwargs["n_heads"])
+        if len(dims) > 1:
+            raise ValueError(
+                f"rotary pos_emb requires a single rope head-dim across layers; got "
+                f"{sorted(dims)}. Make qk_rope_head_dim / (d_model // n_heads) match."
+            )
+        return dims.pop()
 
     @staticmethod
     def compute_flops(config: ModelConfig, max_seq_len: int) -> int:

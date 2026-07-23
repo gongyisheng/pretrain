@@ -39,8 +39,7 @@ def _cfg(task="pretrain", log_every=2, **logging):
             n_layers=2,
             d_model=64,
             vocab_size=256,
-            attn_cls="mha",
-            attn_kwargs={"n_heads": 2},
+            attn=[{"attn_cls": "mha", "attn_kwargs": {"n_heads": 2}}],
             mlp=[
                 {
                     "mlp_cls": "dense",
@@ -287,8 +286,12 @@ def test_eval_moe_aux_loss_subtracts_floor():
             n_layers=2,
             d_model=64,
             vocab_size=256,
-            attn_cls="gqa",
-            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+                }
+            ],
             mlp=[
                 {
                     "mlp_cls": "moe",
@@ -324,8 +327,12 @@ def _moe_cfg():
             n_layers=2,
             d_model=64,
             vocab_size=256,
-            attn_cls="gqa",
-            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+                }
+            ],
             mlp=[
                 {
                     "mlp_cls": "moe",
@@ -469,8 +476,7 @@ def _dense_first_moe_rest_cfg():
         d_model=64,
         n_layers=4,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
         mlp=[
             {
                 "mlp_cls": "dense",
@@ -537,8 +543,7 @@ def test_metrics_tracker_aux_floor_scoped_to_aux_loss_layers_only():
         d_model=64,
         n_layers=4,
         vocab_size=256,
-        attn_cls="gqa",
-        attn_kwargs={"n_heads": 4, "n_kv_heads": 2},
+        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
         mlp=[
             {
                 "mlp_cls": "moe",
@@ -600,8 +605,12 @@ def test_print_model_summary_moe(capsys):
             n_layers=2,
             d_model=64,
             vocab_size=256,
-            attn_cls="gqa",
-            attn_kwargs={"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1, "qk_norm": True},
+                }
+            ],
             mlp=[
                 {
                     "mlp_cls": "moe",

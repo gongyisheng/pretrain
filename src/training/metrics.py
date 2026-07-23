@@ -111,8 +111,9 @@ class MetricsTracker:
         dense models report total + non-embedding.
         """
         counts = metric_utils.count_parameters(self.config)
+        attn_label = "/".join(sorted(set(self.config.model.layer_attn_classes())))
         mlp_label = "/".join(sorted(set(self.config.model.layer_mlp_classes())))
-        label = f"{self.config.model.attn_cls}+{mlp_label}"
+        label = f"{attn_label}+{mlp_label}"
         if self.is_moe:
             msg = (
                 f"Model: {label} | {counts['total'] / 1e6:.1f}M total params "
