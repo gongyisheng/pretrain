@@ -39,7 +39,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_layer0_balance/baseline/
+  checkpoint_dir: checkpoints/moe_layer0_balance/qwen3_188m_a51m/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -60,5 +60,5 @@ scheduler:
   min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-layer0-balance
-  wandb_run_name: baseline
+  wandb_run_name: qwen3-188m-a51m
   log_every: 100

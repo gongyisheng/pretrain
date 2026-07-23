@@ -13,13 +13,14 @@ bias/aux-loss dynamics. Two remedies:
   match the MoE layers' active FFN width. No routing happens at layer 0 at
   all, so there's nothing to imbalance — trades this layer's conditional
   compute (a routing decision) for unconditional compute of the same size.
-- **`shallow_bias_boost`**: keep layer 0 as MoE but give it a 4x
+- **shallow bias boost** (`l0rate*`): keep layer 0 as MoE but give it a higher
   `expert_bias_update_rate` (DeepSeek loss-free balancing, arXiv:2408.15664),
-  so its per-expert bias corrects load imbalance faster than the other
-  layers.
+  so its per-expert bias corrects load imbalance faster than the other layers.
+  Swept over layer-0 rates **2e-3 / 5e-3 / 1e-2** (2×/5×/10× the 1e-3 base);
+  layers 1-7 stay at 1e-3.
 
-Both are compared against **`baseline`**: uniform MoE with the same
-`expert_bias_update_rate` (1e-3) at every layer.
+Both are compared against **`qwen3_188m_a51m`** (baseline): uniform MoE with the
+same `expert_bias_update_rate` (1e-3) at every layer.
 
 ## Setup
 
@@ -44,54 +45,62 @@ MLP uses `intermediate_size: 1536, activation: silu, gated: true` to match it
 
 | Config | Layer 0 | Layers 1-7 | Layer 0 bias rate | Total params | Active params |
 |--------|---------|------------|--------------------|--------------|----------------|
-| `baseline` | MoE | MoE | 1e-3 | 188.03M | 51.19M |
-| `dense_first` | Dense SwiGLU (is=1536) | MoE | n/a | 170.89M | 51.16M |
-| `shallow_bias_boost` | MoE | MoE | 4e-3 | 188.03M | 51.19M |
+| `qwen3_188m_a51m` (baseline) | MoE | MoE | 1e-3 | 188.03M | 51.19M |
+| `qwen3_171m_a51m_dense_first` | Dense SwiGLU (is=1536) | MoE | n/a | 170.89M | 51.16M |
+| `qwen3_188m_a51m_l0rate2e-3` | MoE | MoE | 2e-3 | 188.03M | 51.19M |
+| `qwen3_188m_a51m_l0rate5e-3` | MoE | MoE | 5e-3 | 188.03M | 51.19M |
+| `qwen3_188m_a51m_l0rate1e-2` | MoE | MoE | 1e-2 | 188.03M | 51.19M |
 
 Param counts computed via:
 ```bash
-uv run python -c "from src.utils.config import load_config; from src.utils.metric_utils import count_parameters; c=load_config('experiments/moe_layer0_balance/baseline.yaml'); print(count_parameters(c))"
+uv run python -c "from src.utils.config import load_config; from src.utils.metric_utils import count_parameters; c=load_config('experiments/moe_layer0_balance/qwen3_188m_a51m.yaml'); print(count_parameters(c))"
 ```
 `{'total': 188032512, 'non_emb': 162276864, 'active_non_emb': 25437696}` for
-`baseline`/`shallow_bias_boost` (identical param shapes — only the bias update
-rate differs) and `{'total': 170894848, 'non_emb': 145139200,
+the baseline and every `l0rate*` boost (identical param shapes — only the bias
+update rate differs) and `{'total': 170894848, 'non_emb': 145139200,
 'active_non_emb': 25404928}` for `dense_first`. `dense_first`'s total is lower
 because a dense SwiGLU layer at `is=1536` has fewer parameters than a
 64-routed-expert MoE layer at `is=192` (only the top-6 + 2 shared experts are
 ever active per token, but all 64 routed experts' weights are resident).
 Active params (embeddings + active_non_emb) are ~51.2M / ~51.16M across all
-three, so the arms are compute-comparable per forward pass.
+arms, so they are compute-comparable per forward pass.
 
 ## Run
 
 ```bash
-nohup bash experiments/moe_layer0_balance/run.sh > logs/moe_layer0_balance.log 2>&1 &
+# dense-first arm (baseline + dense_first):
+nohup bash experiments/moe_layer0_balance/run_dense_first.sh > logs/moe_layer0_balance_dense_first.log 2>&1 &
+# shallow bias boost sweep (layer-0 rate 2e-3 / 5e-3 / 1e-2):
+nohup bash experiments/moe_layer0_balance/run_l0rate_boost.sh > logs/moe_layer0_balance_l0rate_boost.log 2>&1 &
 # single:
-uv run python scripts/train.py --config experiments/moe_layer0_balance/baseline.yaml
+uv run python scripts/train.py --config experiments/moe_layer0_balance/qwen3_188m_a51m.yaml
 ```
 
 ## Results
 
 | arm | val_loss | layer-0 balance (MaxVio) | notes |
 |-----|----------|--------------------------|-------|
-| `baseline` | | | |
-| `dense_first` | | | |
-| `shallow_bias_boost` | | | |
+| `qwen3_188m_a51m` (baseline) | | | |
+| `qwen3_171m_a51m_dense_first` | | | |
+| `qwen3_188m_a51m_l0rate2e-3` | | | |
+| `qwen3_188m_a51m_l0rate5e-3` | | | |
+| `qwen3_188m_a51m_l0rate1e-2` | | | |
 
 ## Notes
 
 - Layer-0 balance is read from the existing per-layer MoE MaxVio metrics
   (`src/utils/metric_utils.py::compute_moe_maxvio` /
   `compute_moe_global_maxvio`, logged per layer during training) — compare
-  `layer_0` MaxVio across `baseline` and `shallow_bias_boost` directly.
+  `layer_0` MaxVio across the baseline and the `l0rate*` boosts directly, and
+  look for a monotonic trend with the layer-0 rate.
   `dense_first` has no layer-0 MoE metric (layer 0 is dense), so its "balance"
   is by construction 0 there; compare its layers 1-7 MaxVio against the
-  corresponding layers in `baseline` to see whether removing layer-0 routing
+  corresponding layers in the baseline to see whether removing layer-0 routing
   changes downstream balance.
-- Compare `val_loss` across all three to see whether either remedy costs (or
-  gains) quality relative to `baseline`, since both trade off something:
-  `dense_first` removes a routing decision (fixed compute, no adaptivity),
-  `shallow_bias_boost` only changes the balancing speed (no compute change).
-- Same testbed as `../moe_expert_bias/`, so `baseline` here is expected to
+- Compare `val_loss` across all arms to see whether either remedy costs (or
+  gains) quality relative to the baseline, since both trade off something:
+  `dense_first` removes a routing decision (fixed compute, no adaptivity), the
+  `l0rate*` boosts only change layer-0 balancing speed (no compute change).
+- Same testbed as `../moe_expert_bias/`, so the baseline here is expected to
   reproduce `qwen3_188m_a51m_sigmoid_expert_bias_rate1e-3` if the two ever
   need to be cross-checked (config-diff, not just result-diff).
