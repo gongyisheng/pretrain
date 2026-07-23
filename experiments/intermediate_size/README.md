@@ -91,7 +91,7 @@ Suggested charts:
 - **Fixed LR across all widths.** No per-width LR retune. Muon's `match_rms_adamw` rescales each 2D weight's effective LR by its shape, which absorbs most of the `down_proj` lr ∝ 1/intermediate_size mistuning that plain AdamW suffers at large width; the AdamW-handled params (embeddings, head, 1D) still see a fixed lr. Read the loss-at-large-mult numbers as "lr=5e-4 result," not necessarily "best achievable at this width."
 - **Largest widths are not iso-token.** `max_steps=50000` is fixed, but `is>=4096` raise gradient accumulation (2-4x), so they train on proportionally more tokens (~26B / ~52B vs ~13B for the rest). Their loss is not directly comparable to the smaller widths as a pure width effect.
 - **mult=0.25 and mult=0.5 are intentionally extreme.** `intermediate_size` below `d_model` is non-standard; results are useful as anchors for the loss-vs-width curve, not as a recommended config.
-- **mult=32 (~233M params)** is much larger than the 57M nominal scale. It fits at batch=8/seq=1024 without activation checkpointing on a single 24GB+ GPU but pushes memory; if it OOMs, set `training.activation_checkpointing: true` for that one config.
+- **mult=32 (~233M params)** is much larger than the 57M nominal scale. It fits at batch=8/seq=1024 on a single 24GB+ GPU but pushes memory; if it OOMs, lower `batch_size` and raise `gradient_accumulation_steps` to compensate.
 
 ### Out of scope
 

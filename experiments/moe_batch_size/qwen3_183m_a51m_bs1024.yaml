@@ -32,7 +32,6 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/moe_batch_size/qwen3_183m_a51m_bs1024/
   checkpoint_every: 5000

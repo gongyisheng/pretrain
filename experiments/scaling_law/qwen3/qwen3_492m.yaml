@@ -28,7 +28,6 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  activation_checkpointing: false
   checkpoint_dir: checkpoints/scaling_law/qwen3_492m/
   checkpoint_every: 5000
   eval_every: 100

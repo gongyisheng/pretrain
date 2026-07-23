@@ -11,7 +11,6 @@ class TransformerLM(nn.Module):
     def __init__(self, config: ModelConfig, max_seq_len: int = 1024):
         super().__init__()
         self.config = config
-        self.is_moe = config.is_moe
 
         # Pad vocab to multiple of 128 for better matmul alignment.
         pad = 128

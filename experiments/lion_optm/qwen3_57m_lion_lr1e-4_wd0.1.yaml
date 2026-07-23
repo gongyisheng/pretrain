@@ -27,7 +27,6 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/lion_optm/qwen3_57m_lion_lr1e-4_wd0.1/
   checkpoint_every: 5000

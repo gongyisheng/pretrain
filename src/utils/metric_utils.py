@@ -332,8 +332,7 @@ def compute_flops_per_token(config: TrainConfig) -> int:
     Total training FLOPs per token
     """
     fwd_total = TransformerLM.compute_flops(config.model, config.max_seq_len)
-    backward_mult = 4 if config.training.activation_checkpointing else 3
-    return fwd_total * backward_mult
+    return fwd_total * 3  # fwd + bwd (2x); no activation recomputation
 
 
 # ---------------------------------------------------------------------------

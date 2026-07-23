@@ -1,31 +1,3 @@
-"""MetricsTracker — the stateful assembly layer between pure metric math
-(`src/utils/metric_utils.py`) and dispatch (`src/utils/tracking_utils.py`).
-
-It owns everything that has state across a training run: per-window counters,
-log-cadence timing, cached optimizer step-norms, running token totals
-(tokens_per_step / total_tokens), and the eval accumulators. It calls
-`metric_utils` for arithmetic and a logger (WandbLogger) for dispatch; the
-trainer feeds it raw numbers and never assembles a log_dict itself.
-
-Setup (once):
-    print_model_summary()                 # startup banner: param counts + device
-    train_begin()                         # reset the log-window timer
-
-Lifecycle per optimizer step:
-    snapshot_pre_step(model, step)        # before optimizer.step() (snapshots
-                                          #   only on pre-log steps)
-    ...scaler.step / update...
-    on_train_step(loss=, grad_norm=, ...) # update counters + total_tokens,
-                                          #   cache step-norms
-    log_train(step=, model=, optimizer=)  # on cadence: assemble + dispatch,
-                                          #   else None
-
-Eval:
-    eval_begin()
-    on_eval_step(loss=, logits=, labels=, ...)   # per batch
-    log_eval(step=)                            # finalize + dispatch + print
-"""
-
 import time
 
 import torch
@@ -51,16 +23,11 @@ class MetricsTracker:
 
         self.is_moe = config.model.is_moe
         if self.is_moe:
-            # _aux_floor centers the model's reported aux loss, which sums only
-            # over layers using aux_loss (not expert_bias) — so the floor must
-            # be scoped to those layers, not all MoE layers.
             self._aux_floor = sum(
                 kw["aux_loss_coef"] * kw["n_routed_experts_per_token"]
-                for kw in config.model.aux_loss_layer_kwargs
+                for kw in config.model.moe_layer_kwargs
+                if kw.get("aux_loss")
             )
-            # _n_moe_layers sizes the per-layer expert-load list for MaxVio
-            # logging (eval_begin), which covers every MoE layer regardless of
-            # its balancing strategy — so this stays scoped to all MoE layers.
             self._n_moe_layers = len(config.model.moe_layer_kwargs)
 
         self._flops_per_token = metric_utils.compute_flops_per_token(config)

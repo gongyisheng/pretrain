@@ -13,7 +13,7 @@ from src.model import build_model
 from src.model.transformer import TransformerLM
 from src.training.optimizer import AdamWOptimizer, LionOptimizer
 from src.utils import metric_utils
-from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+from src.utils.config import ModelConfig, TrainConfig
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 # ---------------------------------------------------------------------------
@@ -674,30 +674,20 @@ def test_compute_flops_per_token_moe_uses_k_active():
     assert mlp_k_active < mlp_all_experts // 3
 
 
-def test_compute_flops_per_token_ckpt_multiplier():
-    """activation_checkpointing flips backward multiplier 3 -> 4."""
-    base_kwargs = dict(
-        n_layers=2,
-        d_model=64,
-        vocab_size=256,
-        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
-        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
-    )
-    cfg_off = TrainConfig(
+def test_compute_flops_per_token_backward_multiplier():
+    """Total training FLOPs = 3x forward (fwd + 2x bwd)."""
+    cfg = TrainConfig(
         max_seq_len=128,
-        model=ModelConfig(**base_kwargs),
-        training=TrainingConfig(activation_checkpointing=False),
+        model=ModelConfig(
+            n_layers=2,
+            d_model=64,
+            vocab_size=256,
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
+            mlp=[{"mlp_cls": "dense", "mlp_kwargs": {}}],
+        ),
     )
-    cfg_on = TrainConfig(
-        max_seq_len=128,
-        model=ModelConfig(**base_kwargs),
-        training=TrainingConfig(activation_checkpointing=True),
-    )
-    fwd = TransformerLM.compute_flops(cfg_off.model, cfg_off.max_seq_len)
-    f_off = metric_utils.compute_flops_per_token(cfg_off)
-    f_on = metric_utils.compute_flops_per_token(cfg_on)
-    assert f_off == 3 * fwd
-    assert f_on == 4 * fwd
+    fwd = TransformerLM.compute_flops(cfg.model, cfg.max_seq_len)
+    assert metric_utils.compute_flops_per_token(cfg) == 3 * fwd
 
 
 def test_compute_flops_per_token_lm_head_bias():

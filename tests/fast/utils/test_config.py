@@ -61,7 +61,6 @@ MINIMAL_CONFIG = {
         "gradient_accumulation_steps": 1,
         "max_steps": 10,
         "mixed_precision": "no",
-        "activation_checkpointing": False,
         "grad_clip": 1.0,
         "checkpoint_dir": "ckpt/",
         "checkpoint_every": 5,

@@ -28,7 +28,6 @@ training:
   gradient_accumulation_steps: 64
   max_steps: 50000
   mixed_precision: bf16
-  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/intra_doc_masking/qwen3_57m_seqlen_8192_baseline
   checkpoint_every: 5000

@@ -25,7 +25,6 @@ training:
   gradient_accumulation_steps: 8
   max_steps: 20000
   mixed_precision: bf16
-  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/scaling_law/gpt2_16m/
   checkpoint_every: 2500

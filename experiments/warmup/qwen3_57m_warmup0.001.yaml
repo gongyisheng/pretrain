@@ -27,7 +27,6 @@ training:
   gradient_accumulation_steps: 2
   max_steps: 75000
   mixed_precision: bf16
-  activation_checkpointing: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/warmup/qwen3_57m_warmup0.001/
   checkpoint_every: 5000

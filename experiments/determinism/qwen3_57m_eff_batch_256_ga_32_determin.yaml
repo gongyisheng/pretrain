@@ -27,7 +27,6 @@ training:
   gradient_accumulation_steps: 32
   max_steps: 50000
   mixed_precision: bf16
-  activation_checkpointing: false
   use_deterministic_algo: true
   seed: 42
   grad_clip: 1.0

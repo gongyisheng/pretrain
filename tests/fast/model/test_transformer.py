@@ -153,7 +153,6 @@ def test_qwen3_style_forward_no_aux(impl, device):
 def test_moe_forward_returns_aux(impl, device):
     skip_if_unsupported(impl, device)
     model = build_model(_moe_cfg(impl))
-    assert model.is_moe
     x = torch.randint(0, 256, (2, 8))
     pos = _pos(2, 8)
     attn_mask, _ = make_attn_mask("causal", impl, pos, torch.float32)

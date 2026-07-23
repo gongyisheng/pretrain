@@ -133,7 +133,6 @@ def run_benchmark(
         "seq_len": config.max_seq_len,
         "tokens_per_step": trainer.metrics.tokens_per_step,
         "mixed_precision": config.training.mixed_precision,
-        "activation_checkpointing": config.training.activation_checkpointing,
         "warmup_steps": warmup,
         "measured_steps": steps,
         "elapsed_sec": round(elapsed, 2),
