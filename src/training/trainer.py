@@ -71,8 +71,7 @@ class Trainer:
             eot_id = self.tokenizer.token_to_id("<|endoftext|>")
             self.eot_token_id = eot_id if eot_id is not None else 0
         else:
-            self.eot_token_id = 0  # fallback for tests without a real tokenizer
-        # EOT doubles as the padding token (no dedicated pad token in the current tokenizer)
+            self.eot_token_id = 0
         self.pad_token_id = self.eot_token_id
 
         # Model
