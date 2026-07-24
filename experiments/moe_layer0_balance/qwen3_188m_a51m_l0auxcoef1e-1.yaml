@@ -18,9 +18,9 @@ model:
       n_routed_experts_per_token: 6
       n_shared_experts: 2
       dropout: 0.0
-      aux_loss: false
-      expert_bias: true
-      expert_bias_update_rate: 1e-2
+      aux_loss: true
+      aux_loss_coef: 1e-1
+      expert_bias: false
       router_score_fn: sigmoid
     layer_idx: [0]
   - mlp_cls: moe
@@ -51,7 +51,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_layer0_balance/qwen3_188m_a51m_l0rate1e-2/
+  checkpoint_dir: checkpoints/moe_layer0_balance/qwen3_188m_a51m_l0auxcoef1e-1/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -72,5 +72,5 @@ scheduler:
   min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-layer0-balance
-  wandb_run_name: qwen3-188m-a51m-l0rate1e-2
+  wandb_run_name: qwen3-188m-a51m-l0auxcoef1e-1
   log_every: 100
