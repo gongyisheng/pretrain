@@ -7,8 +7,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 dir=experiments/moe_granularity
 
-# (is E k) at fixed pool=12288, active=1536 (12.5% sparse); m = 1,2,4,8,16.
-triples=("1536 8 1" "768 16 2" "384 32 4" "192 64 8" "96 128 16")
+# (is E k) at fixed pool=12288, active=1536 (12.5% sparse); m = 1,2,4,8,16,32.
+triples=("1536 8 1" "768 16 2" "384 32 4" "192 64 8" "96 128 16" "48 256 32")
 
 configs=()
 for t in "${triples[@]}"; do
