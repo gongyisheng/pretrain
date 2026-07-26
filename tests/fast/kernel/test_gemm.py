@@ -86,3 +86,36 @@ def test_wgrad_parity_uneven_and_empty():
     got = grouped_mm_wgrad(a, grad_c, offs)
     assert got.shape == (len(counts), K, N)
     torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
+
+
+def test_grouped_mm_fwd_bwd_matches_torch():
+    from src.kernel.gemm import grouped_mm
+
+    torch.manual_seed(0)
+    counts = [64, 0, 130, 41]
+    R, K, N = sum(counts), 64, 48
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a0 = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
+
+    def run(fn):
+        a = a0.clone().requires_grad_(True)
+        wv = w.clone().requires_grad_(True)
+        c = fn(a, wv.mT, offs)
+        # Use an explicit contiguous upstream grad instead of c.sum().backward().
+        # d(sum(c))/dc is exactly ones_like(c), so this is mathematically identical,
+        # but c.sum().backward() hands SumBackward's lazily-expanded (zero-stride)
+        # grad straight to the op, and torch._grouped_mm's own CUDA backward on this
+        # torch/GPU build (2.10.0+cu128, RTX 5090) mishandles that zero-stride grad
+        # tensor and raises "Invalid strides/sizes" — a bug in the reference op
+        # itself, reproducible even with plain torch._grouped_mm and no triton
+        # involved. A materialized ones_like grad sidesteps it without changing what
+        # is being checked.
+        c.backward(torch.ones_like(c))
+        return c, a.grad, wv.grad
+
+    c_ref, ga_ref, gw_ref = run(lambda a, b, o: torch._grouped_mm(a, b, offs=o))
+    c_got, ga_got, gw_got = run(lambda a, b, o: grouped_mm(a, b, o))
+    torch.testing.assert_close(c_got.float(), c_ref.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(ga_got.float(), ga_ref.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(gw_got.float(), gw_ref.float(), rtol=2e-2, atol=2e-2)

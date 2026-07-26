@@ -4,7 +4,9 @@ Matches `torch._grouped_mm(a, b, offs=offs)` for the MoE 2D x 3D case:
   a (R, K) x per-group b (E, K, N) -> c (R, N), rows expert-sorted, `offs` the
   (E,) int32 cumulative END-offsets (offs[-1] == R). One persistent kernel walks
   the ragged tile space; `offs` is read on-device (no offs.cpu() sync). fp32
-  accumulation, bf16 in/out. Forward only — no autograd, no torch.compile wiring.
+  accumulation, bf16 in/out. `grouped_mm` is differentiable: dgrad reuses the
+  forward kernel (`grad_a = grouped_mm(grad_c, b.T, offs)`), wgrad uses the
+  dedicated wgrad kernel (`grad_b = grouped_mm_wgrad(a, grad_c, offs)`).
 """
 
 import functools
@@ -127,6 +129,50 @@ def _num_sms(device: torch.device | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
+@triton_op("pretrain::grouped_mm", mutates_args={})
+def grouped_mm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+    """Differentiable grouped GEMM matching torch._grouped_mm(a, b, offs=offs)."""
+    R, K = a.shape
+    N = b.shape[2]
+    c = torch.empty((R, N), device=a.device, dtype=a.dtype)
+    num_sms = _num_sms(a.device)
+    wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
+        a,
+        b,
+        c,
+        offs,
+        b.shape[0],
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        c.stride(0),
+        c.stride(1),
+        NUM_SMS=num_sms,
+    )
+    return c
+
+
+def _grouped_mm_setup_context(ctx, inputs, output):
+    a, b, offs = inputs
+    ctx.save_for_backward(a, b, offs)
+
+
+def _grouped_mm_backward(ctx, grad_c):
+    a, b, offs = ctx.saved_tensors
+    grad_a = grouped_mm(grad_c, b.transpose(-2, -1), offs)  # dgrad reuses forward
+    grad_b = grouped_mm_wgrad(a, grad_c, offs)  # wgrad
+    return grad_a, grad_b, None
+
+
+grouped_mm.register_autograd(
+    _grouped_mm_backward, setup_context=_grouped_mm_setup_context
+)
+
+
 def triton_grouped_mm(
     a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor
 ) -> torch.Tensor:
@@ -141,26 +187,7 @@ def triton_grouped_mm(
     assert K == K_b, f"K mismatch: a K={K}, b K={K_b}"
     assert offs.shape[0] == E, f"offs len {offs.shape[0]} != E {E}"
     assert offs.dtype == torch.int32
-    c = torch.empty((R, N), device=a.device, dtype=a.dtype)
-    num_sms = _num_sms(a.device)
-    _grouped_gemm_kernel[(num_sms,)](
-        a,
-        b,
-        c,
-        offs,
-        E,
-        N,
-        K,
-        a.stride(0),
-        a.stride(1),
-        b.stride(0),
-        b.stride(1),
-        b.stride(2),
-        c.stride(0),
-        c.stride(1),
-        NUM_SMS=num_sms,
-    )
-    return c
+    return grouped_mm(a, b, offs)
 
 
 @triton.autotune(configs=_CONFIGS, key=["N", "K"])
