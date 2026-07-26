@@ -13,11 +13,5 @@ def grouped_gemm_ref(a, b, offs):
 
 
 def grouped_gemm_wgrad_ref(a, grad_c, offs):
-    """Weight-grad reference: grad_b[g] = a[g].T @ grad_c[g], shape (E, K, N).
-
-    This is the 2D x 2D -> 3D grouped-mm layout where `offs` partitions the shared
-    (row) contraction dim, so it is exactly torch._grouped_mm(a.mT, grad_c, offs).
-    A plain forward call (no autograd), so the zero-stride-grad backward bug in
-    torch._grouped_mm does not apply here.
-    """
+    """Weight-grad reference: grad_b[g] = a[g].T @ grad_c[g], shape (E, K, N)."""
     return torch._grouped_mm(a.mT, grad_c, offs=offs)
