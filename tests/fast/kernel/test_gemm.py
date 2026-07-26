@@ -132,15 +132,15 @@ def test_dispatch_impl_selection_and_parity():
     b = w.mT
     ref = torch._grouped_mm(a, b, offs=offs)
     for impl in ("auto", "triton", "torch"):
-        got = gemm.grouped_mm_dispatch(a, b, offs, impl)
+        got = gemm.grouped_gemm(a, b, offs, impl)
         torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
     # torch path is exactly torch._grouped_mm
-    assert torch.equal(gemm.grouped_mm_dispatch(a, b, offs, "torch"), ref)
+    assert torch.equal(gemm.grouped_gemm(a, b, offs, "torch"), ref)
     # invalid impl rejected
     import pytest as _pytest
 
     with _pytest.raises((ValueError, AssertionError)):
-        gemm.grouped_mm_dispatch(a, b, offs, "nonsense")
+        gemm.grouped_gemm(a, b, offs, "nonsense")
 
 
 def test_dispatch_triton_rejects_non_bf16():
@@ -153,4 +153,4 @@ def test_dispatch_triton_rejects_non_bf16():
     w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32) * 0.1
     b = w.mT
     with pytest.raises(ValueError):
-        gemm.grouped_mm_dispatch(a, b, offs, "triton")
+        gemm.grouped_gemm(a, b, offs, "triton")

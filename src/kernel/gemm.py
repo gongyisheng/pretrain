@@ -65,22 +65,6 @@ def _num_sms(device: torch.device | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-@functools.lru_cache(maxsize=None)
-def _fused_grouped_mm_supported(major: int) -> bool:
-    # torch._grouped_mm uses its fused CUTLASS grouped kernel only on
-    # compute-capability major 9 (Hopper) / 10 (datacenter Blackwell); elsewhere
-    # it falls back to a per-group loop, which is where the Triton path wins.
-    return major in (9, 10)
-
-
-def _auto_uses_triton(a: torch.Tensor) -> bool:
-    if not (a.is_cuda and a.dtype == torch.bfloat16):
-        return False
-    return not _fused_grouped_mm_supported(
-        torch.cuda.get_device_capability(a.device)[0]
-    )
-
-
 def _check_grouped_mm_args(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor):
     """Shared precondition checks for the grouped-GEMM entry points."""
     assert a.ndim == 2 and b.ndim == 3 and offs.ndim == 1
@@ -320,10 +304,15 @@ def triton_grouped_mm(
     return grouped_mm(a, b, offs)
 
 
-def grouped_mm_dispatch(
+def grouped_gemm(
     a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor, impl: str = "auto"
 ) -> torch.Tensor:
     """Grouped GEMM with impl selection. impl: 'auto' | 'triton' | 'torch'.
+
+    'auto' uses the Triton kernel where torch._grouped_mm lacks its fused CUTLASS
+    grouped path — compute-capability major NOT in {9 (Hopper), 10 (datacenter
+    Blackwell)} — and bf16 CUDA inputs; otherwise torch's fused path. 'triton'
+    forces the Triton op (bf16 CUDA required); 'torch' forces torch._grouped_mm.
 
     Precondition (not asserted in the hot path to stay compile/sync-free): `offs`
     is int32 cumulative END-offsets with offs[-1] == a.shape[0].
@@ -337,8 +326,9 @@ def grouped_mm_dispatch(
         if not (a.is_cuda and a.dtype == torch.bfloat16):
             raise ValueError("grouped_mm_impl='triton' requires bf16 CUDA tensors")
         return grouped_mm(a, b, offs)
-    return (
-        grouped_mm(a, b, offs)
-        if _auto_uses_triton(a)
-        else torch._grouped_mm(a, b, offs=offs)
+    use_triton = (
+        a.is_cuda
+        and a.dtype == torch.bfloat16
+        and torch.cuda.get_device_capability(a.device)[0] not in (9, 10)
     )
+    return grouped_mm(a, b, offs) if use_triton else torch._grouped_mm(a, b, offs=offs)
