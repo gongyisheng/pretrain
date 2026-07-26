@@ -1079,39 +1079,6 @@ def test_all_configs_load_and_have_list_mlp():
         assert all(cfg.model.resolve_attn(i)[0] for i in range(cfg.model.n_layers))
 
 
-def test_moe_grouped_mm_impl_defaults_and_validates():
-    cfg = ModelConfig(
-        n_layers=1,
-        d_model=64,
-        vocab_size=128,
-        attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1}}],
-        mlp=[
-            {
-                "mlp_cls": "moe",
-                "mlp_kwargs": _moe_kwargs(intermediate_size=32),
-            }
-        ],
-    )
-    cls, kw = cfg.resolve_mlp(0)
-    assert kw["grouped_mm_impl"] == "auto"
-
-    with pytest.raises(ValueError):
-        ModelConfig(
-            n_layers=1,
-            d_model=64,
-            vocab_size=128,
-            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2, "n_kv_heads": 1}}],
-            mlp=[
-                {
-                    "mlp_cls": "moe",
-                    "mlp_kwargs": _moe_kwargs(
-                        intermediate_size=32, grouped_mm_impl="bogus"
-                    ),
-                }
-            ],
-        )
-
-
 def test_configs_model_key_order_d_model_n_layers_vocab_size_attn_mlp_first():
     for p in ("configs/gpt2_124m.yaml", "configs/qwen3_51m.yaml"):
         raw = yaml.safe_load(open(p))

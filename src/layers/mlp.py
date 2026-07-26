@@ -63,7 +63,6 @@ def grouped_mlp(
     row_expert_ids: torch.Tensor = None,
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
-    grouped_mm_impl: str = "auto",
 ) -> torch.Tensor:
     """Dropless MoE expert FFN over expert-sorted tokens via grouped GEMM.
 
@@ -71,15 +70,9 @@ def grouped_mlp(
     end-offsets (offs[-1] == R). Weights keep nn.Linear (E, out, in) layout; the
     transposed view w.mT is the (E, in, out) form the grouped GEMM expects.
     Empty groups (count 0) are handled by the grouped GEMM. Bias, when given,
-    is added per row using row_expert_ids.
-
-    The grouped GEMM is dispatched via `grouped_gemm(..., impl=grouped_mm_impl)`
-    (`src.kernel.gemm`): "auto" picks the Triton kernel or torch._grouped_mm
-    depending on device/dtype, "triton"/"torch" force one path. Eager supports
-    all dtypes; under torch.compile only bf16 is supported. Under autocast,
-    operands are cast to the autocast dtype (e.g. bf16) so the grouped GEMM
-    receives the expected dtype, mirroring what autocast does for ordinary
-    matmuls.
+    is added per row using row_expert_ids. Under autocast, operands are cast to
+    the autocast dtype (e.g. bf16) so the grouped GEMM receives the expected
+    dtype, mirroring what autocast does for ordinary matmuls.
     """
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
@@ -91,7 +84,7 @@ def grouped_mlp(
             b_in = b_in.to(dt)
         if b_down is not None:
             b_down = b_down.to(dt)
-    h = grouped_gemm(x, w_in.mT, offs, grouped_mm_impl)
+    h = grouped_gemm(x, w_in.mT, offs)
     if b_in is not None:
         h = h + b_in[row_expert_ids]
     if gated:
@@ -99,7 +92,7 @@ def grouped_mlp(
         h = act_fn(gate, up)
     else:
         h = act_fn(h)
-    out = grouped_gemm(h, w_down.mT, offs, grouped_mm_impl)
+    out = grouped_gemm(h, w_down.mT, offs)
     if b_down is not None:
         out = out + b_down[row_expert_ids]
     return out
@@ -365,7 +358,6 @@ class SparseMoEBlock(nn.Module):
         dropout: float = 0.0,
         latent_moe: bool = False,
         latent_dim: int | None = None,
-        grouped_mm_impl: str = "auto",
     ):
         super().__init__()
         if aux_loss and expert_bias:
@@ -385,7 +377,6 @@ class SparseMoEBlock(nn.Module):
         self.act_fn = registry[activation]
         self.latent_moe = latent_moe
         self.latent_dim = latent_dim
-        self.grouped_mm_impl = grouped_mm_impl
         expert_dim = latent_dim if latent_moe else d_model
         self.router = MoERouter(
             d_model,
@@ -491,7 +482,6 @@ class SparseMoEBlock(nn.Module):
             row_expert_ids=expert_ids_sorted if b_in is not None else None,
             b_in=b_in,
             b_down=self.expert_down_bias,
-            grouped_mm_impl=self.grouped_mm_impl,
         )
         expert_out = expert_out * weights_sorted
         expert_out = self.expert_dropout(expert_out)

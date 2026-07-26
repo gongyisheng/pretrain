@@ -11,7 +11,7 @@ import torch
 
 sys.path.insert(0, ".")
 
-from src.kernel.gemm import triton_grouped_mm
+from src.kernel.gemm import grouped_mm
 
 SEQ = 1024
 
@@ -70,10 +70,10 @@ def main():
             R = bs * SEQ * k
             a, b, offs = _make(E, R, K, N)
             ref = torch._grouped_mm(a, b, offs=offs)
-            got = triton_grouped_mm(a, b, offs)
+            got = grouped_mm(a, b, offs)
             _assert_parity(got, ref)
             t_torch = _time(lambda: torch._grouped_mm(a, b, offs=offs))
-            t_triton = _time(lambda: triton_grouped_mm(a, b, offs))
+            t_triton = _time(lambda: grouped_mm(a, b, offs))
             print(
                 f"{label:20s} {bs:>4d} {R // E:>9d} {t_torch:>9.3f} "
                 f"{t_triton:>10.3f} {t_torch / t_triton:>7.2f}x"

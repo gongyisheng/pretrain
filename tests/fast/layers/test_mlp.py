@@ -1292,7 +1292,7 @@ def test_sparse_moe_latent_flops_less_than_dense_moe():
 
 
 # ---------------------------------------------------------------------------
-# SparseMoEBlock — grouped_mm_impl integration (triton vs torch)
+# SparseMoEBlock — compiled auto-path smoke test
 # ---------------------------------------------------------------------------
 
 
@@ -1300,63 +1300,28 @@ def test_sparse_moe_latent_flops_less_than_dense_moe():
     not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
 )
 @pytest.mark.parametrize("gated", [True, False])
-def test_sparse_moe_triton_impl_matches_torch_fwd_bwd(gated):
+def test_sparse_moe_block_compiles_fullgraph(gated):
     torch.manual_seed(0)
-    d_model, inter, E, k = 64, 32, 4, 2
-
-    def build():
-        torch.manual_seed(1)
-        blk = (
-            SparseMoEBlock(
-                d_model=d_model,
-                intermediate_size=inter,
-                n_routed_experts=E,
-                n_routed_experts_per_token=k,
-                gated=gated,
-                activation="silu" if gated else "gelu",
-                router_score_fn="softmax",
-                aux_loss=False,
-                expert_bias=True,
-            )
-            .cuda()
-            .to(torch.bfloat16)
+    blk = (
+        SparseMoEBlock(
+            d_model=64,
+            intermediate_size=32,
+            n_routed_experts=4,
+            n_routed_experts_per_token=2,
+            gated=gated,
+            activation="silu" if gated else "gelu",
+            router_score_fn="softmax",
+            aux_loss=False,
+            expert_bias=True,
         )
-        # Routed expert weights are raw nn.Parameter(torch.empty(...)) with no
-        # reset_parameters call (see other parity tests in this file), so
-        # torch.manual_seed alone leaves them as uninitialized memory that can
-        # differ between the two build() calls below. Explicitly init them
-        # (deterministic given the manual_seed(1) + construction order above)
-        # so the "torch" and "triton" runs start from identical weights.
-        with torch.no_grad():
-            w1 = blk.expert_gate_up if gated else blk.expert_up
-            torch.nn.init.normal_(w1, std=0.02)
-            torch.nn.init.normal_(blk.expert_down, std=0.02)
-        return blk
-
-    x = torch.randn(2, 8, d_model, device="cuda", dtype=torch.bfloat16)
-
-    def run(impl):
-        blk = build()
-        blk.grouped_mm_impl = impl
-        xi = x.clone().requires_grad_(True)
-        out, _ = blk(xi)
-        # out.sum().backward() hands SumBackward's lazily-expanded (zero-stride)
-        # grad straight to the grouped GEMM; torch._grouped_mm's CUDA backward on
-        # this torch/GPU build mishandles that (see tests/fast/kernel/test_gemm.py
-        # test_grouped_mm_fwd_bwd_matches_torch for the same upstream issue).
-        # Materializing the sum grad in fp32 via out.float().sum() sidesteps it
-        # without changing what is being checked.
-        out.float().sum().backward()
-        grads = {
-            n: p.grad.clone() for n, p in blk.named_parameters() if p.grad is not None
-        }
-        return out, xi.grad, grads
-
-    o_t, gx_t, gp_t = run("torch")
-    o_k, gx_k, gp_k = run("triton")
-    torch.testing.assert_close(o_k.float(), o_t.float(), rtol=2e-2, atol=2e-2)
-    torch.testing.assert_close(gx_k.float(), gx_t.float(), rtol=2e-2, atol=2e-2)
-    for n in gp_t:
-        torch.testing.assert_close(
-            gp_k[n].float(), gp_t[n].float(), rtol=3e-2, atol=3e-2
-        )
+        .cuda()
+        .to(torch.bfloat16)
+    )
+    for p in blk.parameters():
+        if p.ndim >= 2:
+            torch.nn.init.normal_(p, std=0.02)
+    x = torch.randn(2, 8, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    compiled = torch.compile(blk, fullgraph=True)
+    out, _ = compiled(x)
+    out.float().sum().backward()
+    assert out.shape == x.shape and x.grad is not None

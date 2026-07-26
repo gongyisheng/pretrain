@@ -6,8 +6,8 @@ import torch
 
 
 def _ref_and_triton(counts, K, N, seed=0):
-    """Build (a, b=w.mT, offs) and return (torch._grouped_mm, triton_grouped_mm)."""
-    from src.kernel.gemm import triton_grouped_mm
+    """Build (a, b=w.mT, offs) and return (torch._grouped_mm, grouped_mm)."""
+    from src.kernel.gemm import grouped_mm
 
     torch.manual_seed(seed)
     E = len(counts)
@@ -19,7 +19,7 @@ def _ref_and_triton(counts, K, N, seed=0):
     b = w.mT  # (E, K, N), transposed view — non-contiguous
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     ref = torch._grouped_mm(a, b, offs=offs)
-    got = triton_grouped_mm(a, b, offs)
+    got = grouped_mm(a, b, offs)
     return ref, got
 
 
