@@ -363,11 +363,33 @@ def test_esd_alpha_recovers_synthetic_exponent():
     xmin = 1.0
     u = torch.rand(20000)
     eigs = xmin * (1.0 - u).pow(-1.0 / (true_alpha - 1.0))  # inverse-CDF sampling
-    assert metric_utils._esd_alpha(eigs) == pytest.approx(true_alpha, abs=0.15)
+    fitted = metric_utils._esd_alpha_batched(eigs.reshape(1, -1))[0].item()
+    assert fitted == pytest.approx(true_alpha, abs=0.15)
 
 
 def test_esd_alpha_too_few_eigs_is_nan():
-    assert math.isnan(metric_utils._esd_alpha(torch.tensor([1.0, 2.0, 3.0])))
+    alpha = metric_utils._esd_alpha_batched(torch.tensor([[1.0, 2.0, 3.0]]))[0]
+    assert math.isnan(alpha.item())
+
+
+def test_esd_alpha_batched_rows_independent():
+    """Rows are processed independently (no cross-row leakage), and a row with
+    fewer than four positive eigenvalues returns NaN."""
+    torch.manual_seed(0)
+    rows = [
+        torch.rand(64).pow(3),  # heavy-tailed
+        torch.rand(64),  # bulk
+        torch.tensor([0.0, 0.0, 5.0, 4.0, 3.0, 2.0] + [0.0] * 58),  # 4 positives
+        torch.tensor([0.0, 0.0, 7.0, 1.0] + [0.0] * 60),  # 2 positives → NaN
+        torch.zeros(64),  # all zero → NaN
+    ]
+    batched = metric_utils._esd_alpha_batched(torch.stack(rows))
+    assert not torch.isnan(batched[:3]).any()  # ≥4 positives → finite
+    assert torch.isnan(batched[3:]).all()  # <4 positives → NaN
+    # each row is identical run alone vs. in the batch (no cross-row contamination)
+    for i, row in enumerate(rows[:3]):
+        alone = metric_utils._esd_alpha_batched(row.reshape(1, -1))[0].item()
+        assert alone == pytest.approx(batched[i].item(), rel=1e-6, abs=1e-6)
 
 
 def test_svd_metrics_reports_esd_alpha():

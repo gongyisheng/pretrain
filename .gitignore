@@ -45,3 +45,6 @@ tmp/
 
 # dev folder
 experiments/moe_dev/
+
+# benchmark outputs
+benchmarks/results/
