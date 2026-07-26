@@ -3,29 +3,53 @@
 import pytest
 import torch
 
-from tests.fast.kernel._refs import _ref_and_triton, _wgrad_ref
+from tests.fast.kernel._refs import grouped_mm_ref, wgrad_ref
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Triton grouped GEMM is CUDA+bf16 only"
 )
 
 
+def _make(counts, K, N, seed=0):
+    """Build (a (R,K), b=w.mT (E,K,N) transposed view, offs (E,) int32) on CUDA/bf16."""
+    torch.manual_seed(seed)
+    E, R = len(counts), sum(counts)
+    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    b = (torch.randn(E, N, K, device="cuda", dtype=torch.bfloat16) * 0.1).mT
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    return a, b, offs
+
+
 def test_parity_balanced_groups():
-    ref, got = _ref_and_triton(counts=[128, 128, 128, 128], K=64, N=48)
+    from src.kernel.gemm import grouped_gemm
+
+    a, b, offs = _make([128, 128, 128, 128], K=64, N=48)
+    got = grouped_gemm(a, b, offs)
+    ref = grouped_mm_ref(a, b, offs)
     assert got.shape == ref.shape
     assert got.dtype == torch.bfloat16
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 
 def test_parity_empty_and_uneven_groups():
+    from src.kernel.gemm import grouped_gemm
+
     # includes an empty group (0 rows) and uneven sizes
-    ref, got = _ref_and_triton(counts=[5, 0, 130, 41, 1], K=64, N=48)
-    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+    a, b, offs = _make([5, 0, 130, 41, 1], K=64, N=48)
+    got = grouped_gemm(a, b, offs)
+    torch.testing.assert_close(
+        got.float(), grouped_mm_ref(a, b, offs).float(), rtol=2e-2, atol=2e-2
+    )
 
 
 def test_parity_single_group():
-    ref, got = _ref_and_triton(counts=[200], K=192, N=64)
-    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+    from src.kernel.gemm import grouped_gemm
+
+    a, b, offs = _make([200], K=192, N=64)
+    got = grouped_gemm(a, b, offs)
+    torch.testing.assert_close(
+        got.float(), grouped_mm_ref(a, b, offs).float(), rtol=2e-2, atol=2e-2
+    )
 
 
 @pytest.mark.parametrize(
@@ -38,10 +62,15 @@ def test_parity_single_group():
     ],
 )
 def test_parity_config_shapes(K, N):
+    from src.kernel.gemm import grouped_gemm
+
     # skewed load across 16 experts, summing to a realistic row count
     counts = [300, 5, 120, 0, 44, 210, 7, 90, 33, 150, 1, 260, 12, 80, 40, 400]
-    ref, got = _ref_and_triton(counts=counts, K=K, N=N, seed=1)
-    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+    a, b, offs = _make(counts, K=K, N=N, seed=1)
+    got = grouped_gemm(a, b, offs)
+    torch.testing.assert_close(
+        got.float(), grouped_mm_ref(a, b, offs).float(), rtol=2e-2, atol=2e-2
+    )
 
 
 def test_wgrad_parity_uneven_and_empty():
@@ -53,7 +82,7 @@ def test_wgrad_parity_uneven_and_empty():
     a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    ref = _wgrad_ref(a, grad_c, offs)
+    ref = wgrad_ref(a, grad_c, offs)
     got = grouped_mm_wgrad(a, grad_c, offs)
     assert got.shape == (len(counts), K, N)
     torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
@@ -77,7 +106,7 @@ def test_wgrad_parity_config_shapes(K, N):
     a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    ref = _wgrad_ref(a, grad_c, offs)
+    ref = wgrad_ref(a, grad_c, offs)
     got = grouped_mm_wgrad(a, grad_c, offs)
     torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
 
