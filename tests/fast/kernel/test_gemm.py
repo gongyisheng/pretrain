@@ -58,3 +58,31 @@ def test_parity_config_shapes(K, N):
     counts = [300, 5, 120, 0, 44, 210, 7, 90, 33, 150, 1, 260, 12, 80, 40, 400]
     ref, got = _ref_and_triton(counts=counts, K=K, N=N, seed=1)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+
+
+def _wgrad_ref(a, grad_c, offs):
+    E = offs.shape[0]
+    K, N = a.shape[1], grad_c.shape[1]
+    out = torch.zeros(E, K, N, device=a.device, dtype=torch.float32)
+    start = 0
+    for g in range(E):
+        end = int(offs[g])
+        if end > start:
+            out[g] = a[start:end].float().T @ grad_c[start:end].float()
+        start = end
+    return out
+
+
+def test_wgrad_parity_uneven_and_empty():
+    from src.kernel.gemm import grouped_mm_wgrad
+
+    torch.manual_seed(0)
+    counts = [5, 0, 130, 41, 1]
+    R, K, N = sum(counts), 64, 48
+    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16)
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    ref = _wgrad_ref(a, grad_c, offs)
+    got = grouped_mm_wgrad(a, grad_c, offs)
+    assert got.shape == (len(counts), K, N)
+    torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)

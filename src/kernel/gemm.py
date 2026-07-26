@@ -7,9 +7,12 @@ Matches `torch._grouped_mm(a, b, offs=offs)` for the MoE 2D x 3D case:
   accumulation, bf16 in/out. Forward only — no autograd, no torch.compile wiring.
 """
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
+from torch._library.triton import triton_op, wrap_triton
 
 # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) autotune candidates.
 # autotune keys on (N, K) and picks the best candidate per shape. The set below
@@ -119,14 +122,9 @@ def _grouped_gemm_kernel(
         m_start = m_end
 
 
-_NUM_SMS = None
-
-
-def _num_sms() -> int:
-    global _NUM_SMS
-    if _NUM_SMS is None:
-        _NUM_SMS = torch.cuda.get_device_properties(0).multi_processor_count
-    return _NUM_SMS
+@functools.lru_cache(maxsize=None)
+def _num_sms(device: torch.device | None = None) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count
 
 
 def triton_grouped_mm(
@@ -144,7 +142,7 @@ def triton_grouped_mm(
     assert offs.shape[0] == E, f"offs len {offs.shape[0]} != E {E}"
     assert offs.dtype == torch.int32
     c = torch.empty((R, N), device=a.device, dtype=a.dtype)
-    num_sms = _num_sms()
+    num_sms = _num_sms(a.device)
     _grouped_gemm_kernel[(num_sms,)](
         a,
         b,
@@ -163,3 +161,98 @@ def triton_grouped_mm(
         NUM_SMS=num_sms,
     )
     return c
+
+
+@triton.autotune(configs=_CONFIGS, key=["N", "K"])
+@triton.jit
+def _grouped_gemm_wgrad_kernel(
+    a_ptr,
+    gc_ptr,
+    gb_ptr,
+    offs_ptr,
+    E,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_gm,
+    stride_gn,
+    stride_ge,
+    stride_gk,
+    stride_gn2,
+    NUM_SMS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_k_tiles = tl.cdiv(K, BLOCK_K)
+    num_n_tiles = tl.cdiv(N, BLOCK_N)
+    tiles_per_group = num_k_tiles * num_n_tiles
+    total_tiles = E * tiles_per_group
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        g = tile_id // tiles_per_group
+        local = tile_id % tiles_per_group
+        tile_k = local // num_n_tiles
+        tile_n = local % num_n_tiles
+        # group g owns rows [m_start, m_end); offs are END-offsets, so prev end is
+        # the start. mask the g-1 load so g==0 does not read out of bounds.
+        m_start = tl.load(offs_ptr + g - 1, mask=g > 0, other=0)
+        m_end = tl.load(offs_ptr + g)
+        offs_k = tile_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        k_mask = offs_k < K
+        n_mask = offs_n < N
+        acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
+        m = m_start
+        while m < m_end:
+            offs_m = m + tl.arange(0, BLOCK_M)
+            m_mask = offs_m < m_end
+            # load A as (BLOCK_K, BLOCK_M) so tl.dot contracts over M
+            a_ptrs = a_ptr + offs_k[:, None] * stride_ak + offs_m[None, :] * stride_am
+            gc_ptrs = gc_ptr + offs_m[:, None] * stride_gm + offs_n[None, :] * stride_gn
+            a = tl.load(a_ptrs, mask=k_mask[:, None] & m_mask[None, :], other=0.0)
+            gc = tl.load(gc_ptrs, mask=m_mask[:, None] & n_mask[None, :], other=0.0)
+            acc += tl.dot(a, gc)  # (BLOCK_K, BLOCK_M) @ (BLOCK_M, BLOCK_N)
+            m += BLOCK_M
+        gb_ptrs = (
+            gb_ptr
+            + g * stride_ge
+            + offs_k[:, None] * stride_gk
+            + offs_n[None, :] * stride_gn2
+        )
+        tl.store(
+            gb_ptrs,
+            acc.to(gb_ptr.dtype.element_ty),
+            mask=k_mask[:, None] & n_mask[None, :],
+        )
+
+
+@triton_op("pretrain::grouped_mm_wgrad", mutates_args={})
+def grouped_mm_wgrad(
+    a: torch.Tensor, grad_c: torch.Tensor, offs: torch.Tensor
+) -> torch.Tensor:
+    """Weight gradient of grouped_mm: grad_b[g] = a[g].T @ grad_c[g], shape (E,K,N)."""
+    R, K = a.shape
+    N = grad_c.shape[1]
+    E = offs.shape[0]
+    grad_b = torch.empty((E, K, N), device=a.device, dtype=a.dtype)
+    num_sms = _num_sms(a.device)
+    wrap_triton(_grouped_gemm_wgrad_kernel)[(num_sms,)](
+        a,
+        grad_c,
+        grad_b,
+        offs,
+        E,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        grad_c.stride(0),
+        grad_c.stride(1),
+        grad_b.stride(0),
+        grad_b.stride(1),
+        grad_b.stride(2),
+        NUM_SMS=num_sms,
+    )
+    return grad_b
