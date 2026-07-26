@@ -283,3 +283,44 @@ def grouped_mm_wgrad(
         NUM_SMS=num_sms,
     )
     return grad_b
+
+
+@functools.lru_cache(maxsize=None)
+def _fused_grouped_mm_supported(major: int) -> bool:
+    # torch._grouped_mm uses its fused CUTLASS grouped kernel only on
+    # compute-capability major 9 (Hopper) / 10 (datacenter Blackwell); elsewhere
+    # it falls back to a per-group loop, which is where the Triton path wins.
+    return major in (9, 10)
+
+
+def _auto_uses_triton(a: torch.Tensor) -> bool:
+    if not (a.is_cuda and a.dtype == torch.bfloat16):
+        return False
+    return not _fused_grouped_mm_supported(
+        torch.cuda.get_device_capability(a.device)[0]
+    )
+
+
+def grouped_mm_dispatch(
+    a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor, impl: str = "auto"
+) -> torch.Tensor:
+    """Grouped GEMM with impl selection. impl: 'auto' | 'triton' | 'torch'.
+
+    Precondition (not asserted in the hot path to stay compile/sync-free): `offs`
+    is int32 cumulative END-offsets with offs[-1] == a.shape[0].
+    """
+    if impl not in ("auto", "triton", "torch"):
+        raise ValueError(f"grouped_mm_impl must be auto|triton|torch, got {impl!r}")
+    assert a.dtype == b.dtype, f"dtype mismatch: a {a.dtype}, b {b.dtype}"
+    assert a.device == b.device == offs.device, "a, b, offs must share a device"
+    if impl == "torch":
+        return torch._grouped_mm(a, b, offs=offs)
+    if impl == "triton":
+        if not (a.is_cuda and a.dtype == torch.bfloat16):
+            raise ValueError("grouped_mm_impl='triton' requires bf16 CUDA tensors")
+        return grouped_mm(a, b, offs)
+    return (
+        grouped_mm(a, b, offs)
+        if _auto_uses_triton(a)
+        else torch._grouped_mm(a, b, offs=offs)
+    )

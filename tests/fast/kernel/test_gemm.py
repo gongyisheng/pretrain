@@ -147,3 +147,26 @@ def test_grouped_mm_compiles_fullgraph_and_matches_eager():
     comp = run(compiled_fn)
     for e, c in zip(eager, comp):
         torch.testing.assert_close(c.float(), e.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_dispatch_impl_selection_and_parity():
+    from src.kernel import gemm
+
+    torch.manual_seed(0)
+    counts = [64, 0, 130, 41]
+    R, K, N = sum(counts), 64, 48
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
+    b = w.mT
+    ref = torch._grouped_mm(a, b, offs=offs)
+    for impl in ("auto", "triton", "torch"):
+        got = gemm.grouped_mm_dispatch(a, b, offs, impl)
+        torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+    # torch path is exactly torch._grouped_mm
+    assert torch.equal(gemm.grouped_mm_dispatch(a, b, offs, "torch"), ref)
+    # invalid impl rejected
+    import pytest as _pytest
+
+    with _pytest.raises((ValueError, AssertionError)):
+        gemm.grouped_mm_dispatch(a, b, offs, "nonsense")
