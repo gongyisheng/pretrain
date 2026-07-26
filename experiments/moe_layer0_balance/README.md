@@ -13,6 +13,10 @@ bias/aux-loss dynamics. Two remedies:
   match the MoE layers' active FFN width. No routing happens at layer 0 at
   all, so there's nothing to imbalance — trades this layer's conditional
   compute (a routing decision) for unconditional compute of the same size.
+  A variant (`l0mlplr0.5`) additionally trains only the layer-0 dense MLP at
+  half LR (5e-4 vs. the 1e-3 base, via `lr_mult`), since that block processes
+  the least-differentiated, embedding-like states — testing whether a gentler
+  layer-0 update helps loss or downstream MoE balance.
 - **l0 aux loss** (`l0auxcoef*`): keep layer 0 as MoE but switch it from
   loss-free `expert_bias` to Switch-style auxiliary load-balancing loss
   (`aux_loss`), while layers 1-7 stay on loss-free `expert_bias` at 1e-3.
@@ -53,6 +57,7 @@ MLP uses `intermediate_size: 1536, activation: silu, gated: true` to match it
 |--------|---------|------------|--------------------|--------------|----------------|
 | `qwen3_188m_a51m` (baseline) | MoE | MoE | expert_bias 1e-3 | 188.03M | 51.19M |
 | `qwen3_171m_a51m_l0dense` | Dense SwiGLU (is=1536) | MoE | n/a (dense) | 170.89M | 51.16M |
+| `qwen3_171m_a51m_l0dense_l0mlplr0.5` | Dense SwiGLU (is=1536), LR ×0.5 | MoE | n/a (dense) | 170.89M | 51.16M |
 | `qwen3_188m_a51m_l0auxcoef1e-2` | MoE | MoE | aux_loss 1e-2 | 188.03M | 51.19M |
 | `qwen3_188m_a51m_l0auxcoef1e-1` | MoE | MoE | aux_loss 1e-1 | 188.03M | 51.19M |
 
@@ -90,6 +95,7 @@ uv run python scripts/train.py --config experiments/moe_layer0_balance/qwen3_188
 |-----|----------|--------------------------|-------|
 | `qwen3_188m_a51m` (baseline) | | | |
 | `qwen3_171m_a51m_l0dense` | | | |
+| `qwen3_171m_a51m_l0dense_l0mlplr0.5` | | | |
 | `qwen3_188m_a51m_l0auxcoef1e-2` | | | |
 | `qwen3_188m_a51m_l0auxcoef1e-1` | | | |
 
@@ -104,6 +110,11 @@ uv run python scripts/train.py --config experiments/moe_layer0_balance/qwen3_188
   is by construction 0 there; compare its layers 1-7 MaxVio against the
   corresponding layers in the baseline to see whether removing layer-0 routing
   changes downstream balance.
+- `l0mlplr0.5` is the same architecture as `l0dense` (identical param counts) —
+  only the layer-0 dense MLP's LR differs (5e-4 vs. 1e-3, via
+  `optimizer.lr_mult: {blocks\.0\.mlp: 0.5}`). Compare it against `l0dense`
+  directly: does halving the layer-0 update rate change `val_loss` or the
+  layers 1-7 MaxVio? Like `l0dense`, layer 0 has no MoE metric.
 - Compare `val_loss` across all arms to see whether either remedy costs (or
   gains) quality relative to the baseline, since both trade off something:
   `l0dense` removes a routing decision (fixed compute, no adaptivity), the

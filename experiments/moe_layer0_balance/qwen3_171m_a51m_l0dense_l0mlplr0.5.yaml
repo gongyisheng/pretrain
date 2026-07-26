@@ -45,7 +45,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_layer0_balance/qwen3_171m_a51m_l0dense/
+  checkpoint_dir: checkpoints/moe_layer0_balance/qwen3_171m_a51m_l0dense_l0mlplr0.5/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -53,6 +53,8 @@ training:
 optimizer:
   name: muon
   lr: 1e-3
+  lr_mult:
+    blocks\.0\.mlp: 0.5
   weight_decay: 0.1
   betas:
   - 0.9
@@ -66,5 +68,5 @@ scheduler:
   min_lr: 1e-4
 logging:
   wandb_project: pretrain-moe-layer0-balance
-  wandb_run_name: qwen3-171m-a51m-l0dense
+  wandb_run_name: qwen3-171m-a51m-l0dense-l0mlplr0.5
   log_every: 100

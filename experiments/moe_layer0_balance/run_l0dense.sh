@@ -8,6 +8,7 @@ cd "$(dirname "$0")/../.."
 configs=(
     qwen3_188m_a51m
     qwen3_171m_a51m_l0dense
+    qwen3_171m_a51m_l0dense_l0mlplr0.5
 )
 
 for cfg in "${configs[@]}"; do
