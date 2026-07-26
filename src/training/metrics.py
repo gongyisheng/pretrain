@@ -1,3 +1,4 @@
+import statistics
 import time
 
 import torch
@@ -24,11 +25,10 @@ class MetricsTracker:
         self.is_moe = config.model.is_moe
         if self.is_moe:
             model = config.model
-            moe_kwargs = [
-                model.resolve_mlp(i)[1]
-                for i in range(model.n_layers)
-                if model.resolve_mlp(i)[0] == "moe"
+            self._moe_layer_indices = [
+                i for i in range(model.n_layers) if model.resolve_mlp(i)[0] == "moe"
             ]
+            moe_kwargs = [model.resolve_mlp(i)[1] for i in self._moe_layer_indices]
             self._aux_floor = sum(
                 kw["aux_loss_coef"] * kw["n_routed_experts_per_token"]
                 for kw in moe_kwargs
@@ -220,8 +220,10 @@ class MetricsTracker:
 
         if self.is_moe and self._moe_expert_load is not None:
             maxvio = metric_utils.compute_moe_maxvio(self._moe_expert_load)
-            for name, v in maxvio.items():
-                d[f"train-moe/maxvio_batch/{name}"] = v
+            for idx, v in zip(self._moe_layer_indices, maxvio):
+                d[f"train-moe/maxvio_batch/layer_{idx}"] = v
+            d["train-moe/maxvio_batch/mean"] = statistics.mean(maxvio)
+            d["train-moe/maxvio_batch/max"] = max(maxvio)
 
         if self.config.task == "pretrain":
             d["train/perplexity"] = metric_utils.compute_perplexity(loss)
@@ -360,10 +362,15 @@ class MetricsTracker:
 
         if self.is_moe and self._eval_moe_expert_load[0]:
             batch_load = [torch.stack(loads) for loads in self._eval_moe_expert_load]
-            for name, v in metric_utils.compute_moe_batch_maxvio(batch_load).items():
-                d[f"val-moe/maxvio_batch/{name}"] = v
-            for name, v in metric_utils.compute_moe_global_maxvio(batch_load).items():
-                d[f"val-moe/maxvio_global/{name}"] = v
+            batch = metric_utils.compute_moe_batch_maxvio(batch_load)
+            glob = metric_utils.compute_moe_global_maxvio(batch_load)
+            for idx, bv, gv in zip(self._moe_layer_indices, batch, glob):
+                d[f"val-moe/maxvio_batch/layer_{idx}"] = bv
+                d[f"val-moe/maxvio_global/layer_{idx}"] = gv
+            d["val-moe/maxvio_batch/mean"] = statistics.mean(batch)
+            d["val-moe/maxvio_batch/max"] = max(batch)
+            d["val-moe/maxvio_global/mean"] = statistics.mean(glob)
+            d["val-moe/maxvio_global/max"] = max(glob)
 
         self.logger.log(d, step=step)
         print(self._format_eval_msg(d, avg_loss))

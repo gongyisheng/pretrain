@@ -817,10 +817,9 @@ def test_compute_maxvio_empty_load_is_zero():
     assert metric_utils.compute_maxvio(torch.zeros(4)) == 0.0
 
 
-def test_compute_moe_maxvio_aggregates_per_layer():
+def test_compute_moe_maxvio_per_layer_list():
+    # Returns a plain per-layer list in load order; labeling/aggregation is the
+    # caller's job (MetricsTracker, keyed by true model layer index).
     load = [torch.tensor([10, 0, 5, 5]), torch.tensor([5, 5, 5, 5])]  # maxvio 1.0, 0.0
     out = metric_utils.compute_moe_maxvio(load)
-    assert out["layer_0"] == pytest.approx(1.0)
-    assert out["layer_1"] == pytest.approx(0.0)
-    assert out["mean"] == pytest.approx(0.5)
-    assert out["max"] == pytest.approx(1.0)
+    assert out == [pytest.approx(1.0), pytest.approx(0.0)]

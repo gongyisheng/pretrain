@@ -49,38 +49,22 @@ def compute_maxvio(expert_counts: torch.Tensor) -> float:
     return ((counts.max() - mean) / mean).item()
 
 
-def aggregate_maxvio(per_layer: list[float]) -> dict[str, float]:
-    """Wrap per-layer MaxVio values into ``{"layer_{i}": v, "mean", "max"}``."""
-    out = {f"layer_{i}": v for i, v in enumerate(per_layer)}
-    out["mean"] = statistics.mean(per_layer)
-    out["max"] = max(per_layer)
-    return out
+def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
+    """Per-layer MaxVio from accumulated expert load counts, in list order."""
+    return [compute_maxvio(c) for c in load_per_layer]
 
 
-def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
-    """Per-layer and aggregate MaxVio from accumulated expert load counts.
-
-    Returns ``{"layer_{i}": v, ..., "mean": ..., "max": ...}``.
-    """
-    return aggregate_maxvio([compute_maxvio(c) for c in load_per_layer])
+def compute_moe_global_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
+    """Per-layer MaxVio of the batch-summed load from stacked ``[n_batch, E]`` counts."""
+    return [compute_maxvio(loads.sum(0)) for loads in load_per_layer]
 
 
-def compute_moe_global_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
-    """MaxVio of the load summed over batches, from stacked ``[n_batch, E]``
-    counts per layer, then aggregate.
-    """
-    return aggregate_maxvio([compute_maxvio(loads.sum(0)) for loads in load_per_layer])
-
-
-def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> dict[str, float]:
-    """Mean per-batch MaxVio from stacked ``[n_batch, E]`` counts per layer,
-    then aggregate.
-    """
-    per_layer = [
+def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
+    """Per-layer mean per-batch MaxVio from stacked ``[n_batch, E]`` counts."""
+    return [
         statistics.mean([compute_maxvio(row) for row in loads])
         for loads in load_per_layer
     ]
-    return aggregate_maxvio(per_layer)
 
 
 # ---------------------------------------------------------------------------
