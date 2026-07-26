@@ -59,6 +59,29 @@ def test_wgrad_parity_uneven_and_empty():
     torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (64, 384),  # e512_k48 gate_up
+        (192, 64),  # e512_k48 down
+        (512, 384),  # e64_k6 gate_up
+        (192, 512),  # e64_k6 down
+    ],
+)
+def test_wgrad_parity_config_shapes(K, N):
+    from src.kernel.gemm import grouped_mm_wgrad
+
+    torch.manual_seed(1)
+    counts = [300, 5, 120, 0, 44, 210, 7, 90, 33, 150, 1, 260, 12, 80, 40, 400]
+    R = sum(counts)
+    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16)
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    ref = _wgrad_ref(a, grad_c, offs)
+    got = grouped_mm_wgrad(a, grad_c, offs)
+    torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
+
+
 def test_grouped_mm_fwd_bwd_matches_torch():
     from src.kernel.gemm import grouped_mm
 
@@ -159,6 +182,36 @@ def test_grouped_gemm_auto_compiles_fullgraph():
         torch._grouped_mm(a, w.mT, offs=offs).float(),
         rtol=2e-2,
         atol=2e-2,
+    )
+
+
+def test_grouped_gemm_auto_selects_triton_on_this_arch():
+    from src.kernel import gemm
+
+    major = torch.cuda.get_device_capability()[0]
+    if major in (9, 10):
+        pytest.skip("fused torch path available; auto uses torch here")
+    counts = [64, 0, 130, 41]
+    R, K, N = sum(counts), 64, 48
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    b = (torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1).mT
+    # auto must take the Triton path here → bitwise-identical to forcing triton,
+    # and (almost certainly) NOT bitwise-equal to the torch fallback.
+    auto = gemm.grouped_gemm(a, b, offs, "auto")
+    assert torch.equal(auto, gemm.grouped_gemm(a, b, offs, "triton"))
+
+
+def test_grouped_gemm_auto_uses_torch_for_non_bf16():
+    from src.kernel import gemm
+
+    counts = [64, 130]
+    R, K, N = sum(counts), 64, 48
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a = torch.randn(R, K, device="cuda", dtype=torch.float32)
+    b = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32).mT
+    assert torch.equal(
+        gemm.grouped_gemm(a, b, offs, "auto"), torch._grouped_mm(a, b, offs=offs)
     )
 
 

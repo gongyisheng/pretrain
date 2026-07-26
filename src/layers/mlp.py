@@ -468,6 +468,8 @@ class SparseMoEBlock(nn.Module):
         weights_sorted = weights[order]
         expert_counts = torch.bincount(expert_ids_sorted, minlength=E)
         self.expert_load.record_load(expert_counts.detach(), self.training)
+        # offs[-1] == R (all rows counted exactly once across experts) — the
+        # precondition grouped_gemm relies on; rows past offs[-1] would be uninitialized.
         offs = expert_counts.cumsum(0).to(torch.int32)
         x_sorted = tokens[token_ids_sorted]
 

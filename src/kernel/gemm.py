@@ -256,6 +256,9 @@ def grouped_mm_wgrad(
     a: torch.Tensor, grad_c: torch.Tensor, offs: torch.Tensor
 ) -> torch.Tensor:
     """Weight gradient of grouped_mm: grad_b[g] = a[g].T @ grad_c[g], shape (E,K,N)."""
+    assert a.dtype == grad_c.dtype, (
+        f"dtype mismatch: a {a.dtype}, grad_c {grad_c.dtype}"
+    )
     R, K = a.shape
     N = grad_c.shape[1]
     E = offs.shape[0]
