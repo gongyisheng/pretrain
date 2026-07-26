@@ -37,6 +37,17 @@ def _make(E, R, K, N):
     return a, b, offs
 
 
+def _assert_parity(got, ref, chunk=500_000):
+    # row-independent output → chunked compare bounds peak fp32/isclose memory
+    for i in range(0, got.shape[0], chunk):
+        torch.testing.assert_close(
+            got[i : i + chunk].float(),
+            ref[i : i + chunk].float(),
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+
 def _time(fn, iters=50):
     for _ in range(10):
         fn()
@@ -60,7 +71,7 @@ def main():
             a, b, offs = _make(E, R, K, N)
             ref = torch._grouped_mm(a, b, offs=offs)
             got = triton_grouped_mm(a, b, offs)
-            torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+            _assert_parity(got, ref)
             t_torch = _time(lambda: torch._grouped_mm(a, b, offs=offs))
             t_triton = _time(lambda: triton_grouped_mm(a, b, offs))
             print(
