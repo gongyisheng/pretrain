@@ -203,6 +203,11 @@ class ModelConfig:
                         f"latent_dim must be a positive int when latent_moe=True; "
                         f"got {latent_dim!r}"
                     )
+            kwargs.setdefault("grouped_mm_impl", "auto")
+            if kwargs["grouped_mm_impl"] not in ("auto", "triton", "torch"):
+                raise ValueError(
+                    f"grouped_mm_impl must be auto|triton|torch, got {kwargs['grouped_mm_impl']!r}"
+                )
 
     def _post_init_mlp(self) -> None:
         if not self.mlp:

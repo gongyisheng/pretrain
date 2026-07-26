@@ -143,6 +143,25 @@ def test_dispatch_impl_selection_and_parity():
         gemm.grouped_gemm(a, b, offs, "nonsense")
 
 
+def test_grouped_gemm_auto_compiles_fullgraph():
+    from src.kernel.gemm import grouped_gemm
+
+    torch.manual_seed(0)
+    counts = [64, 0, 130, 41]
+    R, K, N = sum(counts), 64, 48
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
+    fn = torch.compile(lambda a, b, o: grouped_gemm(a, b, o, "auto"), fullgraph=True)
+    out = fn(a, w.mT, offs)
+    torch.testing.assert_close(
+        out.float(),
+        torch._grouped_mm(a, w.mT, offs=offs).float(),
+        rtol=2e-2,
+        atol=2e-2,
+    )
+
+
 def test_dispatch_triton_rejects_non_bf16():
     from src.kernel import gemm
 
