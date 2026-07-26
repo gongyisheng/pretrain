@@ -46,6 +46,7 @@ Config filename = ckpt dir = W&B run name. `m` = split factor = `G = 1536/is`.
 | `qwen3_183m_a51m_is384_e32_k4`   |  4 |  384 |  32 |  4 | 183M | 51M |
 | `qwen3_183m_a51m_is192_e64_k8`   |  8 |  192 |  64 |  8 | 183M | 51M |
 | `qwen3_183m_a51m_is96_e128_k16`  | 16 |   96 | 128 | 16 | 183M | 51M |
+| `qwen3_183m_a51m_is48_e256_k32`  | 32 |   48 | 256 | 32 | 183M | 51M |
 
 Training (all runs): batch 64 × grad-accum 4 × seq 1024 ≈ 0.26M tokens/step, `max_steps`
 50000 (~13B tokens), cosine LR 1e-3 → 1e-4, warmup 1500, bf16.
@@ -71,13 +72,14 @@ W&B project: `pretrain-moe-granularity`.
 | `qwen3_183m_a51m_is384_e32_k4`   |  4 |  384 |  32 |  4 | |
 | `qwen3_183m_a51m_is192_e64_k8`   |  8 |  192 |  64 |  8 | |
 | `qwen3_183m_a51m_is96_e128_k16`  | 16 |   96 | 128 | 16 | |
+| `qwen3_183m_a51m_is48_e256_k32`  | 32 |   48 | 256 | 32 | |
 
 ## Notes
 
 - Total params (183M) and active params (51M) are constant across the MoE sweep by
   construction; the only knob is `m`. So any val-loss trend is a pure granularity effect.
 - The coarse end (`is=1536, E=8, k=1`) is top-1 routing (Switch-style); the fine end
-  (`is=96, E=128, k=16`) routes to 16 of 128. Sparsity (12.5%) is held fixed throughout.
+  (`is=48, E=256, k=32`) routes to 32 of 256. Sparsity (12.5%) is held fixed throughout.
 - Load balancing is aux-loss-free: a sigmoid router gate with per-expert bias updated at
   rate 1e-3 (arXiv:2408.15664), so val loss reflects only the LM objective, not an
   auxiliary balancing term.

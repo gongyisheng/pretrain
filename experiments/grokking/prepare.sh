@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# Idempotent data prep for grokking experiments.
-#
-# Builds the shared tokenizer (if missing) and generates + tokenizes
-# per-op data (if missing). Safe to invoke from any grokking run script.
-#
-# Usage:
-#   # prep all 4 ops (add sub mul div) — the run_weight_decay.sh sweep
-#   bash experiments/grokking/prepare.sh
-#
-#   # prep one or more ops — what run_{adamw_eps,loss,spike}.sh need
-#   bash experiments/grokking/prepare.sh sub
-#   bash experiments/grokking/prepare.sh add sub
+# Idempotent data prep for grokking: builds the shared tokenizer and per-op data if missing.
+# Usage: bash experiments/grokking/prepare.sh [op ...]
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"

@@ -1,5 +1,6 @@
 """Tests for compute_loss with -100 ignore_index convention."""
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -10,6 +11,7 @@ from src.training.loss import (
     _mse_loss,
     _mse_loss_fp64,
     compute_loss,
+    compute_loss_chunked,
 )
 from src.utils.config import TrainingConfig
 
@@ -42,6 +44,77 @@ def test_compute_loss_all_minus_100_returns_nan_safe():
     loss = compute_loss(logits, labels)
     # PyTorch's cross_entropy with full ignore returns nan; documented behavior.
     assert torch.isnan(loss).item()
+
+
+# ============ compute_loss_chunked (memory-efficient eval equivalent) ============
+
+
+@pytest.mark.parametrize(
+    "loss_fn", ["cross_entropy", "cross_entropy_fp64", "mse", "mse_fp64"]
+)
+def test_compute_loss_chunked_matches_compute_loss(loss_fn):
+    """Chunked eval loss is numerically identical to compute_loss across variants.
+
+    A chunk size that does not divide B*S exercises the ragged final chunk.
+    """
+    torch.manual_seed(0)
+    logits = torch.randn(4, 32, 50)  # B*S = 128
+    labels = torch.randint(0, 50, (4, 32))
+    ref = compute_loss(logits, labels, loss_fn=loss_fn)
+    got = compute_loss_chunked(logits, labels, loss_fn=loss_fn, chunk_size=13)
+    assert torch.allclose(ref, got, atol=1e-6)
+
+
+def test_compute_loss_chunked_ignores_minus_100():
+    """Weighted-mean accumulation drops -100 positions, matching compute_loss."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 8, 20)
+    labels = torch.randint(0, 20, (2, 8))
+    labels[labels % 5 == 0] = -100
+    ref = compute_loss(logits, labels)
+    got = compute_loss_chunked(logits, labels, chunk_size=5)
+    assert torch.allclose(ref, got, atol=1e-6)
+
+
+def test_compute_loss_chunked_all_minus_100_returns_nan():
+    """All -100 → 0/0 → nan, matching compute_loss."""
+    logits = torch.randn(1, 4, 10)
+    labels = torch.full((1, 4), -100)
+    assert torch.isnan(compute_loss_chunked(logits, labels)).item()
+
+
+def test_compute_loss_chunked_ignored_chunk_does_not_poison_mean():
+    """A fully-ignored chunk contributes 0 weight, not NaN, to the global mean.
+
+    chunk_size=4 with the first 4 labels all -100 makes chunk 0 all-ignored
+    (its per-chunk mean is NaN); the result must still equal the loss over the
+    remaining valid positions.
+    """
+    torch.manual_seed(0)
+    logits = torch.randn(1, 8, 15)
+    labels = torch.randint(0, 15, (1, 8))
+    labels[0, :4] = -100
+    got = compute_loss_chunked(logits, labels, chunk_size=4)
+    expected = compute_loss(logits[:, 4:], labels[:, 4:])
+    assert not torch.isnan(got).item()
+    assert torch.allclose(got, expected, atol=1e-6)
+
+
+def test_compute_loss_chunked_single_chunk_matches():
+    """chunk_size >= B*S is one chunk and must match compute_loss exactly."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 4, 10)
+    labels = torch.randint(0, 10, (2, 4))
+    ref = compute_loss(logits, labels)
+    got = compute_loss_chunked(logits, labels, chunk_size=10_000)
+    assert torch.allclose(ref, got, atol=1e-6)
+
+
+def test_compute_loss_chunked_unknown_loss_fn_raises():
+    logits = torch.randn(1, 2, 10)
+    labels = torch.randint(0, 10, (1, 2))
+    with pytest.raises(ValueError, match="unknown loss_fn"):
+        compute_loss_chunked(logits, labels, loss_fn="nope")
 
 
 def test_loss_fn_default_is_fp32_ce():

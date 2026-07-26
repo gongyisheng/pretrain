@@ -1,8 +1,5 @@
 #!/bin/bash
-# Phase 1 — attention comparison: MLA vs GQA vs MHA on Qwen3 57M.
-# MLA uses the center config (nope=32, rope=32, v_head=64, kv_lora=512); its
-# per-head QK score dim (32+32=64) matches the MHA/GQA head_dim for a clean
-# apples-to-apples comparison. Each variant is its own standalone YAML.
+# Phase 1 — attention comparison: MLA (center config) vs GQA vs MHA on Qwen3 57M, QK score dim matched across all three.
 # Usage: nohup bash experiments/mla/run_compare_attn.sh > logs/mla_compare_attn.log 2>&1 &
 
 set -e

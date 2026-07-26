@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Shared-experts split sweep at fixed active capacity (s + k = 8 active experts,
-# active intermediate = 8*192 = 1536). Vary how the 8 active experts split between
-# always-on shared and top-k routed. Config filenames embed the (s, k) suffix.
+# Shared-experts split sweep at fixed active capacity (s + k = 8 active experts), varying how they split between shared and top-k routed.
 # Usage: nohup bash experiments/moe_shared_experts/run.sh > logs/moe_shared_experts.log 2>&1 &
 set -euo pipefail
 cd "$(dirname "$0")/../.."

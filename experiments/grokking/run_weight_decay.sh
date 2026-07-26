@@ -1,29 +1,6 @@
 #!/usr/bin/env bash
 # Run the full grokking weight-decay sweep: 4 ops × 3 weight-decay values = 12 runs.
-#
-# Configs live in experiments/grokking/weight_decay/.
-#
-# Idempotently prepares the tokenizer and per-op data (skips any stage whose
-# output already exists), then launches training.
-#
-# Usage:
-#   # full 12-config sweep, sequential (one run at a time)
-#   nohup bash experiments/grokking/run_weight_decay.sh > logs/grokking_wd.log 2>&1 &
-#
-#   # full sweep with 6 concurrent runs sharing the visible GPU
-#   MAX_CONCURRENCY=6 nohup bash experiments/grokking/run_weight_decay.sh > logs/grokking_wd.log 2>&1 &
-#
-#   # single config (op=add, wd=1.0); MAX_CONCURRENCY ignored here
-#   nohup bash experiments/grokking/run_weight_decay.sh add 1.0 > logs/grokking_wd.log 2>&1 &
-#
-#   # pin to cuda:1 by prefixing CUDA_VISIBLE_DEVICES
-#   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run_weight_decay.sh > logs/grokking_wd.log 2>&1 &
-#
-# MAX_CONCURRENCY (default 6) controls how many training runs execute in
-# parallel during the sweep. Each concurrent run gets its own per-config log
-# under logs/grokking/<op>_wd<wd>.log so output isn't interleaved. All runs
-# share whatever GPUs CUDA_VISIBLE_DEVICES exposes — for the 1M-param grokking
-# model this fits ~dozens of runs per GPU; bump cautiously.
+# Usage: nohup bash experiments/grokking/run_weight_decay.sh > logs/grokking_wd.log 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Fixed-tokens batch size sweep: ~13.1B tokens per run (8 * 32 * 1024 * 50000).
-# Each bs has its own max_steps so the total token budget stays constant.
+# Fixed-tokens batch size sweep: ~13.1B tokens per run, each bs with its own max_steps to hold the budget constant.
 # Usage: nohup bash experiments/batch_size/run_tokens_13b.sh > logs/batch_size_tokens_13b.log 2>&1 &
 
 set -e

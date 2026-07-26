@@ -1,8 +1,5 @@
 #!/bin/bash
-# Phase 3 — qk_nope:qk_rope split at fixed total head dim = 64 (v_head=64,
-# kv_lora=512 fixed). Tests how to divide the 64-dim QK budget between content
-# matching (nope) and decoupled position (rope). 32:32 = center (run in Phase 1),
-# so it is not repeated here.
+# Phase 3 — qk_nope:qk_rope split at fixed total head dim = 64 (v_head=64, kv_lora=512 fixed).
 # Usage: nohup bash experiments/mla/run_qk_nope_rope.sh > logs/mla_qk_nope_rope.log 2>&1 &
 
 set -e

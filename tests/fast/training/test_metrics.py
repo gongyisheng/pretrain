@@ -532,6 +532,43 @@ def _dense_first_moe_rest_cfg():
     )
 
 
+def test_moe_maxvio_labels_skip_dense_layer():
+    """Dense-first stack (layer 0 dense, layers 1-3 MoE): maxvio metrics must be
+    labeled by true model layer index. No `layer_0` should appear; the three MoE
+    layers are layer_1/layer_2/layer_3.
+    """
+    from src.utils.config import TrainConfig, TrainingConfig
+
+    model = _dense_first_moe_rest_cfg()
+    cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
+    cfg.task = "pretrain"
+    cfg.logging.log_every = 1
+    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    built = build_model(cfg)
+    opt = torch.optim.SGD(built.parameters(), lr=1e-3)
+
+    # --- train ---
+    tracker.train_begin()
+    _moe_on_step(tracker, built, opt, step=0)
+    dt = tracker.log_train(step=1, model=built, optimizer=opt)
+    train_keys = {k for k in dt if k.startswith("train-moe/maxvio_batch/")}
+    assert "train-moe/maxvio_batch/layer_0" not in train_keys
+    for i in (1, 2, 3):
+        assert f"train-moe/maxvio_batch/layer_{i}" in train_keys
+
+    # --- eval ---
+    built.eval()
+    tracker.eval_begin()
+    logits = torch.randn(1, 4, model.vocab_size)
+    labels = torch.randint(0, model.vocab_size, (1, 4))
+    tracker.on_eval_step(loss=2.0, logits=logits, labels=labels, model=built)
+    de = tracker.log_eval(step=1)
+    for variant in ("maxvio_global", "maxvio_batch"):
+        assert f"val-moe/{variant}/layer_0" not in de
+        for i in (1, 2, 3):
+            assert f"val-moe/{variant}/layer_{i}" in de
+
+
 def test_metrics_moe_facts_with_dense_first_layer():
     from src.utils.config import TrainConfig, TrainingConfig
 

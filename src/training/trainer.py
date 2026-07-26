@@ -19,7 +19,7 @@ from src.data.tokenizer import load_tokenizer
 from src.quant.convert import apply_quantization
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
-from src.training.loss import LOSS_REGISTRY, compute_loss
+from src.training.loss import LOSS_REGISTRY, compute_loss, compute_loss_chunked
 from src.utils.config import TrainConfig
 from src.utils.metric_utils import count_correct
 from src.utils.tracking_utils import WandbLogger
@@ -443,7 +443,9 @@ class Trainer:
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                loss = compute_loss(logits, labels, self.config.training.loss_fn)
+                loss = compute_loss_chunked(
+                    logits, labels, self.config.training.loss_fn
+                )
             self.metrics.on_eval_step(
                 loss=loss.item(),
                 logits=logits,
