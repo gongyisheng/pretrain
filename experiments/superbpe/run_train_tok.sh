@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Train the SuperBPE grid sweep: 134 configs (4 BPE baselines + 130 SuperBPE).
-# Smallest V first, BPE baseline before SuperBPE configs in each folder.
-# Each run streams to logs/superbpe/train/<name>.log.
-#
+# Train the SuperBPE grid sweep: 134 configs (4 BPE baselines + 130 SuperBPE), smallest V first.
 # Usage: nohup bash experiments/superbpe/run_train_tok.sh > logs/superbpe_train.log 2>&1 &
 
 set -euo pipefail

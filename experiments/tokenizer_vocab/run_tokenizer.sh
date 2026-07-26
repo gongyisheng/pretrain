@@ -1,6 +1,5 @@
 #!/bin/bash
-# Train tokenizers for all vocab sizes
-# (50k tokenizer already exists at tokenizers/custom_bpe_50k — only train others)
+# Train tokenizers for all vocab sizes (the 50k tokenizer already exists — only train others).
 # Usage: nohup bash experiments/tokenizer_vocab/run_tokenizer.sh > logs/tokenizer_vocab.log 2>&1 &
 
 set -e

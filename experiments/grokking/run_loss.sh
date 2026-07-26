@@ -1,25 +1,6 @@
 #!/usr/bin/env bash
-# Loss-function comparison sweep for grokking (sub, wd=0.1).
-#
-# Runs 4 configs side by side:
-#   ce, ce_fp64, mse, mse_fp64
-#
-# Configs live in experiments/grokking/loss/.
-#
-# Tokenizer and sub-task data are prepared on demand via prepare.sh (idempotent).
-#
-# Usage:
-#   # all 4 variants in parallel
-#   nohup bash experiments/grokking/run_loss.sh > logs/grokking_loss.log 2>&1 &
-#
-#   # single variant
-#   nohup bash experiments/grokking/run_loss.sh ce_fp64 > logs/grokking_loss.log 2>&1 &
-#
-#   # pin to a GPU
-#   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run_loss.sh > logs/grokking_loss.log 2>&1 &
-#
-# MAX_CONCURRENCY (default 4) controls parallelism. Each run gets its own
-# per-config log under logs/grokking/sub_wd0.1_<variant>.log.
+# Loss-function comparison sweep for grokking (sub, wd=0.1): ce, ce_fp64, mse, mse_fp64.
+# Usage: nohup bash experiments/grokking/run_loss.sh > logs/grokking_loss.log 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"

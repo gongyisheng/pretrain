@@ -1,29 +1,6 @@
 #!/usr/bin/env bash
-# AdamW eps ablation sweep for grokking (sub, wd=0.1).
-#
-# 12 runs: eps ∈ {1e-15, 1e-12, 1e-8, 1e-7, 1e-6, 1e-5} × loss ∈ {ce, ce_fp64}.
-#
-# Tests whether the fp64-loss benefit is direction-only (NFI fix, eps-agnostic)
-# or magnitude-dependent (eps must be small enough not to dominate sqrt(v)).
-# eps=1e-5 is the LLaMA-style trust-region setting; 1e-15 lets fp64-tiny grads
-# drive updates; 1e-8 is the textbook default.
-#
-# Configs live in experiments/grokking/adamw_eps/.
-#
-# Tokenizer and sub-task data are prepared on demand via prepare.sh (idempotent).
-#
-# Usage:
-#   # all 12 variants in parallel (respect MAX_CONCURRENCY)
-#   nohup bash experiments/grokking/run_adamw_eps.sh > logs/grokking_adamw_eps.log 2>&1 &
-#
-#   # single variant
-#   bash experiments/grokking/run_adamw_eps.sh ce_eps1e-5
-#
-#   # pin to a GPU
-#   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run_adamw_eps.sh > logs/grokking_adamw_eps.log 2>&1 &
-#
-# MAX_CONCURRENCY (default 6) controls parallelism. Each run gets its own
-# per-config log under logs/grokking/sub_wd0.1_<variant>.log.
+# AdamW eps ablation sweep for grokking (sub, wd=0.1): eps ∈ {1e-15,1e-12,1e-8,1e-7,1e-6,1e-5} × loss ∈ {ce, ce_fp64}.
+# Usage: nohup bash experiments/grokking/run_adamw_eps.sh > logs/grokking_adamw_eps.log 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"

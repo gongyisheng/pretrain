@@ -1,6 +1,5 @@
 #!/bin/bash
-# FP8 module-sensitivity ablation at Qwen3-77M (untied), Muon optimizer.
-# Add-one-in: bf16 baseline, then each module group quantized alone, then all.
+# FP8 module-sensitivity add-one-in ablation at Qwen3-77M (untied), Muon optimizer.
 # Usage: nohup bash experiments/fp8_module_sensitivity/run.sh > logs/fp8_module_sensitivity.log 2>&1 &
 
 set -e

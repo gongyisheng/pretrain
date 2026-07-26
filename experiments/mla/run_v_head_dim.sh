@@ -1,9 +1,5 @@
 #!/bin/bash
-# Phase 4 — v_head_dim sweep (nope=32, rope=32, kv_lora=512 fixed). Varies the
-# value/output head width. Note kv_lora=512 is held fixed, so larger v_head both
-# widens values AND raises the latent's reconstruction target 8*(32+v_head) —
-# at v_head=256 the latent compresses 4.5x, so this axis is not purely "value
-# capacity". 64 = center (run in Phase 1), so it is not repeated here.
+# Phase 4 — v_head_dim sweep (nope=32, rope=32, kv_lora=512 fixed), varying the value/output head width.
 # Usage: nohup bash experiments/mla/run_v_head_dim.sh > logs/mla_v_head_dim.log 2>&1 &
 
 set -e

@@ -1,6 +1,5 @@
 #!/bin/bash
-# MoE warmup-steps sweep, sigmoid router, aux-loss 1e-3.
-# Model: qwen3_183m_a51m -> 64 routed, top-8, 0 shared.
+# MoE warmup-steps sweep on qwen3_183m_a51m (64 routed, top-8, 0 shared), sigmoid router, aux-loss 1e-3.
 # Usage: nohup bash experiments/moe_warmup/run_s0r8.sh > logs/moe_warmup_s0r8.log 2>&1 &
 
 set -e

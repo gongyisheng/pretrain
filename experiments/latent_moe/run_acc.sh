@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# LatentMoE run_acc (ℓ-MoE_acc, paper's recommended variant): reinvest into both the
-# routed pool AND active experts. α-matched diagonal from the E=64 base, N' = αN and
-# K' = αK (ℓ=256→E128/k12, ℓ=128→E256/k24, ℓ=64→E512/k48). Active params lifted back
-# to ≈ the benchmark. Load balancing aux-loss-free (expert_bias 1e-3); Muon lr 1e-3; 50k steps.
+# LatentMoE run_acc (ℓ-MoE_acc, paper's recommended variant): reinvest the α=d/ℓ savings into both the routed pool and active experts (N'=αN, K'=αK), aux-loss-free, Muon lr 1e-3, 50k steps.
 # Usage: nohup bash experiments/latent_moe/run_acc.sh > logs/latent_moe_acc.log 2>&1 &
 set -euo pipefail
 cd "$(dirname "$0")/../.."

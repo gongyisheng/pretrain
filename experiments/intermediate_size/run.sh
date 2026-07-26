@@ -1,6 +1,5 @@
 #!/bin/bash
-# Sweep FFN expansion ratio (intermediate_size / d_model) with Muon at fixed lr=5e-4.
-# 15 widths (mult 0.25 - 32, dense 128-step grid over 1024-2048)
+# Sweep FFN expansion ratio (intermediate_size / d_model) with Muon at fixed lr=5e-4 (15 widths, mult 0.25-32).
 # Usage: nohup bash experiments/intermediate_size/run.sh > logs/intermediate_size.log 2>&1 &
 
 set -e

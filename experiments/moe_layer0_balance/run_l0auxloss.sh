@@ -1,7 +1,5 @@
 #!/bin/bash
-# moe_layer0_balance / l0 aux-loss: switch layer 0 to Switch-style aux-loss
-# balancing (layers 1-7 stay on loss-free expert_bias at 1e-3), sweeping the
-# layer-0 aux_loss_coef.
+# moe_layer0_balance / l0 aux-loss: switch layer 0 to Switch-style aux-loss balancing (layers 1-7 stay loss-free), sweeping the layer-0 aux_loss_coef.
 # Usage: nohup bash experiments/moe_layer0_balance/run_l0auxloss.sh > logs/moe_layer0_balance_l0auxloss.log 2>&1 &
 set -e
 cd "$(dirname "$0")/../.."

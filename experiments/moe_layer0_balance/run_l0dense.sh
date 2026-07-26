@@ -1,6 +1,5 @@
 #!/bin/bash
-# moe_layer0_balance / l0dense: baseline vs. replacing layer-0 MoE with a
-# compute-matched dense SwiGLU MLP.
+# moe_layer0_balance / l0dense: baseline vs. replacing layer-0 MoE with a compute-matched dense SwiGLU MLP.
 # Usage: nohup bash experiments/moe_layer0_balance/run_l0dense.sh > logs/moe_layer0_balance_l0dense.log 2>&1 &
 set -e
 cd "$(dirname "$0")/../.."

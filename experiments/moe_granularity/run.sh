@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Expert-granularity sweep: split each expert into m finer ones while scaling k
-# by m, so the pool (E*is=12288) AND the active capacity (k*is=1536) both stay
-# fixed. Only granularity changes.
+# Expert-granularity sweep: split each expert into m finer ones while scaling k by m, holding pool and active capacity fixed.
 # Usage: nohup bash experiments/moe_granularity/run.sh > logs/moe_granularity.log 2>&1 &
 set -euo pipefail
 cd "$(dirname "$0")/../.."

@@ -1,38 +1,6 @@
 #!/usr/bin/env bash
-# Slingshot-spike ablation for grokking (sub task).
-#
-# Tests what eliminates the slingshot spikes observed in the wd>0 regime.
-# Two complementary hypotheses:
-#
-#   A) The spike is driven by fp32 CE precision collapse (Liu et al. 2025,
-#      arXiv:2605.06152). Use cross_entropy_fp64 to restore gradient direction.
-#   B) The spike is driven by AdamW's 1/sqrt(v) amplification when v collapses
-#      between memorization and wd-driven basin exit. Switch to Lion (no v,
-#      bounded sign-momentum step) to remove the amplification path.
-#
-# Variants:
-#   wd0.0_ce            - fp32 CE,  AdamW, wd=0   (paper's regime;   expected: spikes)
-#   wd0.0_ce_fp64       - fp64 CE,  AdamW, wd=0   (paper's fix;      expected: no spikes)
-#   wd0.1_ce_fp64       - fp64 CE,  AdamW, wd=0.1 (our regime;       observed: spikes)
-#   wd0.1_ce_fp64_lion  - fp64 CE,  Lion,  wd=0.1 (matched-wd to spike regime)
-#   wd0.3_ce_fp64_lion  - fp64 CE,  Lion,  wd=0.3 (matched effective decay: lr*wd ≈ AdamW baseline)
-#
-# Configs live in experiments/grokking/spike/.
-#
-# Tokenizer and sub-task data are prepared on demand via prepare.sh (idempotent).
-#
-# Usage:
-#   # all 3 variants in parallel
-#   nohup bash experiments/grokking/run_spike.sh > logs/grokking_spike.log 2>&1 &
-#
-#   # single variant
-#   nohup bash experiments/grokking/run_spike.sh wd0.0_ce_fp64 > logs/grokking_spike.log 2>&1 &
-#
-#   # pin to a GPU
-#   CUDA_VISIBLE_DEVICES=1 nohup bash experiments/grokking/run_spike.sh > logs/grokking_spike.log 2>&1 &
-#
-# MAX_CONCURRENCY (default 3) controls parallelism. Each run gets its own
-# per-config log under logs/grokking/spike_<variant>.log.
+# Slingshot-spike ablation for grokking (sub task): tests what eliminates the spikes in the wd>0 regime.
+# Usage: nohup bash experiments/grokking/run_spike.sh > logs/grokking_spike.log 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
