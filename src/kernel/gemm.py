@@ -16,6 +16,10 @@ import triton
 import triton.language as tl
 from torch._library.triton import triton_op, wrap_triton
 
+# ---------------------------------------------------------------------------
+# Config + helpers
+# ---------------------------------------------------------------------------
+
 # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) autotune candidates.
 # autotune keys on (N, K) and picks the best candidate per shape. The set below
 # targets the expert-GEMM shapes used by experiments/latent_moe/* (all d_model=512,
@@ -54,6 +58,42 @@ _CONFIGS = [
     )
     for (bm, bn, bk, w, s) in _CFG
 ]
+
+
+@functools.lru_cache(maxsize=None)
+def _num_sms(device: torch.device | None = None) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count
+
+
+@functools.lru_cache(maxsize=None)
+def _fused_grouped_mm_supported(major: int) -> bool:
+    # torch._grouped_mm uses its fused CUTLASS grouped kernel only on
+    # compute-capability major 9 (Hopper) / 10 (datacenter Blackwell); elsewhere
+    # it falls back to a per-group loop, which is where the Triton path wins.
+    return major in (9, 10)
+
+
+def _auto_uses_triton(a: torch.Tensor) -> bool:
+    if not (a.is_cuda and a.dtype == torch.bfloat16):
+        return False
+    return not _fused_grouped_mm_supported(
+        torch.cuda.get_device_capability(a.device)[0]
+    )
+
+
+def _check_grouped_mm_args(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor):
+    """Shared precondition checks for the grouped-GEMM entry points."""
+    assert a.ndim == 2 and b.ndim == 3 and offs.ndim == 1
+    assert a.shape[1] == b.shape[1], f"K mismatch: a K={a.shape[1]}, b K={b.shape[1]}"
+    assert offs.shape[0] == b.shape[0], f"offs len {offs.shape[0]} != E {b.shape[0]}"
+    assert offs.dtype == torch.int32
+    assert a.dtype == b.dtype, f"dtype mismatch: a {a.dtype}, b {b.dtype}"
+    assert a.device == b.device == offs.device, "a, b, offs must share a device"
+
+
+# ---------------------------------------------------------------------------
+# Triton kernels
+# ---------------------------------------------------------------------------
 
 
 @triton.autotune(configs=_CONFIGS, key=["N", "K"])
@@ -124,72 +164,6 @@ def _grouped_gemm_kernel(
         m_start = m_end
 
 
-@functools.lru_cache(maxsize=None)
-def _num_sms(device: torch.device | None = None) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count
-
-
-@triton_op("pretrain::grouped_mm", mutates_args={})
-def grouped_mm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
-    """Differentiable grouped GEMM matching torch._grouped_mm(a, b, offs=offs)."""
-    R, K = a.shape
-    N = b.shape[2]
-    c = torch.empty((R, N), device=a.device, dtype=a.dtype)
-    num_sms = _num_sms(a.device)
-    wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
-        a,
-        b,
-        c,
-        offs,
-        b.shape[0],
-        N,
-        K,
-        a.stride(0),
-        a.stride(1),
-        b.stride(0),
-        b.stride(1),
-        b.stride(2),
-        c.stride(0),
-        c.stride(1),
-        NUM_SMS=num_sms,
-    )
-    return c
-
-
-def _grouped_mm_setup_context(ctx, inputs, output):
-    a, b, offs = inputs
-    ctx.save_for_backward(a, b, offs)
-
-
-def _grouped_mm_backward(ctx, grad_c):
-    a, b, offs = ctx.saved_tensors
-    grad_a = grouped_mm(grad_c, b.transpose(-2, -1), offs)  # dgrad reuses forward
-    grad_b = grouped_mm_wgrad(a, grad_c, offs)  # wgrad
-    return grad_a, grad_b, None
-
-
-grouped_mm.register_autograd(
-    _grouped_mm_backward, setup_context=_grouped_mm_setup_context
-)
-
-
-def triton_grouped_mm(
-    a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor
-) -> torch.Tensor:
-    """Grouped GEMM matching torch._grouped_mm(a, b, offs=offs) (2D x 3D).
-
-    a: (R, K); b: (E, K, N) (may be a transposed/strided view); offs: (E,) int32
-    cumulative end-offsets on device. Returns (R, N) in a.dtype, fp32 accumulation.
-    """
-    assert a.ndim == 2 and b.ndim == 3 and offs.ndim == 1
-    R, K = a.shape
-    E, K_b, N = b.shape
-    assert K == K_b, f"K mismatch: a K={K}, b K={K_b}"
-    assert offs.shape[0] == E, f"offs len {offs.shape[0]} != E {E}"
-    assert offs.dtype == torch.int32
-    return grouped_mm(a, b, offs)
-
-
 @triton.autotune(configs=_CONFIGS, key=["N", "K"])
 @triton.jit
 def _grouped_gemm_wgrad_kernel(
@@ -255,6 +229,55 @@ def _grouped_gemm_wgrad_kernel(
         )
 
 
+# ---------------------------------------------------------------------------
+# Torch wrappers / ops
+# ---------------------------------------------------------------------------
+
+
+@triton_op("pretrain::grouped_mm", mutates_args={})
+def grouped_mm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+    """Differentiable grouped GEMM matching torch._grouped_mm(a, b, offs=offs)."""
+    R, K = a.shape
+    N = b.shape[2]
+    c = torch.empty((R, N), device=a.device, dtype=a.dtype)
+    num_sms = _num_sms(a.device)
+    wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
+        a,
+        b,
+        c,
+        offs,
+        b.shape[0],
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        c.stride(0),
+        c.stride(1),
+        NUM_SMS=num_sms,
+    )
+    return c
+
+
+def _grouped_mm_setup_context(ctx, inputs, output):
+    a, b, offs = inputs
+    ctx.save_for_backward(a, b, offs)
+
+
+def _grouped_mm_backward(ctx, grad_c):
+    a, b, offs = ctx.saved_tensors
+    grad_a = grouped_mm(grad_c, b.transpose(-2, -1), offs)  # dgrad reuses forward
+    grad_b = grouped_mm_wgrad(a, grad_c, offs)  # wgrad
+    return grad_a, grad_b, None
+
+
+grouped_mm.register_autograd(
+    _grouped_mm_backward, setup_context=_grouped_mm_setup_context
+)
+
+
 @triton_op("pretrain::grouped_mm_wgrad", mutates_args={})
 def grouped_mm_wgrad(
     a: torch.Tensor, grad_c: torch.Tensor, offs: torch.Tensor
@@ -285,20 +308,16 @@ def grouped_mm_wgrad(
     return grad_b
 
 
-@functools.lru_cache(maxsize=None)
-def _fused_grouped_mm_supported(major: int) -> bool:
-    # torch._grouped_mm uses its fused CUTLASS grouped kernel only on
-    # compute-capability major 9 (Hopper) / 10 (datacenter Blackwell); elsewhere
-    # it falls back to a per-group loop, which is where the Triton path wins.
-    return major in (9, 10)
+def triton_grouped_mm(
+    a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor
+) -> torch.Tensor:
+    """Grouped GEMM matching torch._grouped_mm(a, b, offs=offs) (2D x 3D).
 
-
-def _auto_uses_triton(a: torch.Tensor) -> bool:
-    if not (a.is_cuda and a.dtype == torch.bfloat16):
-        return False
-    return not _fused_grouped_mm_supported(
-        torch.cuda.get_device_capability(a.device)[0]
-    )
+    a: (R, K); b: (E, K, N) (may be a transposed/strided view); offs: (E,) int32
+    cumulative end-offsets on device. Returns (R, N) in a.dtype, fp32 accumulation.
+    """
+    _check_grouped_mm_args(a, b, offs)
+    return grouped_mm(a, b, offs)
 
 
 def grouped_mm_dispatch(
@@ -311,8 +330,7 @@ def grouped_mm_dispatch(
     """
     if impl not in ("auto", "triton", "torch"):
         raise ValueError(f"grouped_mm_impl must be auto|triton|torch, got {impl!r}")
-    assert a.dtype == b.dtype, f"dtype mismatch: a {a.dtype}, b {b.dtype}"
-    assert a.device == b.device == offs.device, "a, b, offs must share a device"
+    _check_grouped_mm_args(a, b, offs)
     if impl == "torch":
         return torch._grouped_mm(a, b, offs=offs)
     if impl == "triton":
