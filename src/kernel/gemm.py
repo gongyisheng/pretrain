@@ -11,20 +11,34 @@ import torch
 import triton
 import triton.language as tl
 
-# (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) — curated to cover K=64 and K=512.
+# (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) autotune candidates.
+# autotune keys on (N, K) and picks the best candidate per shape. The set below
+# targets the expert-GEMM shapes used by experiments/latent_moe/* (all d_model=512,
+# intermediate_size=192; latent_dim in {64,128,256} or non-latent d=512):
+#   gate_up:  K in {64,128,256,512}, N = 2*d_ff = 384
+#   down:     K = d_ff = 192,        N in {64,128,256,512}
+# So K in {64,128,192,256,512}, N in {64,128,256,384,512}. Small-N (down, N=64)
+# wants small BLOCK_N + tall BLOCK_M; large-N (gate_up, N=384) wants wide BLOCK_N.
+# BLOCK_K in {32,64} evenly divides every K here (192 = 6*32 = 3*64). Ragged small
+# groups keep BLOCK_M in {32,64,128}. Configs that exceed shared memory on this arch
+# are auto-pruned by Triton's autotuner.
 _CFG = [
-    (64, 64, 32, 4, 3),
-    (64, 64, 64, 4, 4),
-    (64, 128, 32, 4, 3),
-    (64, 128, 64, 8, 4),
-    (128, 64, 32, 4, 4),
-    (128, 64, 64, 8, 4),
-    (128, 128, 32, 8, 4),
-    (128, 128, 64, 8, 3),
-    (64, 256, 64, 8, 4),
-    (128, 256, 64, 8, 3),
+    # small N (down, N=64/128): narrow tiles, taller M
     (32, 64, 64, 4, 3),
     (64, 32, 32, 4, 3),
+    (64, 64, 32, 4, 3),
+    (64, 64, 64, 4, 4),
+    (128, 64, 32, 4, 4),
+    (128, 64, 64, 8, 4),
+    (32, 128, 64, 4, 3),
+    (64, 128, 32, 4, 3),
+    (64, 128, 64, 8, 4),
+    (128, 128, 32, 8, 4),
+    (128, 128, 64, 8, 3),
+    # wide N (gate_up N=384, down N=256/512): wide BLOCK_N
+    (64, 256, 32, 8, 3),
+    (64, 256, 64, 8, 4),
+    (128, 256, 64, 8, 3),
 ]
 
 _CONFIGS = [
