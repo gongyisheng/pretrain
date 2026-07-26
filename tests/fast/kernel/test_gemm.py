@@ -31,3 +31,30 @@ def test_parity_balanced_groups():
     assert got.shape == ref.shape
     assert got.dtype == torch.bfloat16
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_parity_empty_and_uneven_groups():
+    # includes an empty group (0 rows) and uneven sizes
+    ref, got = _ref_and_triton(counts=[5, 0, 130, 41, 1], K=64, N=48)
+    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_parity_single_group():
+    ref, got = _ref_and_triton(counts=[200], K=192, N=64)
+    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (64, 384),  # e512_k48 gate_up
+        (192, 64),  # e512_k48 down
+        (512, 384),  # e64_k6 gate_up
+        (192, 512),  # e64_k6 down
+    ],
+)
+def test_parity_config_shapes(K, N):
+    # skewed load across 16 experts, summing to a realistic row count
+    counts = [300, 5, 120, 0, 44, 210, 7, 90, 33, 150, 1, 260, 12, 80, 40, 400]
+    ref, got = _ref_and_triton(counts=counts, K=K, N=N, seed=1)
+    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
