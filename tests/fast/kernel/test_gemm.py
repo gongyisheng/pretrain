@@ -170,3 +170,16 @@ def test_dispatch_impl_selection_and_parity():
 
     with _pytest.raises((ValueError, AssertionError)):
         gemm.grouped_mm_dispatch(a, b, offs, "nonsense")
+
+
+def test_dispatch_triton_rejects_non_bf16():
+    from src.kernel import gemm
+
+    counts = [64, 130]
+    R, K, N = sum(counts), 64, 48
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a = torch.randn(R, K, device="cuda", dtype=torch.float32)  # not bf16
+    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32) * 0.1
+    b = w.mT
+    with pytest.raises(ValueError):
+        gemm.grouped_mm_dispatch(a, b, offs, "triton")
