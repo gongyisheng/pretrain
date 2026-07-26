@@ -1,7 +1,7 @@
 """Forward-only throughput: Triton grouped GEMM vs torch._grouped_mm.
 
 Covers both configs' expert GEMMs across batch sizes, with a parity assert before
-timing. Run: uv run python benchmarks/bench_grouped_gemm.py
+timing. Run: uv run python benchmarks/gemm/bench_grouped_gemm.py
 """
 
 import sys
