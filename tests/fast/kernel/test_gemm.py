@@ -119,3 +119,31 @@ def test_grouped_mm_fwd_bwd_matches_torch():
     torch.testing.assert_close(c_got.float(), c_ref.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(ga_got.float(), ga_ref.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(gw_got.float(), gw_ref.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_grouped_mm_compiles_fullgraph_and_matches_eager():
+    from src.kernel.gemm import grouped_mm
+
+    torch.manual_seed(0)
+    counts = [64, 0, 130, 41]
+    R, K, N = sum(counts), 64, 48
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a0 = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
+
+    def fn(a, b, o):
+        return grouped_mm(a, b, o)
+
+    def run(f):
+        a = a0.clone().requires_grad_(True)
+        wv = w.clone().requires_grad_(True)
+        c = f(a, wv.mT, offs)
+        c.sum().backward()
+        return c, a.grad, wv.grad
+
+    eager = run(fn)
+    # fullgraph=True raises if the op graph-breaks
+    compiled_fn = torch.compile(fn, fullgraph=True)
+    comp = run(compiled_fn)
+    for e, c in zip(eager, comp):
+        torch.testing.assert_close(c.float(), e.float(), rtol=2e-2, atol=2e-2)
