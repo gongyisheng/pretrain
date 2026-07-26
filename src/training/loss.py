@@ -108,3 +108,45 @@ def compute_loss(
     return LOSS_REGISTRY[loss_fn](
         flat_logits, flat_labels, ignore_index=-100, label_smoothing=label_smoothing
     )
+
+
+@torch.no_grad()
+def compute_loss_chunked(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    loss_fn: str = "cross_entropy",
+    label_smoothing: float = 0.0,
+    chunk_size: int = 8192,
+) -> torch.Tensor:
+    """
+    Memory-efficient, no-grad equivalent of ``compute_loss`` for eval.
+    """
+    if loss_fn not in LOSS_REGISTRY:
+        raise ValueError(
+            f"unknown loss_fn {loss_fn!r}; expected one of {sorted(LOSS_REGISTRY)}"
+        )
+    fn = LOSS_REGISTRY[loss_fn]
+    flat_logits = logits.reshape(-1, logits.size(-1))
+    flat_labels = labels.reshape(-1)
+    n = flat_labels.numel()
+
+    # Accumulate in fp64 so the fp64 loss variants keep full precision and the
+    # fp32 variants match compute_loss to well within rounding.
+    loss_acc = torch.zeros((), device=logits.device, dtype=torch.float64)
+    tok_acc = torch.zeros((), device=logits.device, dtype=torch.float64)
+    out_dtype = logits.dtype  # overwritten below to the loss fn's output dtype
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        lc = flat_logits[start:end]
+        yc = flat_labels[start:end]
+        valid = (yc != -100).sum().double()
+        chunk_mean = fn(lc, yc, ignore_index=-100, label_smoothing=label_smoothing)
+        out_dtype = chunk_mean.dtype
+        # torch.where discards the (possibly NaN) mean of an all-ignored chunk
+        # without host sync; NaN in the unselected branch does not propagate.
+        loss_acc = loss_acc + torch.where(
+            valid > 0, chunk_mean.double() * valid, torch.zeros_like(loss_acc)
+        )
+        tok_acc = tok_acc + valid
+    # Return in the loss fn's natural dtype so this is a drop-in for compute_loss.
+    return (loss_acc / tok_acc).to(out_dtype)  # 0/0 -> NaN when all ignored
