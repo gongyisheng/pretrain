@@ -3,9 +3,9 @@
 MoE 2D x 3D case: a (R, K) x per-group b (E, K, N) -> c (R, N), rows expert-sorted,
 `offs` the (E,) int32 cumulative END-offsets (offs[-1] == R). One persistent kernel
 walks the ragged tile space; `offs` is read on-device (no offs.cpu() sync). fp32
-accumulation, bf16 in/out. `grouped_mm` is differentiable: dgrad reuses the forward
-kernel (`grad_a = grouped_mm(grad_c, b.T, offs)`), wgrad uses the dedicated wgrad
-kernel (`grad_b = grouped_mm_wgrad(a, grad_c, offs)`).
+accumulation, bf16 in/out. `_grouped_gemm` is differentiable: dgrad reuses the forward
+kernel (`grad_a = _grouped_gemm(grad_c, b.T, offs)`), wgrad uses the dedicated wgrad
+kernel (`grad_b = _grouped_gemm_wgrad(a, grad_c, offs)`).
 """
 
 import functools
@@ -19,19 +19,7 @@ from torch._library.triton import triton_op, wrap_triton
 # Config + helpers
 # ---------------------------------------------------------------------------
 
-# (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) autotune candidates.
-# autotune keys on (N, K) and picks the best candidate per shape. The set below
-# targets the expert-GEMM shapes used by experiments/latent_moe/* (all d_model=512,
-# intermediate_size=192; latent_dim in {64,128,256} or non-latent d=512):
-#   gate_up:  K in {64,128,256,512}, N = 2*d_ff = 384
-#   down:     K = d_ff = 192,        N in {64,128,256,512}
-# So K in {64,128,192,256,512}, N in {64,128,256,384,512}. Small-N (down, N=64)
-# wants small BLOCK_N + tall BLOCK_M; large-N (gate_up, N=384) wants wide BLOCK_N.
-# BLOCK_K in {32,64} evenly divides every K here (192 = 6*32 = 3*64). Ragged small
-# groups keep BLOCK_M in {32,64,128}. Configs that exceed shared memory on this arch
-# are auto-pruned by Triton's autotuner.
 _CFG = [
-    # small N (down, N=64/128): narrow tiles, taller M
     (32, 64, 64, 4, 3),
     (64, 32, 32, 4, 3),
     (64, 64, 32, 4, 3),
@@ -43,7 +31,6 @@ _CFG = [
     (64, 128, 64, 8, 4),
     (128, 128, 32, 8, 4),
     (128, 128, 64, 8, 3),
-    # wide N (gate_up N=384, down N=256/512): wide BLOCK_N
     (64, 256, 32, 8, 3),
     (64, 256, 64, 8, 4),
     (128, 256, 64, 8, 3),
@@ -207,8 +194,8 @@ def _grouped_gemm_wgrad_kernel(
 # ---------------------------------------------------------------------------
 
 
-@triton_op("pretrain::grouped_mm", mutates_args={})
-def grouped_mm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+@triton_op("jit_kernel::grouped_gemm", mutates_args={})
+def _grouped_gemm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
     """Differentiable grouped GEMM matching torch._grouped_mm(a, b, offs=offs)."""
     R, K = a.shape
     N = b.shape[2]
@@ -234,28 +221,28 @@ def grouped_mm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Te
     return c
 
 
-def _grouped_mm_setup_context(ctx, inputs, output):
+def _grouped_gemm_setup_context(ctx, inputs, output):
     a, b, offs = inputs
     ctx.save_for_backward(a, b, offs)
 
 
-def _grouped_mm_backward(ctx, grad_c):
+def _grouped_gemm_backward(ctx, grad_c):
     a, b, offs = ctx.saved_tensors
-    grad_a = grouped_mm(grad_c, b.transpose(-2, -1), offs)  # dgrad reuses forward
-    grad_b = grouped_mm_wgrad(a, grad_c, offs)  # wgrad
+    grad_a = _grouped_gemm(grad_c, b.transpose(-2, -1), offs)  # dgrad reuses forward
+    grad_b = _grouped_gemm_wgrad(a, grad_c, offs)  # wgrad
     return grad_a, grad_b, None
 
 
-grouped_mm.register_autograd(
-    _grouped_mm_backward, setup_context=_grouped_mm_setup_context
+_grouped_gemm.register_autograd(
+    _grouped_gemm_backward, setup_context=_grouped_gemm_setup_context
 )
 
 
-@triton_op("pretrain::grouped_mm_wgrad", mutates_args={})
-def grouped_mm_wgrad(
+@triton_op("jit_kernel::grouped_gemm_wgrad", mutates_args={})
+def _grouped_gemm_wgrad(
     a: torch.Tensor, grad_c: torch.Tensor, offs: torch.Tensor
 ) -> torch.Tensor:
-    """Weight gradient of grouped_mm: grad_b[g] = a[g].T @ grad_c[g], shape (E,K,N)."""
+    """Weight gradient of _grouped_gemm: grad_b[g] = a[g].T @ grad_c[g], shape (E,K,N)."""
     assert a.dtype == grad_c.dtype, (
         f"dtype mismatch: a {a.dtype}, grad_c {grad_c.dtype}"
     )
@@ -287,24 +274,9 @@ def grouped_mm_wgrad(
 def grouped_gemm(
     a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor, impl: str = "auto"
 ) -> torch.Tensor:
-    """Grouped GEMM with impl selection. impl: 'auto' | 'triton' | 'torch'.
 
-    'auto' resolves to 'triton' where torch._grouped_mm lacks its fused CUTLASS
-    grouped path — compute-capability major NOT in {9 (Hopper), 10 (datacenter
-    Blackwell)} — and bf16 CUDA inputs; otherwise 'torch'. 'triton' forces the
-    Triton op (bf16 CUDA required); 'torch' forces torch._grouped_mm.
-
-    Precondition (not asserted in the hot path to stay compile/sync-free): `offs`
-    is int32 cumulative END-offsets with offs[-1] == a.shape[0].
-    """
     if impl not in ("auto", "triton", "torch"):
         raise ValueError(f"impl must be auto|triton|torch, got {impl!r}")
-    assert a.ndim == 2 and b.ndim == 3 and offs.ndim == 1
-    assert a.shape[1] == b.shape[1], f"K mismatch: a K={a.shape[1]}, b K={b.shape[1]}"
-    assert offs.shape[0] == b.shape[0], f"offs len {offs.shape[0]} != E {b.shape[0]}"
-    assert offs.dtype == torch.int32
-    assert a.dtype == b.dtype, f"dtype mismatch: a {a.dtype}, b {b.dtype}"
-    assert a.device == b.device == offs.device, "a, b, offs must share a device"
 
     if impl == "auto":
         impl = (
@@ -316,8 +288,17 @@ def grouped_gemm(
             )
             else "torch"
         )
-    if impl == "triton":
-        if not (a.is_cuda and a.dtype == torch.bfloat16):
-            raise ValueError("impl='triton' requires bf16 CUDA tensors")
-        return grouped_mm(a, b, offs)
-    return torch._grouped_mm(a, b, offs=offs)
+
+    if impl == "torch":
+        return torch._grouped_mm(a, b, offs=offs)
+
+    assert a.ndim == 2 and b.ndim == 3 and offs.ndim == 1
+    assert a.shape[1] == b.shape[1], f"K mismatch: a K={a.shape[1]}, b K={b.shape[1]}"
+    assert offs.shape[0] == b.shape[0], f"offs len {offs.shape[0]} != E {b.shape[0]}"
+    assert offs.dtype == torch.int32
+    assert a.dtype == b.dtype, f"dtype mismatch: a {a.dtype}, b {b.dtype}"
+    assert a.device == b.device == offs.device, "a, b, offs must share same device"
+
+    if not (a.is_cuda and a.dtype == torch.bfloat16):
+        raise ValueError("impl='triton' requires bf16 CUDA tensors")
+    return _grouped_gemm(a, b, offs)

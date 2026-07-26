@@ -7,20 +7,17 @@ under test, so a parity test always compares against an independent reference.
 import torch
 
 
-def grouped_mm_ref(a, b, offs):
+def grouped_gemm_ref(a, b, offs):
     """Forward reference for the grouped GEMM: torch._grouped_mm."""
     return torch._grouped_mm(a, b, offs=offs)
 
 
-def wgrad_ref(a, grad_c, offs):
-    """Weight-grad reference: per-group a[g].T @ grad_c[g] in fp32, shape (E, K, N)."""
-    E = offs.shape[0]
-    K, N = a.shape[1], grad_c.shape[1]
-    out = torch.zeros(E, K, N, device=a.device, dtype=torch.float32)
-    start = 0
-    for g in range(E):
-        end = int(offs[g])
-        if end > start:
-            out[g] = a[start:end].float().T @ grad_c[start:end].float()
-        start = end
-    return out
+def grouped_gemm_wgrad_ref(a, grad_c, offs):
+    """Weight-grad reference: grad_b[g] = a[g].T @ grad_c[g], shape (E, K, N).
+
+    This is the 2D x 2D -> 3D grouped-mm layout where `offs` partitions the shared
+    (row) contraction dim, so it is exactly torch._grouped_mm(a.mT, grad_c, offs).
+    A plain forward call (no autograd), so the zero-stride-grad backward bug in
+    torch._grouped_mm does not apply here.
+    """
+    return torch._grouped_mm(a.mT, grad_c, offs=offs)
