@@ -1,11 +1,7 @@
 """Parity of the Triton grouped GEMM prototype vs torch._grouped_mm (bf16)."""
 
-import sys
-
 import pytest
 import torch
-
-sys.path.insert(0, ".")
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Triton grouped GEMM is CUDA+bf16 only"
@@ -14,7 +10,7 @@ pytestmark = pytest.mark.skipif(
 
 def _ref_and_triton(counts, K, N, seed=0):
     """Build (a, b=w.mT, offs) and return (torch._grouped_mm, triton_grouped_mm)."""
-    from benchmarks.grouped_gemm_triton import triton_grouped_mm
+    from src.kernel.gemm import triton_grouped_mm
 
     torch.manual_seed(seed)
     E = len(counts)
