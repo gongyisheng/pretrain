@@ -6,7 +6,7 @@ from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.attention import ATTN_REGISTRY
 from src.layers.mlp import MLP_REGISTRY, MOE_ROUTER_SCORE_FNS
 from src.layers.pos_emb import POS_EMB_REGISTRY
-from src.quant import (
+from src.quant.constants import (
     QUANT_FORMATS,
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,

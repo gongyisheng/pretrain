@@ -3,13 +3,14 @@ import torch
 import torch.nn as nn
 
 from src.model import build_model
+from src.quant.constants import _INT8_FORMATS, _STR_TO_DTYPE
 from src.quant.linear import QuantLinear, _gemm
 from src.quant.convert import apply_quantization
 from src.quant.quantize import fake_quantize_operand
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
 
-FP8_FORWARD_DTYPE = torch.float8_e4m3fn
-MXFP8_DTYPE = torch.float8_e4m3fn
+FP8_FORWARD_DTYPE = _STR_TO_DTYPE["fp8_e4m3"]
+MXFP8_DTYPE = _STR_TO_DTYPE["fp8_e4m3"]
 _MX_KW = dict(fmt="fp8_e4m3", scale_dtype="fp8_e8m0")
 
 
@@ -151,7 +152,7 @@ def test_runs_under_bf16_autocast():
 
 # --- int8-family _gemm dispatch (migrated from the old test_int8.py) ---
 
-INT_FORMATS = ["int8", "int7", "int6", "int5", "int4"]
+INT_FORMATS = sorted(_INT8_FORMATS)
 
 int_gpu = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="int gemm kernel needs CUDA"

@@ -3,11 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from src.quant.utils import fmt_emax, fmt_qmax, fmt_store_dtype, is_int8s
-
-_EPS = 1e-30
-# E8M0 (bias 127) exponent range for the power-of-two (MX-style) scale.
-_E8M0_EXP_MIN, _E8M0_EXP_MAX = -127, 127
+from src.quant.constants import EPS
+from src.quant.utils import is_int8s, str_to_emax, str_to_qmax, str_to_store_dtype
 
 
 def effective_block_size(granularity: str, block_size: int, K: int) -> int:
@@ -18,28 +15,18 @@ def effective_block_size(granularity: str, block_size: int, K: int) -> int:
 def _amax_to_scale(
     amax: torch.Tensor, fmt: str, scale_dtype: str | None
 ) -> torch.Tensor:
-    """fp32 dequant scale from per-block amax, dispatched by scale_dtype.
-
-    The element format `fmt` supplies the alignment targets from the max map in
-    utils: `emax` (top octave) for the power-of-two scale, `qmax` otherwise.
-
-    "fp8_e8m0" -> power-of-two (MX-style) scale: align the block's amax to the
-    element's top octave `emax`, snapped to an integer exponent E8M0 can store.
-    Any other scale_dtype (fp32 / None) -> arbitrary-real amax/qmax scale.
-    """
+    """fp32 dequant scale from per-block amax."""
     if scale_dtype == "fp8_e8m0":
-        exp = (torch.floor(torch.log2(amax.clamp_min(_EPS))) - fmt_emax(fmt)).clamp(
-            _E8M0_EXP_MIN, _E8M0_EXP_MAX
+        e8m0_emax = str_to_emax("fp8_e8m0")
+        exp = (torch.floor(torch.log2(amax.clamp_min(EPS))) - str_to_emax(fmt)).clamp(
+            -e8m0_emax, e8m0_emax
         )
         return torch.exp2(exp)
-    return (amax / fmt_qmax(fmt)).clamp_min(_EPS)
+    return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 
-def _quantize_last(xf, K, bs, *, fmt, scale_dtype):
-    """Blockwise quantize a (..., K) fp32 tensor along the last axis.
-
-    Returns (xq (..., K) store_dtype, scale (..., nkb) fp32).
-    """
+def _quantize_last_axis(xf, K, bs, *, fmt, scale_dtype):
+    """Blockwise quantize a (..., K) fp32 tensor along the last axis."""
     nkb = (K + bs - 1) // bs
     pad = nkb * bs - K
     xp = F.pad(xf, (0, pad)) if pad else xf
@@ -49,8 +36,8 @@ def _quantize_last(xf, K, bs, *, fmt, scale_dtype):
     q = xb / scale.unsqueeze(-1)
     if is_int8s(fmt):
         q = torch.round(q)
-    qmax = fmt_qmax(fmt)
-    q = q.clamp(-qmax, qmax).to(fmt_store_dtype(fmt))
+    qmax = str_to_qmax(fmt)
+    q = q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
     xq = q.flatten(-2)[..., :K].contiguous()
     return xq, scale
 
@@ -64,23 +51,19 @@ def quantize_operand(
     *,
     scale_dtype=None,
 ):
-    """Quantize 2D operand x for scaled_gemm along contract_dim (-1: A, 0: B).
-
-    `fmt` is the quantized element format (fp8_e4m3 / int7 / ...); its qmax,
-    emax, and storage dtype come from the max map in utils.
-
-    Returns (xq store_dtype, scale fp32) canonical: A -> (M, nkb), B -> (nkb, N).
-    """
+    """Quantize 2D operand x for scaled_gemm along contract_dim (-1: A, 0: B)."""
     xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
     K = xf.shape[-1]
+
+    # tensorwise branch
     if granularity == "tensorwise":
         amax = xf.abs().amax()
         scale = _amax_to_scale(amax, fmt, scale_dtype)  # 0-dim
         q = xf / scale
         if is_int8s(fmt):
             q = torch.round(q)
-        qmax = fmt_qmax(fmt)
-        q = q.clamp(-qmax, qmax).to(fmt_store_dtype(fmt))
+        qmax = str_to_qmax(fmt)
+        q = q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
         xq = q.movedim(-1, contract_dim).contiguous()
         # canonical broadcast: A -> (M,1), B -> (1,N)
         rows = xq.shape[0]
@@ -89,8 +72,9 @@ def quantize_operand(
         scale2d = s.expand(rows, 1) if contract_dim == -1 else s.expand(1, cols)
         return xq, scale2d.contiguous()
 
+    # rowwise/blockwise branch
     bs = effective_block_size(granularity, block_size, K)
-    xq_last, scale = _quantize_last(xf, K, bs, fmt=fmt, scale_dtype=scale_dtype)
+    xq_last, scale = _quantize_last_axis(xf, K, bs, fmt=fmt, scale_dtype=scale_dtype)
     xq = xq_last.movedim(-1, contract_dim).contiguous()
     scale = scale.movedim(-1, contract_dim).contiguous()  # A:(M,nkb) B:(nkb,N)
     return xq, scale

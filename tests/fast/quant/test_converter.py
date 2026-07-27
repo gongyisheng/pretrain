@@ -4,11 +4,12 @@ import pytest
 import torch
 import torch.nn as nn
 
+from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantLinear
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
 
-INT_FORMATS = ["int8", "int7", "int6", "int5", "int4"]
+INT_FORMATS = sorted(_INT8_FORMATS)
 
 
 def _fp8_capable():
@@ -18,7 +19,7 @@ def _fp8_capable():
 fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
 # mxfp8 is now a scaling scheme layered on the fp8 element (e4m3), gated by the
 # same fp8 hardware requirement as any other fp8 recipe -- no separate Blackwell
-# gate remains in _check_hardware.
+# gate remains in check_hardware_support.
 mxfp8_only = fp8_only
 
 

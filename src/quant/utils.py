@@ -5,81 +5,71 @@ from typing import Optional
 
 import torch
 
+from src.quant.constants import (
+    _FP8_FORMATS,
+    _INT8_FORMATS,
+    _STR_TO_DTYPE,
+    _STR_TO_EMAX,
+    _STR_TO_QMAX,
+)
 from src.utils.config import QuantConfig
 
 
-_FP8_DTYPE = {
-    "fp8": torch.float8_e4m3fn,
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-}
-
-# Symmetric max magnitude per int fmt = 2^(bits-1) - 1. All stored in torch.int8.
-_INT8S_QMAX = {"int8": 127, "int7": 63, "int6": 31, "int5": 15, "int4": 7}
-
-# Largest normal exponent per fp8 element format; the shared power-of-two (MX-style)
-# scale aligns a block's amax to this so the block's max value lands near the
-# format's top.
-_FP8_EMAX = {torch.float8_e4m3fn: 8, torch.float8_e5m2: 15}
-
-# fp8 tensor cores require Ada/Hopper/Blackwell (SM >= 8.9); int8 runs anywhere.
-FP8_HARDWARE_REQUIREMENT = (
-    "a CUDA GPU with compute capability >= 8.9 (Ada/Hopper/Blackwell)"
-)
+def str_to_dtype(fmt: str) -> Optional[torch.dtype]:
+    return _STR_TO_DTYPE.get(fmt)
 
 
-def is_fp8_supported() -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
+def str_to_store_dtype(fmt: str) -> torch.dtype:
+    return _STR_TO_DTYPE.get(fmt) or torch.int8
+
+
+def str_to_qmax(fmt: str) -> float:
+    return _STR_TO_QMAX[fmt]
+
+
+def str_to_emax(fmt: str) -> int:
+    return _STR_TO_EMAX[fmt]
 
 
 def is_fp8(fmt: str) -> bool:
-    return fmt in _FP8_DTYPE
-
-
-def is_mxfp8(scaling: dict) -> bool:
-    """Whether a resolved `scaling` dict selects the mxfp8 scheme (blockwise + E8M0)."""
-    return (
-        scaling.get("granularity") == "blockwise"
-        and scaling.get("scale_dtype") == "fp8_e8m0"
-    )
+    return fmt in _FP8_FORMATS
 
 
 def is_int8s(fmt: str) -> bool:
-    return fmt in _INT8S_QMAX
+    return fmt in _INT8_FORMATS
 
 
 def is_quantized(fmt: str) -> bool:
     return is_fp8(fmt) or is_int8s(fmt)
 
 
-def str_to_dtype_fp8(fmt: str) -> Optional[torch.dtype]:
-    return _FP8_DTYPE.get(fmt)
+def is_supported(fmt: str) -> bool:
+    if str_to_dtype(fmt) is not None:
+        return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
+            8,
+            9,
+        )
+    return True
 
 
-def str_to_qmax_int8s(fmt: str) -> Optional[int]:
-    return _INT8S_QMAX.get(fmt)
+def unsupported_error(fmt: str) -> str:
+    requirement = {
+        "fp8": "a CUDA GPU with compute capability >= 8.9 (Ada/Hopper/Blackwell)",
+        # TODO: "fp4": "a CUDA GPU with compute capability >= 10.0 (Blackwell)",
+    }.get(fmt.split("_", 1)[0], "supported hardware")
+    return (
+        f"quant dtype {fmt!r} requires {requirement}. "
+        "Disable quant or run on supported hardware."
+    )
 
 
-# --- element max map: qmax/emax/store dtype keyed by the quantized element `fmt`.
-# These are properties of the element being quantized (not the scale), so `fmt`
-# is the key; the scale scheme picks *which* of qmax/emax it aligns to.
-
-
-def fmt_qmax(fmt: str) -> float:
-    """Max representable magnitude of element `fmt` (fp8 finfo max, or int qmax)."""
-    dt = _FP8_DTYPE.get(fmt)
-    return float(torch.finfo(dt).max) if dt is not None else float(_INT8S_QMAX[fmt])
-
-
-def fmt_emax(fmt: str) -> int:
-    """Largest normal exponent of fp8 element `fmt`; 0 for int formats (unused there)."""
-    dt = _FP8_DTYPE.get(fmt)
-    return _FP8_EMAX[dt] if dt is not None else 0
-
-
-def fmt_store_dtype(fmt: str) -> torch.dtype:
-    """Storage dtype for element `fmt`: its fp8 dtype, or torch.int8 for int formats."""
-    return _FP8_DTYPE.get(fmt, torch.int8)
+def check_hardware_support(rules: list[QuantConfig]) -> None:
+    for rule in rules:
+        if not rule.enabled:
+            continue
+        for fmt in rule.dtype.values():
+            if not is_supported(fmt):
+                raise RuntimeError(unsupported_error(fmt))
 
 
 def should_quantize(fqn: str, cfg: QuantConfig) -> bool:

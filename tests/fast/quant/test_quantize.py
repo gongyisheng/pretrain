@@ -1,16 +1,17 @@
 import pytest
 import torch
 
+from src.quant.constants import _INT8_FORMATS, _STR_TO_DTYPE, _STR_TO_QMAX
 from src.quant.quantize import (
     quantize_operand,
     fake_quantize_operand,
     effective_block_size,
 )
 
-E4M3 = torch.float8_e4m3fn
+E4M3 = _STR_TO_DTYPE["fp8_e4m3"]
 
 # qmax per int fmt (all stored in torch.int8), for deriving expected scales.
-QMAX = {"int8": 127, "int7": 63, "int6": 31, "int5": 15, "int4": 7}
+QMAX = {fmt: _STR_TO_QMAX[fmt] for fmt in sorted(_INT8_FORMATS)}
 
 
 def _fp8_kw(scale_dtype=None):

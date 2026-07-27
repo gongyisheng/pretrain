@@ -1,18 +1,19 @@
 import torch
 
 from src.utils.config import QuantConfig
-from src.quant.utils import should_quantize, resolve_rule, str_to_dtype_fp8
+from src.quant.utils import should_quantize, resolve_rule, str_to_dtype
 
 
-def test_str_to_dtype_fp8_maps_fp8_variants():
-    assert str_to_dtype_fp8("fp8") == torch.float8_e4m3fn
-    assert str_to_dtype_fp8("fp8_e4m3") == torch.float8_e4m3fn
-    assert str_to_dtype_fp8("fp8_e5m2") == torch.float8_e5m2
+def test_str_to_dtype_maps_fp8_variants():
+    assert str_to_dtype("fp8") == torch.float8_e4m3fn
+    assert str_to_dtype("fp8_e4m3") == torch.float8_e4m3fn
+    assert str_to_dtype("fp8_e5m2") == torch.float8_e5m2
+    assert str_to_dtype("fp8_e8m0") == torch.float8_e8m0fnu
 
 
-def test_str_to_dtype_fp8_passthrough_is_none():
+def test_str_to_dtype_passthrough_is_none():
     for fmt in ("fp32", "fp16", "bf16"):
-        assert str_to_dtype_fp8(fmt) is None
+        assert str_to_dtype(fmt) is None
 
 
 def _cfg(**kw):
