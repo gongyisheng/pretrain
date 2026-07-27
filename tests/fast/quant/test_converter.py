@@ -7,20 +7,11 @@ import torch.nn as nn
 from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantLinear
+from src.quant.utils import is_supported
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
 
-INT_FORMATS = sorted(_INT8_FORMATS)
 
-
-def _fp8_capable():
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
-
-
-fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
-# mxfp8 is now a scaling scheme layered on the fp8 element (e4m3), gated by the
-# same fp8 hardware requirement as any other fp8 recipe -- no separate Blackwell
-# gate remains in check_hardware_support.
-mxfp8_only = fp8_only
+fp8_only = pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
 
 
 class _Tiny(nn.Module):
@@ -53,14 +44,18 @@ def test_disabled_is_noop():
     assert not isinstance(m.attn["q_proj"], QuantLinear)
 
 
-@pytest.mark.skipif(_fp8_capable(), reason="testing the unsupported-hardware branch")
+@pytest.mark.skipif(
+    is_supported("fp8"), reason="testing the unsupported-hardware branch"
+)
 def test_raises_without_capable_gpu():
     m = _Tiny()
     with pytest.raises(RuntimeError, match="compute capability"):
         apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
 
 
-@pytest.mark.skipif(_fp8_capable(), reason="testing the unsupported-hardware branch")
+@pytest.mark.skipif(
+    is_supported("fp8"), reason="testing the unsupported-hardware branch"
+)
 def test_mxfp8_rule_raises_without_capable_gpu():
     # mxfp8 is e4m3 on every operand, so it gates on the same fp8 hardware
     # requirement as the plain "fp8" recipe -- no separate Blackwell-only gate.
@@ -69,7 +64,7 @@ def test_mxfp8_rule_raises_without_capable_gpu():
         apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "mxfp8"}}))
 
 
-@mxfp8_only
+@fp8_only
 def test_mxfp8_rule_swaps_on_capable_gpu():
     m = _Tiny().cuda().to(torch.bfloat16)
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "mxfp8"}}))
@@ -142,13 +137,13 @@ def test_list_of_rules_first_match_wins():
 # runs on any GPU, so these are not fp8-gated) ---
 
 
-@pytest.mark.parametrize("fmt", INT_FORMATS)
+@pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_recipe_expands(fmt):
     c = QuantConfig(enabled=True, dtype={"recipe": fmt})
     assert c.dtype == {op: fmt for op in ("weight", "act", "input_grad", "weight_grad")}
 
 
-@pytest.mark.parametrize("fmt", INT_FORMATS)
+@pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_apply_quantization_swaps(fmt):
     model = nn.Sequential(nn.Linear(64, 64))
     rule = QuantConfig(enabled=True, dtype={"recipe": fmt}, include=["0"])

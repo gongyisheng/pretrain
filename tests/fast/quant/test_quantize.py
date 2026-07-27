@@ -1,17 +1,13 @@
 import pytest
 import torch
 
-from src.quant.constants import _INT8_FORMATS, _STR_TO_DTYPE, _STR_TO_QMAX
+from src.quant.constants import _INT8_FORMATS
 from src.quant.quantize import (
     quantize_operand,
     fake_quantize_operand,
     effective_block_size,
 )
-
-E4M3 = _STR_TO_DTYPE["fp8_e4m3"]
-
-# qmax per int fmt (all stored in torch.int8), for deriving expected scales.
-QMAX = {fmt: _STR_TO_QMAX[fmt] for fmt in sorted(_INT8_FORMATS)}
+from src.quant.utils import str_to_qmax
 
 
 def _fp8_kw(scale_dtype=None):
@@ -40,7 +36,7 @@ def test_effective_block_size():
 def test_operand_a_scale_shape(gran, bs, nkb):
     x = torch.randn(8, 256)
     xq, s = quantize_operand(x, -1, gran, bs, **_fp8_kw())
-    assert xq.shape == (8, 256) and xq.dtype == E4M3
+    assert xq.shape == (8, 256) and xq.dtype == torch.float8_e4m3fn
     assert s.shape == (8, nkb) and s.dtype == torch.float32 and s.is_contiguous()
 
 
@@ -76,7 +72,7 @@ def test_tensorwise_fp8_roundtrips_within_error():
     torch.manual_seed(0)
     x = torch.randn(64, 64) * 10.0
     xq, _ = quantize_operand(x, -1, "tensorwise", 0, **_fp8_kw())
-    assert xq.dtype == E4M3
+    assert xq.dtype == torch.float8_e4m3fn
     recon = fake_quantize_operand(x, -1, "tensorwise", 0, **_fp8_kw())
     assert (recon - x).norm() / x.norm() < 0.1  # e4m3 per-tensor dynamic range
 
@@ -109,10 +105,10 @@ def test_int_quant_rounds_and_clamps():
     assert int(xq.min()) >= -7 and int(xq.max()) <= 7
 
 
-@pytest.mark.parametrize("fmt", list(QMAX))
+@pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int_tensorwise_symmetric_range_and_scale(fmt):
     torch.manual_seed(0)
-    qmax = QMAX[fmt]
+    qmax = str_to_qmax(fmt)
     x = torch.randn(64, 64) * 10.0
     q, s = quantize_operand(x, -1, "tensorwise", 0, **_int_kw(fmt))
     assert q.dtype == torch.int8  # all widths stored in int8
@@ -121,10 +117,10 @@ def test_int_tensorwise_symmetric_range_and_scale(fmt):
     assert torch.allclose(s, x.abs().max().float() / qmax)
 
 
-@pytest.mark.parametrize("fmt", list(QMAX))
+@pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int_tensorwise_recon_within_half_scale(fmt):
     torch.manual_seed(0)
-    qmax = QMAX[fmt]
+    qmax = str_to_qmax(fmt)
     x = torch.randn(128, 128)
     recon = fake_quantize_operand(x, -1, "tensorwise", 0, **_int_kw(fmt))
     scale = x.abs().max().float() / qmax
@@ -146,7 +142,7 @@ def test_pow2_scale_block32_shape_and_exactness():
     torch.manual_seed(0)
     x = torch.randn(4, 64)
     xq, s = quantize_operand(x, -1, "blockwise", 32, **_fp8_kw(scale_dtype="fp8_e8m0"))
-    assert xq.dtype == E4M3 and s.shape == (4, 2)
+    assert xq.dtype == torch.float8_e4m3fn and s.shape == (4, 2)
     log2s = torch.log2(s[s > 0])
     assert torch.allclose(log2s, log2s.round())
 

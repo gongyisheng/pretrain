@@ -3,15 +3,13 @@ import torch
 import torch.nn as nn
 
 from src.model import build_model
-from src.quant.constants import _INT8_FORMATS, _STR_TO_DTYPE
+from src.quant.constants import _INT8_FORMATS
 from src.quant.linear import QuantLinear, _gemm
 from src.quant.convert import apply_quantization
 from src.quant.quantize import fake_quantize_operand
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
 
-FP8_FORWARD_DTYPE = _STR_TO_DTYPE["fp8_e4m3"]
-MXFP8_DTYPE = _STR_TO_DTYPE["fp8_e4m3"]
-_MX_KW = dict(fmt="fp8_e4m3", scale_dtype="fp8_e8m0")
+_MXFP8_KW = dict(fmt="fp8_e4m3", scale_dtype="fp8_e8m0")
 
 
 def _fp8_capable():
@@ -152,7 +150,6 @@ def test_runs_under_bf16_autocast():
 
 # --- int8-family _gemm dispatch (migrated from the old test_int8.py) ---
 
-INT_FORMATS = sorted(_INT8_FORMATS)
 
 int_gpu = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="int gemm kernel needs CUDA"
@@ -164,7 +161,7 @@ def test_gemm_passthrough_is_plain_matmul():
     assert torch.allclose(_gemm(a, b, "bf16", "bf16", torch.float32), a @ b, atol=1e-4)
 
 
-@pytest.mark.parametrize("fmt", INT_FORMATS)
+@pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
     out = _gemm(a, b, fmt, "bf16", torch.float32)
@@ -172,7 +169,7 @@ def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
 
 
 @int_gpu
-@pytest.mark.parametrize("fmt", INT_FORMATS)
+@pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")
@@ -199,8 +196,8 @@ def test_quant_linear_mxfp8_forward_matches_oracle():
     out = q(x)
     # forward blocks x along in-features (-1) and w along in-features (-1).
     ref = (
-        fake_quantize_operand(x, -1, "blockwise", 32, **_MX_KW)
-        @ fake_quantize_operand(lin.weight, -1, "blockwise", 32, **_MX_KW).t()
+        fake_quantize_operand(x, -1, "blockwise", 32, **_MXFP8_KW)
+        @ fake_quantize_operand(lin.weight, -1, "blockwise", 32, **_MXFP8_KW).t()
     )
     assert out.shape == (256, 256) and out.dtype == torch.bfloat16
     rel = (out.float() - ref.float()).norm() / ref.float().norm()
