@@ -8,7 +8,7 @@ from src.quant.utils import (
     is_int8s,
     is_quantized,
 )
-from src.quant.scale import (
+from src.quant.quantize import (
     quantize_operand,
     fake_quantize_operand,
     effective_block_size,

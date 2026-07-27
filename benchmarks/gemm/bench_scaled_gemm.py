@@ -25,7 +25,7 @@ import torch.nn.functional as F
 sys.path.insert(0, ".")
 
 from src.kernel.gemm import scaled_gemm
-from src.quant.scale import effective_block_size, quantize_operand
+from src.quant.quantize import quantize_operand, effective_block_size
 
 E4M3 = torch.float8_e4m3fn
 E5M2 = torch.float8_e5m2

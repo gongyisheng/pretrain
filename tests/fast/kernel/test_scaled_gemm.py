@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.quant.scale import quantize_operand, fake_quantize_operand
+from src.quant.quantize import quantize_operand, fake_quantize_operand
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="scaled_gemm is a CUDA Triton kernel"
@@ -23,7 +23,7 @@ def _int_kw(qmax):
 
 def _run(a, b, gran, bs, a_kw, b_kw):
     from src.kernel.gemm import scaled_gemm
-    from src.quant.scale import effective_block_size
+    from src.quant.quantize import effective_block_size
 
     ebs = effective_block_size(gran, bs, a.shape[1])
     aq, sa = quantize_operand(a, -1, gran, bs, **a_kw)
@@ -71,6 +71,16 @@ def test_fp8_mixed_e5m2_e4m3():
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
     out, oracle = _run(a, b, "blockwise", 32, _fp8_kw(E5M2), _fp8_kw(E4M3))
     assert (out - oracle).norm() / oracle.norm() < 0.05
+
+
+def test_pow2_e8m0_blockwise_matches_oracle():
+    # power-of-two (E8M0 / MX-style) blockwise scale through the real kernel.
+    torch.manual_seed(0)
+    a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+    kw = _fp8_kw(E4M3, scale_dtype="fp8_e8m0")
+    out, oracle = _run(a, b, "blockwise", 32, kw, kw)
+    assert (out - oracle).norm() / oracle.norm() < 0.02
 
 
 @pytest.mark.parametrize("qmax", [127, 63, 31, 15, 7])

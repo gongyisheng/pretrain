@@ -1,13 +1,16 @@
 import pytest
 import torch
 
-from src.quant.scale import (
+from src.quant.quantize import (
     quantize_operand,
     fake_quantize_operand,
     effective_block_size,
 )
 
 E4M3 = torch.float8_e4m3fn
+
+# qmax per int fmt (all stored in torch.int8), for deriving expected scales.
+QMAX = {"int8": 127, "int7": 63, "int6": 31, "int5": 15, "int4": 7}
 
 
 def _fp8_kw(scale_dtype=None):
@@ -18,10 +21,16 @@ def _int_kw(fmt="int8"):
     return dict(fmt=fmt)
 
 
+# --- scale block sizing ---
+
+
 def test_effective_block_size():
     assert effective_block_size("blockwise", 32, 256) == 32
     assert effective_block_size("rowwise", 128, 256) == 256
     assert effective_block_size("tensorwise", 128, 256) == 256
+
+
+# --- operand quantize: canonical scale shapes ---
 
 
 @pytest.mark.parametrize(
@@ -51,6 +60,9 @@ def test_blockwise_partial_last_block():
     assert xq.shape == (4, 100) and s.shape == (4, 4)
 
 
+# --- fake-quant: reconstruction, dtype, zero-safety ---
+
+
 def test_fake_quant_reconstructs_within_fp8_error():
     torch.manual_seed(0)
     x = torch.randn(16, 128)
@@ -59,12 +71,33 @@ def test_fake_quant_reconstructs_within_fp8_error():
     assert (fq - x).norm() / x.norm() < 0.1
 
 
-def test_power_of_two_scale_is_exact_pow2():
+def test_tensorwise_fp8_roundtrips_within_error():
     torch.manual_seed(0)
-    x = torch.randn(4, 64)
-    _, s = quantize_operand(x, -1, "blockwise", 32, **_fp8_kw(scale_dtype="fp8_e8m0"))
-    log2s = torch.log2(s[s > 0])
-    assert torch.allclose(log2s, log2s.round())
+    x = torch.randn(64, 64) * 10.0
+    xq, _ = quantize_operand(x, -1, "tensorwise", 0, **_fp8_kw())
+    assert xq.dtype == E4M3
+    recon = fake_quantize_operand(x, -1, "tensorwise", 0, **_fp8_kw())
+    assert (recon - x).norm() / x.norm() < 0.1  # e4m3 per-tensor dynamic range
+
+
+@pytest.mark.parametrize("gran,bs", [("tensorwise", 0), ("blockwise", 32)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_fake_quant_preserves_dtype_and_shape(gran, bs, dtype):
+    x = torch.randn(8, 64, dtype=dtype)
+    out = fake_quantize_operand(x, -1, gran, bs, **_fp8_kw())
+    assert out.dtype == dtype and out.shape == x.shape
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
+)
+def test_zero_input_safe(gran, bs):
+    x = torch.zeros(4, 64)
+    fq = fake_quantize_operand(x, -1, gran, bs, **_fp8_kw())
+    assert torch.isfinite(fq).all()
+
+
+# --- int operand quantize ---
 
 
 def test_int_quant_rounds_and_clamps():
@@ -75,16 +108,58 @@ def test_int_quant_rounds_and_clamps():
     assert int(xq.min()) >= -7 and int(xq.max()) <= 7
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_fake_quant_preserves_dtype(dtype):
-    x = torch.randn(4, 64, dtype=dtype)
-    assert fake_quantize_operand(x, -1, "blockwise", 32, **_fp8_kw()).dtype == dtype
+@pytest.mark.parametrize("fmt", list(QMAX))
+def test_int_tensorwise_symmetric_range_and_scale(fmt):
+    torch.manual_seed(0)
+    qmax = QMAX[fmt]
+    x = torch.randn(64, 64) * 10.0
+    q, s = quantize_operand(x, -1, "tensorwise", 0, **_int_kw(fmt))
+    assert q.dtype == torch.int8  # all widths stored in int8
+    assert int(q.min()) >= -qmax and int(q.max()) <= qmax
+    # tensorwise scale broadcasts a single value = amax / qmax over the rows
+    assert torch.allclose(s, x.abs().max().float() / qmax)
 
 
-def test_zero_input_safe():
-    x = torch.zeros(4, 64)
-    fq = fake_quantize_operand(x, -1, "blockwise", 32, **_fp8_kw())
-    assert torch.isfinite(fq).all()
+@pytest.mark.parametrize("fmt", list(QMAX))
+def test_int_tensorwise_recon_within_half_scale(fmt):
+    torch.manual_seed(0)
+    qmax = QMAX[fmt]
+    x = torch.randn(128, 128)
+    recon = fake_quantize_operand(x, -1, "tensorwise", 0, **_int_kw(fmt))
+    scale = x.abs().max().float() / qmax
+    assert (recon - x).abs().max() <= scale.item() / 2 + 1e-6
+
+
+# --- power-of-two (E8M0 / MX-style) scale ---
+
+
+def test_power_of_two_scale_is_exact_pow2():
+    torch.manual_seed(0)
+    x = torch.randn(4, 64)
+    _, s = quantize_operand(x, -1, "blockwise", 32, **_fp8_kw(scale_dtype="fp8_e8m0"))
+    log2s = torch.log2(s[s > 0])
+    assert torch.allclose(log2s, log2s.round())
+
+
+def test_pow2_scale_block32_shape_and_exactness():
+    torch.manual_seed(0)
+    x = torch.randn(4, 64)
+    xq, s = quantize_operand(x, -1, "blockwise", 32, **_fp8_kw(scale_dtype="fp8_e8m0"))
+    assert xq.dtype == E4M3 and s.shape == (4, 2)
+    log2s = torch.log2(s[s > 0])
+    assert torch.allclose(log2s, log2s.round())
+
+
+def test_pow2_fake_quant_reasonable_error():
+    torch.manual_seed(0)
+    x = torch.randn(8, 128)
+    fq = fake_quantize_operand(
+        x, -1, "blockwise", 32, **_fp8_kw(scale_dtype="fp8_e8m0")
+    )
+    assert (fq - x).norm() / x.norm() < 0.15
+
+
+# --- partial-block bs recovery regression ---
 
 
 def _manual_dequant(x, contract_dim, bs, *, fmt, scale_dtype=None):

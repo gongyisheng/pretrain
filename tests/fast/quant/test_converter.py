@@ -1,10 +1,14 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
 
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantLinear
-from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
+
+INT_FORMATS = ["int8", "int7", "int6", "int5", "int4"]
 
 
 def _fp8_capable():
@@ -131,3 +135,22 @@ def test_list_of_rules_first_match_wins():
     apply_quantization(m, cfg)
     assert isinstance(m.attn["q_proj"], QuantLinear)
     assert isinstance(m.mlp["down_proj"], QuantLinear)
+
+
+# --- int8-family config + converter (migrated from the old test_int8.py; int8
+# runs on any GPU, so these are not fp8-gated) ---
+
+
+@pytest.mark.parametrize("fmt", INT_FORMATS)
+def test_int8s_recipe_expands(fmt):
+    c = QuantConfig(enabled=True, dtype={"recipe": fmt})
+    assert c.dtype == {op: fmt for op in ("weight", "act", "input_grad", "weight_grad")}
+
+
+@pytest.mark.parametrize("fmt", INT_FORMATS)
+def test_int8s_apply_quantization_swaps(fmt):
+    model = nn.Sequential(nn.Linear(64, 64))
+    rule = QuantConfig(enabled=True, dtype={"recipe": fmt}, include=["0"])
+    cfg = SimpleNamespace(training=SimpleNamespace(quant=[rule]))
+    apply_quantization(model, cfg)
+    assert isinstance(model[0], QuantLinear)

@@ -4,16 +4,16 @@ import warnings
 
 import torch.nn as nn
 
-from src.quant import QUANT_PASSTHROUGH, fp8
+from src.quant import QUANT_PASSTHROUGH
 from src.quant.linear import QuantLinear
-from src.quant.utils import resolve_rule
+from src.quant.utils import resolve_rule, is_fp8_supported, FP8_HARDWARE_REQUIREMENT
 
 # Per-format hardware capability: fmt -> (predicate, requirement message). Formats
 # absent here impose no requirement (e.g. passthrough dtypes, and int8 which runs
 # on any modern GPU). Extend as int4/fp4 land.
 # TODO: fold into a per-format backend when the backend registry is introduced.
 _FMT_HARDWARE = {
-    fmt: (fp8.is_supported, fp8.HARDWARE_REQUIREMENT)
+    fmt: (is_fp8_supported, FP8_HARDWARE_REQUIREMENT)
     for fmt in ("fp8", "fp8_e4m3", "fp8_e5m2")
 }
 

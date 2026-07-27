@@ -22,6 +22,15 @@ _INT8S_QMAX = {"int8": 127, "int7": 63, "int6": 31, "int5": 15, "int4": 7}
 # format's top.
 _FP8_EMAX = {torch.float8_e4m3fn: 8, torch.float8_e5m2: 15}
 
+# fp8 tensor cores require Ada/Hopper/Blackwell (SM >= 8.9); int8 runs anywhere.
+FP8_HARDWARE_REQUIREMENT = (
+    "a CUDA GPU with compute capability >= 8.9 (Ada/Hopper/Blackwell)"
+)
+
+
+def is_fp8_supported() -> bool:
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
+
 
 def is_fp8(fmt: str) -> bool:
     return fmt in _FP8_DTYPE

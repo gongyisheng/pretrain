@@ -3,10 +3,9 @@ import torch
 import torch.nn as nn
 
 from src.model import build_model
-from src.quant.linear import QuantLinear
+from src.quant.linear import QuantLinear, _gemm
 from src.quant.convert import apply_quantization
-from src.quant.fp8 import fake_quantize_fp8
-from src.quant.scale import fake_quantize_operand
+from src.quant.quantize import fake_quantize_operand
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
 
 FP8_FORWARD_DTYPE = torch.float8_e4m3fn
@@ -53,8 +52,8 @@ def test_forward_matches_fake_quant_oracle():
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     out = q(x)
     ref = (
-        fake_quantize_fp8(x, FP8_FORWARD_DTYPE)
-        @ fake_quantize_fp8(lin.weight, FP8_FORWARD_DTYPE).t()
+        fake_quantize_operand(x, -1, "tensorwise", 0, fmt="fp8_e4m3")
+        @ fake_quantize_operand(lin.weight, -1, "tensorwise", 0, fmt="fp8_e4m3").t()
     )
     assert out.shape == (64, 96) and out.dtype == torch.bfloat16
     rel = (out.float() - ref.float()).norm() / ref.float().norm()
@@ -87,8 +86,8 @@ def test_rowwise_forward_and_backward():
     out = q(x)
     # rowwise oracle: per-row act, per-column weight (reduce over K)
     ref = (
-        fake_quantize_fp8(x, FP8_FORWARD_DTYPE, dim=-1)
-        @ fake_quantize_fp8(lin.weight, FP8_FORWARD_DTYPE, dim=-1).t()
+        fake_quantize_operand(x, -1, "rowwise", 0, fmt="fp8_e4m3")
+        @ fake_quantize_operand(lin.weight, -1, "rowwise", 0, fmt="fp8_e4m3").t()
     )
     rel = (out.float() - ref.float()).norm() / ref.float().norm()
     assert rel < 0.05
@@ -148,6 +147,41 @@ def test_runs_under_bf16_autocast():
     out.square().mean().backward()
     assert q.weight.grad.dtype == torch.float32  # grad matches fp32 master
     assert torch.isfinite(q.weight.grad).all()
+
+
+# --- int8-family _gemm dispatch (migrated from the old test_int8.py) ---
+
+INT_FORMATS = ["int8", "int7", "int6", "int5", "int4"]
+
+int_gpu = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="int gemm kernel needs CUDA"
+)
+
+
+def test_gemm_passthrough_is_plain_matmul():
+    a, b = torch.randn(20, 32), torch.randn(32, 40)
+    assert torch.allclose(_gemm(a, b, "bf16", "bf16", torch.float32), a @ b, atol=1e-4)
+
+
+@pytest.mark.parametrize("fmt", INT_FORMATS)
+def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
+    a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
+    out = _gemm(a, b, fmt, "bf16", torch.float32)
+    assert out.shape == (20, 40) and torch.isfinite(out).all()
+
+
+@int_gpu
+@pytest.mark.parametrize("fmt", INT_FORMATS)
+def test_int8s_gemm_dispatches_to_kernel(fmt):
+    torch.manual_seed(0)
+    a = torch.randn(64, 128, device="cuda")
+    b = torch.randn(128, 96, device="cuda")
+    out = _gemm(a, b, fmt, fmt, torch.float32, {"granularity": "rowwise"})
+    ref = (
+        fake_quantize_operand(a, -1, "rowwise", 0, fmt).float()
+        @ fake_quantize_operand(b, 0, "rowwise", 0, fmt).float()
+    )
+    assert (out - ref).norm() / ref.norm() < 0.02
 
 
 # --- mxfp8 (blockwise) on all three GEMMs ---
