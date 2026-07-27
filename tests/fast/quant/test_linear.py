@@ -3,12 +3,15 @@ import torch
 import torch.nn as nn
 
 from src.model import build_model
+from src.quant import mxfp8
 from src.quant.linear import QuantLinear
 from src.quant.convert import apply_quantization
 from src.quant.fp8 import fake_quantize_fp8
+from src.quant.mxfp8 import fake_quantize_mxfp8
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
 
 FP8_FORWARD_DTYPE = torch.float8_e4m3fn
+MXFP8_DTYPE = torch.float8_e4m3fn
 
 
 def _fp8_capable():
@@ -18,6 +21,9 @@ def _fp8_capable():
 
 
 fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
+mxfp8_only = pytest.mark.skipif(
+    not mxfp8.is_supported(), reason="mxfp8 needs SM >= 10.0"
+)
 
 
 def _cfg(grad="bf16"):
@@ -141,6 +147,75 @@ def test_runs_under_bf16_autocast():
     out.square().mean().backward()
     assert q.weight.grad.dtype == torch.float32  # grad matches fp32 master
     assert torch.isfinite(q.weight.grad).all()
+
+
+# --- mxfp8 (blockwise) on all three GEMMs ---
+
+
+@mxfp8_only
+def test_quant_linear_mxfp8_forward_matches_oracle():
+    torch.manual_seed(0)
+    lin = nn.Linear(256, 256, bias=False).cuda().to(torch.bfloat16)
+    q = QuantLinear.from_linear(lin, QuantConfig(enabled=True, dtype_recipe="mxfp8"))
+    x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+    out = q(x)
+    # forward blocks x along in-features (-1) and w along in-features (-1).
+    ref = (
+        fake_quantize_mxfp8(x, MXFP8_DTYPE, -1)
+        @ fake_quantize_mxfp8(lin.weight, MXFP8_DTYPE, -1).t()
+    )
+    assert out.shape == (256, 256) and out.dtype == torch.bfloat16
+    rel = (out.float() - ref.float()).norm() / ref.float().norm()
+    assert rel < 0.05
+
+
+@mxfp8_only
+def test_quant_linear_mxfp8_backward_finite():
+    torch.manual_seed(0)
+    lin = nn.Linear(256, 256, bias=True).cuda().to(torch.bfloat16)
+    q = QuantLinear.from_linear(lin, QuantConfig(enabled=True, dtype_recipe="mxfp8"))
+    x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    q(x).square().mean().backward()
+    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
+    assert q.weight.grad.dtype == q.weight.dtype
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+    assert q.bias.grad is not None and torch.isfinite(q.bias.grad).all()
+
+
+@mxfp8_only
+def test_mxfp8_wgrad_unaligned_tokens():
+    # M=250 tokens (not a multiple of 32) exercises the wgrad contraction pad.
+    torch.manual_seed(0)
+    lin = nn.Linear(256, 256, bias=False).cuda().to(torch.bfloat16)
+    q = QuantLinear.from_linear(lin, QuantConfig(enabled=True, dtype_recipe="mxfp8"))
+    x = torch.randn(250, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    q(x).square().mean().backward()
+    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
+    assert q.weight.grad.shape == (256, 256)
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+def test_mxfp8_fake_quant_fallback_on_cpu():
+    # A one-sided mxfp8 rule (weight quantized, act passthrough) exercises the
+    # mxfp8 fake-quant path inside _gemm without touching the real GEMM — on CPU.
+    torch.manual_seed(0)
+    cfg = QuantConfig(
+        enabled=True,
+        dtype={
+            "weight": "fp8_e4m3",
+            "act": "bf16",
+            "input_grad": "bf16",
+            "weight_grad": "bf16",
+        },
+        scaling={"recipe": "mxfp8"},
+    )
+    lin = nn.Linear(64, 64, bias=False).to(torch.float32)
+    q = QuantLinear.from_linear(lin, cfg)
+    x = torch.randn(32, 64, requires_grad=True)
+    out = q(x)
+    assert out.shape == (32, 64) and torch.isfinite(out).all()
+    out.square().mean().backward()
+    assert torch.isfinite(q.weight.grad).all() and torch.isfinite(x.grad).all()
 
 
 # --- end-to-end: a full model trains one step through the converter ---

@@ -4,34 +4,41 @@ import torch
 import torch.nn as nn
 
 from src.quant.fp8 import fp8_gemm, fake_quantize_fp8
+from src.quant.mxfp8 import mxfp8_gemm, fake_quantize_mxfp8
 from src.quant.int8 import int8_gemm, fake_quantize_int8
 from src.quant.utils import (
     str_to_dtype_fp8,
     str_to_qmax_int8s,
     is_fp8,
+    is_mxfp8,
     is_int8s,
     is_quantized,
 )
 from src.utils.config import QuantConfig
 
 
-def _fake_quant(x, fmt, dim):
-    """dequant(quant(x)) for one operand in its format; identity if passthrough."""
+def _fake_quant(x, fmt, scaling, contract_dim):
+    """dequant(quant(x)) for one operand along `contract_dim`; identity if passthrough."""
     if is_fp8(fmt):
+        if is_mxfp8(scaling):
+            return fake_quantize_mxfp8(x, str_to_dtype_fp8(fmt), contract_dim)
+        dim = contract_dim if scaling.get("granularity") == "rowwise" else None
         return fake_quantize_fp8(x, str_to_dtype_fp8(fmt), dim=dim)
     if is_int8s(fmt):
+        dim = contract_dim if scaling.get("granularity") == "rowwise" else None
         return fake_quantize_int8(x, str_to_qmax_int8s(fmt), dim=dim)
     return x
 
 
-def _gemm(a, b, a_fmt, b_fmt, out_dtype, rowwise=False):
-    """`a @ b` dispatched by operand format family.
-
-    Both operands the same quantized family -> real fused GEMM. Otherwise
-    (mixed families, one-sided, or passthrough) fake-quant each quantized
-    operand and matmul in high precision.
-    """
+def _gemm(a, b, a_fmt, b_fmt, out_dtype, scaling=None):
+    """`a @ b` via a fused GEMM when both operands share a quantized family, else fake-quant."""
+    scaling = scaling or {}
+    rowwise = scaling.get("granularity") == "rowwise"
     if is_fp8(a_fmt) and is_fp8(b_fmt):
+        if is_mxfp8(scaling):
+            return mxfp8_gemm(
+                a, b, out_dtype, str_to_dtype_fp8(a_fmt), str_to_dtype_fp8(b_fmt)
+            )
         return fp8_gemm(
             a,
             b,
@@ -50,29 +57,31 @@ def _gemm(a, b, a_fmt, b_fmt, out_dtype, rowwise=False):
             rowwise=rowwise,
         )
     if is_quantized(a_fmt):
-        a = _fake_quant(a, a_fmt, dim=-1 if rowwise else None)
+        a = _fake_quant(a, a_fmt, scaling, contract_dim=-1)
     if is_quantized(b_fmt):
-        b = _fake_quant(b, b_fmt, dim=0 if rowwise else None)
+        b = _fake_quant(b, b_fmt, scaling, contract_dim=0)
     return (a @ b).to(out_dtype)
 
 
 class QuantizedLinearFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, bias, cfg: QuantConfig):
-        # Follow the active autocast dtype so operands share a dtype and the
-        # output matches what nn.Linear would produce; else use x's dtype.
+        # Compute in the active autocast dtype if any, else x's dtype.
         device_type = x.device.type
         if torch.is_autocast_enabled(device_type):
             compute_dtype = torch.get_autocast_dtype(device_type)
         else:
             compute_dtype = x.dtype
 
-        rowwise = cfg.scaling["granularity"] == "rowwise"
-
         x2d = x.reshape(-1, x.shape[-1]).to(compute_dtype)
         w = weight.to(compute_dtype)
         y = _gemm(
-            x2d, w.t(), cfg.dtype["act"], cfg.dtype["weight"], compute_dtype, rowwise
+            x2d,
+            w.t(),
+            cfg.dtype["act"],
+            cfg.dtype["weight"],
+            compute_dtype,
+            cfg.scaling,
         )
         if bias is not None:
             y = y + bias.to(compute_dtype)
@@ -92,11 +101,14 @@ class QuantizedLinearFn(torch.autograd.Function):
         compute_dtype = x2d.dtype
         g = grad_out.reshape(-1, grad_out.shape[-1]).to(compute_dtype)  # (M, N)
 
-        rowwise = cfg.scaling["granularity"] == "rowwise"
-
         # dX = g @ W          (M,N)@(N,K) -> (M,K)
         dx = _gemm(
-            g, w, cfg.dtype["input_grad"], cfg.dtype["weight"], compute_dtype, rowwise
+            g,
+            w,
+            cfg.dtype["input_grad"],
+            cfg.dtype["weight"],
+            compute_dtype,
+            cfg.scaling,
         )
         # dW = gᵀ @ X         (N,M)@(M,K) -> (N,K)
         dw = _gemm(
@@ -105,7 +117,7 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["weight_grad"],
             cfg.dtype["act"],
             compute_dtype,
-            rowwise,
+            cfg.scaling,
         )
         db = g.sum(dim=0) if ctx.has_bias else None
 

@@ -144,7 +144,7 @@ def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")
     b = torch.randn(128, 96, device="cuda")
-    out = _gemm(a, b, fmt, fmt, torch.float32, rowwise=True)
+    out = _gemm(a, b, fmt, fmt, torch.float32, {"granularity": "rowwise"})
     qmax = QMAX[fmt]
     ref = fake_quantize_int8(a, qmax, dim=-1) @ fake_quantize_int8(b, qmax, dim=0)
     assert (out - ref.float()).norm() / ref.float().norm() < 0.02

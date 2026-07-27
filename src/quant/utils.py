@@ -22,6 +22,14 @@ def is_fp8(fmt: str) -> bool:
     return fmt in _FP8_DTYPE
 
 
+def is_mxfp8(scaling: dict) -> bool:
+    """Whether a resolved `scaling` dict selects the mxfp8 scheme (blockwise + E8M0)."""
+    return (
+        scaling.get("granularity") == "blockwise"
+        and scaling.get("scale_dtype") == "e8m0"
+    )
+
+
 def is_int8s(fmt: str) -> bool:
     return fmt in _INT8S_QMAX
 

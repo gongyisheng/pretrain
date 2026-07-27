@@ -872,6 +872,98 @@ def test_quant_disabled_stays_disabled():
     assert _only_rule(tc).enabled is False
 
 
+# ---- mxfp8 / blockwise scaling (Option B: element format ⟂ scale scheme) ----
+
+
+def test_quant_mxfp8_recipe_expands_dtype_and_scaling():
+    q = QuantConfig(enabled=True, dtype_recipe="mxfp8")
+    # mxfp8 is e4m3 on every operand (incl. grads): the MX GEMM only does
+    # e4m3 x e4m3, and per-block rescaling gives e4m3 enough range for grads.
+    assert q.dtype == {
+        "weight": "fp8_e4m3",
+        "act": "fp8_e4m3",
+        "input_grad": "fp8_e4m3",
+        "weight_grad": "fp8_e4m3",
+    }
+    assert q.scaling == {
+        "granularity": "blockwise",
+        "block_size": 32,
+        "scale_dtype": "e8m0",
+    }
+
+
+def test_quant_mxfp8_scaling_recipe_expands():
+    q = QuantConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3"},
+        scaling={"recipe": "mxfp8"},
+    )
+    assert q.scaling["granularity"] == "blockwise"
+    assert q.scaling["block_size"] == 32
+    assert q.scaling["scale_dtype"] == "e8m0"
+    assert "recipe" not in q.scaling  # recipe key is consumed on expansion
+
+
+def test_quant_mxfp8_scaling_recipe_explicit_keys_win():
+    q = QuantConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3"},
+        scaling={"recipe": "mxfp8", "block_size": 16},
+    )
+    assert q.scaling["block_size"] == 16  # explicit overrides recipe default
+
+
+def test_quant_unknown_scaling_recipe_raises():
+    with pytest.raises(ValueError, match="scaling recipe"):
+        QuantConfig(
+            enabled=True, dtype={"weight": "fp8_e4m3"}, scaling={"recipe": "nope"}
+        )
+
+
+def test_quant_e8m0_requires_blockwise():
+    with pytest.raises(ValueError, match="e8m0"):
+        QuantConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            scaling={"granularity": "rowwise", "scale_dtype": "e8m0"},
+        )
+
+
+def test_quant_blockwise_requires_block_size():
+    with pytest.raises(ValueError, match="block_size"):
+        QuantConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            scaling={"granularity": "blockwise"},
+        )
+
+
+def test_quant_mxfp8_rejects_int_element():
+    with pytest.raises(ValueError, match="fp8"):
+        QuantConfig(enabled=True, dtype={"weight": "int8"}, scaling={"recipe": "mxfp8"})
+
+
+def test_quant_rowwise_still_valid_with_blockwise_added():
+    # adding blockwise validation must not disturb the existing rowwise path
+    q = QuantConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3"},
+        scaling={"granularity": "rowwise"},
+    )
+    assert q.scaling["granularity"] == "rowwise"
+    assert "scale_dtype" not in q.scaling
+
+
+def test_quant_mxfp8_normalizes_through_training_config():
+    r = _only_rule(
+        TrainingConfig(
+            mixed_precision="bf16", quant={"dtype_recipe": "mxfp8", "enabled": True}
+        )
+    )
+    assert r.scaling["scale_dtype"] == "e8m0"
+    assert r.dtype["weight"] == "fp8_e4m3"
+
+
 # ==================== latent_moe / latent_dim ====================
 
 

@@ -11,6 +11,8 @@ from src.quant import (
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,
     QUANT_OPERANDS,
+    QUANT_PASSTHROUGH,
+    QUANT_SCALING_RECIPES,
 )
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
@@ -315,6 +317,20 @@ class QuantConfig:
                 )
             for operand, fmt in QUANT_DTYPE_RECIPES[self.dtype_recipe].items():
                 self.dtype.setdefault(operand, fmt)  # explicit dtype wins
+            # mxfp8 is an fp8 element paired with the "mxfp8" scale scheme; seed it.
+            if self.dtype_recipe == "mxfp8":
+                self.scaling.setdefault("recipe", "mxfp8")
+
+        # A scaling recipe fills the scaling dict the way dtype_recipe fills dtype.
+        recipe = self.scaling.pop("recipe", None)
+        if recipe is not None:
+            if recipe not in QUANT_SCALING_RECIPES:
+                raise ValueError(
+                    f"unknown quant scaling recipe: {recipe!r}; "
+                    f"expected one of {sorted(QUANT_SCALING_RECIPES)}"
+                )
+            for key, val in QUANT_SCALING_RECIPES[recipe].items():
+                self.scaling.setdefault(key, val)  # explicit scaling keys win
 
         self.scaling.setdefault("granularity", "tensorwise")
         granularity = self.scaling["granularity"]
@@ -322,6 +338,16 @@ class QuantConfig:
             raise ValueError(
                 f"unknown quant granularity: {granularity!r}; "
                 f"expected one of {sorted(QUANT_GRANULARITY)}"
+            )
+
+        scale_dtype = self.scaling.get("scale_dtype")
+        if scale_dtype == "e8m0" and granularity != "blockwise":
+            raise ValueError(
+                "quant scale_dtype 'e8m0' requires granularity 'blockwise'"
+            )
+        if granularity == "blockwise" and not self.scaling.get("block_size"):
+            raise ValueError(
+                "quant granularity 'blockwise' requires a positive block_size"
             )
 
         for operand, fmt in self.dtype.items():
@@ -335,6 +361,15 @@ class QuantConfig:
                     f"unknown quant fmt for {operand}: {fmt!r}; "
                     f"expected one of {sorted(QUANT_FORMATS)}"
                 )
+
+        # mxfp8 (blockwise + e8m0) is defined only over fp8 elements.
+        if granularity == "blockwise" and scale_dtype == "e8m0":
+            for operand, fmt in self.dtype.items():
+                if fmt not in QUANT_PASSTHROUGH and not fmt.startswith("fp8"):
+                    raise ValueError(
+                        f"mxfp8 scaling requires an fp8 element for {operand}, "
+                        f"got {fmt!r}"
+                    )
 
 
 @dataclass

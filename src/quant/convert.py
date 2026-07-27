@@ -4,9 +4,9 @@ import warnings
 
 import torch.nn as nn
 
-from src.quant import QUANT_PASSTHROUGH, fp8
+from src.quant import QUANT_PASSTHROUGH, fp8, mxfp8
 from src.quant.linear import QuantLinear
-from src.quant.utils import resolve_rule
+from src.quant.utils import is_mxfp8, resolve_rule
 
 # Per-format hardware capability: fmt -> (predicate, requirement message). Formats
 # absent here impose no requirement (e.g. passthrough dtypes, and int8 which runs
@@ -24,10 +24,16 @@ def _quantizes(rule) -> bool:
 
 
 def _check_hardware(rules) -> None:
-    """Raise if any enabled rule uses a fmt this hardware can't run."""
+    """Raise if any enabled rule uses a fmt/scaling scheme this hardware can't run."""
     for rule in rules:
         if not rule.enabled:
             continue
+        # mxfp8 gates on the scale scheme (Blackwell MMA), not just the fp8 element.
+        if is_mxfp8(rule.scaling) and not mxfp8.is_supported():
+            raise RuntimeError(
+                f"mxfp8 scaling requires {mxfp8.HARDWARE_REQUIREMENT}. "
+                "Disable quant or run on supported hardware."
+            )
         for fmt in rule.dtype.values():
             requirement = _FMT_HARDWARE.get(fmt)
             if requirement is not None and not requirement[0]():
