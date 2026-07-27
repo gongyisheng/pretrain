@@ -3,15 +3,15 @@ import torch
 import torch.nn as nn
 
 from src.model import build_model
-from src.quant import mxfp8
 from src.quant.linear import QuantLinear
 from src.quant.convert import apply_quantization
 from src.quant.fp8 import fake_quantize_fp8
-from src.quant.mxfp8 import fake_quantize_mxfp8
+from src.quant.scale import fake_quantize_operand
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
 
 FP8_FORWARD_DTYPE = torch.float8_e4m3fn
 MXFP8_DTYPE = torch.float8_e4m3fn
+_MX_KW = dict(fmt="fp8_e4m3", scale_dtype="fp8_e8m0")
 
 
 def _fp8_capable():
@@ -21,8 +21,10 @@ def _fp8_capable():
 
 
 fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
+# mxfp8 is a scaling scheme (power-of-two blockwise), not Blackwell-only anymore;
+# it now runs through the generic scaled_gemm kernel like any other CUDA fp8/int path.
 mxfp8_only = pytest.mark.skipif(
-    not mxfp8.is_supported(), reason="mxfp8 needs SM >= 10.0"
+    not torch.cuda.is_available(), reason="mxfp8 needs CUDA"
 )
 
 
@@ -30,8 +32,7 @@ def _cfg(grad="bf16"):
     # recipe fills weight/act=fp8_e4m3; both backward grads overridden explicitly
     return QuantConfig(
         enabled=True,
-        dtype_recipe="fp8",
-        dtype={"input_grad": grad, "weight_grad": grad},
+        dtype={"recipe": "fp8", "input_grad": grad, "weight_grad": grad},
     )
 
 
@@ -79,7 +80,7 @@ def test_rowwise_forward_and_backward():
     torch.manual_seed(0)
     lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
     cfg = QuantConfig(
-        enabled=True, dtype_recipe="fp8", scaling={"granularity": "rowwise"}
+        enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "rowwise"}
     )
     q = QuantLinear.from_linear(lin, cfg)
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -103,7 +104,7 @@ def test_high_precision_weight_grad_changes_wgrad():
 
     def weight_grad(hp):
         dtype = {"weight_grad": "bf16"} if hp else {}
-        cfg = QuantConfig(enabled=True, dtype_recipe="fp8", dtype=dtype)
+        cfg = QuantConfig(enabled=True, dtype={"recipe": "fp8", **dtype})
         q = QuantLinear.from_linear(lin, cfg)
         q(x.clone()).square().mean().backward()
         return q.weight.grad
@@ -156,13 +157,15 @@ def test_runs_under_bf16_autocast():
 def test_quant_linear_mxfp8_forward_matches_oracle():
     torch.manual_seed(0)
     lin = nn.Linear(256, 256, bias=False).cuda().to(torch.bfloat16)
-    q = QuantLinear.from_linear(lin, QuantConfig(enabled=True, dtype_recipe="mxfp8"))
+    q = QuantLinear.from_linear(
+        lin, QuantConfig(enabled=True, dtype={"recipe": "mxfp8"})
+    )
     x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
     out = q(x)
     # forward blocks x along in-features (-1) and w along in-features (-1).
     ref = (
-        fake_quantize_mxfp8(x, MXFP8_DTYPE, -1)
-        @ fake_quantize_mxfp8(lin.weight, MXFP8_DTYPE, -1).t()
+        fake_quantize_operand(x, -1, "blockwise", 32, **_MX_KW)
+        @ fake_quantize_operand(lin.weight, -1, "blockwise", 32, **_MX_KW).t()
     )
     assert out.shape == (256, 256) and out.dtype == torch.bfloat16
     rel = (out.float() - ref.float()).norm() / ref.float().norm()
@@ -173,7 +176,9 @@ def test_quant_linear_mxfp8_forward_matches_oracle():
 def test_quant_linear_mxfp8_backward_finite():
     torch.manual_seed(0)
     lin = nn.Linear(256, 256, bias=True).cuda().to(torch.bfloat16)
-    q = QuantLinear.from_linear(lin, QuantConfig(enabled=True, dtype_recipe="mxfp8"))
+    q = QuantLinear.from_linear(
+        lin, QuantConfig(enabled=True, dtype={"recipe": "mxfp8"})
+    )
     x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     q(x).square().mean().backward()
     assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
@@ -187,7 +192,9 @@ def test_mxfp8_wgrad_unaligned_tokens():
     # M=250 tokens (not a multiple of 32) exercises the wgrad contraction pad.
     torch.manual_seed(0)
     lin = nn.Linear(256, 256, bias=False).cuda().to(torch.bfloat16)
-    q = QuantLinear.from_linear(lin, QuantConfig(enabled=True, dtype_recipe="mxfp8"))
+    q = QuantLinear.from_linear(
+        lin, QuantConfig(enabled=True, dtype={"recipe": "mxfp8"})
+    )
     x = torch.randn(250, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     q(x).square().mean().backward()
     assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
@@ -240,7 +247,7 @@ def _model_cfg():
         ),
         training=TrainingConfig(
             mixed_precision="bf16",
-            quant={"enabled": True, "dtype_recipe": "fp8"},
+            quant={"enabled": True, "dtype": {"recipe": "fp8"}},
         ),
     )
 
@@ -261,3 +268,22 @@ def test_quantized_model_trains_one_step():
     assert torch.isfinite(loss).item()
     qw = next(m.weight for m in model.modules() if isinstance(m, QuantLinear))
     assert qw.grad is not None and torch.isfinite(qw.grad).all()
+
+
+@fp8_only
+def test_compiled_quant_linear_blockwise_fwd_bwd():
+    torch.manual_seed(0)
+    lin = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
+    cfg = QuantConfig(
+        enabled=True,
+        dtype={"recipe": "fp8"},
+        scaling={"granularity": "blockwise", "block_size": 128},
+    )
+    q = QuantLinear.from_linear(lin, cfg)
+    x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    compiled = torch.compile(q, fullgraph=True)
+    out = compiled(x)
+    out.square().mean().backward()
+    assert out.shape == (64, 128) and torch.isfinite(out).all()
+    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
+    assert x.grad is not None and torch.isfinite(x.grad).all()

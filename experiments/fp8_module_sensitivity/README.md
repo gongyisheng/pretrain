@@ -28,7 +28,7 @@ All runs share the model, data, schedule, and optimizer; the only independent va
 | qwen3_77m_fp8_lm_head | output head | `[lm_head]` | 1 |
 
 - Model: d_model=512, 8 layers, gqa 8/4, qk_norm, intermediate_size=1536, rope θ=10000, `tie_word_embeddings: false` (~77M).
-- FP8: `dtype_recipe: fp8` (weight/act `fp8_e4m3`, grad `fp8_e5m2`), `scaling.granularity: tensorwise`, `exclude: []`. Only the matched GEMM operands are cast to FP8 on the fly; everything else stays bf16/fp32, hp master weights preserved.
+- FP8: `dtype: {recipe: fp8}` (weight/act `fp8_e4m3`, grad `fp8_e5m2`), `scaling.granularity: tensorwise`, `exclude: []`. Only the matched GEMM operands are cast to FP8 on the fly; everything else stays bf16/fp32, hp master weights preserved.
 - Optimizer: **Muon** (`MuonAdamWOptimizer`) on all runs — 2D hidden weights → Muon, embeddings/`lm_head`/1D → AdamW, `adjust_lr_fn=match_rms_adamw` (reuses AdamW-tuned lr/wd). `momentum=0.95`, `nesterov=true`.
 - All runs: seq_len=1024, batch=16, grad_accum=16 (eff. batch=256, ~262K tok/step), 50K steps (~13B tokens), bf16 mixed precision, lr=5e-4, cosine with 1500 warmup, min_lr=5e-5, seed=42, OpenWebText.
 - `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`.

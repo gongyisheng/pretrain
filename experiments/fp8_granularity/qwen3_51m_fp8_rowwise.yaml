@@ -33,7 +33,7 @@ training:
   mixed_precision: bf16
   quant:
     enabled: true
-    dtype_recipe: fp8
+    dtype: {recipe: fp8}
     scaling:
       granularity: rowwise
     exclude: [lm_head]

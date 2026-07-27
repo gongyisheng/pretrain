@@ -766,7 +766,7 @@ def test_quant_dtype_is_mixable():
 
 
 def test_quant_dtype_recipe_fp8():
-    q = QuantConfig(enabled=True, dtype_recipe="fp8")
+    q = QuantConfig(enabled=True, dtype={"recipe": "fp8"})
     assert q.dtype == {
         "weight": "fp8_e4m3",
         "act": "fp8_e4m3",
@@ -777,19 +777,19 @@ def test_quant_dtype_recipe_fp8():
 
 def test_quant_dtype_recipe_respects_explicit_operand():
     # explicit weight_grad: bf16 overrides the recipe (torchao *_with_gw_hp)
-    q = QuantConfig(enabled=True, dtype_recipe="fp8", dtype={"weight_grad": "bf16"})
+    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "weight_grad": "bf16"})
     assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["weight_grad"] == "bf16"
 
 
 def test_quant_unknown_recipe_raises():
-    with pytest.raises(ValueError, match="dtype_recipe"):
-        QuantConfig(enabled=True, dtype_recipe="fp3")
+    with pytest.raises(ValueError, match="dtype recipe"):
+        QuantConfig(enabled=True, dtype={"recipe": "fp3"})
 
 
 def test_quant_include_defaults_empty():
     q = QuantConfig()
     assert q.include == [] and q.exclude == ["lm_head"]
-    q2 = QuantConfig(enabled=True, dtype_recipe="fp8", include=["*.mlp.*"])
+    q2 = QuantConfig(enabled=True, dtype={"recipe": "fp8"}, include=["*.mlp.*"])
     assert q2.include == ["*.mlp.*"]
 
 
@@ -805,31 +805,31 @@ def test_quant_rejects_unknown_format():
 
 def test_quant_accepts_rowwise_granularity():
     q = QuantConfig(
-        enabled=True, dtype_recipe="fp8", scaling={"granularity": "rowwise"}
+        enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "rowwise"}
     )
     assert q.scaling["granularity"] == "rowwise"
 
 
 def test_quant_default_granularity_is_tensorwise():
-    q = QuantConfig(enabled=True, dtype_recipe="fp8")
+    q = QuantConfig(enabled=True, dtype={"recipe": "fp8"})
     assert q.scaling["granularity"] == "tensorwise"
 
 
 def test_quant_recipe_sets_both_backward_grads():
-    r = TrainingConfig(quant={"enabled": True, "dtype_recipe": "fp8"}).quant[0]
+    r = TrainingConfig(quant={"enabled": True, "dtype": {"recipe": "fp8"}}).quant[0]
     assert r.dtype["input_grad"] == r.dtype["weight_grad"] == "fp8_e5m2"
     assert "grad" not in r.dtype
 
 
 def test_quant_weight_grad_hp_override():
     # gw_hp: keep only the weight-gradient GEMM in bf16
-    q = QuantConfig(enabled=True, dtype_recipe="fp8", dtype={"weight_grad": "bf16"})
+    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "weight_grad": "bf16"})
     assert q.dtype["weight_grad"] == "bf16" and q.dtype["input_grad"] == "fp8_e5m2"
 
 
 def test_quant_input_grad_hp_override():
     # keep only the input-gradient (dgrad) GEMM in bf16
-    q = QuantConfig(enabled=True, dtype_recipe="fp8", dtype={"input_grad": "bf16"})
+    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "input_grad": "bf16"})
     assert q.dtype["input_grad"] == "bf16" and q.dtype["weight_grad"] == "fp8_e5m2"
 
 
@@ -840,11 +840,13 @@ def test_quant_rejects_unknown_dtype_key():
 
 def test_quant_rejects_unsupported_granularity():
     with pytest.raises(ValueError, match="granularity"):
-        QuantConfig(enabled=True, dtype_recipe="fp8", scaling={"granularity": "row"})
+        QuantConfig(
+            enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "row"}
+        )
 
 
 def test_training_config_normalizes_single_rule_to_list():
-    tc = TrainingConfig(quant={"enabled": True, "dtype_recipe": "fp8"})
+    tc = TrainingConfig(quant={"enabled": True, "dtype": {"recipe": "fp8"}})
     assert isinstance(tc.quant, list) and len(tc.quant) == 1
     assert tc.quant[0].dtype["weight"] == "fp8_e4m3"
 
@@ -853,7 +855,7 @@ def test_training_config_accepts_list_of_rules():
     tc = TrainingConfig(
         mixed_precision="bf16",
         quant=[
-            {"enabled": True, "dtype_recipe": "fp8", "include": ["*.mlp.*"]},
+            {"enabled": True, "dtype": {"recipe": "fp8"}, "include": ["*.mlp.*"]},
             {"enabled": True, "dtype": {"weight": "fp8"}, "include": ["*.attn.*"]},
         ],
     )
@@ -876,7 +878,7 @@ def test_quant_disabled_stays_disabled():
 
 
 def test_quant_mxfp8_recipe_expands_dtype_and_scaling():
-    q = QuantConfig(enabled=True, dtype_recipe="mxfp8")
+    q = QuantConfig(enabled=True, dtype={"recipe": "mxfp8"})
     # mxfp8 is e4m3 on every operand (incl. grads): the MX GEMM only does
     # e4m3 x e4m3, and per-block rescaling gives e4m3 enough range for grads.
     assert q.dtype == {
@@ -888,7 +890,7 @@ def test_quant_mxfp8_recipe_expands_dtype_and_scaling():
     assert q.scaling == {
         "granularity": "blockwise",
         "block_size": 32,
-        "scale_dtype": "e8m0",
+        "scale_dtype": "fp8_e8m0",
     }
 
 
@@ -900,7 +902,7 @@ def test_quant_mxfp8_scaling_recipe_expands():
     )
     assert q.scaling["granularity"] == "blockwise"
     assert q.scaling["block_size"] == 32
-    assert q.scaling["scale_dtype"] == "e8m0"
+    assert q.scaling["scale_dtype"] == "fp8_e8m0"
     assert "recipe" not in q.scaling  # recipe key is consumed on expansion
 
 
@@ -921,11 +923,11 @@ def test_quant_unknown_scaling_recipe_raises():
 
 
 def test_quant_e8m0_requires_blockwise():
-    with pytest.raises(ValueError, match="e8m0"):
+    with pytest.raises(ValueError, match="fp8_e8m0"):
         QuantConfig(
             enabled=True,
             dtype={"weight": "fp8_e4m3"},
-            scaling={"granularity": "rowwise", "scale_dtype": "e8m0"},
+            scaling={"granularity": "rowwise", "scale_dtype": "fp8_e8m0"},
         )
 
 
@@ -957,10 +959,11 @@ def test_quant_rowwise_still_valid_with_blockwise_added():
 def test_quant_mxfp8_normalizes_through_training_config():
     r = _only_rule(
         TrainingConfig(
-            mixed_precision="bf16", quant={"dtype_recipe": "mxfp8", "enabled": True}
+            mixed_precision="bf16",
+            quant={"dtype": {"recipe": "mxfp8"}, "enabled": True},
         )
     )
-    assert r.scaling["scale_dtype"] == "e8m0"
+    assert r.scaling["scale_dtype"] == "fp8_e8m0"
     assert r.dtype["weight"] == "fp8_e4m3"
 
 
@@ -1177,3 +1180,63 @@ def test_configs_model_key_order_d_model_n_layers_vocab_size_attn_mlp_first():
         keys = list(raw["model"].keys())
         assert keys[:3] == ["d_model", "n_layers", "vocab_size"], (p, keys)
         assert keys[3] == "attn" and keys[4] == "mlp", (p, keys)
+
+
+# ==================== Scaling recipes (tensorwise, rowwise, blockwise) ====================
+
+
+def test_quant_blockwise_recipe_expands():
+    q = QuantConfig(
+        enabled=True, dtype={"recipe": "fp8"}, scaling={"recipe": "blockwise"}
+    )
+    assert q.scaling["granularity"] == "blockwise"
+    assert q.scaling["block_size"] == 128
+    assert q.scaling["scale_dtype"] == "fp32"
+    assert "recipe" not in q.scaling
+
+
+def test_quant_rowwise_recipe_expands():
+    q = QuantConfig(
+        enabled=True, dtype={"recipe": "fp8"}, scaling={"recipe": "rowwise"}
+    )
+    assert q.scaling["granularity"] == "rowwise"
+
+
+def test_quant_blockwise_block_size_must_be_multiple_of_16():
+    with pytest.raises(ValueError, match="block_size"):
+        QuantConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            scaling={"granularity": "blockwise", "block_size": 24},
+        )
+
+
+def test_quant_blockwise_block_size_must_be_positive():
+    with pytest.raises(ValueError, match="block_size"):
+        QuantConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            scaling={"granularity": "blockwise", "block_size": -16},
+        )
+
+
+def test_quant_rejects_unknown_scale_dtype():
+    with pytest.raises(ValueError, match="scale_dtype"):
+        QuantConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            scaling={
+                "granularity": "blockwise",
+                "block_size": 32,
+                "scale_dtype": "e3m4",
+            },
+        )
+
+
+def test_quant_blockwise_fp32_scale_dtype_ok():
+    q = QuantConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3"},
+        scaling={"granularity": "blockwise", "block_size": 64, "scale_dtype": "fp32"},
+    )
+    assert q.scaling["scale_dtype"] == "fp32"

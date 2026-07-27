@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 
 _EPS = 1e-12
-_warned_shape_fallback = False
 
 
 def quantize_int8(
@@ -23,31 +22,3 @@ def fake_quantize_int8(
 ) -> torch.Tensor:
     x_i8, scale = quantize_int8(x, qmax, dim=dim)
     return (x_i8.float() * scale).to(x.dtype)
-
-
-def int8_gemm(a, b, out_dtype, a_qmax, b_qmax, rowwise=False):
-    a_dim = -1 if rowwise else None
-    b_dim = 0 if rowwise else None
-    M, K = a.shape
-    N = b.shape[1]
-    # torch._int_mm needs CUDA and M > 16, K/N multiples of 8. For anything it
-    # rejects, fall back to the fake-quant path (same numerics, no kernel).
-    if not (a.is_cuda and M > 16 and K % 8 == 0 and N % 8 == 0):
-        global _warned_shape_fallback
-        if not _warned_shape_fallback:
-            print(
-                f"int8_gemm: (device={a.device}, M={M}, K={K}, N={N}) unsupported "
-                "by torch._int_mm (needs CUDA, M>16, K/N multiples of 8); using "
-                "the fake-quant fallback (no int8 kernel speedup). Warned once."
-            )
-            _warned_shape_fallback = True
-        return (
-            fake_quantize_int8(a, a_qmax, dim=a_dim)
-            @ fake_quantize_int8(b, b_qmax, dim=b_dim)
-        ).to(out_dtype)
-
-    a_i8, a_scale = quantize_int8(a, a_qmax, dim=a_dim)  # rowwise: (M,1); else scalar
-    b_i8, b_scale = quantize_int8(b, b_qmax, dim=b_dim)  # rowwise: (1,N); else scalar
-    b_i8_col_major = b_i8.t().contiguous().t()
-    acc = torch._int_mm(a_i8.contiguous(), b_i8_col_major)
-    return (acc.float() * a_scale * b_scale).to(out_dtype)

@@ -17,6 +17,11 @@ _FP8_DTYPE = {
 # Symmetric max magnitude per int fmt = 2^(bits-1) - 1. All stored in torch.int8.
 _INT8S_QMAX = {"int8": 127, "int7": 63, "int6": 31, "int5": 15, "int4": 7}
 
+# Largest normal exponent per fp8 element format; the shared power-of-two (MX-style)
+# scale aligns a block's amax to this so the block's max value lands near the
+# format's top.
+_FP8_EMAX = {torch.float8_e4m3fn: 8, torch.float8_e5m2: 15}
+
 
 def is_fp8(fmt: str) -> bool:
     return fmt in _FP8_DTYPE
@@ -26,7 +31,7 @@ def is_mxfp8(scaling: dict) -> bool:
     """Whether a resolved `scaling` dict selects the mxfp8 scheme (blockwise + E8M0)."""
     return (
         scaling.get("granularity") == "blockwise"
-        and scaling.get("scale_dtype") == "e8m0"
+        and scaling.get("scale_dtype") == "fp8_e8m0"
     )
 
 
@@ -44,6 +49,28 @@ def str_to_dtype_fp8(fmt: str) -> Optional[torch.dtype]:
 
 def str_to_qmax_int8s(fmt: str) -> Optional[int]:
     return _INT8S_QMAX.get(fmt)
+
+
+# --- element max map: qmax/emax/store dtype keyed by the quantized element `fmt`.
+# These are properties of the element being quantized (not the scale), so `fmt`
+# is the key; the scale scheme picks *which* of qmax/emax it aligns to.
+
+
+def fmt_qmax(fmt: str) -> float:
+    """Max representable magnitude of element `fmt` (fp8 finfo max, or int qmax)."""
+    dt = _FP8_DTYPE.get(fmt)
+    return float(torch.finfo(dt).max) if dt is not None else float(_INT8S_QMAX[fmt])
+
+
+def fmt_emax(fmt: str) -> int:
+    """Largest normal exponent of fp8 element `fmt`; 0 for int formats (unused there)."""
+    dt = _FP8_DTYPE.get(fmt)
+    return _FP8_EMAX[dt] if dt is not None else 0
+
+
+def fmt_store_dtype(fmt: str) -> torch.dtype:
+    """Storage dtype for element `fmt`: its fp8 dtype, or torch.int8 for int formats."""
+    return _FP8_DTYPE.get(fmt, torch.int8)
 
 
 def should_quantize(fqn: str, cfg: QuantConfig) -> bool:

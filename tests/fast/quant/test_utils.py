@@ -16,7 +16,7 @@ def test_str_to_dtype_fp8_passthrough_is_none():
 
 
 def _cfg(**kw):
-    base = dict(enabled=True, dtype_recipe="fp8")
+    base = dict(enabled=True, dtype={"recipe": "fp8"})
     base.update(kw)
     return QuantConfig(**base)
 

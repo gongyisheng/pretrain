@@ -37,7 +37,7 @@ training:
   seed: 42
   quant:
     enabled: true
-    dtype_recipe: fp8
+    dtype: {recipe: fp8}
     scaling:
       granularity: tensorwise
     exclude: [lm_head]

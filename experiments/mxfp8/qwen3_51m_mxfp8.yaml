@@ -33,7 +33,7 @@ training:
   mixed_precision: bf16
   quant:
     enabled: true
-    dtype_recipe: mxfp8      # e4m3 on all operands + mxfp8 scaling (block-32, E8M0)
+    dtype: {recipe: mxfp8}      # e4m3 on all operands + mxfp8 scaling (block-32, E8M0)
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/mxfp8/qwen3_51m_mxfp8/

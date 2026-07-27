@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.quant.fp8 import quantize_fp8, fake_quantize_fp8, fp8_gemm
+from src.quant.fp8 import quantize_fp8, fake_quantize_fp8
 
 FP8_FORWARD_DTYPE = torch.float8_e4m3fn
 FP8_GRAD_DTYPE = torch.float8_e5m2
@@ -42,61 +42,3 @@ def test_zero_tensor_is_safe():
     x = torch.zeros(4, 4)
     recon = fake_quantize_fp8(x, FP8_FORWARD_DTYPE)
     assert torch.isfinite(recon).all()
-
-
-# --- fp8_gemm on torch._scaled_mm (GPU-gated) ---
-
-
-@fp8_only
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
-def test_fp8_gemm_matches_bf16_reference(out_dtype):
-    torch.manual_seed(0)
-    M, K, N = 64, 128, 96  # all divisible by 16
-    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
-    out = fp8_gemm(a, b, out_dtype, FP8_FORWARD_DTYPE, FP8_FORWARD_DTYPE)
-    ref = (a.float() @ b.float()).to(out_dtype)
-    assert out.dtype == out_dtype and out.shape == (M, N)
-    rel = (out.float() - ref.float()).norm() / ref.float().norm()
-    assert rel < 0.1
-
-
-@fp8_only
-def test_fp8_gemm_matches_fake_quant_oracle():
-    # tighter check: same rounding on both sides
-    torch.manual_seed(0)
-    a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)
-    out = fp8_gemm(a, b, torch.bfloat16, FP8_FORWARD_DTYPE, FP8_FORWARD_DTYPE)
-    ref = fake_quantize_fp8(a, FP8_FORWARD_DTYPE) @ fake_quantize_fp8(
-        b, FP8_FORWARD_DTYPE
-    )
-    rel = (out.float() - ref.float()).norm() / ref.float().norm()
-    assert rel < 0.02
-
-
-@fp8_only
-def test_fp8_gemm_rowwise_matches_reference():
-    torch.manual_seed(0)
-    M, K, N = 64, 128, 96
-    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
-    out = fp8_gemm(
-        a, b, torch.bfloat16, FP8_FORWARD_DTYPE, FP8_FORWARD_DTYPE, rowwise=True
-    )
-    ref = a.float() @ b.float()
-    rel = (out.float() - ref).norm() / ref.norm()
-    assert out.shape == (M, N)
-    assert rel < 0.06  # rowwise is tighter than tensorwise
-
-
-@fp8_only
-def test_fp8_gemm_e5m2_grad_side():
-    # grad-output side is e5m2; the other side must be e4m3 (cuBLAS rule).
-    torch.manual_seed(0)
-    a = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(64, 48, device="cuda", dtype=torch.bfloat16)
-    out = fp8_gemm(a, b, torch.bfloat16, FP8_GRAD_DTYPE, FP8_FORWARD_DTYPE)
-    ref = a.float() @ b.float()
-    rel = (out.float() - ref).norm() / ref.norm()
-    assert rel < 0.15

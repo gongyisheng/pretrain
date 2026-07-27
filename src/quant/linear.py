@@ -3,59 +3,45 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.quant.fp8 import fp8_gemm, fake_quantize_fp8
-from src.quant.mxfp8 import mxfp8_gemm, fake_quantize_mxfp8
-from src.quant.int8 import int8_gemm, fake_quantize_int8
 from src.quant.utils import (
-    str_to_dtype_fp8,
-    str_to_qmax_int8s,
     is_fp8,
-    is_mxfp8,
     is_int8s,
     is_quantized,
 )
+from src.quant.scale import (
+    quantize_operand,
+    fake_quantize_operand,
+    effective_block_size,
+)
+from src.kernel.gemm import scaled_gemm
 from src.utils.config import QuantConfig
 
 
 def _fake_quant(x, fmt, scaling, contract_dim):
     """dequant(quant(x)) for one operand along `contract_dim`; identity if passthrough."""
-    if is_fp8(fmt):
-        if is_mxfp8(scaling):
-            return fake_quantize_mxfp8(x, str_to_dtype_fp8(fmt), contract_dim)
-        dim = contract_dim if scaling.get("granularity") == "rowwise" else None
-        return fake_quantize_fp8(x, str_to_dtype_fp8(fmt), dim=dim)
-    if is_int8s(fmt):
-        dim = contract_dim if scaling.get("granularity") == "rowwise" else None
-        return fake_quantize_int8(x, str_to_qmax_int8s(fmt), dim=dim)
-    return x
+    if not is_quantized(fmt):
+        return x
+    gran = scaling.get("granularity", "tensorwise")
+    bs = scaling.get("block_size", 0)
+    return fake_quantize_operand(
+        x, contract_dim, gran, bs, fmt, scale_dtype=scaling.get("scale_dtype")
+    )
 
 
 def _gemm(a, b, a_fmt, b_fmt, out_dtype, scaling=None):
     """`a @ b` via a fused GEMM when both operands share a quantized family, else fake-quant."""
     scaling = scaling or {}
-    rowwise = scaling.get("granularity") == "rowwise"
-    if is_fp8(a_fmt) and is_fp8(b_fmt):
-        if is_mxfp8(scaling):
-            return mxfp8_gemm(
-                a, b, out_dtype, str_to_dtype_fp8(a_fmt), str_to_dtype_fp8(b_fmt)
-            )
-        return fp8_gemm(
-            a,
-            b,
-            out_dtype,
-            str_to_dtype_fp8(a_fmt),
-            str_to_dtype_fp8(b_fmt),
-            rowwise=rowwise,
-        )
-    if is_int8s(a_fmt) and is_int8s(b_fmt):
-        return int8_gemm(
-            a,
-            b,
-            out_dtype,
-            str_to_qmax_int8s(a_fmt),
-            str_to_qmax_int8s(b_fmt),
-            rowwise=rowwise,
-        )
+    gran = scaling.get("granularity", "tensorwise")
+    bs = scaling.get("block_size", 0)
+    same_family = (is_fp8(a_fmt) and is_fp8(b_fmt)) or (
+        is_int8s(a_fmt) and is_int8s(b_fmt)
+    )
+    if same_family and a.is_cuda and b.is_cuda:
+        ebs = effective_block_size(gran, bs, a.shape[1])
+        sd = scaling.get("scale_dtype")
+        aq, sa = quantize_operand(a, -1, gran, bs, a_fmt, scale_dtype=sd)
+        bq, sb = quantize_operand(b, 0, gran, bs, b_fmt, scale_dtype=sd)
+        return scaled_gemm(aq, bq, sa, sb, out_dtype, ebs)
     if is_quantized(a_fmt):
         a = _fake_quant(a, a_fmt, scaling, contract_dim=-1)
     if is_quantized(b_fmt):

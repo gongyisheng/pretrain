@@ -299,7 +299,6 @@ class TokenizerTrainingConfig:
 @dataclass
 class QuantConfig:
     enabled: bool = False
-    dtype_recipe: Optional[str] = None
     dtype: dict = field(default_factory=dict)  # {weight/act/grad: fmt}
     scaling: dict = field(default_factory=dict)  # {granularity, block_size}
     include: List[str] = field(default_factory=list)
@@ -309,19 +308,21 @@ class QuantConfig:
         if not self.enabled:
             return
 
-        if self.dtype_recipe is not None:
-            if self.dtype_recipe not in QUANT_DTYPE_RECIPES:
+        # A dtype recipe fills the dtype dict the way a scaling recipe fills scaling.
+        dtype_recipe = self.dtype.pop("recipe", None)
+        if dtype_recipe is not None:
+            if dtype_recipe not in QUANT_DTYPE_RECIPES:
                 raise ValueError(
-                    f"unknown quant dtype_recipe: {self.dtype_recipe!r}; "
+                    f"unknown quant dtype recipe: {dtype_recipe!r}; "
                     f"expected one of {sorted(QUANT_DTYPE_RECIPES)}"
                 )
-            for operand, fmt in QUANT_DTYPE_RECIPES[self.dtype_recipe].items():
+            for operand, fmt in QUANT_DTYPE_RECIPES[dtype_recipe].items():
                 self.dtype.setdefault(operand, fmt)  # explicit dtype wins
             # mxfp8 is an fp8 element paired with the "mxfp8" scale scheme; seed it.
-            if self.dtype_recipe == "mxfp8":
+            if dtype_recipe == "mxfp8":
                 self.scaling.setdefault("recipe", "mxfp8")
 
-        # A scaling recipe fills the scaling dict the way dtype_recipe fills dtype.
+        # A scaling recipe fills the scaling dict the same way (recipe key popped from scaling).
         recipe = self.scaling.pop("recipe", None)
         if recipe is not None:
             if recipe not in QUANT_SCALING_RECIPES:
@@ -341,14 +342,26 @@ class QuantConfig:
             )
 
         scale_dtype = self.scaling.get("scale_dtype")
-        if scale_dtype == "e8m0" and granularity != "blockwise":
+        if scale_dtype is not None and scale_dtype not in ("fp32", "fp8_e8m0"):
             raise ValueError(
-                "quant scale_dtype 'e8m0' requires granularity 'blockwise'"
+                f"unknown quant scale_dtype: {scale_dtype!r}; "
+                "expected 'fp32' or 'fp8_e8m0'"
             )
-        if granularity == "blockwise" and not self.scaling.get("block_size"):
+        if scale_dtype == "fp8_e8m0" and granularity != "blockwise":
             raise ValueError(
-                "quant granularity 'blockwise' requires a positive block_size"
+                "quant scale_dtype 'fp8_e8m0' requires granularity 'blockwise'"
             )
+        if granularity == "blockwise":
+            block_size = self.scaling.get("block_size")
+            if (
+                not isinstance(block_size, int)
+                or block_size <= 0
+                or block_size % 16 != 0
+            ):
+                raise ValueError(
+                    "quant granularity 'blockwise' requires block_size a positive "
+                    f"multiple of 16, got {block_size!r}"
+                )
 
         for operand, fmt in self.dtype.items():
             if operand not in QUANT_OPERANDS:
@@ -362,8 +375,8 @@ class QuantConfig:
                     f"expected one of {sorted(QUANT_FORMATS)}"
                 )
 
-        # mxfp8 (blockwise + e8m0) is defined only over fp8 elements.
-        if granularity == "blockwise" and scale_dtype == "e8m0":
+        # mxfp8 (blockwise + fp8_e8m0) is defined only over fp8 elements.
+        if granularity == "blockwise" and scale_dtype == "fp8_e8m0":
             for operand, fmt in self.dtype.items():
                 if fmt not in QUANT_PASSTHROUGH and not fmt.startswith("fp8"):
                     raise ValueError(

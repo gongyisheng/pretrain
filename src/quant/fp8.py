@@ -32,39 +32,6 @@ def quantize_fp8(
     return x_fp8, scale
 
 
-def fp8_gemm(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    out_dtype: torch.dtype,
-    a_dtype: torch.dtype,
-    b_dtype: torch.dtype,
-    rowwise: bool = False,
-) -> torch.Tensor:
-    """Compute `a @ b` via torch._scaled_mm with fp8 scaling.
-
-    a: (M, K) high precision, b: (K, N) high precision. Returns (M, N) in
-    out_dtype. `a_dtype`/`b_dtype` pick the fp8 dtype each operand casts to; at
-    least one must be e4m3 (cuBLAS rejects e5m2 x e5m2). `rowwise` scales a per
-    row (M,1) and b per column (1,N); else a single per-tensor scale each.
-    _scaled_mm requires the second operand column-major, so b is passed as a
-    transposed contiguous view.
-    """
-    if rowwise:
-        a_fp8, a_scale = quantize_fp8(a, a_dtype, dim=-1)  # (M, 1)
-        b_fp8, b_scale = quantize_fp8(b, b_dtype, dim=0)  # (1, N)
-    else:
-        a_fp8, a_scale = quantize_fp8(a, a_dtype)
-        b_fp8, b_scale = quantize_fp8(b, b_dtype)
-    b_fp8_col_major = b_fp8.t().contiguous().t()  # (K, N) stored column-major
-    return torch._scaled_mm(
-        a_fp8.contiguous(),
-        b_fp8_col_major,
-        scale_a=a_scale,
-        scale_b=b_scale,
-        out_dtype=out_dtype,
-    )
-
-
 def fake_quantize_fp8(
     x: torch.Tensor, fp8_dtype: torch.dtype, dim: int | None = None
 ) -> torch.Tensor:

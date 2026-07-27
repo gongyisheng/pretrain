@@ -302,3 +302,128 @@ def grouped_gemm(
     if not (a.is_cuda and a.dtype == torch.bfloat16):
         raise ValueError("impl='triton' requires bf16 CUDA tensors")
     return _grouped_gemm(a, b, offs)
+
+
+# ---------------------------------------------------------------------------
+# Scaled GEMM (quantized): fp8 / int8, tensorwise|rowwise|blockwise scaling
+# ---------------------------------------------------------------------------
+
+_SCALED_CFG = [
+    (64, 64, 4, 3),
+    (128, 64, 4, 4),
+    (64, 128, 4, 3),
+    (128, 128, 8, 4),
+    (64, 256, 8, 3),
+    (256, 64, 8, 3),
+    (128, 256, 8, 4),
+]
+_SCALED_CONFIGS = [
+    triton.Config({"BLOCK_M": bm, "BLOCK_N": bn}, num_warps=w, num_stages=s)
+    for (bm, bn, w, s) in _SCALED_CFG
+]
+
+
+@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K"])
+@triton.jit
+def _scaled_gemm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sa_ptr,
+    sb_ptr,
+    M,
+    N,
+    K,
+    nkb,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_sam,
+    stride_sak,
+    stride_sbk,
+    stride_sbn,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_mask = offs_m < M
+    n_mask = offs_n < N
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for kb in range(nkb):
+        blk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for kk in range(0, BLOCK_SIZE, BLOCK_K):
+            offs_k = kb * BLOCK_SIZE + kk + tl.arange(0, BLOCK_K)
+            k_mask = offs_k < K
+            a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+            b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+            a = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0)
+            blk += tl.dot(a, b).to(tl.float32)
+        sa = tl.load(
+            sa_ptr + offs_m * stride_sam + kb * stride_sak, mask=m_mask, other=0.0
+        )
+        sb = tl.load(
+            sb_ptr + kb * stride_sbk + offs_n * stride_sbn, mask=n_mask, other=0.0
+        )
+        acc += sa[:, None] * blk * sb[None, :]
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(
+        c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=m_mask[:, None] & n_mask[None, :]
+    )
+
+
+@triton_op("jit_kernel::scaled_gemm", mutates_args={})
+def scaled_gemm(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+) -> torch.Tensor:
+    """`(aq*sa) @ (bq*sb)` with fused dequant. aq (M,K), bq (K,N) fp8/int8;
+    sa (M,nkb), sb (nkb,N) fp32 canonical scales; block_size = elements/scale-block."""
+    M, K = aq.shape
+    N = bq.shape[1]
+    nkb = sa.shape[1]
+    if nkb > 1:
+        BLOCK_SIZE, BLOCK_K = block_size, block_size
+    else:
+        BLOCK_SIZE, BLOCK_K = K, min(128, triton.next_power_of_2(K))
+    c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
+
+    def grid(meta):
+        return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
+
+    wrap_triton(_scaled_gemm_kernel)[grid](
+        aq,
+        bq,
+        c,
+        sa,
+        sb,
+        M,
+        N,
+        K,
+        nkb,
+        aq.stride(0),
+        aq.stride(1),
+        bq.stride(0),
+        bq.stride(1),
+        c.stride(0),
+        c.stride(1),
+        sa.stride(0),
+        sa.stride(1),
+        sb.stride(0),
+        sb.stride(1),
+        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_K=BLOCK_K,
+    )
+    return c

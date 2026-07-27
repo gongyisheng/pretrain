@@ -27,7 +27,7 @@ All hyperparameters are matched between bf16 and fp8. The only independent varia
 | qwen3_51m_fp8_rowwise | 512 | 8 | 8/4 | 2048 | fp8 | rowwise | ~51M |
 | qwen3_51m_fp8_rowwise_with_gw_hp | 512 | 8 | 8/4 | 2048 | fp8 | rowwise + gw_hp | ~51M |
 
-`exclude: [lm_head]` for all FP8 runs (lm_head stays in bf16; numerically sensitive under tied embeddings). fp8 uses `dtype_recipe: fp8` → weight/act `fp8_e4m3`, grad `fp8_e5m2`.
+`exclude: [lm_head]` for all FP8 runs (lm_head stays in bf16; numerically sensitive under tied embeddings). fp8 uses `dtype: {recipe: fp8}` → weight/act `fp8_e4m3`, grad `fp8_e5m2`.
 
 All runs: seq_len=1024, batch=16, grad_accum=16 (effective batch=256, ~262K tok/step), 50K steps (~13B tokens), Muon optimizer (`muon_adjust_lr_fn: match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup, min_lr=5e-5, OpenWebText.
 
@@ -41,7 +41,7 @@ training:
   mixed_precision: bf16
   quant:
     enabled: true
-    dtype_recipe: fp8          # weight/act fp8_e4m3, grad fp8_e5m2
+    dtype: {recipe: fp8}       # weight/act fp8_e4m3, grad fp8_e5m2
     scaling: {granularity: tensorwise}   # or rowwise
     exclude: [lm_head]
 ```

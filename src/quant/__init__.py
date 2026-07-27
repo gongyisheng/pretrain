@@ -32,7 +32,10 @@ QUANT_GRANULARITY = frozenset({"tensorwise", "rowwise", "blockwise"})
 # scale half of the mxfp8 recipe, paired with an fp8 element.
 # TODO: add "mxfp4" (block 32) / "nvfp4" (block 16, e4m3 scale) recipes.
 QUANT_SCALING_RECIPES = {
-    "mxfp8": {"granularity": "blockwise", "block_size": 32, "scale_dtype": "e8m0"},
+    "tensorwise": {"granularity": "tensorwise"},
+    "rowwise": {"granularity": "rowwise"},
+    "blockwise": {"granularity": "blockwise", "block_size": 128, "scale_dtype": "fp32"},
+    "mxfp8": {"granularity": "blockwise", "block_size": 32, "scale_dtype": "fp8_e8m0"},
 }
 
 # Named dtype recipes: fill the per-operand `dtype` map with a standard setup.

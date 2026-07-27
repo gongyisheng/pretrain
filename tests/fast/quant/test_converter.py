@@ -2,7 +2,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.quant import mxfp8
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantLinear
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
@@ -13,9 +12,10 @@ def _fp8_capable():
 
 
 fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
-mxfp8_only = pytest.mark.skipif(
-    not mxfp8.is_supported(), reason="mxfp8 needs SM >= 10.0"
-)
+# mxfp8 is now a scaling scheme layered on the fp8 element (e4m3), gated by the
+# same fp8 hardware requirement as any other fp8 recipe -- no separate Blackwell
+# gate remains in _check_hardware.
+mxfp8_only = fp8_only
 
 
 class _Tiny(nn.Module):
@@ -52,21 +52,22 @@ def test_disabled_is_noop():
 def test_raises_without_capable_gpu():
     m = _Tiny()
     with pytest.raises(RuntimeError, match="compute capability"):
-        apply_quantization(m, _cfg({"enabled": True, "dtype_recipe": "fp8"}))
+        apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
 
 
-def test_mxfp8_rule_raises_on_non_blackwell(monkeypatch):
-    # mxfp8 gates on the scale scheme (SM >= 10.0), independent of the fp8 element.
-    monkeypatch.setattr("src.quant.mxfp8.is_supported", lambda: False)
+@pytest.mark.skipif(_fp8_capable(), reason="testing the unsupported-hardware branch")
+def test_mxfp8_rule_raises_without_capable_gpu():
+    # mxfp8 is e4m3 on every operand, so it gates on the same fp8 hardware
+    # requirement as the plain "fp8" recipe -- no separate Blackwell-only gate.
     m = _Tiny()
-    with pytest.raises(RuntimeError, match="10.0|Blackwell"):
-        apply_quantization(m, _cfg({"enabled": True, "dtype_recipe": "mxfp8"}))
+    with pytest.raises(RuntimeError, match="compute capability"):
+        apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "mxfp8"}}))
 
 
 @mxfp8_only
 def test_mxfp8_rule_swaps_on_capable_gpu():
     m = _Tiny().cuda().to(torch.bfloat16)
-    apply_quantization(m, _cfg({"enabled": True, "dtype_recipe": "mxfp8"}))
+    apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "mxfp8"}}))
     assert isinstance(m.attn["q_proj"], QuantLinear)
     assert isinstance(m.mlp["down_proj"], QuantLinear)
 
@@ -74,7 +75,7 @@ def test_mxfp8_rule_swaps_on_capable_gpu():
 @fp8_only
 def test_swaps_and_excludes_lm_head():
     m = _Tiny().cuda().to(torch.bfloat16)
-    apply_quantization(m, _cfg({"enabled": True, "dtype_recipe": "fp8"}))
+    apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
     assert isinstance(m.attn["q_proj"], QuantLinear)
     assert isinstance(m.mlp["down_proj"], QuantLinear)
     assert isinstance(m.lm_head, nn.Linear) and not isinstance(m.lm_head, QuantLinear)
@@ -85,7 +86,7 @@ def test_swaps_and_excludes_lm_head():
 def test_tie_guard_skips_tied_lm_head():
     m = _Tiny(tie=True).cuda().to(torch.bfloat16)
     # exclude nothing: tie guard alone must keep lm_head unswapped
-    cfg = _cfg({"enabled": True, "dtype_recipe": "fp8", "exclude": []})
+    cfg = _cfg({"enabled": True, "dtype": {"recipe": "fp8"}, "exclude": []})
     with pytest.warns(UserWarning, match="tied"):
         apply_quantization(m, cfg)
     assert isinstance(m.lm_head, nn.Linear) and not isinstance(m.lm_head, QuantLinear)
@@ -96,7 +97,12 @@ def test_tie_guard_skips_tied_lm_head():
 def test_include_restricts_scope():
     m = _Tiny().cuda().to(torch.bfloat16)
     cfg = _cfg(
-        {"enabled": True, "dtype_recipe": "fp8", "include": ["*attn*"], "exclude": []}
+        {
+            "enabled": True,
+            "dtype": {"recipe": "fp8"},
+            "include": ["*attn*"],
+            "exclude": [],
+        }
     )
     apply_quantization(m, cfg)
     assert isinstance(m.attn["q_proj"], QuantLinear)
@@ -110,13 +116,13 @@ def test_list_of_rules_first_match_wins():
         [
             {
                 "enabled": True,
-                "dtype_recipe": "fp8",
+                "dtype": {"recipe": "fp8"},
                 "include": ["*attn*"],
                 "exclude": [],
             },
             {
                 "enabled": True,
-                "dtype_recipe": "fp8",
+                "dtype": {"recipe": "fp8"},
                 "include": ["*mlp*"],
                 "exclude": [],
             },
