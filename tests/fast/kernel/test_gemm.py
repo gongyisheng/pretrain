@@ -13,6 +13,7 @@ from src.kernel.gemm import (
     grouped_gemm,
     scaled_gemm,
     scaled_grouped_gemm,
+    scaled_grouped_gemm_wgrad,
 )
 from src.quant.quantize import effective_block_size, quantize_operand
 from tests.fast.kernel._refs import (
@@ -22,6 +23,7 @@ from tests.fast.kernel._refs import (
     grouped_gemm_wgrad_ref,
     scaled_gemm_ref,
     scaled_grouped_gemm_ref,
+    scaled_grouped_gemm_wgrad_ref,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -456,6 +458,36 @@ def test_scaled_grouped_gemm_compiles_fullgraph():
 def test_bench_scaled_grouped_gemm_importable():
     m = importlib.import_module("benchmarks.gemm.bench_scaled_grouped_gemm")
     assert hasattr(m, "main")
+
+
+def _quant_wgrad(a, g, qmax_or_fmt):
+    """Quantize X (R,K) and gY (R,N) along the token axis (dim 0) for wgrad."""
+    aq, sa = quantize_operand(a, 0, "rowwise", 0, fmt=qmax_or_fmt)
+    gq, sg = quantize_operand(g, 0, "rowwise", 0, fmt=qmax_or_fmt)
+    return aq, gq, sa, sg
+
+
+@pytest.mark.parametrize("fmt", ["fp8_e4m3", "int8"])
+@pytest.mark.parametrize(
+    "counts,K,N",
+    [
+        ([128, 128, 128, 128], 64, 48),
+        ([5, 0, 130, 41, 1], 64, 48),  # empty + uneven
+        ([300, 5, 120, 0, 44, 210], 512, 384),
+    ],
+)
+def test_scaled_grouped_gemm_wgrad_matches_oracle(counts, K, N, fmt):
+    torch.manual_seed(0)
+    R = sum(counts)
+    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    g = torch.randn(R, N, device="cuda", dtype=torch.bfloat16) * 0.1
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    aq, gq, sa, sg = _quant_wgrad(a, g, fmt)
+    got = scaled_grouped_gemm_wgrad(aq, gq, sa, sg, offs, torch.float32)
+    ref = scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs)
+    assert got.shape == (len(counts), K, N)
+    rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
+    assert rel < 2e-2, rel
 
 
 def test_compiles_fullgraph():

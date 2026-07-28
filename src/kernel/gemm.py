@@ -576,3 +576,122 @@ def scaled_grouped_gemm(
         BLOCK_K=BLOCK_K,
     )
     return c
+
+
+# ---------------------------------------------------------------------------
+# Scaled grouped wgrad (quantized): gW[g] = (Xq·sa)[g]^T @ (gYq·sg)[g]
+# Contraction over the ragged token axis M; rowwise/tensorwise scales (nkb==1)
+# factor out of the reduction as per-k (sa) and per-n (sg) vectors.
+# ---------------------------------------------------------------------------
+
+
+@triton.autotune(configs=_CONFIGS, key=["N", "K"])
+@triton.jit
+def _scaled_grouped_gemm_wgrad_kernel(
+    a_ptr,
+    g_ptr,
+    gb_ptr,
+    sa_ptr,
+    sg_ptr,
+    offs_ptr,
+    E,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_gm,
+    stride_gn,
+    stride_ge,
+    stride_gk,
+    stride_gn2,
+    stride_sak,
+    stride_sgn,
+    NUM_SMS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_k_tiles = tl.cdiv(K, BLOCK_K)
+    num_n_tiles = tl.cdiv(N, BLOCK_N)
+    tiles_per_group = num_k_tiles * num_n_tiles
+    total_tiles = E * tiles_per_group
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        g = tile_id // tiles_per_group
+        local = tile_id % tiles_per_group
+        tile_k = local // num_n_tiles
+        tile_n = local % num_n_tiles
+        m_start = tl.load(offs_ptr + g - 1, mask=g > 0, other=0)
+        m_end = tl.load(offs_ptr + g)
+        offs_k = tile_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        k_mask = offs_k < K
+        n_mask = offs_n < N
+        acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
+        m = m_start
+        while m < m_end:
+            offs_m = m + tl.arange(0, BLOCK_M)
+            m_mask = offs_m < m_end
+            a_ptrs = a_ptr + offs_k[:, None] * stride_ak + offs_m[None, :] * stride_am
+            g_ptrs = g_ptr + offs_m[:, None] * stride_gm + offs_n[None, :] * stride_gn
+            a = tl.load(a_ptrs, mask=k_mask[:, None] & m_mask[None, :], other=0.0)
+            gc = tl.load(g_ptrs, mask=m_mask[:, None] & n_mask[None, :], other=0.0)
+            acc += tl.dot(a, gc).to(tl.float32)
+            m += BLOCK_M
+        sa = tl.load(sa_ptr + offs_k * stride_sak, mask=k_mask, other=0.0)
+        sg = tl.load(sg_ptr + offs_n * stride_sgn, mask=n_mask, other=0.0)
+        acc = acc * sa[:, None] * sg[None, :]
+        gb_ptrs = (
+            gb_ptr
+            + g * stride_ge
+            + offs_k[:, None] * stride_gk
+            + offs_n[None, :] * stride_gn2
+        )
+        tl.store(
+            gb_ptrs,
+            acc.to(gb_ptr.dtype.element_ty),
+            mask=k_mask[:, None] & n_mask[None, :],
+        )
+
+
+@triton_op("jit_kernel::scaled_grouped_gemm_wgrad", mutates_args={})
+def scaled_grouped_gemm_wgrad(
+    aq: torch.Tensor,
+    gq: torch.Tensor,
+    sa: torch.Tensor,
+    sg: torch.Tensor,
+    offs: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Scaled grouped wgrad: grad_b[g] = (aq·sa)[g]^T @ (gq·sg)[g], shape (E,K,N).
+
+    aq (R,K), gq (R,N) fp8/int8, expert-sorted; sa (1,K), sg (1,N) fp32 per-channel
+    scales (rowwise/tensorwise, nkb==1); offs (E,) int32 END-offsets.
+    """
+    R, K = aq.shape
+    N = gq.shape[1]
+    E = offs.shape[0]
+    grad_b = torch.empty((E, K, N), device=aq.device, dtype=out_dtype)
+    num_sms = _num_sms(aq.device)
+    wrap_triton(_scaled_grouped_gemm_wgrad_kernel)[(num_sms,)](
+        aq,
+        gq,
+        grad_b,
+        sa,
+        sg,
+        offs,
+        E,
+        N,
+        K,
+        aq.stride(0),
+        aq.stride(1),
+        gq.stride(0),
+        gq.stride(1),
+        grad_b.stride(0),
+        grad_b.stride(1),
+        grad_b.stride(2),
+        sa.stride(1),
+        sg.stride(1),
+        NUM_SMS=num_sms,
+    )
+    return grad_b
