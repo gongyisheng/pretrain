@@ -4,8 +4,10 @@ import warnings
 
 import torch.nn as nn
 
+from src.layers.mlp import MoERouter, SparseMoEBlock
 from src.quant.constants import QUANT_PASSTHROUGH
 from src.quant.linear import QuantLinear
+from src.quant.moe import scaled_grouped_gemm
 from src.quant.utils import resolve_rule, check_hardware_support
 
 
@@ -32,6 +34,8 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
                 fmt in QUANT_PASSTHROUGH for fmt in rule.dtype.values()
             ):
                 continue
+            if isinstance(parent, MoERouter) and child_name == "gate":
+                continue  # keep the router gate fp32-pinned (never quantize)
             if id(child.weight) in embedding_weight_ids:
                 warnings.warn(
                     f"quant: skipping {fqn!r} — its weight is tied to an embedding; "
@@ -39,4 +43,16 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
                 )
                 continue
             setattr(parent, child_name, QuantLinear.from_linear(child, rule))
+
+    # MoE routed experts are stacked Parameters (not nn.Linear), so the swap loop
+    # above can't reach them. Install a quantized expert_mm per matching rule.
+    for fqn, module in model.named_modules():
+        if not isinstance(module, SparseMoEBlock):
+            continue
+        rule = resolve_rule(fqn, rules)
+        if rule is None or all(fmt in QUANT_PASSTHROUGH for fmt in rule.dtype.values()):
+            continue
+        module.expert_mm = lambda a, b, offs, _cfg=rule: scaled_grouped_gemm(
+            a, b, offs, _cfg
+        )
     return model

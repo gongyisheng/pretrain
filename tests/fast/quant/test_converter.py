@@ -133,6 +133,84 @@ def test_list_of_rules_first_match_wins():
     assert isinstance(m.mlp["down_proj"], QuantLinear)
 
 
+def _moe_model():
+    import torch.nn as nn
+
+    from src.layers.mlp import SparseMoEBlock
+
+    class M(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.token_emb = nn.Embedding(64, 32)
+            self.moe = SparseMoEBlock(
+                d_model=32,
+                intermediate_size=48,
+                n_routed_experts=4,
+                n_routed_experts_per_token=2,
+            )
+            self.lm_head = nn.Linear(32, 64, bias=False)
+
+    return M()
+
+
+@fp8_only
+def test_moe_experts_get_quantized_expert_mm():
+    from src.kernel.gemm import grouped_gemm
+
+    m = _moe_model()
+    apply_quantization(
+        m,
+        _cfg(
+            {
+                "enabled": True,
+                "dtype": {"recipe": "fp8"},
+                "scaling": {"recipe": "rowwise"},
+            }
+        ),
+    )
+    # routed experts stay Parameters (no module swap)
+    assert isinstance(m.moe.expert_gate_up, torch.nn.Parameter)
+    # expert_mm was replaced with a quantized callable
+    assert m.moe.expert_mm is not grouped_gemm
+
+
+@fp8_only
+def test_router_gate_stays_fp32_linear():
+    m = _moe_model()
+    apply_quantization(
+        m,
+        _cfg(
+            {
+                "enabled": True,
+                "dtype": {"recipe": "fp8"},
+                "scaling": {"recipe": "rowwise"},
+            }
+        ),
+    )
+    # gate must NOT be swapped (it is fp32-pinned by MoERouter)
+    assert isinstance(m.moe.router.gate, nn.Linear)
+    assert not isinstance(m.moe.router.gate, QuantLinear)
+
+
+@fp8_only
+def test_moe_expert_mm_default_when_excluded():
+    from src.kernel.gemm import grouped_gemm
+
+    m = _moe_model()
+    apply_quantization(
+        m,
+        _cfg(
+            {
+                "enabled": True,
+                "dtype": {"recipe": "fp8"},
+                "scaling": {"recipe": "rowwise"},
+                "exclude": ["moe"],
+            }
+        ),
+    )
+    assert m.moe.expert_mm is grouped_gemm
+
+
 # --- int8-family config + converter (migrated from the old test_int8.py; int8
 # runs on any GPU, so these are not fp8-gated) ---
 
