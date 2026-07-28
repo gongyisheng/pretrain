@@ -1325,3 +1325,37 @@ def test_sparse_moe_block_compiles_fullgraph(gated):
     out, _ = compiled(x)
     out.float().sum().backward()
     assert out.shape == x.shape and x.grad is not None
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+def test_moe_expert_mm_seam_is_pluggable():
+    from src.kernel.gemm import grouped_gemm
+
+    torch.manual_seed(0)
+    blk = (
+        SparseMoEBlock(
+            d_model=32,
+            intermediate_size=48,
+            n_routed_experts=4,
+            n_routed_experts_per_token=2,
+        )
+        .cuda()
+        .bfloat16()
+    )
+    # default seam is the plain bf16 grouped_gemm
+    assert blk.expert_mm is grouped_gemm
+
+    calls = {"n": 0}
+    real = grouped_gemm
+
+    def spy(a, b, offs):
+        calls["n"] += 1
+        return real(a, b, offs)
+
+    blk.expert_mm = spy
+    x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16)
+    out, _ = blk(x)
+    assert out.shape == x.shape
+    assert calls["n"] == 2  # gate_up + down

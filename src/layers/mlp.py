@@ -63,6 +63,7 @@ def grouped_mlp(
     row_expert_ids: torch.Tensor = None,
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
+    expert_mm=grouped_gemm,
 ) -> torch.Tensor:
     """Dropless MoE expert FFN over expert-sorted tokens via grouped GEMM.
 
@@ -84,7 +85,7 @@ def grouped_mlp(
             b_in = b_in.to(dt)
         if b_down is not None:
             b_down = b_down.to(dt)
-    h = grouped_gemm(x, w_in.mT, offs)
+    h = expert_mm(x, w_in.mT, offs)
     if b_in is not None:
         h = h + b_in[row_expert_ids]
     if gated:
@@ -92,7 +93,7 @@ def grouped_mlp(
         h = act_fn(gate, up)
     else:
         h = act_fn(h)
-    out = grouped_gemm(h, w_down.mT, offs)
+    out = expert_mm(h, w_down.mT, offs)
     if b_down is not None:
         out = out + b_down[row_expert_ids]
     return out
@@ -441,6 +442,11 @@ class SparseMoEBlock(nn.Module):
 
         self.expert_load = ExpertLoad(n_routed_experts)
 
+        # Pluggable expert GEMM seam; the quant converter swaps in a quantized
+        # callable. Default is the bf16 grouped GEMM. Signature: (a, b, offs)
+        # with b in (E, K, N) layout (the .mT view applied at the call site).
+        self.expert_mm = grouped_gemm
+
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)
         B, S, D = x.shape
@@ -484,6 +490,7 @@ class SparseMoEBlock(nn.Module):
             row_expert_ids=expert_ids_sorted if b_in is not None else None,
             b_in=b_in,
             b_down=self.expert_down_bias,
+            expert_mm=self.expert_mm,
         )
         expert_out = expert_out * weights_sorted
         expert_out = self.expert_dropout(expert_out)
