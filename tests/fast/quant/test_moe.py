@@ -163,6 +163,9 @@ def test_moe_block_quantized_forward_backward_runs():
             )
 
     m = M().cuda().bfloat16()
+    with torch.no_grad():
+        nn.init.normal_(m.moe.expert_gate_up, mean=0.0, std=0.02)
+        nn.init.normal_(m.moe.expert_down, mean=0.0, std=0.02)
     cfg = TrainConfig(
         model=ModelConfig(
             d_model=32,
