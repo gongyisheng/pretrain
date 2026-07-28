@@ -110,12 +110,27 @@ def test_scaled_grouped_gemm_backward_matches_oracle(recipe):
 
 
 def test_scaled_grouped_gemm_compiles_fullgraph():
+    # Forward compiles with no graph break; the custom Function's backward runs
+    # eager (Dynamo cannot trace the autograd engine under fullgraph — a
+    # categorical limitation), so we compile forward and call backward outside
+    # the traced region, checking grads match eager.
     a, b, offs = _make([128, 0, 130, 41], K=64, N=48)
     cfg = _cfg("fp8", "rowwise")
 
-    def fn(a, b):
+    def fwd(a, b):
         return moe.scaled_grouped_gemm(a, b, offs, cfg)
 
-    eager = fn(a, b)
-    compiled = torch.compile(fn, fullgraph=True)(a, b)
-    torch.testing.assert_close(compiled.float(), eager.float(), rtol=2e-2, atol=2e-2)
+    a_e = a.clone().requires_grad_(True)
+    b_e = b.clone().requires_grad_(True)
+    a_c = a.clone().requires_grad_(True)
+    b_c = b.clone().requires_grad_(True)
+
+    ey = fwd(a_e, b_e)
+    ey.sum().backward()
+
+    cy = torch.compile(fwd, fullgraph=True)(a_c, b_c)
+    cy.sum().backward()
+
+    torch.testing.assert_close(cy.float(), ey.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(a_c.grad.float(), a_e.grad.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(b_c.grad.float(), b_e.grad.float(), rtol=2e-2, atol=2e-2)
