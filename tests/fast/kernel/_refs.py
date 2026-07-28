@@ -51,3 +51,40 @@ def scaled_gemm_ref(aq, bq, sa, sb, ebs):
         )
         return out.float()
     return _dequant_a(aq, sa, ebs) @ _dequant_b(bq, sb, ebs)
+
+
+def _dequant_b_grouped(bq, sb, bs):
+    """Dequant per-expert B (E, K, N) with per-K-block scale (E, nkb, N)."""
+    return torch.stack([_dequant_b(bq[g], sb[g], bs) for g in range(bq.shape[0])])
+
+
+def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, ebs):
+    """fp32 oracle for scaled grouped GEMM. Uses torch._scaled_grouped_mm when it
+    is applicable (per-row/col fp8 on sm90/sm100); otherwise dequants and does a
+    per-group matmul.
+
+    aq (R,K), bq (E,K,N) fp8/int8; sa (R,nkb), sb (E,nkb,N) fp32 canonical scales;
+    offs (E,) int32 cumulative END-offsets; ebs = elements/scale-block along K.
+    """
+    # Native path: per-row/col fp8 (nkb==1) on a device torch supports (sm90/sm100).
+    if aq.dtype in (torch.float8_e4m3fn, _E5M2) and sa.shape[-1] == 1:
+        try:
+            return torch._scaled_grouped_mm(
+                aq,
+                bq,
+                scale_a=sa.squeeze(-1).float(),  # (R,)
+                scale_b=sb.squeeze(1).float(),  # (E, N)
+                offs=offs,
+                out_dtype=torch.bfloat16,
+            ).float()
+        except (RuntimeError, ValueError):
+            pass  # unsupported here (e.g. sm120) -> dequant fallback below
+    a_deq = _dequant_a(aq, sa, ebs)  # (R, K) fp32
+    b_deq = _dequant_b_grouped(bq, sb, ebs)  # (E, K, N) fp32
+    out = torch.zeros(aq.shape[0], bq.shape[2], device=aq.device, dtype=torch.float32)
+    start = 0
+    for g, end in enumerate(offs.tolist()):
+        if end > start:
+            out[start:end] = a_deq[start:end] @ b_deq[g]
+        start = end
+    return out

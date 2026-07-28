@@ -1,0 +1,210 @@
+"""Scaled grouped GEMM latency: Triton `scaled_grouped_gemm` vs a bf16
+`torch._grouped_mm` baseline (the unquantized reference the kernel replaces).
+
+Sweeps the expert-GEMM shapes of the latent-MoE configs (gate_up over K, down
+over N) at two expert counts E in {64, 256}, holding total rows M fixed, under
+fp8-rowwise and int8-rowwise quantization. torch._scaled_grouped_mm is not a
+baseline: it is restricted to sm90/sm100 and raises elsewhere. Accuracy is
+relative error against an fp32 grouped reference. Prints a table and (unless
+--no-plot) writes a matplotlib chart.
+
+    uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py
+    uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py --no-plot
+"""
+
+import argparse
+import os
+import sys
+import time
+
+import torch
+
+sys.path.insert(0, ".")
+
+from src.kernel.gemm import scaled_grouped_gemm
+from src.quant.quantize import effective_block_size, quantize_operand
+
+# Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
+M_FIXED = 8 * 1024 * 8
+E_LIST = [64, 256]
+
+# (role, K, N) — expert-GEMM shapes from the latent-MoE configs.
+SHAPES = [
+    ("gate_up", 64, 384),
+    ("gate_up", 256, 384),
+    ("gate_up", 512, 384),
+    ("down", 192, 64),
+    ("down", 192, 256),
+    ("down", 192, 512),
+]
+
+SCHEMES = ["fp8_rowwise", "int8_rowwise"]
+
+DEFAULT_OUT = "benchmarks/results/scaled_grouped_gemm.png"
+
+# reference-palette pair (validated colorblind-safe, matches sibling benchmarks)
+_IMPL_COLOR = {"bf16": "#eb6834", "triton": "#2a78d6"}
+
+
+def _kw(scheme):
+    return dict(fmt="fp8_e4m3") if scheme == "fp8_rowwise" else dict(fmt="int8")
+
+
+def _make(E, M, K, N, seed=0):
+    torch.manual_seed(seed)
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(E, K, N, device="cuda", dtype=torch.bfloat16) * 0.1
+    counts = torch.full((E,), M // E, device="cuda", dtype=torch.int64)
+    counts[-1] += M - int(counts.sum())
+    offs = counts.cumsum(0).to(torch.int32)
+    return a, b, offs
+
+
+def _quant(a, b, scheme):
+    """Quantize A (M,K) and per-expert B (E,K,N) rowwise; return aq,bq,sa,sb,ebs."""
+    kw = _kw(scheme)
+    ebs = effective_block_size("rowwise", 0, a.shape[1])
+    aq, sa = quantize_operand(a, -1, "rowwise", 0, **kw)
+    bq_list, sb_list = [], []
+    for g in range(b.shape[0]):
+        bqg, sbg = quantize_operand(b[g], 0, "rowwise", 0, **kw)
+        bq_list.append(bqg)
+        sb_list.append(sbg)
+    return aq, torch.stack(bq_list), sa, torch.stack(sb_list), ebs
+
+
+def _time(fn, iters=50):
+    for _ in range(10):
+        fn()
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        fn()
+    torch.cuda.synchronize()
+    return (time.perf_counter() - t0) / iters * 1e3  # ms
+
+
+def _relerr(out, ref):
+    return ((out.float() - ref).norm() / ref.norm()).item()
+
+
+def _bench_point(E, K, N, scheme):
+    """Return {triton_ms, bf16_ms, triton_relerr} for one (E, shape, scheme)."""
+    a, b, offs = _make(E, M_FIXED, K, N)
+    ref = torch._grouped_mm(a, b, offs=offs).float()
+    aq, bq, sa, sb, ebs = _quant(a, b, scheme)
+
+    def triton_fn():
+        return scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16, ebs)
+
+    triton_out = triton_fn()
+    triton_ms = _time(triton_fn)
+    triton_relerr = _relerr(triton_out, ref)
+
+    bf16_ms = _time(lambda: torch._grouped_mm(a, b, offs=offs))
+    return dict(triton_ms=triton_ms, bf16_ms=bf16_ms, triton_relerr=triton_relerr)
+
+
+def plot(results, path, device=""):
+    """Write a grouped-bar chart (rows = scheme, cols = E) from `results`.
+
+    Each result: {"role","K","N","E","scheme","triton_ms","bf16_ms",...}.
+    Import-safe without CUDA.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    lut = {(r["role"], r["K"], r["N"], r["E"], r["scheme"]): r for r in results}
+    ticklabels = [f"K{K}" if role == "gate_up" else f"N{N}" for role, K, N in SHAPES]
+    x = np.arange(len(SHAPES))
+    bw = 0.4
+
+    fig, axes = plt.subplots(
+        len(SCHEMES), len(E_LIST), figsize=(12, 7.5), constrained_layout=True
+    )
+    for ri, scheme in enumerate(SCHEMES):
+        for ci, E in enumerate(E_LIST):
+            ax = axes[ri][ci]
+            for j, impl in enumerate(("bf16", "triton")):
+                key = f"{impl}_ms"
+                vals = [
+                    (lut.get((role, K, N, E, scheme)) or {}).get(key, 0.0)
+                    for role, K, N in SHAPES
+                ]
+                bars = ax.bar(
+                    x + (j - 0.5) * bw,
+                    vals,
+                    bw,
+                    label=impl,
+                    color=_IMPL_COLOR[impl],
+                    zorder=3,
+                )
+                ax.bar_label(bars, fmt="%.2f", fontsize=7, padding=2)
+            ax.set_title(f"{scheme}  ·  E={E}", fontsize=11, fontweight="bold")
+            ax.set_xticks(x, ticklabels, fontsize=8)
+            ax.set_ylabel("latency (ms)", fontsize=9)
+            ax.margins(y=0.16)
+            ax.grid(axis="y", color="#e1e0d9", zorder=0)
+            ax.set_axisbelow(True)
+            for spine in ("top", "right"):
+                ax.spines[spine].set_visible(False)
+            ax.axvline(2.5, color="#c3c2b7", lw=0.8, ls=":")
+
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="outside upper right", ncol=2, fontsize=10)
+    sup = "Scaled grouped GEMM latency — bf16 torch._grouped_mm vs Triton (quantized)"
+    sub = f"M = {M_FIXED:,} rows · lower is faster"
+    if device:
+        sub += f" · {device}"
+    fig.suptitle(f"{sup}\n{sub}", fontsize=12, fontweight="bold")
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--out", default=DEFAULT_OUT, help="path to write the latency chart"
+    )
+    ap.add_argument("--no-plot", action="store_true", help="skip writing the chart")
+    args = ap.parse_args()
+
+    assert torch.cuda.is_available(), "CUDA required"
+    device = torch.cuda.get_device_name(0)
+    print(device)
+    print(f"fixed M = {M_FIXED:,} rows\n")
+    hdr = (
+        f"{'shape':22s} {'E':>4s} {'scheme':13s} {'bf16_ms':>9s} {'triton_ms':>10s} "
+        f"{'triton_relerr':>14s}"
+    )
+    print(hdr)
+    results = []
+    for role, K, N in SHAPES:
+        for E in E_LIST:
+            for scheme in SCHEMES:
+                r = _bench_point(E, K, N, scheme)
+                label = f"{role} K{K} N{N}"
+                print(
+                    f"{label:22s} {E:>4d} {scheme:13s} "
+                    f"{r['bf16_ms']:>9.3f} {r['triton_ms']:>10.3f} "
+                    f"{r['triton_relerr']:>14.4f}"
+                )
+                results.append(
+                    {"role": role, "K": K, "N": N, "E": E, "scheme": scheme, **r}
+                )
+
+    if not args.no_plot:
+        plot(results, args.out, device=device)
+        print(f"\nwrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()

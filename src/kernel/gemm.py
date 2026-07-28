@@ -427,3 +427,152 @@ def scaled_gemm(
         BLOCK_K=BLOCK_K,
     )
     return c
+
+
+# ---------------------------------------------------------------------------
+# Scaled grouped GEMM (quantized ragged MoE): fp8 / int8 with block scaling
+# ---------------------------------------------------------------------------
+
+
+@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K"])
+@triton.jit
+def _scaled_grouped_gemm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sa_ptr,
+    sb_ptr,
+    offs_ptr,
+    E,
+    N,
+    K,
+    nkb,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_sam,
+    stride_sak,
+    stride_sbe,
+    stride_sbk,
+    stride_sbn,
+    NUM_SMS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_n_tiles = tl.cdiv(N, BLOCK_N)
+    tile_idx = pid  # this persistent program handles tiles pid, pid+NUM_SMS, ...
+    last_end = 0  # running count of tiles before the current group
+    m_start = 0  # first row of the current group (prev group's end-offset)
+    for g in range(E):
+        m_end = tl.load(offs_ptr + g)
+        m_g = m_end - m_start
+        num_m_tiles = tl.cdiv(m_g, BLOCK_M)
+        num_tiles_g = num_m_tiles * num_n_tiles
+        while (tile_idx >= last_end) and (tile_idx < last_end + num_tiles_g):
+            local = tile_idx - last_end
+            tile_m = local // num_n_tiles
+            tile_n = local % num_n_tiles
+            offs_m = m_start + tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            m_mask = offs_m < m_end
+            n_mask = offs_n < N
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kb in range(nkb):
+                blk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+                for kk in range(0, BLOCK_SIZE, BLOCK_K):
+                    offs_k = kb * BLOCK_SIZE + kk + tl.arange(0, BLOCK_K)
+                    k_mask = offs_k < K
+                    a_ptrs = (
+                        a_ptr
+                        + offs_m[:, None] * stride_am
+                        + offs_k[None, :] * stride_ak
+                    )
+                    b_ptrs = (
+                        b_ptr
+                        + g * stride_be
+                        + offs_k[:, None] * stride_bk
+                        + offs_n[None, :] * stride_bn
+                    )
+                    a = tl.load(
+                        a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0
+                    )
+                    b = tl.load(
+                        b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0
+                    )
+                    blk += tl.dot(a, b).to(tl.float32)
+                sa = tl.load(
+                    sa_ptr + offs_m * stride_sam + kb * stride_sak,
+                    mask=m_mask,
+                    other=0.0,
+                )
+                sb = tl.load(
+                    sb_ptr + g * stride_sbe + kb * stride_sbk + offs_n * stride_sbn,
+                    mask=n_mask,
+                    other=0.0,
+                )
+                acc += sa[:, None] * blk * sb[None, :]
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(
+                c_ptrs,
+                acc.to(c_ptr.dtype.element_ty),
+                mask=m_mask[:, None] & n_mask[None, :],
+            )
+            tile_idx += NUM_SMS
+        last_end += num_tiles_g
+        m_start = m_end
+
+
+@triton_op("jit_kernel::scaled_grouped_gemm", mutates_args={})
+def scaled_grouped_gemm(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    offs: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+) -> torch.Tensor:
+    R, K = aq.shape
+    E, _, N = bq.shape
+    nkb = sa.shape[1]
+    if nkb > 1:
+        BLOCK_SIZE, BLOCK_K = block_size, block_size
+    else:
+        BLOCK_SIZE, BLOCK_K = K, min(128, triton.next_power_of_2(K))
+    c = torch.empty((R, N), device=aq.device, dtype=out_dtype)
+    num_sms = _num_sms(aq.device)
+    wrap_triton(_scaled_grouped_gemm_kernel)[(num_sms,)](
+        aq,
+        bq,
+        c,
+        sa,
+        sb,
+        offs,
+        E,
+        N,
+        K,
+        nkb,
+        aq.stride(0),
+        aq.stride(1),
+        bq.stride(0),
+        bq.stride(1),
+        bq.stride(2),
+        c.stride(0),
+        c.stride(1),
+        sa.stride(0),
+        sa.stride(1),
+        sb.stride(0),
+        sb.stride(1),
+        sb.stride(2),
+        NUM_SMS=num_sms,
+        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_K=BLOCK_K,
+    )
+    return c
