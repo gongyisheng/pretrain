@@ -2,10 +2,7 @@ import pytest
 import torch
 
 from src.quant import moe
-from src.quant.quantize import (  # noqa: F401  (effective_block_size used in Task 3 tests)
-    effective_block_size,
-    fake_quantize_operand,
-)
+from src.quant.quantize import fake_quantize_operand
 from src.quant.utils import is_supported
 from src.utils.config import QuantConfig
 

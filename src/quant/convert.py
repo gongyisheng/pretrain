@@ -11,6 +11,10 @@ from src.quant.moe import scaled_grouped_gemm
 from src.quant.utils import resolve_rule, check_hardware_support
 
 
+def _is_passthrough(rule) -> bool:
+    return rule is None or all(fmt in QUANT_PASSTHROUGH for fmt in rule.dtype.values())
+
+
 def apply_quantization(model: nn.Module, config) -> nn.Module:
     """Swap eligible nn.Linear modules to QuantLinear per the run's quant rules."""
     rules = config.training.quant
@@ -30,9 +34,7 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
             fqn = f"{parent_fqn}.{child_name}" if parent_fqn else child_name
             rule = resolve_rule(fqn, rules)
             # skip rules that leave every operand in a passthrough dtype
-            if rule is None or all(
-                fmt in QUANT_PASSTHROUGH for fmt in rule.dtype.values()
-            ):
+            if _is_passthrough(rule):
                 continue
             if isinstance(parent, MoERouter) and child_name == "gate":
                 continue  # keep the router gate fp32-pinned (never quantize)
@@ -50,7 +52,7 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
         if not isinstance(module, SparseMoEBlock):
             continue
         rule = resolve_rule(fqn, rules)
-        if rule is None or all(fmt in QUANT_PASSTHROUGH for fmt in rule.dtype.values()):
+        if _is_passthrough(rule):
             continue
         module.expert_mm = lambda a, b, offs, _cfg=rule: scaled_grouped_gemm(
             a, b, offs, _cfg

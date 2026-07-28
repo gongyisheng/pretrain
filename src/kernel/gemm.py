@@ -668,7 +668,7 @@ def scaled_grouped_gemm_wgrad(
     aq (R,K), gq (R,N) fp8/int8, expert-sorted; sa (1,K), sg (1,N) fp32 per-channel
     scales (rowwise/tensorwise, nkb==1); offs (E,) int32 END-offsets.
     """
-    R, K = aq.shape
+    _, K = aq.shape
     N = gq.shape[1]
     E = offs.shape[0]
     grad_b = torch.empty((E, K, N), device=aq.device, dtype=out_dtype)
