@@ -6,6 +6,7 @@ from src.quant.quantize import (  # noqa: F401  (effective_block_size used in Ta
     effective_block_size,
     fake_quantize_operand,
 )
+from src.quant.utils import is_supported
 from src.utils.config import QuantConfig
 
 pytestmark = pytest.mark.skipif(
@@ -134,3 +135,55 @@ def test_scaled_grouped_gemm_compiles_fullgraph():
     torch.testing.assert_close(cy.float(), ey.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(a_c.grad.float(), a_e.grad.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(b_c.grad.float(), b_e.grad.float(), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
+def test_moe_block_quantized_forward_backward_runs():
+    import torch.nn as nn
+
+    from src.kernel.gemm import grouped_gemm
+    from src.layers.mlp import SparseMoEBlock
+    from src.quant.convert import apply_quantization
+    from src.utils.config import (
+        ModelConfig,
+        TrainConfig,
+        TrainingConfig,
+    )
+
+    torch.manual_seed(0)  # deterministic init regardless of prior RNG state
+
+    class M(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.moe = SparseMoEBlock(
+                d_model=32,
+                intermediate_size=48,
+                n_routed_experts=4,
+                n_routed_experts_per_token=2,
+            )
+
+    m = M().cuda().bfloat16()
+    cfg = TrainConfig(
+        model=ModelConfig(
+            d_model=32,
+            n_layers=1,
+            vocab_size=64,
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
+        ),
+        training=TrainingConfig(
+            quant={
+                "enabled": True,
+                "dtype": {"recipe": "fp8"},
+                "scaling": {"recipe": "rowwise"},
+            }
+        ),
+    )
+    apply_quantization(m, cfg)
+    assert m.moe.expert_mm is not grouped_gemm  # confirms the quantized seam installed
+    x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out, _ = m.moe(x)
+    out.sum().backward()
+    assert torch.isfinite(out).all()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+    assert torch.isfinite(m.moe.expert_gate_up.grad).all()
+    assert torch.isfinite(m.moe.expert_down.grad).all()
