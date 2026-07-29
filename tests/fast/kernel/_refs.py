@@ -1,8 +1,6 @@
 import torch
 import torch.nn.functional as F
 
-_E5M2 = torch.float8_e5m2
-
 
 def grouped_gemm_ref(a, b, offs):
     return torch._grouped_mm(a, b, offs=offs)
@@ -38,7 +36,7 @@ def _dequant_b(q, scale, bs):
 
 def scaled_gemm_ref(aq, bq, sa, sb, ebs):
     factorable = sa.shape[-1] == 1 and sb.shape[0] == 1
-    both_e5m2 = aq.dtype == _E5M2 and bq.dtype == _E5M2
+    both_e5m2 = aq.dtype == torch.float8_e5m2 and bq.dtype == torch.float8_e5m2
     if factorable and not both_e5m2:
         if aq.dtype == torch.int8:
             acc = torch._int_mm(aq, bq)  # int32 (M, N)
@@ -86,7 +84,7 @@ def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, ebs):
     offs (E,) int32 cumulative END-offsets; ebs = elements/scale-block along K.
     """
     # Native path: per-row/col fp8 (nkb==1) on a device torch supports (sm90/sm100).
-    if aq.dtype in (torch.float8_e4m3fn, _E5M2) and sa.shape[-1] == 1:
+    if aq.dtype in (torch.float8_e4m3fn, torch.float8_e5m2) and sa.shape[-1] == 1:
         try:
             return torch._scaled_grouped_mm(
                 aq,
