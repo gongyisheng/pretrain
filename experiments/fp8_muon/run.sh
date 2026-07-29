@@ -6,15 +6,12 @@
 set -e
 cd "$(dirname "$0")/../.."
 
+precisions=("bf16" "fp8_std" "fp8_alle4m3")
 optimizers=("adamw" "muon")
-recipes=("std" "alle4m3")
 configs=()
-for opt in "${optimizers[@]}"; do
-    configs+=("qwen3_51m_bf16_${opt}")
-done
-for recipe in "${recipes[@]}"; do
+for precision in "${precisions[@]}"; do
     for opt in "${optimizers[@]}"; do
-        configs+=("qwen3_51m_fp8_${recipe}_${opt}")
+        configs+=("qwen3_51m_${precision}_${opt}")
     done
 done
 
