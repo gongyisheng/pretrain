@@ -36,24 +36,23 @@ training:
   mixed_precision: bf16
   seed: 42
   quant:
-    enabled: true
-    dtype_recipe: fp8
-    scaling:
-      granularity: tensorwise
-    exclude: [lm_head]
+    enabled: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_muon/qwen3_51m_fp8_adamw/
+  checkpoint_dir: checkpoints/fp8_muon/qwen3_51m_bf16_muon/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
 
 optimizer:
-  name: adamw
+  name: muon
   lr: 5e-4
   weight_decay: 0.1
   betas:
   - 0.9
   - 0.95
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_adjust_lr_fn: match_rms_adamw
 
 scheduler:
   name: cosine
@@ -62,5 +61,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-fp8-muon
-  wandb_run_name: qwen3-51m-fp8-adamw
+  wandb_run_name: qwen3-51m-bf16-muon
   log_every: 10

@@ -1,14 +1,18 @@
 #!/bin/bash
-# Run the qwen3 51M fp8 (tensorwise) optimizer comparison: AdamW then Muon.
+# Run the qwen3 51M optimizer/precision sweep: bf16 baselines + fp8 tensorwise
+# {std, alle4m3} x {adamw, muon}.
 # Usage: nohup bash experiments/fp8_muon/run.sh > logs/fp8_muon_51m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
 
+precisions=("bf16" "fp8_std" "fp8_alle4m3")
 optimizers=("adamw" "muon")
 configs=()
-for opt in "${optimizers[@]}"; do
-    configs+=("qwen3_51m_fp8_${opt}")
+for precision in "${precisions[@]}"; do
+    for opt in "${optimizers[@]}"; do
+        configs+=("qwen3_51m_${precision}_${opt}")
+    done
 done
 
 for config in "${configs[@]}"; do
