@@ -4,7 +4,7 @@ import torch
 
 from src.kernel.gemm import (
     grouped_gemm,
-    scaled_grouped_gemm as _kernel_scaled_grouped_gemm,
+    scaled_grouped_gemm,
     scaled_grouped_gemm_wgrad,
 )
 from src.quant.quantize import (
@@ -51,7 +51,7 @@ def _grouped(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
         ebs = effective_block_size(gran, bs, a.shape[1])
         aq, sa = _quant_a(a, a_fmt, scaling)
         bq, sb = _quant_b(b, b_fmt, scaling)
-        return _kernel_scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype, ebs)
+        return scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype, ebs)
     a_fq = fake_quantize_operand(a, -1, gran, bs, a_fmt) if is_quantized(a_fmt) else a
     b_fq = b
     if is_quantized(b_fmt):
@@ -120,6 +120,14 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         return grad_a, grad_b, None, None
 
 
-def scaled_grouped_gemm(a, b, offs, cfg: QuantConfig):
-    """Differentiable quantized ragged grouped GEMM: (R,K)@(E,K,N)->(R,N)."""
-    return ScaledGroupedGemmFn.apply(a, b, offs, cfg)
+def quantized_expert_mm(cfg: QuantConfig):
+    """Build an expert_mm bound to `cfg`: a differentiable quantized ragged grouped
+    GEMM (a (R,K), b (E,K,N), offs (E,)) -> (R,N) that quantizes operands per cfg
+    before the fused kernel. Same (a, b, offs) call contract as `grouped_gemm`, so
+    it drops into `grouped_mlp`/`SparseMoEBlock.expert_mm`.
+    """
+
+    def expert_mm(a, b, offs):
+        return ScaledGroupedGemmFn.apply(a, b, offs, cfg)
+
+    return expert_mm

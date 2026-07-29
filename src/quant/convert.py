@@ -7,7 +7,7 @@ import torch.nn as nn
 from src.layers.mlp import MoERouter, SparseMoEBlock
 from src.quant.constants import QUANT_PASSTHROUGH
 from src.quant.linear import QuantLinear
-from src.quant.moe import scaled_grouped_gemm
+from src.quant.moe import quantized_expert_mm
 from src.quant.utils import resolve_rule, check_hardware_support
 
 
@@ -54,7 +54,5 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
         rule = resolve_rule(fqn, rules)
         if _is_passthrough(rule):
             continue
-        module.expert_mm = lambda a, b, offs, _cfg=rule: scaled_grouped_gemm(
-            a, b, offs, _cfg
-        )
+        module.expert_mm = quantized_expert_mm(rule)
     return model
