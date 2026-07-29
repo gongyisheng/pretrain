@@ -22,10 +22,14 @@ All four configs are identical except `optimizer.name` (+ Muon-only hyperparams)
 
 | Config | Optimizer | Precision | Grad fmt | LR | min_lr | WD | Eff. batch | Approx params |
 |---|---|---|---|---|---|---|---|---|
+| qwen3_51m_bf16_adamw        | AdamW | bf16           | —     | 5e-4 | 5e-5 | 0.1 | 256 | ~51M |
+| qwen3_51m_bf16_muon         | Muon  | bf16           | —     | 5e-4 | 5e-5 | 0.1 | 256 | ~51M |
 | qwen3_51m_fp8_std_adamw     | AdamW | fp8 tensorwise | e5m2  | 5e-4 | 5e-5 | 0.1 | 256 | ~51M |
 | qwen3_51m_fp8_std_muon      | Muon  | fp8 tensorwise | e5m2  | 5e-4 | 5e-5 | 0.1 | 256 | ~51M |
 | qwen3_51m_fp8_alle4m3_adamw | AdamW | fp8 tensorwise | e4m3  | 5e-4 | 5e-5 | 0.1 | 256 | ~51M |
 | qwen3_51m_fp8_alle4m3_muon  | Muon  | fp8 tensorwise | e4m3  | 5e-4 | 5e-5 | 0.1 | 256 | ~51M |
+
+The bf16 pair is the full-precision reference (`quant.enabled: false`): it anchors the bf16 Muon−AdamW gap this experiment asks about, so the FP8 gaps can be read as degradation relative to it rather than against the external `experiments/muon_optm/` run.
 
 - Model: d_model=512, 8 layers, gqa 8/4, qk_norm, intermediate_size=1536, rope θ=10000.
 - FP8 block: explicit `dtype` map (std: weight/act `fp8_e4m3` + grad `fp8_e5m2`; alle4m3: all operands `fp8_e4m3`), `scaling.granularity: tensorwise`, `exclude: [lm_head]`. Only eligible `nn.Linear` GEMM operands are cast to FP8 on the fly; RoPE, RMSNorm, qk_norm, attention, SwiGLU, residuals, embeddings, lm_head, cross-entropy, and optimizer state stay bf16/fp32. hp master weights preserved. (cuBLAS rejects e5m2×e5m2, so e4m3 weight/act is required either way.)
@@ -37,7 +41,7 @@ Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 60
 
 ## Run
 
-The script sweeps `{std, alle4m3} × {adamw, muon}` in order.
+The script runs the bf16 baselines first, then sweeps `{std, alle4m3} × {adamw, muon}`.
 
 ```bash
 nohup bash experiments/fp8_muon/run.sh > logs/fp8_muon_51m.log 2>&1 &
@@ -45,16 +49,18 @@ nohup bash experiments/fp8_muon/run.sh > logs/fp8_muon_51m.log 2>&1 &
 
 ## Results
 
-| Model | Optimizer | Grad fmt | Final Val Loss | Val BPB | Δ vs AdamW |
+| Model | Optimizer | Precision / Grad fmt | Final Val Loss | Val BPB | Δ vs AdamW |
 |---|---|---|---|---|---|
-| 51M | AdamW | e5m2 (std)     | TBD | TBD | — |
-| 51M | Muon  | e5m2 (std)     | TBD | TBD | TBD |
-| 51M | AdamW | e4m3 (alle4m3) | TBD | TBD | — |
-| 51M | Muon  | e4m3 (alle4m3) | TBD | TBD | TBD |
+| 51M | AdamW | bf16           | TBD | TBD | — |
+| 51M | Muon  | bf16           | TBD | TBD | TBD |
+| 51M | AdamW | fp8 e5m2 (std)     | TBD | TBD | — |
+| 51M | Muon  | fp8 e5m2 (std)     | TBD | TBD | TBD |
+| 51M | AdamW | fp8 e4m3 (alle4m3) | TBD | TBD | — |
+| 51M | Muon  | fp8 e4m3 (alle4m3) | TBD | TBD | TBD |
 
 ## Notes
 
-- Compare the FP8 Muon−AdamW gap here against the bf16 Muon−AdamW gap in `experiments/muon_optm/` — a preserved gap supports outcome (1), a shrunk gap supports (2).
+- Compare the FP8 Muon−AdamW gap here against the in-experiment bf16 baseline pair — a preserved gap supports outcome (1), a shrunk gap supports (2). (`experiments/muon_optm/` is a looser external reference.)
 - `optim/momentum_norm` and `optim/variance_norm` in W&B reflect only the AdamW-routed params (Muon's `momentum_buffer` is not aggregated by `metric_utils`).
 - tensorwise is the most aggressive recipe; if Muon's edge collapses here, rerun with `rowwise` / `rowwise_with_gw_hp` (see `experiments/fp8_granularity/`) to see whether tighter scaling restores it.
 - If turnaround matters, compare the 5K/10K-step intermediate eval losses before committing all runs to 50K.
