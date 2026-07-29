@@ -37,12 +37,16 @@ training:
   seed: 42
   quant:
     enabled: true
-    dtype_recipe: fp8
+    dtype:
+      weight: fp8_e4m3
+      act: fp8_e4m3
+      input_grad: fp8_e4m3
+      weight_grad: fp8_e4m3
     scaling:
       granularity: tensorwise
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_muon/qwen3_51m_fp8_muon/
+  checkpoint_dir: checkpoints/fp8_muon/qwen3_51m_fp8_alle4m3_muon/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -65,5 +69,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-fp8-muon
-  wandb_run_name: qwen3-51m-fp8-muon
+  wandb_run_name: qwen3-51m-fp8-alle4m3-muon
   log_every: 10
