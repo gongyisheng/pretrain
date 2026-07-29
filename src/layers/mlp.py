@@ -13,11 +13,6 @@ def gated_mlp(
     b_gate_up: torch.Tensor = None,
     b_down: torch.Tensor = None,
 ) -> torch.Tensor:
-    """Fused gated MLP: gate_up matmul → chunk → act(gate, up) → down matmul.
-
-    Shapes: x (..., D); w_gate_up (2*I, D); w_down (D, I); 1D biases. Leading
-    dims broadcast through `@`.
-    """
     gate_up = x @ w_gate_up.mT
     if b_gate_up is not None:
         gate_up = gate_up + (
@@ -39,10 +34,6 @@ def ungated_mlp(
     b_up: torch.Tensor = None,
     b_down: torch.Tensor = None,
 ) -> torch.Tensor:
-    """Fused ungated MLP: up matmul → act(up) → down matmul.
-
-    Shapes (parallel to gated_mlp): x (..., D); w_up (I, D); w_down (D, I).
-    """
     up = x @ w_up.mT
     if b_up is not None:
         up = up + (b_up if b_up.ndim == 1 else b_up.unsqueeze(-2))
@@ -65,16 +56,6 @@ def grouped_mlp(
     b_down: torch.Tensor = None,
     expert_mm=grouped_gemm,
 ) -> torch.Tensor:
-    """Dropless MoE expert FFN over expert-sorted tokens via grouped GEMM.
-
-    x is (R, D) with rows grouped by expert and `offs` the (E,) int32 cumulative
-    end-offsets (offs[-1] == R). Weights keep nn.Linear (E, out, in) layout; the
-    transposed view w.mT is the (E, in, out) form the grouped GEMM expects.
-    Empty groups (count 0) are handled by the grouped GEMM. Bias, when given,
-    is added per row using row_expert_ids. Under autocast, operands are cast to
-    the autocast dtype (e.g. bf16) so the grouped GEMM receives the expected
-    dtype, mirroring what autocast does for ordinary matmuls.
-    """
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
         dt = torch.get_autocast_dtype(dev)
@@ -442,9 +423,8 @@ class SparseMoEBlock(nn.Module):
 
         self.expert_load = ExpertLoad(n_routed_experts)
 
-        # Pluggable expert GEMM seam; the quant converter swaps in a quantized
-        # callable. Default is the bf16 grouped GEMM. Signature: (a, b, offs)
-        # with b in (E, K, N) layout (the .mT view applied at the call site).
+        # Pluggable expert GEMM seam (a, b, offs)
+        # quant converter swaps in a quantized callable
         self.expert_mm = grouped_gemm
 
     def forward(self, x: torch.Tensor):
