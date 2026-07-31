@@ -10,9 +10,11 @@ configs=(
     qwen3_51m_fp8_std
     qwen3_51m_fp8_alle4m3
     qwen3_51m_fp8_alle5m2
-    qwen3_51m_fp8_gwhp
-    qwen3_51m_fp8_e4m3_fwdonly
-    qwen3_51m_fp8_e5m2_fwdonly
+    qwen3_51m_fp8_std_gwhp
+    qwen3_51m_fp8_e4m3_actweight
+    qwen3_51m_fp8_e5m2_actweight
+    qwen3_51m_fp8_e4m3_weightonly
+    qwen3_51m_fp8_e5m2_weightonly
 )
 
 for config in "${configs[@]}"; do

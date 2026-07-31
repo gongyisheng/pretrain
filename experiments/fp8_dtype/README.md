@@ -20,11 +20,17 @@ nothing but the format supplies dynamic range.
 2. **all-e4m3** loses loss here (unlike under mxfp8) — tensorwise scaling can't
    supply the grad range, so e4m3 clips grad outliers.
 3. **all-e5m2** is the floor — the forward loses mantissa it can't afford.
-4. **gw_hp** (bf16 weight_grad) and the **fwd-only** pair (bf16 both grads)
-   recover loss progressively at throughput cost; the gap isolates the wgrad
-   GEMM's cost. The two fwd-only runs (**e4m3_fwdonly** vs **e5m2_fwdonly**)
-   isolate the forward element format alone — with the backward held at bf16,
-   their gap measures pure forward mantissa (e4m3) vs range (e5m2) at tensorwise.
+4. **std_gwhp** (std with weight_grad forced to bf16) and the **actweight** pair
+   (weight+act fp8, both grads bf16) recover loss progressively at throughput
+   cost; the gap isolates the wgrad GEMM's cost. The two actweight runs
+   (**e4m3_actweight** vs **e5m2_actweight**) isolate the forward element format
+   alone — with the backward held at bf16, their gap measures pure forward
+   mantissa (e4m3) vs range (e5m2) at tensorwise.
+5. **weight-only** pair (**e4m3_weightonly** vs **e5m2_weightonly**): only `weight` is
+   fp8, act/both grads bf16. Weights are the benign operand (stable, no outliers),
+   so both should sit near bf16, and e4m3 ≥ e5m2 (weights want mantissa, not
+   range). The actweight ↔ weightonly gap adds the activation's contribution to
+   the forward, isolating weight vs activation sensitivity at the same format.
 
 If (2) holds, all-e4m3's success is granularity-dependent — it needs the
 fine-grained scaling `fp8_granularity`/`mxfp8` provide, not a free win at coarse scale.
@@ -35,15 +41,17 @@ All hyperparameters matched across runs; only `training.quant.dtype` varies, and
 every FP8 run uses `scaling: {granularity: tensorwise}`, `exclude: [lm_head]`.
 Same seed (42), data order, LR schedule.
 
-| Config | d_model | layers | heads/kv | inter_size | weight/act | input_grad | weight_grad | Approx params |
-|---|---|---|---|---|---|---|---|---|
-| qwen3_51m_bf16 | 512 | 8 | 8/4 | 1536 | — | — | — | ~51M |
-| qwen3_51m_fp8_std | 512 | 8 | 8/4 | 1536 | e4m3 | e5m2 | e5m2 | ~51M |
-| qwen3_51m_fp8_alle4m3 | 512 | 8 | 8/4 | 1536 | e4m3 | e4m3 | e4m3 | ~51M |
-| qwen3_51m_fp8_alle5m2 | 512 | 8 | 8/4 | 1536 | e5m2 | e5m2 | e5m2 | ~51M |
-| qwen3_51m_fp8_gwhp | 512 | 8 | 8/4 | 1536 | e4m3 | e5m2 | bf16 | ~51M |
-| qwen3_51m_fp8_e4m3_fwdonly | 512 | 8 | 8/4 | 1536 | e4m3 | bf16 | bf16 | ~51M |
-| qwen3_51m_fp8_e5m2_fwdonly | 512 | 8 | 8/4 | 1536 | e5m2 | bf16 | bf16 | ~51M |
+| Config | weight | act | input_grad | weight_grad | Approx params |
+|---|---|---|---|---|---|
+| qwen3_51m_bf16 | — | — | — | — | ~51M |
+| qwen3_51m_fp8_std | e4m3 | e4m3 | e5m2 | e5m2 | ~51M |
+| qwen3_51m_fp8_alle4m3 | e4m3 | e4m3 | e4m3 | e4m3 | ~51M |
+| qwen3_51m_fp8_alle5m2 | e5m2 | e5m2 | e5m2 | e5m2 | ~51M |
+| qwen3_51m_fp8_std_gwhp | e4m3 | e4m3 | e5m2 | bf16 | ~51M |
+| qwen3_51m_fp8_e4m3_actweight | e4m3 | e4m3 | bf16 | bf16 | ~51M |
+| qwen3_51m_fp8_e5m2_actweight | e5m2 | e5m2 | bf16 | bf16 | ~51M |
+| qwen3_51m_fp8_e4m3_weightonly | e4m3 | bf16 | bf16 | bf16 | ~51M |
+| qwen3_51m_fp8_e5m2_weightonly | e5m2 | bf16 | bf16 | bf16 | ~51M |
 
 All runs: seq_len=1024, batch=16, grad_accum=16 (effective batch=256, ~262K
 tok/step), 50K steps (~13B tokens), Muon (`muon_adjust_lr_fn: match_rms_adamw`,
@@ -59,9 +67,14 @@ quantized family, else falls back to fake-quant + a bf16 matmul. Everything else
 cross-entropy, optimizer state) stays bf16/fp32; hp master weights preserved.
 
 - std / all-e4m3 / all-e5m2: all three GEMMs fused FP8.
-- gw_hp: forward + dgrad fused; wgrad runs bf16 (weight_grad=bf16, not FP8-accelerated).
-- e4m3_fwdonly / e5m2_fwdonly: only the forward is fused FP8 (e4m3 and e5m2
-  respectively); both backward GEMMs run bf16.
+- std_gwhp: std recipe with only weight_grad forced to bf16 — forward + dgrad fused; wgrad runs bf16 (not FP8-accelerated).
+- e4m3_actweight / e5m2_actweight: only the forward is fused FP8 (weight+act in
+  e4m3 and e5m2 respectively); both backward GEMMs run bf16.
+- e4m3_weightonly / e5m2_weightonly: **no** fused FP8 GEMM. Only `weight` is quantized, so
+  the forward (`act`×`weight`) and dgrad (`input_grad`×`weight`) fake-quant the
+  weight and matmul in bf16; wgrad (`weight_grad`×`act`) is pure bf16 (weight
+  absent). Throughput ≈ bf16 (a touch slower from fake-quant overhead) — these
+  are quality probes of weight-format sensitivity, not throughput wins.
 
 **Config note:** all-e4m3 sets `dtype` per-operand explicitly rather than
 `dtype: {recipe: mxfp8}` — the mxfp8 dtype recipe auto-seeds blockwise-32/E8M0
@@ -77,15 +90,17 @@ nohup bash experiments/fp8_dtype/run.sh > logs/fp8_dtype_51m.log 2>&1 &
 
 ## Results
 
-| Model | dtype recipe | weight/act | input_grad | weight_grad | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
-|---|---|---|---|---|---|---|---|---|
-| 51M | bf16 | — | — | — | | | | 1.00× |
-| 51M | std | e4m3 | e5m2 | e5m2 | | | | |
-| 51M | all-e4m3 | e4m3 | e4m3 | e4m3 | | | | |
-| 51M | all-e5m2 | e5m2 | e5m2 | e5m2 | | | | |
-| 51M | gw_hp | e4m3 | e5m2 | bf16 | | | | |
-| 51M | e4m3_fwdonly | e4m3 | bf16 | bf16 | | | | |
-| 51M | e5m2_fwdonly | e5m2 | bf16 | bf16 | | | | |
+| Model | dtype recipe | weight | act | input_grad | weight_grad | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
+|---|---|---|---|---|---|---|---|---|---|
+| 51M | bf16 | — | — | — | — | | | | 1.00× |
+| 51M | std | e4m3 | e4m3 | e5m2 | e5m2 | | | | |
+| 51M | all-e4m3 | e4m3 | e4m3 | e4m3 | e4m3 | | | | |
+| 51M | all-e5m2 | e5m2 | e5m2 | e5m2 | e5m2 | | | | |
+| 51M | std_gwhp | e4m3 | e4m3 | e5m2 | bf16 | | | | |
+| 51M | e4m3_actweight | e4m3 | e4m3 | bf16 | bf16 | | | | |
+| 51M | e5m2_actweight | e5m2 | e5m2 | bf16 | bf16 | | | | |
+| 51M | e4m3_weightonly | e4m3 | bf16 | bf16 | bf16 | | | | |
+| 51M | e5m2_weightonly | e5m2 | bf16 | bf16 | bf16 | | | | |
 
 ## Notes
 
@@ -93,7 +108,7 @@ nohup bash experiments/fp8_dtype/run.sh > logs/fp8_dtype_51m.log 2>&1 &
   numbers should match across folders (cross-experiment sanity check).
 - "Best dtype" = smallest val-loss gap to bf16 at equal throughput; combine with
   `fp8_granularity`'s best granularity for the overall recipe.
-- The e4m3_fwdonly ↔ e5m2_fwdonly gap isolates the forward element format with
-  the backward held at bf16; the std ↔ e4m3_fwdonly gap adds the backward's cost.
+- The e4m3_actweight ↔ e5m2_actweight gap isolates the forward element format with
+  the backward held at bf16; the std ↔ e4m3_actweight gap adds the backward's cost.
 - Throughput gain at 51M is modest — non-GEMM kernels are a meaningful fraction
   of step time at this size.

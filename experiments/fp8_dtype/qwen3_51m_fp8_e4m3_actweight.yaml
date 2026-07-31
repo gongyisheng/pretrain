@@ -37,7 +37,7 @@ training:
     scaling: {granularity: tensorwise}
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_dtype/qwen3_51m_fp8_e4m3_fwdonly/
+  checkpoint_dir: checkpoints/fp8_dtype/qwen3_51m_fp8_e4m3_actweight/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -57,5 +57,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-fp8-dtype
-  wandb_run_name: qwen3-51m-fp8-e4m3-fwdonly
+  wandb_run_name: qwen3-51m-fp8-e4m3-actweight
   log_every: 10
