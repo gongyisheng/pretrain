@@ -140,3 +140,51 @@ def test_collector_passthrough_grad_absent():
     out = coll.drain()
     assert not any("grad_weight" in k for k in out)
     assert any("grad_input" in k for k in out)
+
+
+def _moe_block():
+    from src.layers.mlp import SparseMoEBlock
+
+    cfg = QuantConfig(
+        enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "tensorwise"}
+    )
+    block = SparseMoEBlock(
+        d_model=32,
+        intermediate_size=48,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+    )
+    block.layer_id = "5"
+    block.cfg = cfg
+    return block
+
+
+@fp8_only
+def test_collector_records_moe_block():
+    # BS = 4 * 16 = 64 tokens, comfortably >= 32 per the fused fp8 wgrad
+    # GEMM's contraction-dim floor.
+    torch.manual_seed(0)
+    block = _moe_block().cuda().to(torch.bfloat16)
+    coll = QuantMetricCollector()
+    coll.enabled = True
+    handles = register_quant_metric_hooks(block, coll)
+    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out, _ = block(x)
+    out.sum().backward()
+    out_metrics = coll.drain()
+    assert "quant/underflow_rate/weight/layer_5" in out_metrics
+    assert "quant/underflow_rate/act/layer_5" in out_metrics
+    for h in handles:
+        h.remove()
+
+
+@fp8_only
+def test_collector_disabled_records_nothing_moe():
+    block = _moe_block().cuda().to(torch.bfloat16)
+    coll = QuantMetricCollector()
+    coll.enabled = False
+    register_quant_metric_hooks(block, coll)
+    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out, _ = block(x)
+    out.sum().backward()
+    assert coll.drain() == {}
