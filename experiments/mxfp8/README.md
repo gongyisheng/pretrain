@@ -17,7 +17,7 @@ mxfp8 (block-32 along the contraction axis, power-of-two E8M0 scale, e4m3 elemen
 
 ### Why e4m3 on every operand (incl. gradients)
 
-Plain fp8 uses e5m2 for gradients to buy exponent range. mxfp8 does **not**: the BlockWise1x32 MMA on this stack accepts only `e4m3 × e4m3` (mixed e5m2 is rejected), and MX's block scaling supplies the dynamic range that e5m2 would otherwise provide. So `dtype: {recipe: mxfp8}` sets weight/act/input_grad/weight_grad all to `fp8_e4m3` — this is what keeps dgrad and wgrad on the tensor-core path instead of falling back to a slow high-precision matmul.
+Plain fp8 uses e5m2 for gradients to buy exponent range. mxfp8 does **not**: the BlockWise1x32 MMA on this stack accepts only `e4m3 × e4m3` (mixed e5m2 is rejected), and MX's block scaling supplies the dynamic range that e5m2 would otherwise provide. So `dtype: {recipe: mxfp8}` sets weight/act/grad_input/grad_weight all to `fp8_e4m3` — this is what keeps dgrad and wgrad on the tensor-core path instead of falling back to a slow high-precision matmul.
 
 ## Setup
 
@@ -28,7 +28,7 @@ All hyperparameters are matched between bf16 and mxfp8. The only independent var
 | qwen3_51m_bf16 | 512 | 8 | 8/4 | 1536 | off | — | ~51M |
 | qwen3_51m_mxfp8 | 512 | 8 | 8/4 | 1536 | mxfp8 | blockwise-32 / E8M0 | ~51M |
 
-`exclude: [lm_head]` (lm_head stays in bf16; numerically sensitive under tied embeddings). mxfp8 uses `dtype: {recipe: mxfp8}` → weight/act/input_grad/weight_grad all `fp8_e4m3`, scaling `{granularity: blockwise, block_size: 32, scale_dtype: e8m0}`.
+`exclude: [lm_head]` (lm_head stays in bf16; numerically sensitive under tied embeddings). mxfp8 uses `dtype: {recipe: mxfp8}` → weight/act/grad_input/grad_weight all `fp8_e4m3`, scaling `{granularity: blockwise, block_size: 32, scale_dtype: e8m0}`.
 
 All runs: seq_len=1024, batch=16, grad_accum=16 (effective batch=256, ~262K tok/step), 50K steps (~13B tokens), Muon optimizer (`muon_adjust_lr_fn: match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup, min_lr=5e-5, OpenWebText. `eval_steps: 100` matches the `fp8_granularity` experiment so the two are directly comparable.
 

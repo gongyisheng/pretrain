@@ -91,7 +91,7 @@ class QuantizedLinearFn(torch.autograd.Function):
         dx = _gemm(
             g,
             w,
-            cfg.dtype["input_grad"],
+            cfg.dtype["grad_input"],
             cfg.dtype["weight"],
             compute_dtype,
             cfg.scaling,
@@ -100,7 +100,7 @@ class QuantizedLinearFn(torch.autograd.Function):
         dw = _gemm(
             g.t(),
             x2d,
-            cfg.dtype["weight_grad"],
+            cfg.dtype["grad_weight"],
             cfg.dtype["act"],
             compute_dtype,
             cfg.scaling,

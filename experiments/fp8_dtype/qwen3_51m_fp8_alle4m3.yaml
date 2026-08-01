@@ -33,7 +33,7 @@ training:
   mixed_precision: bf16
   quant:
     enabled: true
-    dtype: {weight: fp8_e4m3, act: fp8_e4m3, input_grad: fp8_e4m3, weight_grad: fp8_e4m3}
+    dtype: {weight: fp8_e4m3, act: fp8_e4m3, grad_input: fp8_e4m3, grad_weight: fp8_e4m3}
     scaling: {granularity: tensorwise}
     exclude: [lm_head]
   grad_clip: 1.0

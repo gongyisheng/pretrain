@@ -218,7 +218,7 @@ def test_moe_expert_mm_default_when_excluded():
 @pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_recipe_expands(fmt):
     c = QuantConfig(enabled=True, dtype={"recipe": fmt})
-    assert c.dtype == {op: fmt for op in ("weight", "act", "input_grad", "weight_grad")}
+    assert c.dtype == {op: fmt for op in ("weight", "act", "grad_input", "grad_weight")}
 
 
 @pytest.mark.parametrize("fmt", _INT8_FORMATS)

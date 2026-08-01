@@ -11,7 +11,7 @@ dtype). Design: `docs/superpowers/specs/2026-07-27-fp8-dtype-experiment-design.m
 ## Hypothesis
 
 `QuantLinear` runs three GEMMs — forward (`act`×`weight`), dgrad
-(`input_grad`×`weight`), wgrad (`weight_grad`×`act`). Classic intuition: forward
+(`grad_input`×`weight`), wgrad (`grad_weight`×`act`). Classic intuition: forward
 operands want e4m3 (mantissa/precision), gradients want e5m2 (exponent range).
 At the coarsest scale (tensorwise), the element format matters most, since
 nothing but the format supplies dynamic range.
@@ -20,7 +20,7 @@ nothing but the format supplies dynamic range.
 2. **all-e4m3** loses loss here (unlike under mxfp8) — tensorwise scaling can't
    supply the grad range, so e4m3 clips grad outliers.
 3. **all-e5m2** is the floor — the forward loses mantissa it can't afford.
-4. **std_gwhp** (std with weight_grad forced to bf16) and the **actweight** pair
+4. **std_gwhp** (std with grad_weight forced to bf16) and the **actweight** pair
    (weight+act fp8, both grads bf16) recover loss progressively at throughput
    cost; the gap isolates the wgrad GEMM's cost. The two actweight runs
    (**e4m3_actweight** vs **e5m2_actweight**) isolate the forward element format
@@ -41,7 +41,7 @@ All hyperparameters matched across runs; only `training.quant.dtype` varies, and
 every FP8 run uses `scaling: {granularity: tensorwise}`, `exclude: [lm_head]`.
 Same seed (42), data order, LR schedule.
 
-| Config | weight | act | input_grad | weight_grad | Approx params |
+| Config | weight | act | grad_input | grad_weight | Approx params |
 |---|---|---|---|---|---|
 | qwen3_51m_bf16 | — | — | — | — | ~51M |
 | qwen3_51m_fp8_std | e4m3 | e4m3 | e5m2 | e5m2 | ~51M |
@@ -67,12 +67,12 @@ quantized family, else falls back to fake-quant + a bf16 matmul. Everything else
 cross-entropy, optimizer state) stays bf16/fp32; hp master weights preserved.
 
 - std / all-e4m3 / all-e5m2: all three GEMMs fused FP8.
-- std_gwhp: std recipe with only weight_grad forced to bf16 — forward + dgrad fused; wgrad runs bf16 (not FP8-accelerated).
+- std_gwhp: std recipe with only grad_weight forced to bf16 — forward + dgrad fused; wgrad runs bf16 (not FP8-accelerated).
 - e4m3_actweight / e5m2_actweight: only the forward is fused FP8 (weight+act in
   e4m3 and e5m2 respectively); both backward GEMMs run bf16.
 - e4m3_weightonly / e5m2_weightonly: **no** fused FP8 GEMM. Only `weight` is quantized, so
-  the forward (`act`×`weight`) and dgrad (`input_grad`×`weight`) fake-quant the
-  weight and matmul in bf16; wgrad (`weight_grad`×`act`) is pure bf16 (weight
+  the forward (`act`×`weight`) and dgrad (`grad_input`×`weight`) fake-quant the
+  weight and matmul in bf16; wgrad (`grad_weight`×`act`) is pure bf16 (weight
   absent). Throughput ≈ bf16 (a touch slower from fake-quant overhead) — these
   are quality probes of weight-format sensitivity, not throughput wins.
 
@@ -90,7 +90,7 @@ nohup bash experiments/fp8_dtype/run.sh > logs/fp8_dtype_51m.log 2>&1 &
 
 ## Results
 
-| Model | dtype recipe | weight | act | input_grad | weight_grad | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
+| Model | dtype recipe | weight | act | grad_input | grad_weight | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
 |---|---|---|---|---|---|---|---|---|---|
 | 51M | bf16 | — | — | — | — | | | | 1.00× |
 | 51M | std | e4m3 | e4m3 | e5m2 | e5m2 | | | | |

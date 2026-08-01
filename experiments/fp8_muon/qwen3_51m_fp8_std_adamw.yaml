@@ -40,8 +40,8 @@ training:
     dtype:
       weight: fp8_e4m3
       act: fp8_e4m3
-      input_grad: fp8_e5m2
-      weight_grad: fp8_e5m2
+      grad_input: fp8_e5m2
+      grad_weight: fp8_e5m2
     scaling:
       granularity: tensorwise
     exclude: [lm_head]

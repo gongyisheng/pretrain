@@ -3,7 +3,7 @@
 Does Muon's per-step advantage over AdamW survive FP8 quantization, and does that depend on the grad format? Sweep two optimizers × two FP8 dtype assignments at Qwen3-51M with FP8 **tensorwise** GEMMs (in-house `src/quant/`, cuBLASLt via `torch._scaled_mm`), holding everything else fixed.
 
 The two dtype assignments differ only in the gradient GEMM operands:
-- **std** — weight/act `fp8_e4m3`, grad (`input_grad`/`weight_grad`) `fp8_e5m2`. The standard mixed-format recipe: e5m2 trades mantissa for exponent range on the wider-dynamic-range gradients.
+- **std** — weight/act `fp8_e4m3`, grad (`grad_input`/`grad_weight`) `fp8_e5m2`. The standard mixed-format recipe: e5m2 trades mantissa for exponent range on the wider-dynamic-range gradients.
 - **alle4m3** — every operand (weight/act/grad) `fp8_e4m3`. Keeps grad mantissa precision at the cost of dynamic range; stresses whether the extra range in e5m2 actually matters here.
 
 Both are written as explicit `dtype` maps (no named `dtype_recipe`) so the grad-format axis is visible in the config.

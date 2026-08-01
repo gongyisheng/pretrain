@@ -732,8 +732,8 @@ def test_quant_operand_defaults_follow_mixed_precision():
     assert r.dtype == {
         "weight": "bf16",
         "act": "bf16",
-        "input_grad": "bf16",
-        "weight_grad": "bf16",
+        "grad_input": "bf16",
+        "grad_weight": "bf16",
     }
     r32 = _only_rule(TrainingConfig(mixed_precision="no", quant={"enabled": True}))
     assert r32.dtype["weight"] == "fp32"
@@ -747,8 +747,8 @@ def test_quant_operand_defaults_follow_mixed_precision():
     assert r2.dtype == {
         "weight": "fp8",
         "act": "bf16",
-        "input_grad": "bf16",
-        "weight_grad": "bf16",
+        "grad_input": "bf16",
+        "grad_weight": "bf16",
     }
 
 
@@ -760,9 +760,9 @@ def test_quant_disabled_rule_dtype_stays_empty():
 
 def test_quant_dtype_is_mixable():
     q = QuantConfig(
-        enabled=True, dtype={"weight": "fp8", "act": "fp8", "weight_grad": "bf16"}
+        enabled=True, dtype={"weight": "fp8", "act": "fp8", "grad_weight": "bf16"}
     )
-    assert q.dtype["weight"] == "fp8" and q.dtype["weight_grad"] == "bf16"
+    assert q.dtype["weight"] == "fp8" and q.dtype["grad_weight"] == "bf16"
 
 
 def test_quant_dtype_recipe_fp8():
@@ -770,15 +770,15 @@ def test_quant_dtype_recipe_fp8():
     assert q.dtype == {
         "weight": "fp8_e4m3",
         "act": "fp8_e4m3",
-        "input_grad": "fp8_e5m2",
-        "weight_grad": "fp8_e5m2",
+        "grad_input": "fp8_e5m2",
+        "grad_weight": "fp8_e5m2",
     }
 
 
 def test_quant_dtype_recipe_respects_explicit_operand():
-    # explicit weight_grad: bf16 overrides the recipe (torchao *_with_gw_hp)
-    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "weight_grad": "bf16"})
-    assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["weight_grad"] == "bf16"
+    # explicit grad_weight: bf16 overrides the recipe (torchao *_with_gw_hp)
+    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "grad_weight": "bf16"})
+    assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["grad_weight"] == "bf16"
 
 
 def test_quant_unknown_recipe_raises():
@@ -817,25 +817,25 @@ def test_quant_default_granularity_is_tensorwise():
 
 def test_quant_recipe_sets_both_backward_grads():
     r = TrainingConfig(quant={"enabled": True, "dtype": {"recipe": "fp8"}}).quant[0]
-    assert r.dtype["input_grad"] == r.dtype["weight_grad"] == "fp8_e5m2"
+    assert r.dtype["grad_input"] == r.dtype["grad_weight"] == "fp8_e5m2"
     assert "grad" not in r.dtype
 
 
-def test_quant_weight_grad_hp_override():
+def test_quant_grad_weight_hp_override():
     # gw_hp: keep only the weight-gradient GEMM in bf16
-    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "weight_grad": "bf16"})
-    assert q.dtype["weight_grad"] == "bf16" and q.dtype["input_grad"] == "fp8_e5m2"
+    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "grad_weight": "bf16"})
+    assert q.dtype["grad_weight"] == "bf16" and q.dtype["grad_input"] == "fp8_e5m2"
 
 
-def test_quant_input_grad_hp_override():
+def test_quant_grad_input_hp_override():
     # keep only the input-gradient (dgrad) GEMM in bf16
-    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "input_grad": "bf16"})
-    assert q.dtype["input_grad"] == "bf16" and q.dtype["weight_grad"] == "fp8_e5m2"
+    q = QuantConfig(enabled=True, dtype={"recipe": "fp8", "grad_input": "bf16"})
+    assert q.dtype["grad_input"] == "bf16" and q.dtype["grad_weight"] == "fp8_e5m2"
 
 
 def test_quant_rejects_unknown_dtype_key():
     with pytest.raises(ValueError, match="dtype key"):
-        QuantConfig(enabled=True, dtype={"grad_weight": "bf16"})
+        QuantConfig(enabled=True, dtype={"bogus_grad": "bf16"})
 
 
 def test_quant_rejects_unsupported_granularity():
@@ -864,8 +864,8 @@ def test_training_config_accepts_list_of_rules():
     assert tc.quant[1].dtype == {
         "weight": "fp8",
         "act": "bf16",
-        "input_grad": "bf16",
-        "weight_grad": "bf16",
+        "grad_input": "bf16",
+        "grad_weight": "bf16",
     }
 
 
@@ -884,8 +884,8 @@ def test_quant_mxfp8_recipe_expands_dtype_and_scaling():
     assert q.dtype == {
         "weight": "fp8_e4m3",
         "act": "fp8_e4m3",
-        "input_grad": "fp8_e4m3",
-        "weight_grad": "fp8_e4m3",
+        "grad_input": "fp8_e4m3",
+        "grad_weight": "fp8_e4m3",
     }
     assert q.scaling == {
         "granularity": "blockwise",

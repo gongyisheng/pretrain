@@ -24,22 +24,22 @@ QUANT_DTYPE_RECIPES = {
     "fp8": {
         "weight": "fp8_e4m3",
         "act": "fp8_e4m3",
-        "input_grad": "fp8_e5m2",
-        "weight_grad": "fp8_e5m2",
+        "grad_input": "fp8_e5m2",
+        "grad_weight": "fp8_e5m2",
     },
     "mxfp8": {
         "weight": "fp8_e4m3",
         "act": "fp8_e4m3",
-        "input_grad": "fp8_e4m3",
-        "weight_grad": "fp8_e4m3",
+        "grad_input": "fp8_e4m3",
+        "grad_weight": "fp8_e4m3",
     },
     **{
-        fmt: {op: fmt for op in ("weight", "act", "input_grad", "weight_grad")}
+        fmt: {op: fmt for op in ("weight", "act", "grad_input", "grad_weight")}
         for fmt in ("int8", "int7", "int6", "int5", "int4")
     },
 }
 
-QUANT_OPERANDS = ("weight", "act", "input_grad", "weight_grad")
+QUANT_OPERANDS = ("weight", "act", "grad_input", "grad_weight")
 
 
 # --- format property maps ---------------------------------------------------

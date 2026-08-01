@@ -102,7 +102,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             grad_y,
             b.transpose(-2, -1).contiguous(),
             offs,
-            cfg.dtype["input_grad"],
+            cfg.dtype["grad_input"],
             cfg.dtype["weight"],
             out_dtype,
             cfg.scaling,
@@ -113,7 +113,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             grad_y,
             offs,
             cfg.dtype["act"],
-            cfg.dtype["weight_grad"],
+            cfg.dtype["grad_weight"],
             out_dtype,
             cfg.scaling,
         )

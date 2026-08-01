@@ -30,7 +30,7 @@ def _cfg(grad="bf16"):
     # recipe fills weight/act=fp8_e4m3; both backward grads overridden explicitly
     return QuantConfig(
         enabled=True,
-        dtype={"recipe": "fp8", "input_grad": grad, "weight_grad": grad},
+        dtype={"recipe": "fp8", "grad_input": grad, "grad_weight": grad},
     )
 
 
@@ -95,20 +95,20 @@ def test_rowwise_forward_and_backward():
 
 
 @fp8_only
-def test_high_precision_weight_grad_changes_wgrad():
+def test_high_precision_grad_weight_changes_wgrad():
     torch.manual_seed(0)
     lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
 
-    def weight_grad(hp):
-        dtype = {"weight_grad": "bf16"} if hp else {}
+    def grad_weight(hp):
+        dtype = {"grad_weight": "bf16"} if hp else {}
         cfg = QuantConfig(enabled=True, dtype={"recipe": "fp8", **dtype})
         q = QuantLinear.from_linear(lin, cfg)
         q(x.clone()).square().mean().backward()
         return q.weight.grad
 
-    g_hp = weight_grad(True)
-    g_fp8 = weight_grad(False)
+    g_hp = grad_weight(True)
+    g_fp8 = grad_weight(False)
     assert torch.isfinite(g_hp).all() and torch.isfinite(g_fp8).all()
     # hp wgrad skips fp8 rounding of grad/act, so it differs from the fp8 wgrad
     rel = (g_hp.float() - g_fp8.float()).norm() / g_fp8.float().norm()
@@ -243,8 +243,8 @@ def test_mxfp8_fake_quant_fallback_on_cpu():
         dtype={
             "weight": "fp8_e4m3",
             "act": "bf16",
-            "input_grad": "bf16",
-            "weight_grad": "bf16",
+            "grad_input": "bf16",
+            "grad_weight": "bf16",
         },
         scaling={"recipe": "mxfp8"},
     )
