@@ -20,11 +20,17 @@ nothing but the format supplies dynamic range.
 2. **all-e4m3** loses loss here (unlike under mxfp8) — tensorwise scaling can't
    supply the grad range, so e4m3 clips grad outliers.
 3. **all-e5m2** is the floor — the forward loses mantissa it can't afford.
-4. **std_gwhp** (std with grad_weight forced to bf16) and the **actweight** pair
-   (weight+act fp8, both grads bf16) recover loss progressively at throughput
-   cost; the gap isolates the wgrad GEMM's cost. The two actweight runs
-   (**e4m3_actweight** vs **e5m2_actweight**) isolate the forward element format
-   alone — with the backward held at bf16, their gap measures pure forward
+4. **std_gwhp** (std with grad_weight forced to bf16), **std_gihp** (std with
+   grad_input forced to bf16), and the **actweight** pair (weight+act fp8, both
+   grads bf16) recover loss progressively at throughput cost. std_gwhp/std_gihp/
+   actweight form the missing three corners of a 2×2 over the backward GEMMs
+   (std = both grads fp8, actweight = both bf16): `std − std_gwhp` isolates the
+   fp8 wgrad cost, `std − std_gihp` isolates the fp8 dgrad cost, and their sum vs
+   `std − actweight` checks additivity. dgrad error chains backward through every
+   layer, so it may be the more fp8-sensitive backward path — hence a dedicated
+   cell rather than inferring it from the joint actweight gap. The two actweight
+   runs (**e4m3_actweight** vs **e5m2_actweight**) isolate the forward element
+   format alone — with the backward held at bf16, their gap measures pure forward
    mantissa (e4m3) vs range (e5m2) at tensorwise.
 5. **weight-only** pair (**e4m3_weightonly** vs **e5m2_weightonly**): only `weight` is
    fp8, act/both grads bf16. Weights are the benign operand (stable, no outliers),
@@ -48,6 +54,7 @@ Same seed (42), data order, LR schedule.
 | qwen3_51m_fp8_alle4m3 | e4m3 | e4m3 | e4m3 | e4m3 | ~51M |
 | qwen3_51m_fp8_alle5m2 | e5m2 | e5m2 | e5m2 | e5m2 | ~51M |
 | qwen3_51m_fp8_std_gwhp | e4m3 | e4m3 | e5m2 | bf16 | ~51M |
+| qwen3_51m_fp8_std_gihp | e4m3 | e4m3 | bf16 | e5m2 | ~51M |
 | qwen3_51m_fp8_e4m3_actweight | e4m3 | e4m3 | bf16 | bf16 | ~51M |
 | qwen3_51m_fp8_e5m2_actweight | e5m2 | e5m2 | bf16 | bf16 | ~51M |
 | qwen3_51m_fp8_e4m3_weightonly | e4m3 | bf16 | bf16 | bf16 | ~51M |
@@ -68,6 +75,7 @@ cross-entropy, optimizer state) stays bf16/fp32; hp master weights preserved.
 
 - std / all-e4m3 / all-e5m2: all three GEMMs fused FP8.
 - std_gwhp: std recipe with only grad_weight forced to bf16 — forward + dgrad fused; wgrad runs bf16 (not FP8-accelerated).
+- std_gihp: std recipe with only grad_input forced to bf16 — forward + wgrad fused; dgrad runs bf16 (not FP8-accelerated). Mirror of std_gwhp; same 2/3 fusion, same throughput class.
 - e4m3_actweight / e5m2_actweight: only the forward is fused FP8 (weight+act in
   e4m3 and e5m2 respectively); both backward GEMMs run bf16.
 - e4m3_weightonly / e5m2_weightonly: **no** fused FP8 GEMM. Only `weight` is quantized, so
@@ -97,6 +105,7 @@ nohup bash experiments/fp8_dtype/run.sh > logs/fp8_dtype_51m.log 2>&1 &
 | 51M | all-e4m3 | e4m3 | e4m3 | e4m3 | e4m3 | | | | |
 | 51M | all-e5m2 | e5m2 | e5m2 | e5m2 | e5m2 | | | | |
 | 51M | std_gwhp | e4m3 | e4m3 | e5m2 | bf16 | | | | |
+| 51M | std_gihp | e4m3 | e4m3 | bf16 | e5m2 | | | | |
 | 51M | e4m3_actweight | e4m3 | e4m3 | bf16 | bf16 | | | | |
 | 51M | e5m2_actweight | e5m2 | e5m2 | bf16 | bf16 | | | | |
 | 51M | e4m3_weightonly | e4m3 | bf16 | bf16 | bf16 | | | | |
@@ -110,5 +119,10 @@ nohup bash experiments/fp8_dtype/run.sh > logs/fp8_dtype_51m.log 2>&1 &
   `fp8_granularity`'s best granularity for the overall recipe.
 - The e4m3_actweight ↔ e5m2_actweight gap isolates the forward element format with
   the backward held at bf16; the std ↔ e4m3_actweight gap adds the backward's cost.
+- std/std_gwhp/std_gihp/actweight are the four corners of the backward 2×2:
+  std−std_gwhp = fp8 wgrad cost, std−std_gihp = fp8 dgrad cost. If those two
+  singles sum to std−actweight, the backward GEMM errors are additive; a gap
+  means they interact. Larger of the two singles = the more fp8-sensitive
+  backward path (dgrad chains through depth, so it may dominate).
 - Throughput gain at 51M is modest — non-GEMM kernels are a meaningful fraction
   of step time at this size.
