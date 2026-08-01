@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from src.quant.constants import EPS
+from src.quant.linear import QuantLinear
 from src.quant.quantize import operand_quotient
 from src.quant.utils import is_quantized, str_to_min_subnormal, str_to_qmax
 
@@ -44,3 +45,72 @@ def compute_operand_metrics(
         "range_ratio": range_ratio,
         "sqnr": sqnr,
     }
+
+
+class QuantMetricCollector:
+    """Accumulates per-(layer, operand, metric) 0-dim tensors across a step's hooks.
+
+    No host sync in `record`; `drain` performs the single `.tolist()` sync.
+    """
+
+    def __init__(self):
+        self.enabled = False
+        self._store = {}  # (layer_id, operand, metric) -> 0-dim tensor
+
+    def record(self, layer_id, operand, metrics):
+        if metrics is None:
+            return
+        for name, val in metrics.items():
+            self._store[(layer_id, operand, name)] = val
+
+    def drain(self):
+        if not self._store:
+            return {}
+        keys = list(self._store.keys())
+        vals = torch.stack([self._store[k] for k in keys]).tolist()  # one sync
+        self._store = {}
+        return {
+            f"quant/{metric}/{operand}/layer_{layer_id}": v
+            for (layer_id, operand, metric), v in zip(keys, vals)
+        }
+
+
+def _record_operand(collector, module, tensor, operand, fmt_key):
+    cfg = module.cfg
+    fmt = cfg.dtype[fmt_key]
+    m = compute_operand_metrics(
+        tensor,
+        fmt,
+        cfg.scaling.get("granularity", "tensorwise"),
+        cfg.scaling.get("block_size", 0),
+        -1,
+        scale_dtype=cfg.scaling.get("scale_dtype"),
+    )
+    collector.record(module.layer_id, operand, m)
+
+
+def _make_hooks(collector):
+    def fwd(module, inputs, output):
+        if not collector.enabled:
+            return
+        _record_operand(collector, module, module.weight, "weight", "weight")
+        _record_operand(collector, module, inputs[0], "act", "act")
+
+    def bwd(module, grad_input, grad_output):
+        if not collector.enabled:
+            return
+        g = grad_output[0]
+        _record_operand(collector, module, g, "grad_input", "grad_input")
+        _record_operand(collector, module, g, "grad_weight", "grad_weight")
+
+    return fwd, bwd
+
+
+def register_quant_metric_hooks(model, collector):
+    handles = []
+    for module in model.modules():
+        if isinstance(module, QuantLinear) and hasattr(module, "layer_id"):
+            fwd, bwd = _make_hooks(collector)
+            handles.append(module.register_forward_hook(fwd))
+            handles.append(module.register_full_backward_hook(bwd))
+    return handles

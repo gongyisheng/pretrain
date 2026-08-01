@@ -1,8 +1,24 @@
 import torch
+import torch.nn as nn
 import pytest
 from src.quant.utils import str_to_min_subnormal, str_to_qmax
 from src.quant.quantize import operand_quotient, fake_quantize_operand
-from src.quant.metrics import compute_operand_metrics
+from src.quant.metrics import (
+    compute_operand_metrics,
+    QuantMetricCollector,
+    register_quant_metric_hooks,
+)
+from src.quant.linear import QuantLinear
+from src.utils.config import QuantConfig
+
+
+def _fp8_capable():
+    if not torch.cuda.is_available():
+        return False
+    return torch.cuda.get_device_capability() >= (8, 9)
+
+
+fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
 
 
 def test_min_subnormal_values():
@@ -73,3 +89,54 @@ def test_metrics_all_zero_dim_float32():
     m = compute_operand_metrics(x, "fp8_e5m2", "tensorwise", 0, -1)
     for k in ("underflow_rate", "clip_rate", "range_ratio", "sqnr"):
         assert m[k].ndim == 0 and m[k].dtype == torch.float32
+
+
+def _qlinear(fmt_overrides=None):
+    cfg = QuantConfig(enabled=True, dtype={"recipe": "fp8", **(fmt_overrides or {})})
+    lin = nn.Linear(64, 32, bias=False)
+    q = QuantLinear.from_linear(lin, cfg)
+    q.layer_id = "3"
+    return q
+
+
+@fp8_only
+def test_collector_records_and_drains_all_operands():
+    torch.manual_seed(0)
+    q = _qlinear().cuda().to(torch.bfloat16)
+    coll = QuantMetricCollector()
+    coll.enabled = True
+    handles = register_quant_metric_hooks(q, coll)
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    q(x).square().mean().backward()
+    out = coll.drain()
+    for operand in ("weight", "act", "grad_input", "grad_weight"):
+        assert f"quant/underflow_rate/{operand}/layer_3" in out
+        assert f"quant/sqnr/{operand}/layer_3" in out
+    assert coll.drain() == {}  # cleared after drain
+    for h in handles:
+        h.remove()
+
+
+@fp8_only
+def test_collector_disabled_records_nothing():
+    q = _qlinear().cuda().to(torch.bfloat16)
+    coll = QuantMetricCollector()
+    coll.enabled = False
+    register_quant_metric_hooks(q, coll)
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    q(x).square().mean().backward()
+    assert coll.drain() == {}
+
+
+@fp8_only
+def test_collector_passthrough_grad_absent():
+    # grad_weight forced to bf16 -> no grad_weight series, others present.
+    q = _qlinear({"grad_weight": "bf16"}).cuda().to(torch.bfloat16)
+    coll = QuantMetricCollector()
+    coll.enabled = True
+    register_quant_metric_hooks(q, coll)
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    q(x).square().mean().backward()
+    out = coll.drain()
+    assert not any("grad_weight" in k for k in out)
+    assert any("grad_input" in k for k in out)
