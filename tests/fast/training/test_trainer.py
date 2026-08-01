@@ -11,6 +11,7 @@ import tempfile
 import numpy as np
 import pytest
 
+from src.quant.utils import is_supported
 from src.training.trainer import Trainer
 from src.utils.config import (
     DataConfig,
@@ -21,6 +22,8 @@ from src.utils.config import (
     TrainConfig,
     TrainingConfig,
 )
+
+fp8_only = pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
 
 
 @pytest.fixture
@@ -184,3 +187,66 @@ def test_trainer_rejects_unknown_loss_fn(mock_memmap):
         cfg.training.loss_fn = "not_a_real_loss"
         with pytest.raises(ValueError, match="unknown loss_fn"):
             Trainer(cfg, wandb_enabled=False)
+
+
+# ---------------------------------------------------------------------------
+# quant metrics wiring: flag off -> no hooks, no quant/ keys (runs everywhere);
+# flag on -> quant/ keys dispatched (needs fp8-capable GPU, see fp8_only below).
+# ---------------------------------------------------------------------------
+
+
+def test_quant_metrics_disabled_by_default(mock_memmap):
+    """log_quant_metrics defaults to False: no collector, no quant/ keys, hot
+    path unchanged."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        trainer = Trainer(_tiny_config(tmp), wandb_enabled=False)
+        assert trainer.quant_collector is None
+        assert trainer.metrics.quant_collector is None
+        logged = []
+        trainer.logger.register_on_log_hook(
+            lambda step, metrics: logged.append(metrics)
+        )
+        trainer.train()
+        assert not any(k.startswith("quant/") for metrics in logged for k in metrics)
+
+
+def _tiny_fp8_config(tmp_dir):
+    """_tiny_config, but on cuda with a tensorwise fp8 quant rule (mirrors
+    tests/fast/quant/test_converter.py's `_cfg`) and quant metrics on."""
+    cfg = _tiny_config(tmp_dir)
+    cfg.training = TrainingConfig(
+        batch_size=4,
+        gradient_accumulation_steps=1,
+        max_steps=2,
+        device="cuda",
+        mixed_precision="bf16",
+        grad_clip=1.0,
+        checkpoint_dir=os.path.join(tmp_dir, "ckpt"),
+        checkpoint_every=100,
+        eval_every=100,
+        eval_steps=2,
+        enable_torch_compile=False,
+        quant={"enabled": True, "dtype": {"recipe": "fp8"}},
+    )
+    cfg.logging.log_quant_metrics = True
+    cfg.logging.log_every = 1
+    return cfg
+
+
+@fp8_only
+def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
+    """log_quant_metrics=True with an fp8 quant recipe: at least one quant/
+    key from the collector's drain() reaches the logger."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        cfg = _tiny_fp8_config(tmp)
+
+        trainer = Trainer(cfg, wandb_enabled=False)
+        assert trainer.quant_collector is not None
+        logged = []
+        trainer.logger.register_on_log_hook(
+            lambda step, metrics: logged.append(metrics)
+        )
+        trainer.train()
+        assert any(k.startswith("quant/") for metrics in logged for k in metrics)

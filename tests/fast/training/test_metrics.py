@@ -137,6 +137,27 @@ def test_grad_clip_ratio_reflects_window():
 
 
 # ---------------------------------------------------------------------------
+# quant_collector drain merge
+# ---------------------------------------------------------------------------
+
+
+class _StubQuantCollector:
+    def drain(self):
+        return {"quant/sqnr/act/layer_0": 42.0}
+
+
+def test_log_train_merges_quant_metrics():
+    tracker, _ = _tracker(_cfg(log_every=1))
+    tracker.quant_collector = _StubQuantCollector()
+    model, opt, scaler = _linear_setup()
+    tracker.train_begin()
+    _do_step(tracker, model, opt, scaler, step=0)
+    d = tracker.log_train(step=1, model=model, optimizer=opt)
+    assert d["quant/sqnr/act/layer_0"] == 42.0
+    assert tracker.logger.logs[-1][1]["quant/sqnr/act/layer_0"] == 42.0
+
+
+# ---------------------------------------------------------------------------
 # total_tokens / tokens_per_step
 # ---------------------------------------------------------------------------
 

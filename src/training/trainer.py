@@ -149,6 +149,18 @@ class Trainer:
         # Quantization: swap eligible nn.Linear modules to QuantLinear
         apply_quantization(self.model, config)
 
+        # Quant metrics: hooks must attach after apply_quantization (layer_id
+        # exists) and before torch.compile (register on the pre-compile module).
+        self.quant_collector = None
+        if config.logging.log_quant_metrics:
+            from src.quant.metrics import (
+                QuantMetricCollector,
+                register_quant_metric_hooks,
+            )
+
+            self.quant_collector = QuantMetricCollector()
+            register_quant_metric_hooks(self.model, self.quant_collector)
+
         # Optimizer & scheduler
         self.optimizer = build_optimizer(self.model, config)
         self.scheduler = build_scheduler(self.optimizer, config)
@@ -178,6 +190,8 @@ class Trainer:
         # Metrics and Logging
         self.logger = WandbLogger(config, enabled=wandb_enabled)
         self.metrics = MetricsTracker(config, self.device, logger=self.logger)
+        if self.quant_collector is not None:
+            self.metrics.quant_collector = self.quant_collector
         self.metrics.print_model_summary()
 
         # Checkpoint dir
@@ -227,6 +241,11 @@ class Trainer:
         )
         while self.step < stop_at:
             self.optimizer.zero_grad(set_to_none=True)
+
+            if self.quant_collector is not None:
+                self.quant_collector.enabled = (
+                    self.step + 1
+                ) % self.config.logging.log_every == 0
 
             # Read previous step's loss NOW (GPU has been computing since we launched it)
             # This overlaps the .item() sync with the current step's data prefetch

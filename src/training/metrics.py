@@ -21,6 +21,7 @@ class MetricsTracker:
         self.config = config
         self.device = device
         self.logger = logger
+        self.quant_collector = None  # set by trainer when log_quant_metrics is on
 
         self.is_moe = config.model.is_moe
         if self.is_moe:
@@ -256,6 +257,9 @@ class MetricsTracker:
             for name, m in metric_utils.compute_layer_svd_metrics(model).items():
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val
+
+        if self.quant_collector is not None:
+            d.update(self.quant_collector.drain())
 
         self.logger.log(d, step=step)
 
