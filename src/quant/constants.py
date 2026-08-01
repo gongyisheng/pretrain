@@ -61,6 +61,16 @@ _STR_TO_QMAX = {
     "int4": 7.0,
 }
 
+_STR_TO_MIN_SUBNORMAL = {
+    "fp8_e4m3": 2**-9,
+    "fp8_e5m2": 2**-16,
+    "int8": 0.5,
+    "int7": 0.5,
+    "int6": 0.5,
+    "int5": 0.5,
+    "int4": 0.5,
+}
+
 _STR_TO_EMAX = {
     "fp8_e4m3": 8,
     "fp8_e5m2": 15,

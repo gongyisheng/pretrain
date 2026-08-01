@@ -80,6 +80,53 @@ def quantize_operand(
     return xq, scale
 
 
+def operand_quotient(
+    x, contract_dim, granularity, block_size, fmt, *, scale_dtype=None
+):
+    """Diagnostic-only: return (q_abs, deq, xf) as float32 for metric probes.
+
+    q_abs = |xf / scale| BEFORE clamp/round; deq = dequant(quant(xf));
+    xf = float32 view of x (contract_dim restored). Shares the exact scale
+    path as quantize_operand — do NOT reimplement scale math here.
+    """
+    xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
+    K = xf.shape[-1]
+    qmax = str_to_qmax(fmt)
+
+    if granularity == "tensorwise":
+        amax = xf.abs().amax()
+        scale = _amax_to_scale(amax, fmt, scale_dtype)
+        q = xf / scale
+        q_clamped = torch.round(q) if is_int8s(fmt) else q
+        # cast through the store dtype so fp8 mantissa rounding matches
+        # quantize_operand exactly (clamp alone does not reproduce it)
+        q_store = q_clamped.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
+        deq = q_store.float() * scale
+        return (
+            q.abs().movedim(-1, contract_dim).contiguous(),
+            deq.movedim(-1, contract_dim).contiguous(),
+            xf.movedim(-1, contract_dim).contiguous(),
+        )
+
+    bs = effective_block_size(granularity, block_size, K)
+    nkb = (K + bs - 1) // bs
+    pad = nkb * bs - K
+    xp = F.pad(xf, (0, pad)) if pad else xf
+    xb = xp.reshape(*xp.shape[:-1], nkb, bs)
+    amax = xb.abs().amax(dim=-1)
+    scale = _amax_to_scale(amax, fmt, scale_dtype)
+    q = xb / scale.unsqueeze(-1)
+    q_clamped = torch.round(q) if is_int8s(fmt) else q
+    q_store = q_clamped.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
+    deq = (q_store.float() * scale.unsqueeze(-1)).flatten(-2)[..., :K]
+    q_abs = q.abs().flatten(-2)[..., :K]
+    return (
+        q_abs.movedim(-1, contract_dim).contiguous(),
+        deq.movedim(-1, contract_dim).contiguous(),
+        xf.movedim(-1, contract_dim).contiguous(),
+    )
+
+
 def fake_quantize_operand(
     x,
     contract_dim,
