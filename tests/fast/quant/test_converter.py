@@ -228,3 +228,11 @@ def test_int8s_apply_quantization_swaps(fmt):
     cfg = SimpleNamespace(training=SimpleNamespace(quant=[rule]))
     apply_quantization(model, cfg)
     assert isinstance(model[0], QuantLinear)
+
+
+@fp8_only
+def test_apply_quantization_sets_layer_id():
+    m = _Tiny().cuda().to(torch.bfloat16)
+    apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
+    qls = [mod for mod in m.modules() if isinstance(mod, QuantLinear)]
+    assert qls and all(isinstance(mod.layer_id, str) for mod in qls)

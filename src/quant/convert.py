@@ -15,6 +15,13 @@ def _is_passthrough(rule) -> bool:
     return rule is None or all(fmt in QUANT_PASSTHROUGH for fmt in rule.dtype.values())
 
 
+def _layer_id_from_fqn(fqn: str) -> str:
+    for part in fqn.split("."):
+        if part.isdigit():
+            return part
+    return fqn
+
+
 def apply_quantization(model: nn.Module, config) -> nn.Module:
     """Swap eligible nn.Linear modules to QuantLinear per the run's quant rules."""
     rules = config.training.quant
@@ -44,7 +51,9 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
                     "swapping would break the tie."
                 )
                 continue
-            setattr(parent, child_name, QuantLinear.from_linear(child, rule))
+            qmod = QuantLinear.from_linear(child, rule)
+            qmod.layer_id = _layer_id_from_fqn(fqn)
+            setattr(parent, child_name, qmod)
 
     # MoE routed experts are stacked Parameters (not nn.Linear), so the swap loop
     # above can't reach them. Install a quantized expert_mm per matching rule.
@@ -55,4 +64,6 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
         if _is_passthrough(rule):
             continue
         module.expert_mm = quantized_expert_mm(rule)
+        module.layer_id = _layer_id_from_fqn(fqn)
+        module.cfg = rule
     return model

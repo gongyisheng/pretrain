@@ -486,6 +486,9 @@ class LoggingConfig:
     log_optimizer_svd_metrics: bool = (
         True  # log per-2D-weight srank/pr; costly, SVD per weight
     )
+    log_quant_metrics: bool = (
+        False  # per-(operand,layer) quant health to W&B; hooks only when True
+    )
 
 
 @dataclass

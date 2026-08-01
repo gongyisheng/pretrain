@@ -1240,3 +1240,9 @@ def test_quant_blockwise_fp32_scale_dtype_ok():
         scaling={"granularity": "blockwise", "block_size": 64, "scale_dtype": "fp32"},
     )
     assert q.scaling["scale_dtype"] == "fp32"
+
+
+def test_log_quant_metrics_defaults_false():
+    from src.utils.config import LoggingConfig
+
+    assert LoggingConfig().log_quant_metrics is False
