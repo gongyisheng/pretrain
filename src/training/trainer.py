@@ -146,7 +146,7 @@ class Trainer:
             worker_init_fn=Trainer._worker_init_fn,
         )
 
-        # Quantization: swap eligible nn.Linear modules to QuantLinear
+        # Quantization: swap eligible nn.Linear modules to QuantizedLinear
         apply_quantization(self.model, config)
 
         # Quant metrics: hooks must attach after apply_quantization (layer_id

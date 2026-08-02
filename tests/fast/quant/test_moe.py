@@ -70,7 +70,7 @@ def test_moe_block_quantized_forward_backward_runs():
     class M(nn.Module):
         def __init__(self):
             super().__init__()
-            self.moe = SparseMoEBlock(
+            self.mlp = SparseMoEBlock(
                 d_model=32,
                 intermediate_size=48,
                 n_routed_experts=4,
@@ -79,8 +79,8 @@ def test_moe_block_quantized_forward_backward_runs():
 
     m = M().cuda().bfloat16()
     with torch.no_grad():
-        nn.init.normal_(m.moe.expert_gate_up, mean=0.0, std=0.02)
-        nn.init.normal_(m.moe.expert_down, mean=0.0, std=0.02)
+        nn.init.normal_(m.mlp.expert_gate_up, mean=0.0, std=0.02)
+        nn.init.normal_(m.mlp.expert_down, mean=0.0, std=0.02)
     cfg = TrainConfig(
         model=ModelConfig(
             d_model=32,
@@ -97,11 +97,11 @@ def test_moe_block_quantized_forward_backward_runs():
         ),
     )
     apply_quantization(m, cfg)
-    assert m.moe.expert_mm is not grouped_gemm  # confirms the quantized seam installed
+    assert m.mlp.expert_mm is not grouped_gemm  # confirms the quantized seam installed
     x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    out, _ = m.moe(x)
+    out, _ = m.mlp(x)
     out.sum().backward()
     assert torch.isfinite(out).all()
     assert x.grad is not None and torch.isfinite(x.grad).all()
-    assert torch.isfinite(m.moe.expert_gate_up.grad).all()
-    assert torch.isfinite(m.moe.expert_down.grad).all()
+    assert torch.isfinite(m.mlp.expert_gate_up.grad).all()
+    assert torch.isfinite(m.mlp.expert_down.grad).all()

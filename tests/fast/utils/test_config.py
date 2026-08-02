@@ -721,7 +721,7 @@ def _only_rule(tc):
 def test_quant_defaults_disabled():
     q = QuantConfig()
     assert q.enabled is False
-    assert q.exclude == ["lm_head"]
+    assert q.exclude == ["lm_head", "*mlp.router.gate"]
     # disabled rule is inert: no dtype/scaling defaults applied
     assert q.dtype == {} and q.scaling == {}
 
@@ -788,7 +788,7 @@ def test_quant_unknown_recipe_raises():
 
 def test_quant_include_defaults_empty():
     q = QuantConfig()
-    assert q.include == [] and q.exclude == ["lm_head"]
+    assert q.include == [] and q.exclude == ["lm_head", "*mlp.router.gate"]
     q2 = QuantConfig(enabled=True, dtype={"recipe": "fp8"}, include=["*.mlp.*"])
     assert q2.include == ["*.mlp.*"]
 

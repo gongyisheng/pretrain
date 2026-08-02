@@ -1,7 +1,7 @@
 import torch
 
 from src.utils.config import QuantConfig
-from src.quant.utils import should_quantize, resolve_rule, str_to_dtype
+from src.quant.utils import should_quantize, resolve_quantization_config, str_to_dtype
 
 
 def test_str_to_dtype_maps_fp8_variants():
@@ -56,15 +56,17 @@ def test_exclude_wins_over_include():
     assert should_quantize("blocks.0.mlp.gate", cfg) is False
 
 
-def test_resolve_rule_first_match_wins():
+def test_resolve_quantization_config_first_match_wins():
     mlp_rule = _cfg(include=["*.mlp.*"], exclude=[])
     attn_rule = _cfg(include=["*.attn.*"], exclude=[])
-    rules = [mlp_rule, attn_rule]
-    assert resolve_rule("blocks.0.mlp.down_proj", rules) is mlp_rule
-    assert resolve_rule("blocks.0.attn.q_proj", rules) is attn_rule
-    assert resolve_rule("lm_head", rules) is None  # no rule includes it
+    configs = [mlp_rule, attn_rule]
+    assert resolve_quantization_config("blocks.0.mlp.down_proj", configs) is mlp_rule
+    assert resolve_quantization_config("blocks.0.attn.q_proj", configs) is attn_rule
+    assert (
+        resolve_quantization_config("lm_head", configs) is None
+    )  # nothing includes it
 
 
-def test_resolve_rule_skips_disabled():
+def test_resolve_quantization_config_skips_disabled():
     disabled = QuantConfig(enabled=False, include=["*"])
-    assert resolve_rule("blocks.0.mlp.down_proj", [disabled]) is None
+    assert resolve_quantization_config("blocks.0.mlp.down_proj", [disabled]) is None

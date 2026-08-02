@@ -68,11 +68,11 @@ def unsupported_error(fmt: str) -> str:
     )
 
 
-def check_hardware_support(rules: list[QuantConfig]) -> None:
-    for rule in rules:
-        if not rule.enabled:
+def check_hardware_support(quantization_configs: list[QuantConfig]) -> None:
+    for quantization_config in quantization_configs:
+        if not quantization_config.enabled:
             continue
-        for fmt in rule.dtype.values():
+        for fmt in quantization_config.dtype.values():
             if not is_supported(fmt):
                 raise RuntimeError(unsupported_error(fmt))
 
@@ -90,9 +90,10 @@ def should_quantize(fqn: str, cfg: QuantConfig) -> bool:
     return not matches(cfg.exclude)
 
 
-def resolve_rule(fqn: str, rules: list[QuantConfig]) -> Optional[QuantConfig]:
-
-    for rule in rules:
-        if rule.enabled and should_quantize(fqn, rule):
-            return rule
+def resolve_quantization_config(
+    fqn: str, quantization_configs: list[QuantConfig]
+) -> Optional[QuantConfig]:
+    for quantization_config in quantization_configs:
+        if quantization_config.enabled and should_quantize(fqn, quantization_config):
+            return quantization_config
     return None

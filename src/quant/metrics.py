@@ -4,7 +4,7 @@ import torch
 
 from src.layers.mlp import SparseMoEBlock
 from src.quant.constants import EPS
-from src.quant.linear import QuantLinear
+from src.quant.linear import QuantizedLinear
 from src.quant.quantize import operand_quotient
 from src.quant.utils import is_quantized, str_to_min_subnormal, str_to_qmax
 
@@ -77,7 +77,7 @@ class QuantMetricCollector:
 
 
 def _record_operand(collector, module, tensor, operand, fmt_key):
-    cfg = module.cfg
+    cfg = module.quantization_config
     fmt = cfg.dtype[fmt_key]
     m = compute_operand_metrics(
         tensor,
@@ -129,14 +129,14 @@ def _make_moe_hooks(collector):
 def register_quant_metric_hooks(model, collector):
     handles = []
     for module in model.modules():
-        if isinstance(module, QuantLinear) and hasattr(module, "layer_id"):
+        if isinstance(module, QuantizedLinear) and hasattr(module, "layer_id"):
             fwd, bwd = _make_hooks(collector)
             handles.append(module.register_forward_hook(fwd))
             handles.append(module.register_full_backward_hook(bwd))
         elif (
             isinstance(module, SparseMoEBlock)
             and hasattr(module, "layer_id")
-            and hasattr(module, "cfg")
+            and hasattr(module, "quantization_config")
         ):
             fwd, bwd = _make_moe_hooks(collector)
             handles.append(module.register_forward_hook(fwd))

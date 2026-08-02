@@ -87,7 +87,7 @@ class QuantizedLinearFn(torch.autograd.Function):
         compute_dtype = x2d.dtype
         g = grad_out.reshape(-1, grad_out.shape[-1]).to(compute_dtype)  # (M, N)
 
-        # dX = g @ W          (M,N)@(N,K) -> (M,K)
+        # dX = g @ W, (M,N)@(N,K) -> (M,K)
         dx = _gemm(
             g,
             w,
@@ -96,7 +96,7 @@ class QuantizedLinearFn(torch.autograd.Function):
             compute_dtype,
             cfg.scaling,
         )
-        # dW = gᵀ @ X         (N,M)@(M,K) -> (N,K)
+        # dW = gᵀ @ X, (N,M)@(M,K) -> (N,K)
         dw = _gemm(
             g.t(),
             x2d,
@@ -113,17 +113,17 @@ class QuantizedLinearFn(torch.autograd.Function):
         return dx, dw, db, None
 
 
-class QuantLinear(nn.Module):
+class QuantizedLinear(nn.Module):
     def __init__(self, in_features, out_features, bias, cfg: QuantConfig):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.cfg = cfg
+        self.quantization_config = cfg
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
 
     @classmethod
-    def from_linear(cls, linear: nn.Linear, cfg: QuantConfig) -> "QuantLinear":
+    def from_linear(cls, linear: nn.Linear, cfg: QuantConfig) -> "QuantizedLinear":
         q = cls(linear.in_features, linear.out_features, linear.bias is not None, cfg)
         with torch.no_grad():
             q.weight.copy_(linear.weight)
@@ -132,4 +132,6 @@ class QuantLinear(nn.Module):
         return q.to(linear.weight.device, linear.weight.dtype)
 
     def forward(self, x):
-        return QuantizedLinearFn.apply(x, self.weight, self.bias, self.cfg)
+        return QuantizedLinearFn.apply(
+            x, self.weight, self.bias, self.quantization_config
+        )

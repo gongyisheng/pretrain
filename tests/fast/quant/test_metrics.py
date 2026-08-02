@@ -8,7 +8,7 @@ from src.quant.metrics import (
     QuantMetricCollector,
     register_quant_metric_hooks,
 )
-from src.quant.linear import QuantLinear
+from src.quant.linear import QuantizedLinear
 from src.utils.config import QuantConfig
 
 
@@ -94,7 +94,7 @@ def test_metrics_all_zero_dim_float32():
 def _qlinear(fmt_overrides=None):
     cfg = QuantConfig(enabled=True, dtype={"recipe": "fp8", **(fmt_overrides or {})})
     lin = nn.Linear(64, 32, bias=False)
-    q = QuantLinear.from_linear(lin, cfg)
+    q = QuantizedLinear.from_linear(lin, cfg)
     q.layer_id = "3"
     return q
 
@@ -155,7 +155,7 @@ def _moe_block():
         n_routed_experts_per_token=2,
     )
     block.layer_id = "5"
-    block.cfg = cfg
+    block.quantization_config = cfg
     return block
 
 

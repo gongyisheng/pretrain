@@ -302,7 +302,7 @@ class QuantConfig:
     dtype: dict = field(default_factory=dict)  # {weight/act/grad: fmt}
     scaling: dict = field(default_factory=dict)  # {granularity, block_size}
     include: List[str] = field(default_factory=list)
-    exclude: List[str] = field(default_factory=lambda: ["lm_head"])
+    exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
     def __post_init__(self):
         if not self.enabled:

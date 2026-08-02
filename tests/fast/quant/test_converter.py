@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
-from src.quant.linear import QuantLinear
+from src.quant.linear import QuantizedLinear
 from src.quant.utils import is_supported
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
 
@@ -41,7 +41,7 @@ def test_disabled_is_noop():
     m = _Tiny()
     apply_quantization(m, _cfg({"enabled": False}))
     assert isinstance(m.attn["q_proj"], nn.Linear)
-    assert not isinstance(m.attn["q_proj"], QuantLinear)
+    assert not isinstance(m.attn["q_proj"], QuantizedLinear)
 
 
 @pytest.mark.skipif(
@@ -68,29 +68,33 @@ def test_mxfp8_rule_raises_without_capable_gpu():
 def test_mxfp8_rule_swaps_on_capable_gpu():
     m = _Tiny().cuda().to(torch.bfloat16)
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "mxfp8"}}))
-    assert isinstance(m.attn["q_proj"], QuantLinear)
-    assert isinstance(m.mlp["down_proj"], QuantLinear)
+    assert isinstance(m.attn["q_proj"], QuantizedLinear)
+    assert isinstance(m.mlp["down_proj"], QuantizedLinear)
 
 
 @fp8_only
 def test_swaps_and_excludes_lm_head():
     m = _Tiny().cuda().to(torch.bfloat16)
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
-    assert isinstance(m.attn["q_proj"], QuantLinear)
-    assert isinstance(m.mlp["down_proj"], QuantLinear)
-    assert isinstance(m.lm_head, nn.Linear) and not isinstance(m.lm_head, QuantLinear)
+    assert isinstance(m.attn["q_proj"], QuantizedLinear)
+    assert isinstance(m.mlp["down_proj"], QuantizedLinear)
+    assert isinstance(m.lm_head, nn.Linear) and not isinstance(
+        m.lm_head, QuantizedLinear
+    )
     assert isinstance(m.token_emb, nn.Embedding)
 
 
 @fp8_only
-def test_tie_guard_skips_tied_lm_head():
+def test_tie_guard_skips_tied_lm_head(capsys):
     m = _Tiny(tie=True).cuda().to(torch.bfloat16)
     # exclude nothing: tie guard alone must keep lm_head unswapped
     cfg = _cfg({"enabled": True, "dtype": {"recipe": "fp8"}, "exclude": []})
-    with pytest.warns(UserWarning, match="tied"):
-        apply_quantization(m, cfg)
-    assert isinstance(m.lm_head, nn.Linear) and not isinstance(m.lm_head, QuantLinear)
-    assert isinstance(m.attn["q_proj"], QuantLinear)  # non-tied still swapped
+    apply_quantization(m, cfg)
+    assert "tied" in capsys.readouterr().out
+    assert isinstance(m.lm_head, nn.Linear) and not isinstance(
+        m.lm_head, QuantizedLinear
+    )
+    assert isinstance(m.attn["q_proj"], QuantizedLinear)  # non-tied still swapped
 
 
 @fp8_only
@@ -105,7 +109,7 @@ def test_include_restricts_scope():
         }
     )
     apply_quantization(m, cfg)
-    assert isinstance(m.attn["q_proj"], QuantLinear)
+    assert isinstance(m.attn["q_proj"], QuantizedLinear)
     assert isinstance(m.mlp["down_proj"], nn.Linear)  # not in include
 
 
@@ -129,8 +133,8 @@ def test_list_of_rules_first_match_wins():
         ]
     )
     apply_quantization(m, cfg)
-    assert isinstance(m.attn["q_proj"], QuantLinear)
-    assert isinstance(m.mlp["down_proj"], QuantLinear)
+    assert isinstance(m.attn["q_proj"], QuantizedLinear)
+    assert isinstance(m.mlp["down_proj"], QuantizedLinear)
 
 
 def _moe_model():
@@ -142,7 +146,7 @@ def _moe_model():
         def __init__(self):
             super().__init__()
             self.token_emb = nn.Embedding(64, 32)
-            self.moe = SparseMoEBlock(
+            self.mlp = SparseMoEBlock(
                 d_model=32,
                 intermediate_size=48,
                 n_routed_experts=4,
@@ -169,9 +173,9 @@ def test_moe_experts_get_quantized_expert_mm():
         ),
     )
     # routed experts stay Parameters (no module swap)
-    assert isinstance(m.moe.expert_gate_up, torch.nn.Parameter)
+    assert isinstance(m.mlp.expert_gate_up, torch.nn.Parameter)
     # expert_mm was replaced with a quantized callable
-    assert m.moe.expert_mm is not grouped_gemm
+    assert m.mlp.expert_mm is not grouped_gemm
 
 
 @fp8_only
@@ -188,8 +192,8 @@ def test_router_gate_stays_fp32_linear():
         ),
     )
     # gate must NOT be swapped (it is fp32-pinned by MoERouter)
-    assert isinstance(m.moe.router.gate, nn.Linear)
-    assert not isinstance(m.moe.router.gate, QuantLinear)
+    assert isinstance(m.mlp.router.gate, nn.Linear)
+    assert not isinstance(m.mlp.router.gate, QuantizedLinear)
 
 
 @fp8_only
@@ -204,11 +208,11 @@ def test_moe_expert_mm_default_when_excluded():
                 "enabled": True,
                 "dtype": {"recipe": "fp8"},
                 "scaling": {"recipe": "rowwise"},
-                "exclude": ["moe"],
+                "exclude": ["mlp"],
             }
         ),
     )
-    assert m.moe.expert_mm is grouped_gemm
+    assert m.mlp.expert_mm is grouped_gemm
 
 
 # --- int8-family config + converter (migrated from the old test_int8.py; int8
@@ -234,12 +238,12 @@ def test_int8s_apply_quantization_swaps(fmt):
     rule = QuantConfig(enabled=True, dtype={"recipe": fmt}, include=["0"])
     cfg = SimpleNamespace(training=SimpleNamespace(quant=[rule]))
     apply_quantization(model, cfg)
-    assert isinstance(model[0], QuantLinear)
+    assert isinstance(model[0], QuantizedLinear)
 
 
 @fp8_only
 def test_apply_quantization_sets_layer_id():
     m = _Tiny().cuda().to(torch.bfloat16)
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
-    qls = [mod for mod in m.modules() if isinstance(mod, QuantLinear)]
+    qls = [mod for mod in m.modules() if isinstance(mod, QuantizedLinear)]
     assert qls and all(isinstance(mod.layer_id, str) for mod in qls)

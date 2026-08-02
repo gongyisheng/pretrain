@@ -1,69 +1,69 @@
 from __future__ import annotations
 
-import warnings
-
 import torch.nn as nn
 
-from src.layers.mlp import MoERouter, SparseMoEBlock
+from src.layers.mlp import SparseMoEBlock
 from src.quant.constants import QUANT_PASSTHROUGH
-from src.quant.linear import QuantLinear
+from src.quant.linear import QuantizedLinear
 from src.quant.moe import quantized_expert_mm
-from src.quant.utils import resolve_rule, check_hardware_support
+from src.quant.utils import resolve_quantization_config, check_hardware_support
 
 
-def _is_passthrough(rule) -> bool:
-    return rule is None or all(fmt in QUANT_PASSTHROUGH for fmt in rule.dtype.values())
+def _is_passthrough(quantization_config) -> bool:
+    return quantization_config is None or all(
+        fmt in QUANT_PASSTHROUGH for fmt in quantization_config.dtype.values()
+    )
 
 
-def _layer_id_from_fqn(fqn: str) -> str:
-    for part in fqn.split("."):
+def _layer_id_from_name(name: str) -> str:
+    for part in name.split("."):
         if part.isdigit():
             return part
-    return fqn
+    return name
 
 
 def apply_quantization(model: nn.Module, config) -> nn.Module:
-    """Swap eligible nn.Linear modules to QuantLinear per the run's quant rules."""
-    rules = config.training.quant
-    if not any(rule.enabled for rule in rules):
+    """Swap eligible nn.Linear modules to QuantizedLinear per the run's quant rules."""
+    quantization_configs = config.training.quant
+    if not any(qc.enabled for qc in quantization_configs):
         return model
 
-    check_hardware_support(rules)
+    check_hardware_support(quantization_configs)
 
     embedding_weight_ids = {
         id(m.weight) for m in model.modules() if isinstance(m, nn.Embedding)
     }
 
-    for parent_fqn, parent in model.named_modules():
+    for parent_name, parent in model.named_modules():
         for child_name, child in list(parent.named_children()):
             if not isinstance(child, nn.Linear):
                 continue
-            fqn = f"{parent_fqn}.{child_name}" if parent_fqn else child_name
-            rule = resolve_rule(fqn, rules)
-            # skip rules that leave every operand in a passthrough dtype
-            if _is_passthrough(rule):
+            full_name = f"{parent_name}.{child_name}" if parent_name else child_name
+            quantization_config = resolve_quantization_config(
+                full_name, quantization_configs
+            )
+            # skip configs that leave every operand in a passthrough dtype
+            if _is_passthrough(quantization_config):
                 continue
-            if isinstance(parent, MoERouter) and child_name == "gate":
-                continue  # keep the router gate fp32-pinned (never quantize)
             if id(child.weight) in embedding_weight_ids:
-                warnings.warn(
-                    f"quant: skipping {fqn!r} — its weight is tied to an embedding; "
-                    "swapping would break the tie."
+                print(
+                    f"quant: skipping {full_name!r} — its weight is tied to an "
+                    "embedding; swapping would break the tie."
                 )
                 continue
-            qmod = QuantLinear.from_linear(child, rule)
-            qmod.layer_id = _layer_id_from_fqn(fqn)
+            qmod = QuantizedLinear.from_linear(child, quantization_config)
+            qmod.layer_id = _layer_id_from_name(full_name)
             setattr(parent, child_name, qmod)
 
     # MoE routed experts are stacked Parameters (not nn.Linear), so the swap loop
     # above can't reach them. Install a quantized expert_mm per matching rule.
-    for fqn, module in model.named_modules():
+    for name, module in model.named_modules():
         if not isinstance(module, SparseMoEBlock):
             continue
-        rule = resolve_rule(fqn, rules)
-        if _is_passthrough(rule):
+        quantization_config = resolve_quantization_config(name, quantization_configs)
+        if _is_passthrough(quantization_config):
             continue
-        module.expert_mm = quantized_expert_mm(rule)
-        module.layer_id = _layer_id_from_fqn(fqn)
-        module.cfg = rule
+        module.expert_mm = quantized_expert_mm(quantization_config)
+        module.layer_id = _layer_id_from_name(name)
+        module.quantization_config = quantization_config
     return model
