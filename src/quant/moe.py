@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import torch
 
 from src.kernel.gemm import (
@@ -12,6 +14,7 @@ from src.quant.quantize import (
     fake_quantize_operand,
     quantize_operand,
 )
+from src.layers.mlp import SparseMoEBlock
 from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantConfig
 
@@ -131,3 +134,23 @@ def quantized_expert_mm(cfg: QuantConfig):
         return ScaledGroupedGemmFn.apply(a, b, offs, cfg)
 
     return expert_mm
+
+
+class QuantizedSparseMoEBlock(SparseMoEBlock):
+    """SparseMoEBlock with a quantized expert GEMM. Inherits routing, weights, and
+    forward unchanged — only the `expert_mm` seam and the carried config differ, so
+    the quant path is `QuantizedLinear`'s analogue for stacked-expert MoE.
+    """
+
+    @classmethod
+    def from_module(
+        cls, module: SparseMoEBlock, quantization_config: QuantConfig, layer_id: str
+    ) -> "QuantizedSparseMoEBlock":
+        """Retype a deep copy of an existing block (independent params/buffers) and
+        bind the quantized expert_mm to the config."""
+        q = cls.__new__(cls)
+        q.__dict__ = copy.deepcopy(module).__dict__
+        q.quantization_config = quantization_config
+        q.layer_id = layer_id
+        q.expert_mm = quantized_expert_mm(quantization_config)
+        return q

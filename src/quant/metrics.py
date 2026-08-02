@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import torch
 
-from src.layers.mlp import SparseMoEBlock
 from src.quant.constants import EPS
 from src.quant.linear import QuantizedLinear
+from src.quant.moe import QuantizedSparseMoEBlock
 from src.quant.quantize import operand_quotient
 from src.quant.utils import is_quantized, str_to_min_subnormal, str_to_qmax
 
@@ -133,11 +133,7 @@ def register_quant_metric_hooks(model, collector):
             fwd, bwd = _make_hooks(collector)
             handles.append(module.register_forward_hook(fwd))
             handles.append(module.register_full_backward_hook(bwd))
-        elif (
-            isinstance(module, SparseMoEBlock)
-            and hasattr(module, "layer_id")
-            and hasattr(module, "quantization_config")
-        ):
+        elif isinstance(module, QuantizedSparseMoEBlock):
             fwd, bwd = _make_moe_hooks(collector)
             handles.append(module.register_forward_hook(fwd))
             handles.append(module.register_full_backward_hook(bwd))

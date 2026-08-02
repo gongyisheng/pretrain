@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import torch
 import torch.nn as nn
 
@@ -113,23 +115,28 @@ class QuantizedLinearFn(torch.autograd.Function):
         return dx, dw, db, None
 
 
-class QuantizedLinear(nn.Module):
-    def __init__(self, in_features, out_features, bias, cfg: QuantConfig):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.quantization_config = cfg
-        self.weight = nn.Parameter(torch.empty(out_features, in_features))
-        self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
+class QuantizedLinear(nn.Linear):
+    def __init__(
+        self,
+        in_features,
+        out_features,
+        bias=True,
+        quantization_config: QuantConfig = None,
+        layer_id=None,
+    ):
+        super().__init__(in_features, out_features, bias=bias)
+        self.quantization_config = quantization_config
+        self.layer_id = layer_id
 
     @classmethod
-    def from_linear(cls, linear: nn.Linear, cfg: QuantConfig) -> "QuantizedLinear":
-        q = cls(linear.in_features, linear.out_features, linear.bias is not None, cfg)
-        with torch.no_grad():
-            q.weight.copy_(linear.weight)
-            if linear.bias is not None:
-                q.bias.copy_(linear.bias)
-        return q.to(linear.weight.device, linear.weight.dtype)
+    def from_module(
+        cls, module: nn.Linear, quantization_config: QuantConfig, layer_id=None
+    ) -> "QuantizedLinear":
+        q = cls.__new__(cls)
+        q.__dict__ = copy.deepcopy(module).__dict__
+        q.quantization_config = quantization_config
+        q.layer_id = layer_id
+        return q
 
     def forward(self, x):
         return QuantizedLinearFn.apply(
