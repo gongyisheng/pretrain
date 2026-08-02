@@ -217,8 +217,15 @@ def test_moe_expert_mm_default_when_excluded():
 
 @pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_recipe_expands(fmt):
+    # int8-series is weight-only: uniform quant lacks the dynamic range for
+    # activations/gradients, so those stay bf16.
     c = QuantConfig(enabled=True, dtype={"recipe": fmt})
-    assert c.dtype == {op: fmt for op in ("weight", "act", "grad_input", "grad_weight")}
+    assert c.dtype == {
+        "weight": fmt,
+        "act": "bf16",
+        "grad_input": "bf16",
+        "grad_weight": "bf16",
+    }
 
 
 @pytest.mark.parametrize("fmt", _INT8_FORMATS)

@@ -34,7 +34,12 @@ QUANT_DTYPE_RECIPES = {
         "grad_weight": "fp8_e4m3",
     },
     **{
-        fmt: {op: fmt for op in ("weight", "act", "grad_input", "grad_weight")}
+        fmt: {
+            "weight": fmt,
+            "act": "bf16",
+            "grad_input": "bf16",
+            "grad_weight": "bf16",
+        }
         for fmt in ("int8", "int7", "int6", "int5", "int4")
     },
 }
