@@ -13,8 +13,6 @@ from src.layers.mlp import (
     MOE_ROUTER_SCORE_FNS,
     SparseMoEBlock,
     grouped_mlp,
-    gated_mlp,
-    ungated_mlp,
 )
 from tests.fast.layers._refs import (
     COMPOUND_DTYPES,
@@ -967,24 +965,18 @@ def test_grouped_mlp_matches_per_group_loop(
         if c == 0:
             continue
         xs = x[start : start + c]
+        h = xs @ w_in[e].mT
+        if use_bias:
+            h = h + b_in[e]
         if gated:
-            ref[start : start + c] = gated_mlp(
-                xs,
-                w_in[e],
-                w_down[e],
-                act,
-                b_in[e] if use_bias else None,
-                b_down[e] if use_bias else None,
-            )
+            gate, up = h.chunk(2, dim=-1)
+            h = act(gate, up)
         else:
-            ref[start : start + c] = ungated_mlp(
-                xs,
-                w_in[e],
-                w_down[e],
-                act,
-                b_in[e] if use_bias else None,
-                b_down[e] if use_bias else None,
-            )
+            h = act(h)
+        out = h @ w_down[e].mT
+        if use_bias:
+            out = out + b_down[e]
+        ref[start : start + c] = out
         start += c
 
     assert got.dtype == dtype

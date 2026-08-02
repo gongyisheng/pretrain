@@ -5,45 +5,6 @@ from src.kernel.gemm import grouped_gemm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
-def gated_mlp(
-    x: torch.Tensor,
-    w_gate_up: torch.Tensor,
-    w_down: torch.Tensor,
-    act_fn,
-    b_gate_up: torch.Tensor = None,
-    b_down: torch.Tensor = None,
-) -> torch.Tensor:
-    gate_up = x @ w_gate_up.mT
-    if b_gate_up is not None:
-        gate_up = gate_up + (
-            b_gate_up if b_gate_up.ndim == 1 else b_gate_up.unsqueeze(-2)
-        )
-    gate, up = gate_up.chunk(2, dim=-1)
-    hidden = act_fn(gate, up)
-    out = hidden @ w_down.mT
-    if b_down is not None:
-        out = out + (b_down if b_down.ndim == 1 else b_down.unsqueeze(-2))
-    return out
-
-
-def ungated_mlp(
-    x: torch.Tensor,
-    w_up: torch.Tensor,
-    w_down: torch.Tensor,
-    act_fn,
-    b_up: torch.Tensor = None,
-    b_down: torch.Tensor = None,
-) -> torch.Tensor:
-    up = x @ w_up.mT
-    if b_up is not None:
-        up = up + (b_up if b_up.ndim == 1 else b_up.unsqueeze(-2))
-    hidden = act_fn(up)
-    out = hidden @ w_down.mT
-    if b_down is not None:
-        out = out + (b_down if b_down.ndim == 1 else b_down.unsqueeze(-2))
-    return out
-
-
 def grouped_mlp(
     x: torch.Tensor,
     w_in: torch.Tensor,
