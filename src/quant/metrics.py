@@ -19,7 +19,7 @@ def _expert_slices(tensor, offs):
 
 
 class QuantizationMetricProbe:
-    """The metrics one quantized module recorded this step, keyed by operand site.
+    """The metrics one quantized module recorded this step, keyed by GEMM operand.
     Created and retained by a QuantizationMetricsCollector, which arms `enabled`
     and drains `metrics`; the probe holds no reference back to it.
     """
@@ -28,9 +28,9 @@ class QuantizationMetricProbe:
 
     def __init__(self, enabled=False):
         self.enabled = enabled
-        self.metrics = {}  # site -> {metric name -> 0-dim tensor}
+        self.metrics = {}  # gemm_operand -> {metric name -> 0-dim tensor}
 
-    def record(self, site, snapshot):
+    def record(self, gemm_operand, snapshot):
         if snapshot is None:  # that operand's format is passthrough
             return
         dequantized = dequantize_operand(
@@ -60,7 +60,7 @@ class QuantizationMetricProbe:
                 name: torch.stack([m[name] for m in per_expert]).mean()
                 for name in per_expert[0]
             }
-        self.metrics[site] = metrics
+        self.metrics[gemm_operand] = metrics
 
 
 class QuantizationMetricsCollector:
@@ -93,16 +93,16 @@ class QuantizationMetricsCollector:
     def to_metrics_dict(self) -> dict[str, float]:
         keys, values = [], []
         for module_name, probe in self._probes.items():
-            for site, metrics in probe.metrics.items():
+            for gemm_operand, metrics in probe.metrics.items():
                 for name, value in metrics.items():
-                    keys.append((module_name, site, name))
+                    keys.append((module_name, gemm_operand, name))
                     values.append(value)
             probe.metrics.clear()
         if not keys:
             return {}
         return {
-            f"quant/{metric}/{site}/{module_name}": value
-            for (module_name, site, metric), value in zip(
+            f"quant/{metric}/{gemm_operand}/{module_name}": value
+            for (module_name, gemm_operand, metric), value in zip(
                 keys,
                 torch.stack(values).tolist(),  # one sync
             )

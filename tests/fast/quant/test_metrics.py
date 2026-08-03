@@ -24,7 +24,7 @@ def _fp8_capable():
 
 fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
 
-LINEAR_SITES = (
+LINEAR_GEMM_OPERANDS = (
     "fwd.act",
     "fwd.weight",
     "dgrad.grad",
@@ -193,8 +193,8 @@ def test_forward_backward_records_every_site():
 
     out = collector.to_metrics_dict()
     assert set(out) == {
-        f"quant/{metric}/{site}/down_proj"
-        for site in LINEAR_SITES
+        f"quant/{metric}/{gemm_operand}/down_proj"
+        for gemm_operand in LINEAR_GEMM_OPERANDS
         for metric in METRICS
     }
 
@@ -292,9 +292,9 @@ def test_moe_records_both_projections_separately():
 
     got = collector.to_metrics_dict()
     assert set(got) == {
-        f"quant/{metric}/{site}/mlp.{projection}"
+        f"quant/{metric}/{gemm_operand}/mlp.{projection}"
         for projection in ("expert_gate_up", "expert_down")
-        for site in LINEAR_SITES
+        for gemm_operand in LINEAR_GEMM_OPERANDS
         for metric in METRICS
     }
 
