@@ -226,7 +226,7 @@ def _tiny_fp8_config(tmp_dir):
         eval_every=100,
         eval_steps=2,
         enable_torch_compile=False,
-        quant={"enabled": True, "dtype": {"recipe": "fp8"}},
+        quantization={"enabled": True, "dtype": {"recipe": "fp8"}},
     )
     cfg.logging.log_quant_metrics = True
     cfg.logging.log_every = 1

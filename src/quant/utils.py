@@ -12,7 +12,7 @@ from src.quant.constants import (
     _STR_TO_EMAX,
     _STR_TO_QMAX,
 )
-from src.utils.config import QuantConfig
+from src.utils.config import QuantizationConfig
 
 
 def str_to_dtype(fmt: str) -> Optional[torch.dtype]:
@@ -63,7 +63,7 @@ def unsupported_error(fmt: str) -> str:
     )
 
 
-def check_hardware_support(quantization_configs: list[QuantConfig]) -> None:
+def check_hardware_support(quantization_configs: list[QuantizationConfig]) -> None:
     for quantization_config in quantization_configs:
         if not quantization_config.enabled:
             continue
@@ -72,7 +72,7 @@ def check_hardware_support(quantization_configs: list[QuantConfig]) -> None:
                 raise RuntimeError(unsupported_error(fmt))
 
 
-def should_quantize(fqn: str, cfg: QuantConfig) -> bool:
+def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:
 
     def matches(patterns: list[str]) -> bool:
         leaf = fqn.rsplit(".", 1)[-1]
@@ -86,8 +86,8 @@ def should_quantize(fqn: str, cfg: QuantConfig) -> bool:
 
 
 def resolve_quantization_config(
-    fqn: str, quantization_configs: list[QuantConfig]
-) -> Optional[QuantConfig]:
+    fqn: str, quantization_configs: list[QuantizationConfig]
+) -> Optional[QuantizationConfig]:
     for quantization_config in quantization_configs:
         if quantization_config.enabled and should_quantize(fqn, quantization_config):
             return quantization_config

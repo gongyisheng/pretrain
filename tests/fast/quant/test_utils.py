@@ -1,6 +1,6 @@
 import torch
 
-from src.utils.config import QuantConfig
+from src.utils.config import QuantizationConfig
 from src.quant.utils import should_quantize, resolve_quantization_config, str_to_dtype
 
 
@@ -19,7 +19,7 @@ def test_str_to_dtype_passthrough_is_none():
 def _cfg(**kw):
     base = dict(enabled=True, dtype={"recipe": "fp8"})
     base.update(kw)
-    return QuantConfig(**base)
+    return QuantizationConfig(**base)
 
 
 def test_excluded_is_false():
@@ -68,5 +68,5 @@ def test_resolve_quantization_config_first_match_wins():
 
 
 def test_resolve_quantization_config_skips_disabled():
-    disabled = QuantConfig(enabled=False, include=["*"])
+    disabled = QuantizationConfig(enabled=False, include=["*"])
     assert resolve_quantization_config("blocks.0.mlp.down_proj", [disabled]) is None

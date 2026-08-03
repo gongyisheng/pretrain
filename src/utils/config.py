@@ -297,7 +297,7 @@ class TokenizerTrainingConfig:
 
 
 @dataclass
-class QuantConfig:
+class QuantizationConfig:
     enabled: bool = False
     dtype: dict = field(default_factory=dict)  # {weight/act/grad: fmt}
     scaling: dict = field(default_factory=dict)  # {granularity, block_size}
@@ -406,7 +406,9 @@ class TrainingConfig:
     eval_batch_size: int = 16
     eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
-    quant: Union[QuantConfig, dict, list] = field(default_factory=QuantConfig)
+    quantization: Union[QuantizationConfig, dict, list] = field(
+        default_factory=QuantizationConfig
+    )
 
     def __post_init__(self):
         if self.device not in _DEVICES:
@@ -423,17 +425,21 @@ class TrainingConfig:
                 f"unknown loss_fn: {self.loss_fn!r}; "
                 f"expected one of {sorted(LOSS_REGISTRY)}"
             )
-        rules = self.quant if isinstance(self.quant, list) else [self.quant]
+        rules = (
+            self.quantization
+            if isinstance(self.quantization, list)
+            else [self.quantization]
+        )
         amp_dtype = "fp32" if self.mixed_precision == "no" else self.mixed_precision
         normalized = []
         for rule in rules:
             if isinstance(rule, dict):
-                rule = QuantConfig(**rule)
+                rule = QuantizationConfig(**rule)
             if rule.enabled:
                 for operand in QUANT_OPERANDS:
                     rule.dtype.setdefault(operand, amp_dtype)
             normalized.append(rule)
-        self.quant = normalized
+        self.quantization = normalized
 
 
 @dataclass
@@ -624,7 +630,7 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         _coerce_kwargs(item["attn_kwargs"])
     for item in config.model.mlp:
         _coerce_kwargs(item["mlp_kwargs"])
-    for rule in config.training.quant:
+    for rule in config.training.quantization:
         _coerce_kwargs(rule.scaling)
 
     if overrides:

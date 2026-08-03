@@ -36,7 +36,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   seed: 42
-  quant:
+  quantization:
     enabled: true
     dtype: {recipe: fp8}
     scaling:

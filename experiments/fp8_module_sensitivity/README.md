@@ -14,7 +14,7 @@ FP8 GEMM (E4M3 forward operands, E5M2 grad) injects rounding noise into whicheve
 
 `apply_quantization` **skips** a `lm_head` whose weight is tied to the embedding table (swapping it would break the tie), so an `lm_head` FP8 run is a no-op on a tied model. To make the output head a separately quantizable projection, every config here sets `tie_word_embeddings: false`. Untying adds `vocab × d_model` = 50257 × 512 ≈ 25.7M params, so the model is **~77M** (vs the tied ~51M). The untied architecture is held constant across all four runs, so the only variable is which module is FP8.
 
-Note: `QuantConfig.exclude` defaults to `["lm_head"]`; each FP8 config here sets `exclude: []` explicitly so the `lm_head` run actually quantizes the head.
+Note: `QuantizationConfig.exclude` defaults to `["lm_head"]`; each FP8 config here sets `exclude: []` explicitly so the `lm_head` run actually quantizes the head.
 
 ## Setup
 

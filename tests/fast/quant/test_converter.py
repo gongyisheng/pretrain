@@ -8,7 +8,12 @@ from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantizedLinear
 from src.quant.utils import is_supported
-from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
+from src.utils.config import (
+    ModelConfig,
+    QuantizationConfig,
+    TrainConfig,
+    TrainingConfig,
+)
 
 
 fp8_only = pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
@@ -25,7 +30,7 @@ class _Tiny(nn.Module):
             self.lm_head.weight = self.token_emb.weight
 
 
-def _cfg(quant, mixed_precision="bf16"):
+def _cfg(quantization, mixed_precision="bf16"):
     return TrainConfig(
         model=ModelConfig(
             d_model=32,
@@ -33,7 +38,9 @@ def _cfg(quant, mixed_precision="bf16"):
             vocab_size=64,
             attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
         ),
-        training=TrainingConfig(mixed_precision=mixed_precision, quant=quant),
+        training=TrainingConfig(
+            mixed_precision=mixed_precision, quantization=quantization
+        ),
     )
 
 
@@ -223,7 +230,7 @@ def test_moe_expert_mm_default_when_excluded():
 def test_int8s_recipe_expands(fmt):
     # int8-series is weight-only: uniform quant lacks the dynamic range for
     # activations/gradients, so those stay bf16.
-    c = QuantConfig(enabled=True, dtype={"recipe": fmt})
+    c = QuantizationConfig(enabled=True, dtype={"recipe": fmt})
     assert c.dtype == {
         "weight": fmt,
         "act": "bf16",
@@ -235,8 +242,8 @@ def test_int8s_recipe_expands(fmt):
 @pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_apply_quantization_swaps(fmt):
     model = nn.Sequential(nn.Linear(64, 64))
-    rule = QuantConfig(enabled=True, dtype={"recipe": fmt}, include=["0"])
-    cfg = SimpleNamespace(training=SimpleNamespace(quant=[rule]))
+    rule = QuantizationConfig(enabled=True, dtype={"recipe": fmt}, include=["0"])
+    cfg = SimpleNamespace(training=SimpleNamespace(quantization=[rule]))
     apply_quantization(model, cfg)
     assert isinstance(model[0], QuantizedLinear)
 

@@ -31,7 +31,7 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  quant:
+  quantization:
     enabled: true
     dtype: {recipe: mxfp8}      # e4m3 on all operands + mxfp8 scaling (block-32, E8M0)
     exclude: [lm_head]

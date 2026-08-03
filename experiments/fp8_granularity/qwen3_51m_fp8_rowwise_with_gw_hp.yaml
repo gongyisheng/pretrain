@@ -31,7 +31,7 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  quant:
+  quantization:
     enabled: true
     dtype:
       recipe: fp8

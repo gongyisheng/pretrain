@@ -3,7 +3,7 @@ import torch
 
 from src.quant import moe
 from src.quant.utils import is_supported
-from src.utils.config import QuantConfig
+from src.utils.config import QuantizationConfig
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="scaled grouped GEMM is CUDA only"
@@ -11,7 +11,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _cfg(recipe="fp8", scaling="rowwise"):
-    return QuantConfig(
+    return QuantizationConfig(
         enabled=True, dtype={"recipe": recipe}, scaling={"recipe": scaling}
     )
 
@@ -89,7 +89,7 @@ def test_moe_block_quantized_forward_backward_runs():
             attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
         ),
         training=TrainingConfig(
-            quant={
+            quantization={
                 "enabled": True,
                 "dtype": {"recipe": "fp8"},
                 "scaling": {"recipe": "rowwise"},

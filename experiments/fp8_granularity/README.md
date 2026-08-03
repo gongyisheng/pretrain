@@ -18,7 +18,7 @@ If (2) is flat, the bottleneck is data movement / non-GEMM kernels, not the matm
 
 ## Setup
 
-All hyperparameters are matched between bf16 and fp8. The only independent variable is the `training.quant` block. Same seed (default 42), same data order, same LR schedule.
+All hyperparameters are matched between bf16 and fp8. The only independent variable is the `training.quantization` block. Same seed (default 42), same data order, same LR schedule.
 
 | Config | d_model | layers | heads/kv | inter_size | quant | granularity | Approx params |
 |---|---|---|---|---|---|---|---|
@@ -39,7 +39,7 @@ The `quant` block:
 ```yaml
 training:
   mixed_precision: bf16
-  quant:
+  quantization:
     enabled: true
     dtype: {recipe: fp8}       # weight/act fp8_e4m3, grad fp8_e5m2
     scaling: {granularity: tensorwise}   # or rowwise

@@ -3,7 +3,7 @@
 Compare end-task loss and throughput across FP8 element-format recipes against a
 bf16 baseline at Qwen3-51M, holding scaling granularity fixed at **tensorwise**,
 using the in-house `src/quant/` framework. The independent variable is
-`training.quant.dtype`; the bf16 run anchors the loss/throughput reference.
+`training.quantization.dtype`; the bf16 run anchors the loss/throughput reference.
 
 Complements `experiments/fp8_granularity/` (granularity axis at fixed std-fp8
 dtype). Design: `docs/superpowers/specs/2026-07-27-fp8-dtype-experiment-design.md`.
@@ -43,7 +43,7 @@ fine-grained scaling `fp8_granularity`/`mxfp8` provide, not a free win at coarse
 
 ## Setup
 
-All hyperparameters matched across runs; only `training.quant.dtype` varies, and
+All hyperparameters matched across runs; only `training.quantization.dtype` varies, and
 every FP8 run uses `scaling: {granularity: tensorwise}`, `exclude: [lm_head]`.
 Same seed (42), data order, LR schedule.
 

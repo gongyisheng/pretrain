@@ -7,7 +7,12 @@ from src.quant.constants import _INT8_FORMATS
 from src.quant.linear import QuantizedLinear, quantized_gemm
 from src.quant.convert import apply_quantization
 from src.quant.quantize import dequantize_operand, quantize_operand
-from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
+from src.utils.config import (
+    ModelConfig,
+    QuantizationConfig,
+    TrainConfig,
+    TrainingConfig,
+)
 
 _MXFP8_KW = dict(fmt="fp8_e4m3", scale_dtype="fp8_e8m0")
 
@@ -36,7 +41,7 @@ mxfp8_only = pytest.mark.skipif(
 
 def _cfg(grad="bf16"):
     # recipe fills weight/act=fp8_e4m3; both backward grads overridden explicitly
-    return QuantConfig(
+    return QuantizationConfig(
         enabled=True,
         dtype={"recipe": "fp8", "grad_input": grad, "grad_weight": grad},
     )
@@ -85,7 +90,7 @@ def test_backward_finite_grads_and_dtypes():
 def test_rowwise_forward_and_backward():
     torch.manual_seed(0)
     lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
-    cfg = QuantConfig(
+    cfg = QuantizationConfig(
         enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "rowwise"}
     )
     q = QuantizedLinear.from_module(lin, cfg)
@@ -110,7 +115,7 @@ def test_high_precision_grad_weight_changes_wgrad():
 
     def grad_weight(hp):
         dtype = {"grad_weight": "bf16"} if hp else {}
-        cfg = QuantConfig(enabled=True, dtype={"recipe": "fp8", **dtype})
+        cfg = QuantizationConfig(enabled=True, dtype={"recipe": "fp8", **dtype})
         q = QuantizedLinear.from_module(lin, cfg)
         q(x.clone()).square().mean().backward()
         return q.weight.grad
@@ -200,7 +205,7 @@ def test_quant_linear_mxfp8_forward_matches_oracle():
     torch.manual_seed(0)
     lin = nn.Linear(256, 256, bias=False).cuda().to(torch.bfloat16)
     q = QuantizedLinear.from_module(
-        lin, QuantConfig(enabled=True, dtype={"recipe": "mxfp8"})
+        lin, QuantizationConfig(enabled=True, dtype={"recipe": "mxfp8"})
     )
     x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
     out = q(x)
@@ -219,7 +224,7 @@ def test_quant_linear_mxfp8_backward_finite():
     torch.manual_seed(0)
     lin = nn.Linear(256, 256, bias=True).cuda().to(torch.bfloat16)
     q = QuantizedLinear.from_module(
-        lin, QuantConfig(enabled=True, dtype={"recipe": "mxfp8"})
+        lin, QuantizationConfig(enabled=True, dtype={"recipe": "mxfp8"})
     )
     x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     q(x).square().mean().backward()
@@ -235,7 +240,7 @@ def test_mxfp8_wgrad_unaligned_tokens():
     torch.manual_seed(0)
     lin = nn.Linear(256, 256, bias=False).cuda().to(torch.bfloat16)
     q = QuantizedLinear.from_module(
-        lin, QuantConfig(enabled=True, dtype={"recipe": "mxfp8"})
+        lin, QuantizationConfig(enabled=True, dtype={"recipe": "mxfp8"})
     )
     x = torch.randn(250, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     q(x).square().mean().backward()
@@ -248,7 +253,7 @@ def test_mxfp8_fake_quant_fallback_on_cpu():
     # A one-sided mxfp8 rule (weight quantized, act passthrough) exercises the
     # mxfp8 fake-quant path inside quantized_gemm without touching the real GEMM — on CPU.
     torch.manual_seed(0)
-    cfg = QuantConfig(
+    cfg = QuantizationConfig(
         enabled=True,
         dtype={
             "weight": "fp8_e4m3",
@@ -289,7 +294,7 @@ def _model_cfg():
         ),
         training=TrainingConfig(
             mixed_precision="bf16",
-            quant={"enabled": True, "dtype": {"recipe": "fp8"}},
+            quantization={"enabled": True, "dtype": {"recipe": "fp8"}},
         ),
     )
 
@@ -316,7 +321,7 @@ def test_quantized_model_trains_one_step():
 def test_compiled_quant_linear_blockwise_fwd_bwd():
     torch.manual_seed(0)
     lin = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
-    cfg = QuantConfig(
+    cfg = QuantizationConfig(
         enabled=True,
         dtype={"recipe": "fp8"},
         scaling={"granularity": "blockwise", "block_size": 128},

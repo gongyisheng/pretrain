@@ -31,7 +31,7 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  quant:
+  quantization:
     enabled: true
     dtype: {weight: fp8_e4m3, act: bf16, grad_input: bf16, grad_weight: bf16}
     scaling: {granularity: tensorwise}

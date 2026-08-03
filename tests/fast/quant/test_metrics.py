@@ -12,7 +12,7 @@ from src.quant.quantize import (
     dequantize_operand,
     quantize_operand,
 )
-from src.utils.config import QuantConfig
+from src.utils.config import QuantizationConfig
 from src.utils.metric_utils import compute_quantization_metrics
 
 
@@ -161,7 +161,7 @@ def test_collector_arms_the_probes_it_owns():
 
 
 def _quantized_mlp(fmt_overrides=None, scaling=None):
-    cfg = QuantConfig(
+    cfg = QuantizationConfig(
         enabled=True,
         dtype={"recipe": "fp8", **(fmt_overrides or {})},
         scaling=scaling or {},
@@ -262,7 +262,7 @@ def test_passthrough_operand_has_no_series():
 
 
 def _quantized_moe():
-    cfg = QuantConfig(
+    cfg = QuantizationConfig(
         enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "rowwise"}
     )
     block = SparseMoEBlock(

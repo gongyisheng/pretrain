@@ -13,7 +13,7 @@ from src.quant.quantize import (
     quantize_operand,
 )
 from src.quant.utils import is_fp8, is_int8s, is_quantized
-from src.utils.config import QuantConfig
+from src.utils.config import QuantizationConfig
 
 
 def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
@@ -57,7 +57,7 @@ def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
 
 class QuantizedLinearFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, bias, cfg: QuantConfig, probe=None):
+    def forward(ctx, x, weight, bias, cfg: QuantizationConfig, probe=None):
         # Compute in the active autocast dtype if any, else x's dtype.
         device_type = x.device.type
         if torch.is_autocast_enabled(device_type):
@@ -132,7 +132,7 @@ class QuantizedLinearFn(torch.autograd.Function):
 class QuantizedLinear(nn.Linear):
     @classmethod
     def from_module(
-        cls, module: nn.Linear, quantization_config: QuantConfig
+        cls, module: nn.Linear, quantization_config: QuantizationConfig
     ) -> "QuantizedLinear":
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__

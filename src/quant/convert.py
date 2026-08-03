@@ -19,7 +19,7 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
     """Swap eligible nn.Linear / SparseMoEBlock modules to their quantized
     counterparts per the run's quant configurations.
     """
-    quantization_configs = config.training.quant
+    quantization_configs = config.training.quantization
     if not any(qc.enabled for qc in quantization_configs):
         return model
 

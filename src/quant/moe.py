@@ -18,7 +18,7 @@ from src.quant.quantize import (
     quantize_operand,
 )
 from src.quant.utils import is_fp8, is_int8s, is_quantized
-from src.utils.config import QuantConfig
+from src.utils.config import QuantizationConfig
 
 
 def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
@@ -115,7 +115,7 @@ def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
 
 class ScaledGroupedGemmFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, offs, cfg: QuantConfig, probe=None):
+    def forward(ctx, a, b, offs, cfg: QuantizationConfig, probe=None):
         out_dtype = a.dtype
         y, act_snap, weight_snap = quantized_grouped_gemm(
             a, b, offs, cfg.dtype["act"], cfg.dtype["weight"], out_dtype, cfg.scaling
@@ -162,7 +162,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         return grad_a, grad_b, None, None, None
 
 
-def quantized_expert_mm(cfg: QuantConfig, probes=None):
+def quantized_expert_mm(cfg: QuantizationConfig, probes=None):
 
     def expert_mm(a, b, offs, projection=None):
         probe = probes.get(projection) if probes else None
@@ -174,7 +174,7 @@ def quantized_expert_mm(cfg: QuantConfig, probes=None):
 class QuantizedSparseMoEBlock(SparseMoEBlock):
     @classmethod
     def from_module(
-        cls, module: SparseMoEBlock, quantization_config: QuantConfig
+        cls, module: SparseMoEBlock, quantization_config: QuantizationConfig
     ) -> "QuantizedSparseMoEBlock":
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__

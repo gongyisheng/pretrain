@@ -21,7 +21,7 @@ Plain fp8 uses e5m2 for gradients to buy exponent range. mxfp8 does **not**: the
 
 ## Setup
 
-All hyperparameters are matched between bf16 and mxfp8. The only independent variable is the `training.quant` block. Same seed (default 42), same data order, same LR schedule.
+All hyperparameters are matched between bf16 and mxfp8. The only independent variable is the `training.quantization` block. Same seed (default 42), same data order, same LR schedule.
 
 | Config | d_model | layers | heads/kv | inter_size | quant | scaling | Approx params |
 |---|---|---|---|---|---|---|---|
@@ -40,7 +40,7 @@ The `quant` block:
 ```yaml
 training:
   mixed_precision: bf16
-  quant:
+  quantization:
     enabled: true
     dtype: {recipe: mxfp8}     # e4m3 all operands + mx scaling (block-32, E8M0)
     exclude: [lm_head]
