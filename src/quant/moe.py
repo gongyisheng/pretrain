@@ -111,6 +111,7 @@ def _quant_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
             g_snap.scale,
             offs,
             out_dtype,
+            effective_block_size(granularity, block_size, a.shape[0]),
         )
         return grad_b, a_snap, g_snap
 

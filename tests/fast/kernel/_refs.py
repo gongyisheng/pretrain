@@ -56,15 +56,16 @@ def _dequant_b_grouped(bq, sb, bs):
     return torch.stack([_dequant_b(bq[g], sb[g], bs) for g in range(bq.shape[0])])
 
 
-def scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs):
+def scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, ebs):
     """fp32 oracle for scaled grouped wgrad: gW[g] = (Xq·sa)[g]^T @ (gYq·sg)[g].
 
-    aq (R,K), gq (R,N) fp8/int8; sa (1,K), sg (1,N) fp32 per-channel scales
-    (contract axis is the ragged token dim M/dim0, so scales factor out of the
-    reduction); offs (E,) int32 cumulative END-offsets. Returns (E,K,N) fp32.
+    aq (R,K), gq (R,N) fp8/int8; sa (nrb,K), sg (nrb,N) fp32 scales blocked along
+    the contracted ragged token axis (dim 0) with ebs rows per block — nrb == 1 for
+    rowwise/tensorwise; offs (E,) int32 cumulative END-offsets. Returns (E,K,N) fp32.
     """
-    a = aq.float() * sa.float()  # (R,K), sa (1,K) broadcasts over rows
-    g = gq.float() * sg.float()  # (R,N)
+    # (R,K) with an (nrb,K) scale along dim 0 is the same layout _dequant_b handles.
+    a = _dequant_b(aq, sa, ebs)  # (R,K) fp32
+    g = _dequant_b(gq, sg, ebs)  # (R,N) fp32
     E, K, N = offs.shape[0], aq.shape[1], gq.shape[1]
     out = torch.zeros(E, K, N, device=aq.device, dtype=torch.float32)
     start = 0

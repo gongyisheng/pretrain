@@ -580,12 +580,14 @@ def scaled_grouped_gemm(
 
 # ---------------------------------------------------------------------------
 # Scaled grouped wgrad (quantized): gW[g] = (Xq·sa)[g]^T @ (gYq·sg)[g]
-# Contraction over the ragged token axis M; rowwise/tensorwise scales (nkb==1)
-# factor out of the reduction as per-k (sa) and per-n (sg) vectors.
+# Contraction over the ragged token axis M, with scales blocked along that axis.
+# rowwise/tensorwise (nrb==1) factor out of the whole reduction as per-k (sa) and
+# per-n (sg) vectors; blockwise rescales once per scale block, each clamped to the
+# group's rows so a block that straddles experts is visited once per expert.
 # ---------------------------------------------------------------------------
 
 
-@triton.autotune(configs=_CONFIGS, key=["N", "K"])
+@triton.autotune(configs=_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
 @triton.jit
 def _scaled_grouped_gemm_wgrad_kernel(
     a_ptr,
@@ -604,9 +606,12 @@ def _scaled_grouped_gemm_wgrad_kernel(
     stride_ge,
     stride_gk,
     stride_gn2,
+    stride_sam,
     stride_sak,
+    stride_sgm,
     stride_sgn,
     NUM_SMS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -627,20 +632,45 @@ def _scaled_grouped_gemm_wgrad_kernel(
         offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
         k_mask = offs_k < K
         n_mask = offs_n < N
+        # Scale blocks tile the global row axis, so they are independent of offs and
+        # may straddle an expert boundary. Visit only the blocks intersecting this
+        # group; BLOCK_SIZE == 0 means one scale for the whole axis (nrb == 1).
+        if BLOCK_SIZE == 0:
+            jb_start = 0
+            jb_end = 1
+        else:
+            jb_start = m_start // BLOCK_SIZE
+            jb_end = tl.cdiv(m_end, BLOCK_SIZE)
         acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
-        m = m_start
-        while m < m_end:
-            offs_m = m + tl.arange(0, BLOCK_M)
-            m_mask = offs_m < m_end
-            a_ptrs = a_ptr + offs_k[:, None] * stride_ak + offs_m[None, :] * stride_am
-            g_ptrs = g_ptr + offs_m[:, None] * stride_gm + offs_n[None, :] * stride_gn
-            a = tl.load(a_ptrs, mask=k_mask[:, None] & m_mask[None, :], other=0.0)
-            gc = tl.load(g_ptrs, mask=m_mask[:, None] & n_mask[None, :], other=0.0)
-            acc += tl.dot(a, gc).to(tl.float32)
-            m += BLOCK_M
-        sa = tl.load(sa_ptr + offs_k * stride_sak, mask=k_mask, other=0.0)
-        sg = tl.load(sg_ptr + offs_n * stride_sgn, mask=n_mask, other=0.0)
-        acc = acc * sa[:, None] * sg[None, :]
+        for jb in range(jb_start, jb_end):
+            if BLOCK_SIZE == 0:
+                m = m_start
+                m_stop = m_end
+            else:
+                m = tl.maximum(jb * BLOCK_SIZE, m_start)
+                m_stop = tl.minimum((jb + 1) * BLOCK_SIZE, m_end)
+            # clamping to m_stop keeps an M tile inside one scale block and one expert
+            blk = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
+            while m < m_stop:
+                offs_m = m + tl.arange(0, BLOCK_M)
+                m_mask = offs_m < m_stop
+                a_ptrs = (
+                    a_ptr + offs_k[:, None] * stride_ak + offs_m[None, :] * stride_am
+                )
+                g_ptrs = (
+                    g_ptr + offs_m[:, None] * stride_gm + offs_n[None, :] * stride_gn
+                )
+                a = tl.load(a_ptrs, mask=k_mask[:, None] & m_mask[None, :], other=0.0)
+                gc = tl.load(g_ptrs, mask=m_mask[:, None] & n_mask[None, :], other=0.0)
+                blk += tl.dot(a, gc).to(tl.float32)
+                m += BLOCK_M
+            sa = tl.load(
+                sa_ptr + jb * stride_sam + offs_k * stride_sak, mask=k_mask, other=0.0
+            )
+            sg = tl.load(
+                sg_ptr + jb * stride_sgm + offs_n * stride_sgn, mask=n_mask, other=0.0
+            )
+            acc += sa[:, None] * blk * sg[None, :]
         gb_ptrs = (
             gb_ptr
             + g * stride_ge
@@ -662,11 +692,14 @@ def scaled_grouped_gemm_wgrad(
     sg: torch.Tensor,
     offs: torch.Tensor,
     out_dtype: torch.dtype,
+    block_size: int,
 ) -> torch.Tensor:
     """Scaled grouped wgrad: grad_b[g] = (aq·sa)[g]^T @ (gq·sg)[g], shape (E,K,N).
 
-    aq (R,K), gq (R,N) fp8/int8, expert-sorted; sa (1,K), sg (1,N) fp32 per-channel
-    scales (rowwise/tensorwise, nkb==1); offs (E,) int32 END-offsets.
+    aq (R,K), gq (R,N) fp8/int8, expert-sorted; offs (E,) int32 END-offsets. Scales
+    are fp32 and blocked along the contracted token axis: sa (nrb,K), sg (nrb,N) with
+    nrb = ceil(R/block_size). rowwise/tensorwise are nrb == 1, where the scales factor
+    out of the whole reduction; `block_size` is then ignored.
     """
     _, K = aq.shape
     N = gq.shape[1]
@@ -690,8 +723,11 @@ def scaled_grouped_gemm_wgrad(
         grad_b.stride(0),
         grad_b.stride(1),
         grad_b.stride(2),
+        sa.stride(0),
         sa.stride(1),
+        sg.stride(0),
         sg.stride(1),
         NUM_SMS=num_sms,
+        BLOCK_SIZE=block_size if sa.shape[0] > 1 else 0,
     )
     return grad_b
