@@ -16,16 +16,12 @@ from src.model import build_model
 from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
-from src.quant.convert import apply_quantization
+from src.quant.convert import apply_quantization, attach_quantization_probes
 from src.training.optimizer import build_optimizer, build_scheduler
-from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
+from src.training.metrics import MetricsCollector, TokenizerMetricsCollector
 from src.training.loss import LOSS_REGISTRY, compute_loss, compute_loss_chunked
 from src.utils.config import TrainConfig
-from src.utils.metric_utils import (
-    QuantMetricCollector,
-    attach_quant_probe,
-    count_correct,
-)
+from src.utils.metric_utils import count_correct
 from src.utils.tracking_utils import WandbLogger
 from src.utils.masking_utils import (
     build_causal_attention_mask,
@@ -150,15 +146,13 @@ class Trainer:
             worker_init_fn=Trainer._worker_init_fn,
         )
 
-        # Quantization: swap eligible nn.Linear modules to QuantizedLinear
+        # Quantization: swap eligible nn.Linear modules to QuantizedLinear, then
+        # point the metric probes at the swapped modules (both before torch.compile).
         apply_quantization(self.model, config)
-
-        # Quant metrics: probes must attach after apply_quantization (the quantized
-        # modules exist) and before torch.compile (attach to the pre-compile module).
-        self.quant_collector = None
+        self.logger = WandbLogger(config, enabled=wandb_enabled)
+        self.metrics = MetricsCollector(config, self.device, logger=self.logger)
         if config.logging.log_quant_metrics:
-            self.quant_collector = QuantMetricCollector()
-            attach_quant_probe(self.model, self.quant_collector)
+            attach_quantization_probes(self.model, self.metrics.quantization_collector)
 
         # Optimizer & scheduler
         self.optimizer = build_optimizer(self.model, config)
@@ -186,11 +180,6 @@ class Trainer:
         if config.training.enable_torch_compile:
             self.model = torch.compile(self.model)
 
-        # Metrics and Logging
-        self.logger = WandbLogger(config, enabled=wandb_enabled)
-        self.metrics = MetricsTracker(config, self.device, logger=self.logger)
-        if self.quant_collector is not None:
-            self.metrics.quant_collector = self.quant_collector
         self.metrics.print_model_summary()
 
         # Checkpoint dir
@@ -239,12 +228,8 @@ class Trainer:
             total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True
         )
         while self.step < stop_at:
+            self.metrics.on_train_step_begin(self.step)
             self.optimizer.zero_grad(set_to_none=True)
-
-            if self.quant_collector is not None:
-                self.quant_collector.enabled = (
-                    self.step + 1
-                ) % self.config.logging.log_every == 0
 
             # Read previous step's loss NOW (GPU has been computing since we launched it)
             # This overlaps the .item() sync with the current step's data prefetch
@@ -478,7 +463,7 @@ class Trainer:
         if self.config.task == "sft" and self.config.training.eval_train:
             train_avg_acc = self._evaluate_train_acc()
 
-        # Assembly + dispatch + the printed summary line all live in MetricsTracker.
+        # Assembly + dispatch + the printed summary line all live in MetricsCollector.
         self.metrics.log_eval(step=self.step, train_avg_acc=train_avg_acc)
 
         if self.config.task == "pretrain":
@@ -635,7 +620,7 @@ class TokenizerTrainer:
         os.makedirs(config.tokenizer_training.checkpoint_dir, exist_ok=True)
 
         self.logger = WandbLogger(config, enabled=wandb_enabled)
-        self.metrics = TokenizerMetricsTracker(self.logger)
+        self.metrics = TokenizerMetricsCollector(self.logger)
         self.eval_texts: list[str] = []
 
     # ---- Shared helpers ----

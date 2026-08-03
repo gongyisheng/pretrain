@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from src.model import build_model
 from src.quant.constants import _INT8_FORMATS
-from src.quant.linear import QuantizedLinear, _quant_gemm
+from src.quant.linear import QuantizedLinear, quantized_gemm
 from src.quant.convert import apply_quantization
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.utils.config import ModelConfig, QuantConfig, TrainConfig, TrainingConfig
@@ -156,7 +156,7 @@ def test_runs_under_bf16_autocast():
     assert torch.isfinite(q.weight.grad).all()
 
 
-# --- int8-family _quant_gemm dispatch (migrated from the old test_int8.py) ---
+# --- int8-family quantized_gemm dispatch (migrated from the old test_int8.py) ---
 
 
 int_gpu = pytest.mark.skipif(
@@ -166,7 +166,7 @@ int_gpu = pytest.mark.skipif(
 
 def test_gemm_passthrough_is_plain_matmul():
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    out, a_snap, b_snap = _quant_gemm(a, b, "bf16", "bf16", torch.float32, {})
+    out, a_snap, b_snap = quantized_gemm(a, b, "bf16", "bf16", torch.float32, {})
     assert torch.allclose(out, a @ b, atol=1e-4)
     assert a_snap is None and b_snap is None  # nothing was quantized
 
@@ -174,7 +174,7 @@ def test_gemm_passthrough_is_plain_matmul():
 @pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
-    out, a_snap, b_snap = _quant_gemm(a, b, fmt, "bf16", torch.float32, {})
+    out, a_snap, b_snap = quantized_gemm(a, b, fmt, "bf16", torch.float32, {})
     assert out.shape == (20, 40) and torch.isfinite(out).all()
     assert a_snap is not None and b_snap is None  # only a is a quantized format
 
@@ -185,7 +185,9 @@ def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")
     b = torch.randn(128, 96, device="cuda")
-    out, _, _ = _quant_gemm(a, b, fmt, fmt, torch.float32, {"granularity": "rowwise"})
+    out, _, _ = quantized_gemm(
+        a, b, fmt, fmt, torch.float32, {"granularity": "rowwise"}
+    )
     ref = _roundtrip(a, -1, "rowwise", 0, fmt) @ _roundtrip(b, 0, "rowwise", 0, fmt)
     assert (out - ref).norm() / ref.norm() < 0.02
 
@@ -244,7 +246,7 @@ def test_mxfp8_wgrad_unaligned_tokens():
 
 def test_mxfp8_fake_quant_fallback_on_cpu():
     # A one-sided mxfp8 rule (weight quantized, act passthrough) exercises the
-    # mxfp8 fake-quant path inside _quant_gemm without touching the real GEMM — on CPU.
+    # mxfp8 fake-quant path inside quantized_gemm without touching the real GEMM — on CPU.
     torch.manual_seed(0)
     cfg = QuantConfig(
         enabled=True,

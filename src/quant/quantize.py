@@ -120,3 +120,4 @@ class QuantizationSnapshot(NamedTuple):
     contract_dim: int
     granularity: str
     block_size: int
+    offs: torch.Tensor | None = None  # set by grouped GEMMs, marks an expert axis

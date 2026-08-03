@@ -162,6 +162,40 @@ def test_pow2_scale_roundtrips_within_error():
     assert (fq - x).norm() / x.norm() < 0.15
 
 
+@pytest.mark.parametrize("granularity", ["tensorwise", "rowwise"])
+def test_fp32_scale_never_clips(granularity):
+    # scale = amax/qmax lands the extremal element exactly on qmax, so the clamp in
+    # quantize_operand is a no-op and the largest magnitude round-trips intact.
+    torch.manual_seed(0)
+    x = torch.randn(32, 64) * 10.0
+    fq = _roundtrip(x, -1, granularity, 0, **_fp8_kw())
+    assert fq.abs().amax().item() == pytest.approx(x.abs().amax().item(), rel=1e-6)
+
+
+def test_e8m0_scale_clips_the_block_maximum():
+    # e8m0 floors the exponent, so the scale is up to 2x too small and codes above
+    # qmax saturate: 1.9 -> floor(log2 1.9) = 0 -> scale = 2^-8 -> 1.9/scale = 486 > 448,
+    # clamped back to 448 * 2^-8 = 1.75.
+    x = torch.full((1, 32), 1.9)
+    xq, s = quantize_operand(x, -1, "blockwise", 32, **_fp8_kw(scale_dtype="fp8_e8m0"))
+    assert xq.float().abs().amax().item() == str_to_qmax(
+        "fp8_e4m3"
+    )  # every code clipped
+    fq = dequantize_operand(xq, s, -1, "blockwise", 32)
+    assert torch.allclose(fq, torch.full_like(fq, 1.75))
+
+
+def test_e8m0_clipping_loss_is_bounded_by_one_eighth():
+    # Worst case is a mantissa just under 2: qmax/2^emax = 1.75 of it survives, so no
+    # element loses more than (2 - 1.75) / 2 = 12.5% of its magnitude.
+    torch.manual_seed(0)
+    x = torch.randn(64, 256) * 3.0
+    fq = _roundtrip(x, -1, "blockwise", 32, **_fp8_kw(scale_dtype="fp8_e8m0"))
+    clipped = x.abs() > fq.abs()
+    loss = (x.abs() - fq.abs())[clipped] / x.abs()[clipped]
+    assert loss.max().item() <= 0.125
+
+
 # --- dequantize_operand ---
 
 

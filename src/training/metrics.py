@@ -4,12 +4,13 @@ import time
 import torch
 from tokenizers import Tokenizer
 
+from src.quant.metrics import QuantizationMetricsCollector
 from src.utils import metric_utils
 from src.utils.config import TrainConfig
 from src.utils.tracking_utils import WandbLogger
 
 
-class MetricsTracker:
+class MetricsCollector:
     """Tracks and assembles training/eval metrics, then dispatches to W&B."""
 
     def __init__(
@@ -21,7 +22,9 @@ class MetricsTracker:
         self.config = config
         self.device = device
         self.logger = logger
-        self.quant_collector = None  # set by trainer when log_quant_metrics is on
+
+        # Quantization error, filled by the probes attach_quantization_probes installs.
+        self.quantization_collector = QuantizationMetricsCollector()
 
         self.is_moe = config.model.is_moe
         if self.is_moe:
@@ -116,6 +119,15 @@ class MetricsTracker:
         self._momentum_norm = None
         self._variance_norm = None
         self._moe_expert_load = None
+
+    def on_train_step_begin(self, step: int) -> None:
+        """Arm cadence-gated capture for the step about to run: each recorded operand
+        costs a dequant + reductions, so probes only fire on the pre-log step.
+        """
+        logging = self.config.logging
+        self.quantization_collector.enabled = (
+            logging.log_quant_metrics and (step + 1) % logging.log_every == 0
+        )
 
     def snapshot_pre_step(self, model: torch.nn.Module, step: int) -> None:
         """Cache θ before optimizer.step() so on_train_step can compute ||Δθ||.
@@ -258,8 +270,7 @@ class MetricsTracker:
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val
 
-        if self.quant_collector is not None:
-            d.update(self.quant_collector.drain())
+        d.update(self.quantization_collector.to_metrics_dict())
 
         self.logger.log(d, step=step)
 
@@ -397,7 +408,7 @@ class MetricsTracker:
         return msg
 
 
-class TokenizerMetricsTracker:
+class TokenizerMetricsCollector:
     """Assembles tokenizer-training metrics and dispatches them via its logger.
 
     `eval_texts` (the held-out slice used to measure bytes/token) is passed per

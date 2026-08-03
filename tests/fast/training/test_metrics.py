@@ -1,4 +1,4 @@
-"""Tests for MetricsTracker — the stateful assembly layer.
+"""Tests for MetricsCollector — the stateful assembly layer.
 
 Pure metric math is tested in tests/fast/utils/test_metric_utils.py. Here we
 exercise the tracker's state machine: per-step accumulation, the log-cadence
@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from src.model import build_model
-from src.training.metrics import MetricsTracker
+from src.training.metrics import MetricsCollector
 from src.utils.config import ModelConfig, TrainConfig
 
 
@@ -57,7 +57,7 @@ def _cfg(task="pretrain", log_every=2, **logging):
 
 def _tracker(cfg=None):
     cfg = cfg or _cfg()
-    return MetricsTracker(cfg, device="cpu", logger=FakeLogger()), cfg
+    return MetricsCollector(cfg, device="cpu", logger=FakeLogger()), cfg
 
 
 def _linear_setup():
@@ -137,18 +137,14 @@ def test_grad_clip_ratio_reflects_window():
 
 
 # ---------------------------------------------------------------------------
-# quant_collector drain merge
+# quant metrics flush merge
 # ---------------------------------------------------------------------------
-
-
-class _StubQuantCollector:
-    def drain(self):
-        return {"quant/sqnr/act/layer_0": 42.0}
 
 
 def test_log_train_merges_quant_metrics():
     tracker, _ = _tracker(_cfg(log_every=1))
-    tracker.quant_collector = _StubQuantCollector()
+    probe = tracker.quantization_collector.get_probe("layer_0")
+    probe.metrics["act"] = {"sqnr": torch.tensor(42.0)}
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
@@ -328,7 +324,7 @@ def test_eval_moe_aux_loss_subtracts_floor():
         )
     )
     cfg.task = "pretrain"
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     model = build_model(cfg)
     model.eval()
     floor = tracker._aux_floor
@@ -372,7 +368,7 @@ def test_aux_floor_is_coef_weighted():
             ],
         )
     )
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     # floor = 1e-3*2 + 1e-2*3 = 0.032
     assert abs(tracker._aux_floor - (1e-3 * 2 + 1e-2 * 3)) < 1e-9
 
@@ -430,7 +426,7 @@ def _moe_on_step(tracker, model, opt, step):
 def test_train_moe_maxvio_logged_per_layer():
     cfg = _moe_cfg()
     cfg.logging.log_every = 1
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     model = build_model(cfg)
     opt = torch.optim.SGD(model.parameters(), lr=1e-3)
 
@@ -456,7 +452,7 @@ def test_train_moe_maxvio_uses_latest_step():
     # confirming last-step semantics, not window accumulation.
     cfg = _moe_cfg()
     cfg.logging.log_every = 2
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     model = build_model(cfg)
     opt = torch.optim.SGD(model.parameters(), lr=1e-3)
 
@@ -473,7 +469,7 @@ def test_train_moe_maxvio_uses_latest_step():
 
 def test_eval_moe_maxvio_logs_both_variants():
     cfg = _moe_cfg()
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     model = build_model(cfg)
     model.eval()  # eval mode -> forward_meta returns eval_load
     blocks = _moe_blocks(model)
@@ -497,7 +493,7 @@ def test_eval_moe_maxvio_global_vs_batch_semantics():
     # MaxVio per batch then averages. Batches [10,0,5,5] and [0,10,5,5] sum to
     # [10,10,10,10] -> global 0, but each batch has MaxVio 1.0 -> batch avg 1.0.
     cfg = _moe_cfg()
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     model = build_model(cfg)
     model.eval()  # eval mode -> forward_meta returns eval_load
     block = _moe_blocks(model)[0]
@@ -564,7 +560,7 @@ def test_moe_maxvio_labels_skip_dense_layer():
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
     cfg.task = "pretrain"
     cfg.logging.log_every = 1
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     built = build_model(cfg)
     opt = torch.optim.SGD(built.parameters(), lr=1e-3)
 
@@ -606,7 +602,7 @@ def test_metrics_moe_facts_with_dense_first_layer():
 
 
 def test_metrics_tracker_aux_floor_and_n_moe_layers_on_dense_first_stack():
-    """MetricsTracker itself (not just ModelConfig) must count only MoE layers.
+    """MetricsCollector itself (not just ModelConfig) must count only MoE layers.
 
     n_layers=4 but n_moe_layers=3 (layer 0 is dense): the old buggy
     `n_layers * k` formula would give 4*2=8; the correct per-layer-sum formula
@@ -617,7 +613,7 @@ def test_metrics_tracker_aux_floor_and_n_moe_layers_on_dense_first_stack():
 
     model = _dense_first_moe_rest_cfg()
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
 
     # 3 MoE layers * k(2) * coef(1e-3), NOT n_layers(4) * k = 8
     assert abs(tracker._aux_floor - 6e-3) < 1e-9
@@ -665,7 +661,7 @@ def test_metrics_tracker_aux_floor_scoped_to_aux_loss_layers_only():
         ],
     )
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
 
     # only the 1 aux_loss layer * k(2) * coef(1e-3), NOT 4*2=8
     assert abs(tracker._aux_floor - 2e-3) < 1e-9
@@ -677,7 +673,7 @@ def test_print_model_summary_dense_first_moe_rest_label(capsys):
 
     model = _dense_first_moe_rest_cfg()
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     tracker.print_model_summary()
     out = capsys.readouterr().out
     assert "Model: gqa+dense/moe" in out
@@ -706,7 +702,7 @@ def test_print_model_summary_mixed_attn_label(capsys):
 
     model = _mha_first_gqa_rest_cfg()
     cfg = TrainConfig(model=model, training=TrainingConfig(mixed_precision="bf16"))
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     tracker.print_model_summary()
     out = capsys.readouterr().out
     assert "Model: gqa/mha+dense" in out
@@ -719,7 +715,7 @@ def test_print_model_summary_mixed_attn_label(capsys):
 
 def test_print_model_summary_dense(capsys):
     cfg = TrainConfig(max_seq_len=128, model=_cfg().model)
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     assert tracker.print_model_summary() is None
     out = capsys.readouterr().out
     assert "Model: mha+dense" in out and "non-embedding" in out and "device=cpu" in out
@@ -752,7 +748,7 @@ def test_print_model_summary_moe(capsys):
             ],
         ),
     )
-    tracker = MetricsTracker(cfg, device="cpu", logger=FakeLogger())
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
     tracker.print_model_summary()
     out = capsys.readouterr().out
     assert "total params" in out and "active non-embedding" in out

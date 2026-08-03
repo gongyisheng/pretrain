@@ -16,12 +16,7 @@ from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantConfig
 
 
-def _quant_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
-    """`a @ b` via a fused GEMM when both operands share a quantized family, else fake-quant.
-
-    Also returns a QuantizationSnapshot per operand (None if its fmt is passthrough);
-    a fused dispatch implies both are quantized, so both are set on that path.
-    """
+def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
     granularity = scaling_cfg.get("granularity", "tensorwise")
     block_size = scaling_cfg.get("block_size", 0)
     scale_dtype = scaling_cfg.get("scale_dtype")
@@ -30,6 +25,7 @@ def _quant_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
     )
 
     a_snap = b_snap = None
+    aq = sa = bq = sb = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
             a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
@@ -43,18 +39,18 @@ def _quant_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
 
     if same_family and a.is_cuda and b.is_cuda:
         y = scaled_gemm(
-            a_snap.quantized_tensor,
-            b_snap.quantized_tensor,
-            a_snap.scale,
-            b_snap.scale,
+            aq,
+            bq,
+            sa,
+            sb,
             out_dtype,
             effective_block_size(granularity, block_size, a.shape[1]),
         )
         return y, a_snap, b_snap
 
-    if a_snap is not None:
+    if aq is not None:
         a = dequantize_operand(aq, sa, -1, granularity, block_size).to(a.dtype)
-    if b_snap is not None:
+    if bq is not None:
         b = dequantize_operand(bq, sb, 0, granularity, block_size).to(b.dtype)
     return (a @ b).to(out_dtype), a_snap, b_snap
 
@@ -71,7 +67,7 @@ class QuantizedLinearFn(torch.autograd.Function):
 
         x2d = x.reshape(-1, x.shape[-1]).to(compute_dtype)
         w = weight.to(compute_dtype)
-        y, act_snap, weight_snap = _quant_gemm(
+        y, act_snap, weight_snap = quantized_gemm(
             x2d,
             w.t(),
             cfg.dtype["act"],
@@ -102,7 +98,7 @@ class QuantizedLinearFn(torch.autograd.Function):
         g = grad_out.reshape(-1, grad_out.shape[-1]).to(compute_dtype)  # (M, N)
 
         # dX = g @ W, (M,N)@(N,K) -> (M,K)
-        dx, dgrad_grad_snap, dgrad_weight_snap = _quant_gemm(
+        dx, dgrad_grad_snap, dgrad_weight_snap = quantized_gemm(
             g,
             w,
             cfg.dtype["grad_input"],
@@ -111,7 +107,7 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.scaling,
         )
         # dW = gᵀ @ X, (N,M)@(M,K) -> (N,K)
-        dw, wgrad_grad_snap, wgrad_act_snap = _quant_gemm(
+        dw, wgrad_grad_snap, wgrad_act_snap = quantized_gemm(
             g.t(),
             x2d,
             cfg.dtype["grad_weight"],
@@ -134,17 +130,6 @@ class QuantizedLinearFn(torch.autograd.Function):
 
 
 class QuantizedLinear(nn.Linear):
-    def __init__(
-        self,
-        in_features,
-        out_features,
-        bias=True,
-        quantization_config: QuantConfig = None,
-    ):
-        super().__init__(in_features, out_features, bias=bias)
-        self.quantization_config = quantization_config
-        self.quantization_probe = None  # set by attach_quant_probe when logging metrics
-
     @classmethod
     def from_module(
         cls, module: nn.Linear, quantization_config: QuantConfig
@@ -154,6 +139,9 @@ class QuantizedLinear(nn.Linear):
         q.quantization_config = quantization_config
         q.quantization_probe = None
         return q
+
+    def set_quantization_probe(self, probe):
+        self.quantization_probe = probe
 
     def forward(self, x):
         return QuantizedLinearFn.apply(

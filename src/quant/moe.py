@@ -21,15 +21,7 @@ from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantConfig
 
 
-def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
-    """Quantized ragged (a @ b[g]); fake-quant + bf16 fallback off the fused path.
-
-    fp8/int8 use the fused kernel at any granularity, provided both operands share
-    the same family and are on CUDA; anything else falls back to fake-quant + bf16.
-
-    Also returns a QuantizationSnapshot per operand (None if its fmt is passthrough);
-    a fused dispatch implies both are quantized, so both are set on that path.
-    """
+def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
     scale_dtype = scaling.get("scale_dtype")
@@ -38,15 +30,13 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     )
 
     a_snap = b_snap = None
+    aq = sa = bq = sb = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
             a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
         )
-        a_snap = QuantizationSnapshot(a, aq, sa, -1, granularity, block_size)
+        a_snap = QuantizationSnapshot(a, aq, sa, -1, granularity, block_size, offs)
     if is_quantized(b_fmt):
-        # Per-expert quantize of (E,K,N) along K, i.e. dim 0 of each slab. That
-        # partitions scales exactly as contracting dim 1 of the stacked tensor does,
-        # which is what the snapshot records so dequantizing needs no expert loop.
         per_expert = [
             quantize_operand(
                 b[g], 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
@@ -55,35 +45,29 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
         ]
         bq = torch.stack([q for q, _ in per_expert])
         sb = torch.stack([s for _, s in per_expert])
-        b_snap = QuantizationSnapshot(b, bq, sb, 1, granularity, block_size)
+        b_snap = QuantizationSnapshot(b, bq, sb, 1, granularity, block_size, offs)
 
     if same_family and a.is_cuda:
         y = scaled_grouped_gemm(
-            a_snap.quantized_tensor,
-            b_snap.quantized_tensor,
-            a_snap.scale,
-            b_snap.scale,
+            aq,
+            bq,
+            sa,
+            sb,
             offs,
             out_dtype,
             effective_block_size(granularity, block_size, a.shape[1]),
         )
         return y, a_snap, b_snap
 
-    if a_snap is not None:
+    if aq is not None:
         a = dequantize_operand(aq, sa, -1, granularity, block_size).to(a.dtype)
-    if b_snap is not None:
+    if bq is not None:
         b = dequantize_operand(bq, sb, 1, granularity, block_size).to(b.dtype)
     y = grouped_gemm(a.to(out_dtype), b.to(out_dtype), offs).to(out_dtype)
     return y, a_snap, b_snap
 
 
-def _quant_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
-    """grad_b[g] = (a·sa)[g]^T @ (g·sg)[g] -> (E,K,N). fp8/int8 use the fused kernel
-    at any granularity, provided both operands share the same family and are on
-    CUDA; anything else falls back to fake-quant + bf16 wgrad.
-
-    Also returns a QuantizationSnapshot per operand (None if its fmt is passthrough).
-    """
+def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
     scale_dtype = scaling.get("scale_dtype")
@@ -92,32 +76,37 @@ def _quant_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
     )
 
     a_snap = g_snap = None
+    aq = sa = gq = sg = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
             a, 0, granularity, block_size, a_fmt, scale_dtype=scale_dtype
         )
-        a_snap = QuantizationSnapshot(a, aq, sa, 0, granularity, block_size)  # (nrb,K)
+        a_snap = QuantizationSnapshot(
+            a, aq, sa, 0, granularity, block_size, offs
+        )  # (nrb,K)
     if is_quantized(g_fmt):
         gq, sg = quantize_operand(
             g, 0, granularity, block_size, g_fmt, scale_dtype=scale_dtype
         )
-        g_snap = QuantizationSnapshot(g, gq, sg, 0, granularity, block_size)  # (nrb,N)
+        g_snap = QuantizationSnapshot(
+            g, gq, sg, 0, granularity, block_size, offs
+        )  # (nrb,N)
 
     if same_family and a.is_cuda:
         grad_b = scaled_grouped_gemm_wgrad(
-            a_snap.quantized_tensor,
-            g_snap.quantized_tensor,
-            a_snap.scale,
-            g_snap.scale,
+            aq,
+            gq,
+            sa,
+            sg,
             offs,
             out_dtype,
             effective_block_size(granularity, block_size, a.shape[0]),
         )
         return grad_b, a_snap, g_snap
 
-    if a_snap is not None:
+    if aq is not None:
         a = dequantize_operand(aq, sa, 0, granularity, block_size).to(a.dtype)
-    if g_snap is not None:
+    if gq is not None:
         g = dequantize_operand(gq, sg, 0, granularity, block_size).to(g.dtype)
     # bf16 ragged Xᵀ@gY via the existing grouped wgrad path
     grad_b = grouped_gemm_wgrad(a.to(out_dtype), g.to(out_dtype), offs).to(out_dtype)
@@ -128,7 +117,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b, offs, cfg: QuantConfig, probe=None):
         out_dtype = a.dtype
-        y, act_snap, weight_snap = _quant_grouped_gemm(
+        y, act_snap, weight_snap = quantized_grouped_gemm(
             a, b, offs, cfg.dtype["act"], cfg.dtype["weight"], out_dtype, cfg.scaling
         )
         if probe is not None and probe.enabled:
@@ -144,8 +133,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         a, b, offs = ctx.saved_tensors
         cfg = ctx.cfg
         out_dtype = a.dtype
-        # dgrad: grad_a = grad_y @ b^T  (contract over N); reuse the forward op.
-        grad_a, dgrad_grad_snap, dgrad_weight_snap = _quant_grouped_gemm(
+        # dgrad: grad_a = grad_y @ b^T
+        grad_a, dgrad_grad_snap, dgrad_weight_snap = quantized_grouped_gemm(
             grad_y,
             b.transpose(-2, -1).contiguous(),
             offs,
@@ -154,8 +143,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             out_dtype,
             cfg.scaling,
         )
-        # wgrad: grad_b[g] = a[g]^T @ grad_y[g]  (contract over ragged M).
-        grad_b, wgrad_act_snap, wgrad_grad_snap = _quant_grouped_wgrad(
+        # wgrad: grad_b[g] = a[g]^T @ grad_y[g]
+        grad_b, wgrad_act_snap, wgrad_grad_snap = quantized_grouped_wgrad(
             a,
             grad_y,
             offs,
@@ -174,14 +163,6 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
 
 
 def quantized_expert_mm(cfg: QuantConfig, probes=None):
-    """Build an expert_mm bound to `cfg`: a differentiable quantized ragged grouped
-    GEMM (a (R,K), b (E,K,N), offs (E,)) -> (R,N) that quantizes operands per cfg
-    before the fused kernel. Same call contract as `grouped_gemm`, so it drops into
-    `grouped_mlp`/`SparseMoEBlock.expert_mm`.
-
-    `probes` maps a projection ("gate_up" / "down") to the probe that records its
-    operands, so the block's two GEMMs report under separate names.
-    """
 
     def expert_mm(a, b, offs, projection=None):
         probe = probes.get(projection) if probes else None
@@ -191,26 +172,17 @@ def quantized_expert_mm(cfg: QuantConfig, probes=None):
 
 
 class QuantizedSparseMoEBlock(SparseMoEBlock):
-    """SparseMoEBlock with a quantized expert GEMM. Inherits routing, weights, and
-    forward unchanged — only the `expert_mm` seam and the carried config differ, so
-    the quant path is `QuantizedLinear`'s analogue for stacked-expert MoE.
-    """
-
     @classmethod
     def from_module(
         cls, module: SparseMoEBlock, quantization_config: QuantConfig
     ) -> "QuantizedSparseMoEBlock":
-        """Retype a deep copy of an existing block (independent params/buffers) and
-        bind the quantized expert_mm to the config."""
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
         q.expert_mm = quantized_expert_mm(quantization_config)
         return q
 
-    def set_quantization_probes(self, gate_up_probe, down_probe):
-        """Rebind expert_mm with a probe per projection, so the block's two GEMMs
-        record under separate names instead of overwriting each other."""
+    def set_quantization_probe(self, gate_up_probe, down_probe):
         self.expert_mm = quantized_expert_mm(
             self.quantization_config,
             {"gate_up": gate_up_probe, "down": down_probe},

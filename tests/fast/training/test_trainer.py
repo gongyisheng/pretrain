@@ -196,13 +196,12 @@ def test_trainer_rejects_unknown_loss_fn(mock_memmap):
 
 
 def test_quant_metrics_disabled_by_default(mock_memmap):
-    """log_quant_metrics defaults to False: no collector, no quant/ keys, hot
-    path unchanged."""
+    """log_quant_metrics defaults to False: no probes attached, no quant/ keys,
+    hot path unchanged."""
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
         trainer = Trainer(_tiny_config(tmp), wandb_enabled=False)
-        assert trainer.quant_collector is None
-        assert trainer.metrics.quant_collector is None
+        assert not trainer.metrics.quantization_collector._probes
         logged = []
         trainer.logger.register_on_log_hook(
             lambda step, metrics: logged.append(metrics)
@@ -237,13 +236,12 @@ def _tiny_fp8_config(tmp_dir):
 @fp8_only
 def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
     """log_quant_metrics=True with an fp8 quant recipe: at least one quant/
-    key from the collector's drain() reaches the logger."""
+    key from the quant collector's to_metrics_dict() reaches the logger."""
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
         cfg = _tiny_fp8_config(tmp)
 
         trainer = Trainer(cfg, wandb_enabled=False)
-        assert trainer.quant_collector is not None
         logged = []
         trainer.logger.register_on_log_hook(
             lambda step, metrics: logged.append(metrics)

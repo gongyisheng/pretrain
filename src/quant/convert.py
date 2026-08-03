@@ -16,7 +16,9 @@ def _is_passthrough(quantization_config) -> bool:
 
 
 def apply_quantization(model: nn.Module, config) -> nn.Module:
-    """Swap eligible nn.Linear modules to QuantizedLinear per the run's quant rules."""
+    """Swap eligible nn.Linear / SparseMoEBlock modules to their quantized
+    counterparts per the run's quant configurations.
+    """
     quantization_configs = config.training.quant
     if not any(qc.enabled for qc in quantization_configs):
         return model
@@ -53,3 +55,15 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
             qmod = quantized_cls.from_module(child, quantization_config)
             setattr(parent, child_name, qmod)
     return model
+
+
+def attach_quantization_probes(model: nn.Module, collector) -> None:
+    """Create and attach metrics probe for every quantized module"""
+    for name, module in model.named_modules():
+        if isinstance(module, QuantizedSparseMoEBlock):
+            module.set_quantization_probe(
+                collector.get_probe(f"{name}.expert_gate_up"),
+                collector.get_probe(f"{name}.expert_down"),
+            )
+        elif isinstance(module, QuantizedLinear):
+            module.set_quantization_probe(collector.get_probe(name))

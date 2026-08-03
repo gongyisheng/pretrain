@@ -1,13 +1,3 @@
-"""Triton grouped (ragged) GEMM, matching `torch._grouped_mm(a, b, offs=offs)`.
-
-MoE 2D x 3D case: a (R, K) x per-group b (E, K, N) -> c (R, N), rows expert-sorted,
-`offs` the (E,) int32 cumulative END-offsets (offs[-1] == R). One persistent kernel
-walks the ragged tile space; `offs` is read on-device (no offs.cpu() sync). fp32
-accumulation, bf16 in/out. `_grouped_gemm` is differentiable: dgrad reuses the forward
-kernel (`grad_a = _grouped_gemm(grad_c, b.T, offs)`), wgrad uses the dedicated wgrad
-kernel (`grad_b = grouped_gemm_wgrad(a, grad_c, offs)`).
-"""
-
 import functools
 
 import torch
@@ -196,7 +186,6 @@ def _grouped_gemm_wgrad_kernel(
 
 @triton_op("jit_kernel::grouped_gemm", mutates_args={})
 def _grouped_gemm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
-    """Differentiable grouped GEMM matching torch._grouped_mm(a, b, offs=offs)."""
     R, K = a.shape
     N = b.shape[2]
     c = torch.empty((R, N), device=a.device, dtype=a.dtype)
@@ -242,7 +231,6 @@ _grouped_gemm.register_autograd(
 def grouped_gemm_wgrad(
     a: torch.Tensor, grad_c: torch.Tensor, offs: torch.Tensor
 ) -> torch.Tensor:
-    """Weight gradient of _grouped_gemm: grad_b[g] = a[g].T @ grad_c[g], shape (E,K,N)."""
     assert a.dtype == grad_c.dtype, (
         f"dtype mismatch: a {a.dtype}, grad_c {grad_c.dtype}"
     )
@@ -389,8 +377,6 @@ def scaled_gemm(
     out_dtype: torch.dtype,
     block_size: int,
 ) -> torch.Tensor:
-    """`(aq*sa) @ (bq*sb)` with fused dequant. aq (M,K), bq (K,N) fp8/int8;
-    sa (M,nkb), sb (nkb,N) fp32 canonical scales; block_size = elements/scale-block."""
     M, K = aq.shape
     N = bq.shape[1]
     nkb = sa.shape[1]
@@ -578,22 +564,6 @@ def scaled_grouped_gemm(
     return c
 
 
-# ---------------------------------------------------------------------------
-# Scaled grouped wgrad (quantized): gW[g] = (Xq·sa)[g]^T @ (gYq·sg)[g]
-# Contraction over the ragged token axis M, with scales blocked along that axis.
-# rowwise/tensorwise (nrb==1) factor out of the whole reduction as per-k (sa) and
-# per-n (sg) vectors; blockwise rescales once per scale block, each clamped to the
-# group's rows so a block that straddles experts is visited once per expert.
-#
-# mxfp8 (block_size=32) forces the autotuner to BLOCK_M=32, so the inner `while`
-# runs one trip per scale block and loses num_stages pipelining across M: measured
-# 0.542ms vs 0.213ms (rowwise)/0.247ms (blockwise-128)/0.283ms (bf16) at E=8x1024
-# rows/expert, K=512, N=1024. Fused still wins end-to-end at every granularity
-# (_quant_grouped_wgrad): mxfp8 2.233ms vs 2.502ms fake-quant+bf16; rowwise 1.689
-# vs 2.252; blockwise 1.754 vs 2.279.
-# ---------------------------------------------------------------------------
-
-
 @triton.autotune(configs=_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
 @triton.jit
 def _scaled_grouped_gemm_wgrad_kernel(
@@ -701,13 +671,6 @@ def scaled_grouped_gemm_wgrad(
     out_dtype: torch.dtype,
     block_size: int,
 ) -> torch.Tensor:
-    """Scaled grouped wgrad: grad_b[g] = (aq·sa)[g]^T @ (gq·sg)[g], shape (E,K,N).
-
-    aq (R,K), gq (R,N) fp8/int8, expert-sorted; offs (E,) int32 END-offsets. Scales
-    are fp32 and blocked along the contracted token axis: sa (nrb,K), sg (nrb,N) with
-    nrb = ceil(R/block_size). rowwise/tensorwise are nrb == 1, where the scales factor
-    out of the whole reduction; `block_size` is then ignored.
-    """
     _, K = aq.shape
     N = gq.shape[1]
     E = offs.shape[0]
