@@ -7,13 +7,15 @@ from src.quant.quantize import (
     quantize_operand,
     fake_quantize_operand,
 )
-from src.quant.metrics import (
+from src.utils.metric_utils import (
     compare_quantized,
     QuantMetricCollector,
     QuantProbe,
     attach_quant_probe,
 )
 from src.quant.linear import QuantizedLinear
+from src.quant.moe import QuantizedSparseMoEBlock
+from src.layers.mlp import SparseMoEBlock
 from src.utils.config import QuantConfig
 
 
@@ -114,6 +116,39 @@ def test_snapshot_dequantize_matches_fake_quant(granularity, block_size, contrac
     ref = fake_quantize_operand(x, contract_dim, granularity, block_size, "fp8_e4m3")
     assert torch.equal(snap.dequantize(), ref)
     assert snap.source_tensor is x
+
+
+@pytest.mark.parametrize(
+    "granularity,block_size", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
+)
+def test_stacked_expert_snapshot_matches_per_expert_dequant(granularity, block_size):
+    # _grouped records per-expert (E,K,N) quantization as contract_dim=1 of the
+    # stacked tensor. Assert that inverts to the same thing as dequantizing each
+    # (K,N) slab along dim 0 — the quantize and dequantize paths are written
+    # differently, so their agreement is the load-bearing claim.
+    torch.manual_seed(0)
+    experts = torch.randn(4, 96, 32)
+    per_expert = [
+        quantize_operand(experts[g], 0, granularity, block_size, "fp8_e4m3")
+        for g in range(experts.shape[0])
+    ]
+    snap = QuantizationSnapshot(
+        experts,
+        torch.stack([q for q, _ in per_expert]),
+        torch.stack([s for _, s in per_expert]),
+        1,
+        granularity,
+        block_size,
+    )
+    reference = torch.stack(
+        [
+            fake_quantize_operand(
+                experts[g], 0, granularity, block_size, "fp8_e4m3"
+            ).float()
+            for g in range(experts.shape[0])
+        ]
+    )
+    assert torch.equal(snap.dequantize(), reference)
 
 
 # --- collector ---
@@ -254,3 +289,76 @@ def test_passthrough_operand_has_no_series():
     out = collector.drain()
     assert not any("wgrad.grad" in key for key in out)
     assert any("dgrad.grad" in key for key in out)
+
+
+# --- end-to-end through QuantizedSparseMoEBlock ---
+
+
+def _quantized_moe():
+    cfg = QuantConfig(
+        enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "rowwise"}
+    )
+    block = SparseMoEBlock(
+        d_model=32,
+        intermediate_size=48,
+        n_routed_experts=4,
+        n_routed_experts_per_token=2,
+    )
+    return QuantizedSparseMoEBlock.from_module(block, cfg)
+
+
+@fp8_only
+def test_moe_records_both_projections_separately():
+    # BS = 4 * 16 = 64 tokens, comfortably above the fused fp8 wgrad GEMM's
+    # contraction-dim floor.
+    torch.manual_seed(0)
+    block = _quantized_moe().cuda().to(torch.bfloat16)
+    collector = QuantMetricCollector()
+    attach_quant_probe(block, collector)
+    collector.enabled = True
+
+    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out, _ = block(x)
+    out.sum().backward()
+
+    got = collector.drain()
+    assert set(got) == {
+        f"quant/{metric}/{site}/root.{projection}"
+        for projection in ("expert_gate_up", "expert_down")
+        for site in LINEAR_SITES
+        for metric in METRICS
+    }
+
+
+@fp8_only
+def test_moe_down_projection_sees_the_post_activation_tensor():
+    # The two projections consume different tensors (block input vs post-SwiGLU h),
+    # so their activation range must differ -- this is what a single shared
+    # expert_mm would have collapsed into one overwritten series.
+    torch.manual_seed(0)
+    block = _quantized_moe().cuda().to(torch.bfloat16)
+    collector = QuantMetricCollector()
+    attach_quant_probe(block, collector)
+    collector.enabled = True
+
+    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out, _ = block(x)
+    out.sum().backward()
+
+    got = collector.drain()
+    assert (
+        got["quant/range_ratio/fwd.act/root.expert_gate_up"]
+        != got["quant/range_ratio/fwd.act/root.expert_down"]
+    )
+
+
+@fp8_only
+def test_moe_disabled_collector_records_nothing():
+    block = _quantized_moe().cuda().to(torch.bfloat16)
+    collector = QuantMetricCollector()
+    attach_quant_probe(block, collector)  # enabled stays False
+
+    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out, _ = block(x)
+    out.sum().backward()
+    assert collector.drain() == {}

@@ -17,12 +17,15 @@ from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
 from src.quant.convert import apply_quantization
-from src.quant.metrics import QuantMetricCollector, attach_quant_probe
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
 from src.training.loss import LOSS_REGISTRY, compute_loss, compute_loss_chunked
 from src.utils.config import TrainConfig
-from src.utils.metric_utils import count_correct
+from src.utils.metric_utils import (
+    QuantMetricCollector,
+    attach_quant_probe,
+    count_correct,
+)
 from src.utils.tracking_utils import WandbLogger
 from src.utils.masking_utils import (
     build_causal_attention_mask,

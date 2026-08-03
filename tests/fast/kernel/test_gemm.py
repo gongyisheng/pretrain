@@ -9,7 +9,7 @@ import torch
 from src.kernel import gemm
 from src.kernel.gemm import (
     _grouped_gemm,
-    _grouped_gemm_wgrad,
+    grouped_gemm_wgrad,
     grouped_gemm,
     scaled_gemm,
     scaled_grouped_gemm,
@@ -116,7 +116,7 @@ def test_wgrad_parity_uneven_and_empty():
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     ref = grouped_gemm_wgrad_ref(a, grad_c, offs)
-    got = _grouped_gemm_wgrad(a, grad_c, offs)
+    got = grouped_gemm_wgrad(a, grad_c, offs)
     assert got.shape == (len(counts), K, N)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
@@ -141,7 +141,7 @@ def test_wgrad_parity_config_shapes(K, N):
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16) * 0.1
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     ref = grouped_gemm_wgrad_ref(a, grad_c, offs)
-    got = _grouped_gemm_wgrad(a, grad_c, offs)
+    got = grouped_gemm_wgrad(a, grad_c, offs)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 

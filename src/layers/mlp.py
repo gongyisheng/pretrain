@@ -27,7 +27,7 @@ def grouped_mlp(
             b_in = b_in.to(dt)
         if b_down is not None:
             b_down = b_down.to(dt)
-    h = expert_mm(x, w_in.mT, offs)
+    h = expert_mm(x, w_in.mT, offs, projection="gate_up")
     if b_in is not None:
         h = h + b_in[row_expert_ids]
     if gated:
@@ -35,7 +35,7 @@ def grouped_mlp(
         h = act_fn(gate, up)
     else:
         h = act_fn(h)
-    out = expert_mm(h, w_down.mT, offs)
+    out = expert_mm(h, w_down.mT, offs, projection="down")
     if b_down is not None:
         out = out + b_down[row_expert_ids]
     return out
@@ -384,7 +384,7 @@ class SparseMoEBlock(nn.Module):
 
         self.expert_load = ExpertLoad(n_routed_experts)
 
-        # Pluggable expert GEMM seam (a, b, offs)
+        # Pluggable expert GEMM seam (a, b, offs, projection)
         # quant converter swaps in a quantized callable
         self.expert_mm = grouped_gemm
 

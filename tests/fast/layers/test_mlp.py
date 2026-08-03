@@ -1339,15 +1339,16 @@ def test_moe_expert_mm_seam_is_pluggable():
     # default seam is the plain bf16 grouped_gemm
     assert blk.expert_mm is grouped_gemm
 
-    calls = {"n": 0}
-    real = grouped_gemm
+    seen = []
 
-    def spy(a, b, offs):
-        calls["n"] += 1
-        return real(a, b, offs)
+    def spy(a, b, offs, projection=None):
+        seen.append(projection)
+        return grouped_gemm(a, b, offs)
 
     blk.expert_mm = spy
     x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16)
     out, _ = blk(x)
     assert out.shape == x.shape
-    assert calls["n"] == 2  # gate_up + down
+    # one seam, called once per projection, each tagged so a swapped-in
+    # implementation can tell the block input from the post-activation hidden state
+    assert seen == ["gate_up", "down"]

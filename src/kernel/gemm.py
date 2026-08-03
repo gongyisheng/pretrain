@@ -5,7 +5,7 @@ MoE 2D x 3D case: a (R, K) x per-group b (E, K, N) -> c (R, N), rows expert-sort
 walks the ragged tile space; `offs` is read on-device (no offs.cpu() sync). fp32
 accumulation, bf16 in/out. `_grouped_gemm` is differentiable: dgrad reuses the forward
 kernel (`grad_a = _grouped_gemm(grad_c, b.T, offs)`), wgrad uses the dedicated wgrad
-kernel (`grad_b = _grouped_gemm_wgrad(a, grad_c, offs)`).
+kernel (`grad_b = grouped_gemm_wgrad(a, grad_c, offs)`).
 """
 
 import functools
@@ -229,7 +229,7 @@ def _grouped_gemm_setup_context(ctx, inputs, output):
 def _grouped_gemm_backward(ctx, grad_c):
     a, b, offs = ctx.saved_tensors
     grad_a = _grouped_gemm(grad_c, b.transpose(-2, -1), offs)  # dgrad reuses forward
-    grad_b = _grouped_gemm_wgrad(a, grad_c, offs)  # wgrad
+    grad_b = grouped_gemm_wgrad(a, grad_c, offs)  # wgrad
     return grad_a, grad_b, None
 
 
@@ -239,7 +239,7 @@ _grouped_gemm.register_autograd(
 
 
 @triton_op("jit_kernel::grouped_gemm_wgrad", mutates_args={})
-def _grouped_gemm_wgrad(
+def grouped_gemm_wgrad(
     a: torch.Tensor, grad_c: torch.Tensor, offs: torch.Tensor
 ) -> torch.Tensor:
     """Weight gradient of _grouped_gemm: grad_b[g] = a[g].T @ grad_c[g], shape (E,K,N)."""
@@ -272,7 +272,7 @@ def _grouped_gemm_wgrad(
 
 
 def grouped_gemm(
-    a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor, impl: str = "auto"
+    a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor, impl: str = "auto", **_
 ) -> torch.Tensor:
 
     if impl not in ("auto", "triton", "torch"):
