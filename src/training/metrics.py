@@ -271,6 +271,7 @@ class MetricsCollector:
                     d[f"weight/{metric}/{name}"] = val
 
         d.update(self.quantization_collector.to_metrics_dict())
+        self.quantization_collector.enabled = False
 
         self.logger.log(d, step=step)
 
