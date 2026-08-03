@@ -80,6 +80,24 @@ def quantize_operand(
     return xq, scale
 
 
+def dequantize_operand(xq, scale, contract_dim, granularity, block_size):
+    """float32 `xq * scale` with contract_dim restored — inverse of `quantize_operand`.
+
+    `granularity`/`block_size` must be the values `quantize_operand` used. The block
+    size cannot be recovered from nkb/K, which is ambiguous whenever the last block
+    is partial (e.g. K=100, block_size=32 -> nkb=4 but ceil(100/4)=25 != 32).
+    """
+    qf = xq.movedim(contract_dim, -1).float()  # (..., K)
+    K = qf.shape[-1]
+    sf = scale.movedim(contract_dim, -1).float()  # (..., nkb)
+    nkb = sf.shape[-1]
+    bs = effective_block_size(granularity, block_size, K)
+    pad = nkb * bs - K
+    qp = F.pad(qf, (0, pad)) if pad else qf
+    deq = (qp.reshape(*qp.shape[:-1], nkb, bs) * sf.unsqueeze(-1)).flatten(-2)[..., :K]
+    return deq.movedim(-1, contract_dim).contiguous()
+
+
 def operand_quotient(
     x, contract_dim, granularity, block_size, fmt, *, scale_dtype=None
 ):
@@ -140,15 +158,5 @@ def fake_quantize_operand(
     xq, scale = quantize_operand(
         x, contract_dim, granularity, block_size, fmt, scale_dtype=scale_dtype
     )
-    qf = xq.movedim(contract_dim, -1).float()  # (..., K)
-    K = qf.shape[-1]
-    sf = scale.movedim(contract_dim, -1).float()  # (..., nkb)
-    nkb = sf.shape[-1]
-    # Recompute the exact block size quantize_operand used (not reverse-
-    # engineered from nkb/K, which is ambiguous whenever the last block is
-    # partial, e.g. K=100, block_size=32 -> nkb=4 but ceil(100/4)=25 != 32).
-    bs = effective_block_size(granularity, block_size, K)
-    pad = nkb * bs - K
-    qp = F.pad(qf, (0, pad)) if pad else qf
-    deq = (qp.reshape(*qp.shape[:-1], nkb, bs) * sf.unsqueeze(-1)).flatten(-2)[..., :K]
-    return deq.movedim(-1, contract_dim).to(x.dtype).contiguous()
+    xdeq = dequantize_operand(xq, scale, contract_dim, granularity, block_size)
+    return xdeq.to(x.dtype)

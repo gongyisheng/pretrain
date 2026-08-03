@@ -4,6 +4,7 @@ import torch
 from src.quant.constants import _INT8_FORMATS
 from src.quant.quantize import (
     quantize_operand,
+    dequantize_operand,
     fake_quantize_operand,
     effective_block_size,
 )
@@ -195,3 +196,37 @@ def test_fake_quant_partial_block_matches_manual_dequant_operand_b():
     fq = fake_quantize_operand(x, 0, "blockwise", 32, **_fp8_kw())
     manual = _manual_dequant(x, 0, 32, **_fp8_kw()).to(x.dtype)
     assert torch.allclose(fq, manual, atol=1e-6, rtol=1e-5)
+
+
+# --- dequantize_operand ---
+
+
+@pytest.mark.parametrize("contract_dim", [-1, 0])
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
+)
+def test_dequantize_operand_matches_fake_quant(gran, bs, contract_dim):
+    torch.manual_seed(0)
+    x = torch.randn(64, 96)
+    xq, s = quantize_operand(x, contract_dim, gran, bs, **_fp8_kw())
+    deq = dequantize_operand(xq, s, contract_dim, gran, bs)
+    assert torch.equal(
+        deq, fake_quantize_operand(x, contract_dim, gran, bs, **_fp8_kw())
+    )
+    assert deq.shape == x.shape and deq.is_contiguous()
+
+
+def test_dequantize_operand_returns_float32_from_bf16():
+    # metrics compare in fp32 regardless of the operand's compute dtype
+    x = torch.randn(32, 64, dtype=torch.bfloat16)
+    xq, s = quantize_operand(x, -1, "rowwise", 0, **_fp8_kw())
+    assert dequantize_operand(xq, s, -1, "rowwise", 0).dtype == torch.float32
+
+
+def test_dequantize_operand_partial_block_uses_given_block_size():
+    # K=100, bs=32 -> nkb=4; an inferred ceil(100/4)=25 would diverge.
+    torch.manual_seed(0)
+    x = torch.randn(4, 100)
+    xq, s = quantize_operand(x, -1, "blockwise", 32, **_fp8_kw())
+    deq = dequantize_operand(xq, s, -1, "blockwise", 32)
+    assert torch.allclose(deq, _manual_dequant(x, -1, 32, **_fp8_kw()), atol=1e-6)
