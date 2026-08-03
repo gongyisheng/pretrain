@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 import torch.nn.functional as F
 
@@ -98,51 +100,30 @@ def dequantize_operand(xq, scale, contract_dim, granularity, block_size):
     return deq.movedim(-1, contract_dim).contiguous()
 
 
-def operand_quotient(
-    x, contract_dim, granularity, block_size, fmt, *, scale_dtype=None
-):
-    """Diagnostic-only: return (q_abs, deq, xf) as float32 for metric probes.
+class QuantizationSnapshot(NamedTuple):
+    """What one GEMM operand was quantized to, recorded for metrics.
 
-    q_abs = |xf / scale| BEFORE clamp/round; deq = dequant(quant(xf));
-    xf = float32 view of x (contract_dim restored). Shares the exact scale
-    path as quantize_operand — do NOT reimplement scale math here.
+    Holds references to live tensors, not copies — read it during the GEMM that
+    produced it, not later. Carrying the layout alongside the data is what lets
+    `dequantize` be called without re-supplying (and possibly transposing) the
+    contraction axis.
     """
-    xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
-    K = xf.shape[-1]
-    qmax = str_to_qmax(fmt)
 
-    if granularity == "tensorwise":
-        amax = xf.abs().amax()
-        scale = _amax_to_scale(amax, fmt, scale_dtype)
-        q = xf / scale
-        q_clamped = torch.round(q) if is_int8s(fmt) else q
-        # cast through the store dtype so fp8 mantissa rounding matches
-        # quantize_operand exactly (clamp alone does not reproduce it)
-        q_store = q_clamped.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
-        deq = q_store.float() * scale
-        return (
-            q.abs().movedim(-1, contract_dim).contiguous(),
-            deq.movedim(-1, contract_dim).contiguous(),
-            xf.movedim(-1, contract_dim).contiguous(),
+    source_tensor: torch.Tensor  # pre-quantization, in the compute dtype
+    quantized_tensor: torch.Tensor  # low-precision codes
+    scale: torch.Tensor  # fp32 dequant scale
+    contract_dim: int
+    granularity: str
+    block_size: int
+
+    def dequantize(self):
+        return dequantize_operand(
+            self.quantized_tensor,
+            self.scale,
+            self.contract_dim,
+            self.granularity,
+            self.block_size,
         )
-
-    bs = effective_block_size(granularity, block_size, K)
-    nkb = (K + bs - 1) // bs
-    pad = nkb * bs - K
-    xp = F.pad(xf, (0, pad)) if pad else xf
-    xb = xp.reshape(*xp.shape[:-1], nkb, bs)
-    amax = xb.abs().amax(dim=-1)
-    scale = _amax_to_scale(amax, fmt, scale_dtype)
-    q = xb / scale.unsqueeze(-1)
-    q_clamped = torch.round(q) if is_int8s(fmt) else q
-    q_store = q_clamped.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
-    deq = (q_store.float() * scale.unsqueeze(-1)).flatten(-2)[..., :K]
-    q_abs = q.abs().flatten(-2)[..., :K]
-    return (
-        q_abs.movedim(-1, contract_dim).contiguous(),
-        deq.movedim(-1, contract_dim).contiguous(),
-        xf.movedim(-1, contract_dim).contiguous(),
-    )
 
 
 def fake_quantize_operand(

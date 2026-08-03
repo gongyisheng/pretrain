@@ -4,137 +4,81 @@ import torch
 
 from src.quant.constants import EPS
 from src.quant.linear import QuantizedLinear
-from src.quant.moe import QuantizedSparseMoEBlock
-from src.quant.quantize import operand_quotient
-from src.quant.utils import is_quantized, str_to_min_subnormal, str_to_qmax
 
 
-def compute_operand_metrics(
-    x, fmt, granularity, block_size, contract_dim, *, scale_dtype=None
-):
-    """Per-tensor quant health metrics, or None for a passthrough fmt.
+def compare_quantized(source_tensor, dequantized_tensor):
+    """Quant health of an operand against its dequantized round-trip.
 
-    Returns 0-dim float32 tensors on x.device: underflow_rate, clip_rate,
-    range_ratio, sqnr. No host sync (no .item()).
+    `dequantized_tensor` is what the GEMM actually consumed, so nothing here
+    re-derives a scale. Returns 0-dim float32 tensors on the source's device:
+    sqnr (dB), flush_to_zero_rate, range_ratio. No host sync (no .item()).
     """
-    if not is_quantized(fmt):
-        return None
-
-    q_abs, deq, xf = operand_quotient(
-        x, contract_dim, granularity, block_size, fmt, scale_dtype=scale_dtype
-    )
-    qmax = str_to_qmax(fmt)
-    min_sub = str_to_min_subnormal(fmt)
-
-    nonzero = q_abs > 0
-    total = xf.numel()
-    underflow = (nonzero & (q_abs < min_sub)).sum().float() / total
-    clip = (q_abs > qmax).sum().float() / total
-
-    absxf = xf.abs()
-    amax = absxf.amax()
-    median = absxf.median().clamp_min(EPS)
-    range_ratio = amax / median
-
-    err = (xf - deq).norm()
-    sig = xf.norm().clamp_min(EPS)
-    sqnr = 20.0 * torch.log10((sig / err.clamp_min(EPS)))
-
+    source = source_tensor.float()
+    dequantized = dequantized_tensor.float()
+    magnitude = source.abs()
+    error = (source - dequantized).norm().clamp_min(EPS)
     return {
-        "underflow_rate": underflow,
-        "clip_rate": clip,
-        "range_ratio": range_ratio,
-        "sqnr": sqnr,
+        "sqnr": 20.0 * torch.log10(source.norm().clamp_min(EPS) / error),
+        "flush_to_zero_rate": ((source != 0) & (dequantized == 0)).sum().float()
+        / source.numel(),
+        "range_ratio": magnitude.amax() / magnitude.median().clamp_min(EPS),
     }
 
 
 class QuantMetricCollector:
-    """Accumulates per-(layer, operand, metric) 0-dim tensors across a step's hooks.
+    """Accumulates per-(module, site, metric) 0-dim tensors across a step's GEMMs.
 
-    No host sync in `record`; `drain` performs the single `.tolist()` sync.
+    No host sync in `record`; `drain` performs the single `.tolist()` sync. Under
+    gradient accumulation every micro-step writes the same keys, so a drained value
+    is the last micro-batch's, not an average over the accumulation window.
     """
 
     def __init__(self):
         self.enabled = False
-        self._store = {}  # (layer_id, operand, metric) -> 0-dim tensor
+        self._store = {}  # (module_name, site, metric) -> 0-dim tensor
 
-    def record(self, layer_id, operand, metrics):
-        if metrics is None:
-            return
-        for name, val in metrics.items():
-            self._store[(layer_id, operand, name)] = val
+    def record(self, module_name, site, snapshot):
+        metrics = compare_quantized(snapshot.source_tensor, snapshot.dequantize())
+        for name, value in metrics.items():
+            self._store[(module_name, site, name)] = value
 
     def drain(self):
         if not self._store:
             return {}
         keys = list(self._store.keys())
-        vals = torch.stack([self._store[k] for k in keys]).tolist()  # one sync
+        values = torch.stack([self._store[k] for k in keys]).tolist()  # one sync
         self._store = {}
         return {
-            f"quant/{metric}/{operand}/layer_{layer_id}": v
-            for (layer_id, operand, metric), v in zip(keys, vals)
+            f"quant/{metric}/{site}/{module_name}": value
+            for (module_name, site, metric), value in zip(keys, values)
         }
 
 
-def _record_operand(collector, module, tensor, operand, fmt_key):
-    cfg = module.quantization_config
-    fmt = cfg.dtype[fmt_key]
-    m = compute_operand_metrics(
-        tensor,
-        fmt,
-        cfg.scaling.get("granularity", "tensorwise"),
-        cfg.scaling.get("block_size", 0),
-        -1,
-        scale_dtype=cfg.scaling.get("scale_dtype"),
-    )
-    collector.record(module.layer_id, operand, m)
+class QuantProbe:
+    """Recorder bound to one module's quantized GEMM sites.
+
+    Keyed on the module's full name, so every projection reports separately —
+    `blocks.3.mlp.down_proj` (whose activation is the post-activation hidden state)
+    does not collide with `blocks.3.mlp.gate_up_proj`.
+    """
+
+    __slots__ = ("collector", "module_name")
+
+    def __init__(self, collector, module_name):
+        self.collector = collector
+        self.module_name = module_name
+
+    @property
+    def enabled(self):
+        return self.collector.enabled
+
+    def record(self, site, snapshot):
+        if snapshot is not None:  # None when that operand's format is passthrough
+            self.collector.record(self.module_name, site, snapshot)
 
 
-def _make_hooks(collector):
-    def fwd(module, inputs, output):
-        if not collector.enabled:
-            return
-        _record_operand(collector, module, module.weight, "weight", "weight")
-        _record_operand(collector, module, inputs[0], "act", "act")
-
-    def bwd(module, grad_input, grad_output):
-        if not collector.enabled:
-            return
-        g = grad_output[0]
-        _record_operand(collector, module, g, "grad_input", "grad_input")
-        _record_operand(collector, module, g, "grad_weight", "grad_weight")
-
-    return fwd, bwd
-
-
-def _make_moe_hooks(collector):
-    def fwd(module, inputs, output):
-        if not collector.enabled:
-            return
-        # MoE act/grad are pre-router (approximation); weight is faithful.
-        weight = module.expert_gate_up if module.gated else module.expert_up
-        _record_operand(collector, module, weight, "weight", "weight")
-        _record_operand(collector, module, inputs[0], "act", "act")
-
-    def bwd(module, grad_input, grad_output):
-        if not collector.enabled:
-            return
-        g = grad_output[0]
-        _record_operand(collector, module, g, "grad_input", "grad_input")
-        _record_operand(collector, module, g, "grad_weight", "grad_weight")
-
-    return fwd, bwd
-
-
-def register_quant_metric_hooks(model, collector):
-    handles = []
-    for module in model.modules():
-        if isinstance(module, QuantizedLinear) and hasattr(module, "layer_id"):
-            fwd, bwd = _make_hooks(collector)
-            handles.append(module.register_forward_hook(fwd))
-            handles.append(module.register_full_backward_hook(bwd))
-        elif isinstance(module, QuantizedSparseMoEBlock):
-            fwd, bwd = _make_moe_hooks(collector)
-            handles.append(module.register_forward_hook(fwd))
-            handles.append(module.register_full_backward_hook(bwd))
-    return handles
+def attach_quant_probe(model, collector):
+    """Give every quantized module a probe keyed on its full name in `model`."""
+    for name, module in model.named_modules():
+        if isinstance(module, QuantizedLinear):
+            module.quantization_probe = QuantProbe(collector, name or "root")

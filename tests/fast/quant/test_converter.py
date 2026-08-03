@@ -242,8 +242,10 @@ def test_int8s_apply_quantization_swaps(fmt):
 
 
 @fp8_only
-def test_apply_quantization_sets_layer_id():
+def test_apply_quantization_leaves_probe_unset():
+    # Metric probes are attached separately (attach_quant_probe), so conversion
+    # alone must not wire one up — an unattached model records nothing.
     m = _Tiny().cuda().to(torch.bfloat16)
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
     qls = [mod for mod in m.modules() if isinstance(mod, QuantizedLinear)]
-    assert qls and all(isinstance(mod.layer_id, str) for mod in qls)
+    assert qls and all(mod.quantization_probe is None for mod in qls)

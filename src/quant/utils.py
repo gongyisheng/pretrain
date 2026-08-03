@@ -10,7 +10,6 @@ from src.quant.constants import (
     _INT8_FORMATS,
     _STR_TO_DTYPE,
     _STR_TO_EMAX,
-    _STR_TO_MIN_SUBNORMAL,
     _STR_TO_QMAX,
 )
 from src.utils.config import QuantConfig
@@ -30,10 +29,6 @@ def str_to_qmax(fmt: str) -> float:
 
 def str_to_emax(fmt: str) -> int:
     return _STR_TO_EMAX[fmt]
-
-
-def str_to_min_subnormal(fmt: str) -> float:
-    return _STR_TO_MIN_SUBNORMAL[fmt]
 
 
 def is_fp8(fmt: str) -> bool:

@@ -158,16 +158,17 @@ int_gpu = pytest.mark.skipif(
 
 def test_gemm_passthrough_is_plain_matmul():
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    assert torch.allclose(
-        _quant_gemm(a, b, "bf16", "bf16", torch.float32, {}), a @ b, atol=1e-4
-    )
+    out, a_snap, b_snap = _quant_gemm(a, b, "bf16", "bf16", torch.float32, {})
+    assert torch.allclose(out, a @ b, atol=1e-4)
+    assert a_snap is None and b_snap is None  # nothing was quantized
 
 
 @pytest.mark.parametrize("fmt", _INT8_FORMATS)
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
-    out = _quant_gemm(a, b, fmt, "bf16", torch.float32, {})
+    out, a_snap, b_snap = _quant_gemm(a, b, fmt, "bf16", torch.float32, {})
     assert out.shape == (20, 40) and torch.isfinite(out).all()
+    assert a_snap is not None and b_snap is None  # only a is a quantized format
 
 
 @int_gpu
@@ -176,7 +177,7 @@ def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")
     b = torch.randn(128, 96, device="cuda")
-    out = _quant_gemm(a, b, fmt, fmt, torch.float32, {"granularity": "rowwise"})
+    out, _, _ = _quant_gemm(a, b, fmt, fmt, torch.float32, {"granularity": "rowwise"})
     ref = (
         fake_quantize_operand(a, -1, "rowwise", 0, fmt).float()
         @ fake_quantize_operand(b, 0, "rowwise", 0, fmt).float()

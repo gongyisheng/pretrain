@@ -1,16 +1,19 @@
 import torch
 import torch.nn as nn
 import pytest
-from src.quant.utils import str_to_min_subnormal, str_to_qmax
-from src.quant.quantize import operand_quotient, fake_quantize_operand
+
+from src.quant.quantize import (
+    QuantizationSnapshot,
+    quantize_operand,
+    fake_quantize_operand,
+)
 from src.quant.metrics import (
-    compute_operand_metrics,
+    compare_quantized,
     QuantMetricCollector,
-    register_quant_metric_hooks,
+    QuantProbe,
+    attach_quant_probe,
 )
 from src.quant.linear import QuantizedLinear
-from src.quant.moe import QuantizedSparseMoEBlock
-from src.layers.mlp import SparseMoEBlock
 from src.utils.config import QuantConfig
 
 
@@ -22,167 +25,232 @@ def _fp8_capable():
 
 fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
 
-
-def test_min_subnormal_values():
-    assert str_to_min_subnormal("fp8_e4m3") == 2**-9
-    assert str_to_min_subnormal("fp8_e5m2") == 2**-16
-    assert str_to_min_subnormal("int8") == 0.5
-    assert str_to_min_subnormal("int4") == 0.5
-
-
-def test_min_subnormal_rejects_e8m0():
-    with pytest.raises(KeyError):
-        str_to_min_subnormal("fp8_e8m0")
+LINEAR_SITES = (
+    "fwd.act",
+    "fwd.weight",
+    "dgrad.grad",
+    "dgrad.weight",
+    "wgrad.grad",
+    "wgrad.act",
+)
+METRICS = ("sqnr", "flush_to_zero_rate", "range_ratio")
 
 
-@pytest.mark.parametrize("fmt", ["fp8_e4m3", "fp8_e5m2"])
-def test_operand_quotient_dequant_matches_fake_quant(fmt):
-    torch.manual_seed(0)
-    x = torch.randn(64, 128) * 3.0
-    q_abs, deq, xf = operand_quotient(x, -1, "tensorwise", 0, fmt)
-    ref = fake_quantize_operand(x, -1, "tensorwise", 0, fmt).float()
-    assert torch.allclose(deq, ref, atol=0, rtol=0)
-    # amax element maps to exactly qmax under amax scaling
-    assert q_abs.max().item() == pytest.approx(str_to_qmax(fmt), rel=1e-4)
-    assert xf.shape == x.shape and deq.shape == x.shape
+# --- compare_quantized: a pure function of (source, dequantized) ---
 
 
-def test_operand_quotient_rowwise_matches_fake_quant():
-    torch.manual_seed(1)
-    x = torch.randn(32, 96)
-    _, deq, _ = operand_quotient(x, -1, "rowwise", 0, "fp8_e4m3")
-    ref = fake_quantize_operand(x, -1, "rowwise", 0, "fp8_e4m3").float()
-    assert torch.allclose(deq, ref, atol=1e-6)
+def test_identical_tensors_have_infinite_sqnr_and_no_loss():
+    x = torch.randn(16, 32)
+    m = compare_quantized(x, x)
+    assert m["sqnr"].item() > 200.0  # error clamped to EPS, not zero
+    assert m["flush_to_zero_rate"].item() == 0.0
 
 
-def test_metrics_passthrough_returns_none():
-    x = torch.randn(8, 8)
-    assert compute_operand_metrics(x, "bf16", "tensorwise", 0, -1) is None
+def test_flush_to_zero_counts_nonzero_source_mapped_to_zero():
+    x = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    deq = torch.tensor([[1.0, 0.0, 0.0, 4.0]])
+    assert compare_quantized(x, deq)["flush_to_zero_rate"].item() == 0.5
 
 
-def test_metrics_underflow_on_outlier_inflated_scale():
-    # one huge outlier inflates tensorwise scale so the small bulk underflows.
-    x = torch.zeros(1, 256)
-    x[0, 0] = 1000.0  # outlier
-    x[0, 1:] = 1e-3  # bulk, well below (1000/448)*2^-9 for e4m3
-    m = compute_operand_metrics(x, "fp8_e4m3", "tensorwise", 0, -1)
-    assert m["underflow_rate"].item() > 0.9  # nearly all bulk flushed
-    assert m["range_ratio"].item() > 100.0  # amax/median huge
+def test_flush_to_zero_ignores_zeros_already_in_the_source():
+    x = torch.tensor([[0.0, 0.0, 1.0, 2.0]])
+    deq = torch.tensor([[0.0, 0.0, 1.0, 2.0]])
+    assert compare_quantized(x, deq)["flush_to_zero_rate"].item() == 0.0
 
 
-def test_metrics_clip_zero_under_amax_scaling():
-    torch.manual_seed(0)
-    x = torch.randn(32, 64)
-    m = compute_operand_metrics(x, "fp8_e4m3", "tensorwise", 0, -1)
-    # amax maps exactly to qmax; nothing strictly exceeds it.
-    assert m["clip_rate"].item() == 0.0
+def test_sqnr_matches_hand_computed_ratio():
+    x = torch.tensor([[3.0, 4.0]])  # norm 5
+    deq = torch.tensor([[3.0, 3.0]])  # error norm 1
+    expected = 20.0 * torch.log10(torch.tensor(5.0))
+    assert compare_quantized(x, deq)["sqnr"].item() == pytest.approx(
+        expected.item(), rel=1e-5
+    )
 
 
-def test_metrics_sqnr_finite_and_positive_for_smooth_tensor():
+def test_range_ratio_is_amax_over_median():
+    x = torch.tensor([[1.0, 1.0, 1.0, 100.0]])
+    assert compare_quantized(x, x)["range_ratio"].item() == pytest.approx(100.0)
+
+
+def test_metrics_are_zero_dim_float32_and_device_local():
+    x = torch.randn(8, 8, dtype=torch.bfloat16)
+    m = compare_quantized(x, x)
+    assert set(m) == set(METRICS)
+    for value in m.values():
+        assert value.ndim == 0 and value.dtype == torch.float32
+
+
+@pytest.mark.parametrize("fmt", ["fp8_e4m3", "fp8_e5m2", "int8"])
+def test_sqnr_positive_and_finite_over_a_real_round_trip(fmt):
     torch.manual_seed(0)
     x = torch.randn(64, 64)
-    m = compute_operand_metrics(x, "fp8_e4m3", "tensorwise", 0, -1)
-    assert torch.isfinite(m["sqnr"]).all()
-    assert m["sqnr"].item() > 10.0  # e4m3 on N(0,1) is well above 10 dB
+    deq = fake_quantize_operand(x, -1, "tensorwise", 0, fmt)
+    m = compare_quantized(x, deq)
+    assert torch.isfinite(m["sqnr"]) and m["sqnr"].item() > 10.0
 
 
-def test_metrics_all_zero_dim_float32():
-    x = torch.randn(8, 8)
-    m = compute_operand_metrics(x, "fp8_e5m2", "tensorwise", 0, -1)
-    for k in ("underflow_rate", "clip_rate", "range_ratio", "sqnr"):
-        assert m[k].ndim == 0 and m[k].dtype == torch.float32
+def test_outlier_inflated_scale_shows_up_as_flush_to_zero():
+    # One huge outlier inflates the tensorwise scale so the small bulk underflows.
+    x = torch.zeros(1, 256)
+    x[0, 0] = 1000.0
+    x[0, 1:] = 1e-3  # well below (1000/448) * 2^-9 for e4m3
+    m = compare_quantized(x, fake_quantize_operand(x, -1, "tensorwise", 0, "fp8_e4m3"))
+    assert m["flush_to_zero_rate"].item() > 0.9
+    assert m["range_ratio"].item() > 100.0
 
 
-def _qlinear(fmt_overrides=None):
-    cfg = QuantConfig(enabled=True, dtype={"recipe": "fp8", **(fmt_overrides or {})})
-    lin = nn.Linear(64, 32, bias=False)
-    q = QuantizedLinear.from_module(lin, cfg)
-    q.layer_id = "3"
-    return q
+# --- QuantizationSnapshot ---
 
 
-@fp8_only
-def test_collector_records_and_drains_all_operands():
+@pytest.mark.parametrize("contract_dim", [-1, 0])
+@pytest.mark.parametrize(
+    "granularity,block_size", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
+)
+def test_snapshot_dequantize_matches_fake_quant(granularity, block_size, contract_dim):
     torch.manual_seed(0)
-    q = _qlinear().cuda().to(torch.bfloat16)
-    coll = QuantMetricCollector()
-    coll.enabled = True
-    handles = register_quant_metric_hooks(q, coll)
-    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    q(x).square().mean().backward()
-    out = coll.drain()
-    for operand in ("weight", "act", "grad_input", "grad_weight"):
-        assert f"quant/underflow_rate/{operand}/layer_3" in out
-        assert f"quant/sqnr/{operand}/layer_3" in out
-    assert coll.drain() == {}  # cleared after drain
-    for h in handles:
-        h.remove()
+    x = torch.randn(64, 96)
+    q, scale = quantize_operand(x, contract_dim, granularity, block_size, "fp8_e4m3")
+    snap = QuantizationSnapshot(x, q, scale, contract_dim, granularity, block_size)
+    ref = fake_quantize_operand(x, contract_dim, granularity, block_size, "fp8_e4m3")
+    assert torch.equal(snap.dequantize(), ref)
+    assert snap.source_tensor is x
 
 
-@fp8_only
-def test_collector_disabled_records_nothing():
-    q = _qlinear().cuda().to(torch.bfloat16)
-    coll = QuantMetricCollector()
-    coll.enabled = False
-    register_quant_metric_hooks(q, coll)
-    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    q(x).square().mean().backward()
-    assert coll.drain() == {}
+# --- collector ---
 
 
-@fp8_only
-def test_collector_passthrough_grad_absent():
-    # grad_weight forced to bf16 -> no grad_weight series, others present.
-    q = _qlinear({"grad_weight": "bf16"}).cuda().to(torch.bfloat16)
-    coll = QuantMetricCollector()
-    coll.enabled = True
-    register_quant_metric_hooks(q, coll)
-    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    q(x).square().mean().backward()
-    out = coll.drain()
-    assert not any("grad_weight" in k for k in out)
-    assert any("grad_input" in k for k in out)
+def _snapshot(x, fmt="fp8_e4m3"):
+    q, scale = quantize_operand(x, -1, "tensorwise", 0, fmt)
+    return QuantizationSnapshot(x, q, scale, -1, "tensorwise", 0)
 
 
-def _moe_block():
+def test_collector_keys_are_metric_site_module():
+    collector = QuantMetricCollector()
+    collector.record("blocks.3.mlp.down_proj", "fwd.act", _snapshot(torch.randn(8, 8)))
+    out = collector.drain()
+    assert set(out) == {
+        f"quant/{metric}/fwd.act/blocks.3.mlp.down_proj" for metric in METRICS
+    }
+    assert all(isinstance(v, float) for v in out.values())
+
+
+def test_drain_clears_the_store():
+    collector = QuantMetricCollector()
+    collector.record("m", "fwd.act", _snapshot(torch.randn(8, 8)))
+    assert collector.drain()
+    assert collector.drain() == {}
+
+
+def test_probe_skips_passthrough_operands():
+    collector = QuantMetricCollector()
+    QuantProbe(collector, "m").record("fwd.act", None)
+    assert collector.drain() == {}
+
+
+def test_probe_respects_collector_enabled_flag():
+    collector = QuantMetricCollector()
+    probe = QuantProbe(collector, "m")
+    assert probe.enabled is False
+    collector.enabled = True
+    assert probe.enabled is True
+
+
+# --- end-to-end through QuantizedLinear ---
+
+
+def _quantized_mlp(fmt_overrides=None, scaling=None):
     cfg = QuantConfig(
-        enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "tensorwise"}
+        enabled=True,
+        dtype={"recipe": "fp8", **(fmt_overrides or {})},
+        scaling=scaling or {},
     )
-    block = SparseMoEBlock(
-        d_model=32,
-        intermediate_size=48,
-        n_routed_experts=4,
-        n_routed_experts_per_token=2,
-    )
-    return QuantizedSparseMoEBlock.from_module(block, cfg, "5")
+    mlp = nn.Sequential()
+    mlp.add_module("down_proj", nn.Linear(64, 32, bias=False))
+    mlp.down_proj = QuantizedLinear.from_module(mlp.down_proj, cfg)
+    return mlp
 
 
 @fp8_only
-def test_collector_records_moe_block():
-    # BS = 4 * 16 = 64 tokens, comfortably >= 32 per the fused fp8 wgrad
-    # GEMM's contraction-dim floor.
+def test_attach_names_probes_by_module_path():
+    model = _quantized_mlp()
+    collector = QuantMetricCollector()
+    attach_quant_probe(model, collector)
+    assert model.down_proj.quantization_probe.module_name == "down_proj"
+
+
+@fp8_only
+def test_forward_backward_records_every_site():
     torch.manual_seed(0)
-    block = _moe_block().cuda().to(torch.bfloat16)
-    coll = QuantMetricCollector()
-    coll.enabled = True
-    handles = register_quant_metric_hooks(block, coll)
-    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    out, _ = block(x)
-    out.sum().backward()
-    out_metrics = coll.drain()
-    assert "quant/underflow_rate/weight/layer_5" in out_metrics
-    assert "quant/underflow_rate/act/layer_5" in out_metrics
-    for h in handles:
-        h.remove()
+    model = _quantized_mlp().cuda().to(torch.bfloat16)
+    collector = QuantMetricCollector()
+    attach_quant_probe(model, collector)
+    collector.enabled = True
+
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    model(x).square().mean().backward()
+
+    out = collector.drain()
+    assert set(out) == {
+        f"quant/{metric}/{site}/down_proj"
+        for site in LINEAR_SITES
+        for metric in METRICS
+    }
 
 
 @fp8_only
-def test_collector_disabled_records_nothing_moe():
-    block = _moe_block().cuda().to(torch.bfloat16)
-    coll = QuantMetricCollector()
-    coll.enabled = False
-    register_quant_metric_hooks(block, coll)
-    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    out, _ = block(x)
-    out.sum().backward()
-    assert coll.drain() == {}
+def test_weight_sites_differ_under_rowwise():
+    # The weight contracts over K in fwd and over N in dgrad, so under rowwise the
+    # two are quantized with different scale partitions and report different sqnr.
+    # (Under tensorwise a single whole-tensor amax makes the axis irrelevant.)
+    torch.manual_seed(0)
+    model = _quantized_mlp(scaling={"granularity": "rowwise"}).cuda().to(torch.bfloat16)
+    collector = QuantMetricCollector()
+    attach_quant_probe(model, collector)
+    collector.enabled = True
+
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    model(x).square().mean().backward()
+
+    out = collector.drain()
+    assert (
+        out["quant/sqnr/fwd.weight/down_proj"]
+        != out["quant/sqnr/dgrad.weight/down_proj"]
+    )
+
+
+@fp8_only
+def test_disabled_collector_records_nothing():
+    model = _quantized_mlp().cuda().to(torch.bfloat16)
+    collector = QuantMetricCollector()
+    attach_quant_probe(model, collector)  # enabled stays False
+
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    model(x).square().mean().backward()
+    assert collector.drain() == {}
+
+
+@fp8_only
+def test_unattached_model_records_nothing():
+    model = _quantized_mlp().cuda().to(torch.bfloat16)
+    collector = QuantMetricCollector()
+    collector.enabled = True  # no attach_quant_probe call
+
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    model(x).square().mean().backward()
+    assert collector.drain() == {}
+
+
+@fp8_only
+def test_passthrough_operand_has_no_series():
+    # grad_weight in bf16 -> the wgrad.grad operand is never quantized.
+    model = _quantized_mlp({"grad_weight": "bf16"}).cuda().to(torch.bfloat16)
+    collector = QuantMetricCollector()
+    attach_quant_probe(model, collector)
+    collector.enabled = True
+
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    model(x).square().mean().backward()
+
+    out = collector.drain()
+    assert not any("wgrad.grad" in key for key in out)
+    assert any("dgrad.grad" in key for key in out)

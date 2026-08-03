@@ -11,8 +11,8 @@ from src.quant.utils import (
     is_quantized,
 )
 from src.quant.quantize import (
+    QuantizationSnapshot,
     quantize_operand,
-    fake_quantize_operand,
     effective_block_size,
 )
 from src.kernel.gemm import scaled_gemm
@@ -35,21 +35,31 @@ def _quant_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
         bq, sb = quantize_operand(
             b, 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
         )
-        return scaled_gemm(aq, bq, sa, sb, out_dtype, ebs)
+        return (
+            scaled_gemm(aq, bq, sa, sb, out_dtype, ebs),
+            QuantizationSnapshot(a, aq, sa, -1, granularity, block_size),
+            QuantizationSnapshot(b, bq, sb, 0, granularity, block_size),
+        )
+
+    a_snap = b_snap = None
     if is_quantized(a_fmt):
-        a = fake_quantize_operand(
+        aq, sa = quantize_operand(
             a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
         )
+        a_snap = QuantizationSnapshot(a, aq, sa, -1, granularity, block_size)
+        a = a_snap.dequantize().to(a.dtype)
     if is_quantized(b_fmt):
-        b = fake_quantize_operand(
+        bq, sb = quantize_operand(
             b, 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
         )
-    return (a @ b).to(out_dtype)
+        b_snap = QuantizationSnapshot(b, bq, sb, 0, granularity, block_size)
+        b = b_snap.dequantize().to(b.dtype)
+    return (a @ b).to(out_dtype), a_snap, b_snap
 
 
 class QuantizedLinearFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, bias, cfg: QuantConfig):
+    def forward(ctx, x, weight, bias, cfg: QuantConfig, probe=None):
         # Compute in the active autocast dtype if any, else x's dtype.
         device_type = x.device.type
         if torch.is_autocast_enabled(device_type):
@@ -59,7 +69,7 @@ class QuantizedLinearFn(torch.autograd.Function):
 
         x2d = x.reshape(-1, x.shape[-1]).to(compute_dtype)
         w = weight.to(compute_dtype)
-        y = _quant_gemm(
+        y, act_snap, weight_snap = _quant_gemm(
             x2d,
             w.t(),
             cfg.dtype["act"],
@@ -67,11 +77,15 @@ class QuantizedLinearFn(torch.autograd.Function):
             compute_dtype,
             cfg.scaling,
         )
+        if probe is not None and probe.enabled:
+            probe.record("fwd.act", act_snap)
+            probe.record("fwd.weight", weight_snap)
         if bias is not None:
             y = y + bias.to(compute_dtype)
 
         ctx.save_for_backward(x2d, w)
         ctx.cfg = cfg
+        ctx.probe = probe
         ctx.has_bias = bias is not None
         ctx.x_shape = x.shape
         ctx.x_dtype = x.dtype
@@ -86,7 +100,7 @@ class QuantizedLinearFn(torch.autograd.Function):
         g = grad_out.reshape(-1, grad_out.shape[-1]).to(compute_dtype)  # (M, N)
 
         # dX = g @ W, (M,N)@(N,K) -> (M,K)
-        dx = _quant_gemm(
+        dx, dgrad_grad_snap, dgrad_weight_snap = _quant_gemm(
             g,
             w,
             cfg.dtype["grad_input"],
@@ -95,7 +109,7 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.scaling,
         )
         # dW = gᵀ @ X, (N,M)@(M,K) -> (N,K)
-        dw = _quant_gemm(
+        dw, wgrad_grad_snap, wgrad_act_snap = _quant_gemm(
             g.t(),
             x2d,
             cfg.dtype["grad_weight"],
@@ -103,12 +117,18 @@ class QuantizedLinearFn(torch.autograd.Function):
             compute_dtype,
             cfg.scaling,
         )
+        probe = ctx.probe
+        if probe is not None and probe.enabled:
+            probe.record("dgrad.grad", dgrad_grad_snap)
+            probe.record("dgrad.weight", dgrad_weight_snap)
+            probe.record("wgrad.grad", wgrad_grad_snap)
+            probe.record("wgrad.act", wgrad_act_snap)
         db = g.sum(dim=0) if ctx.has_bias else None
 
         dx = dx.reshape(*ctx.x_shape).to(ctx.x_dtype)
         dw = dw.to(ctx.w_dtype)
         db = db.to(ctx.w_dtype) if db is not None else None
-        return dx, dw, db, None
+        return dx, dw, db, None, None
 
 
 class QuantizedLinear(nn.Linear):
@@ -118,23 +138,22 @@ class QuantizedLinear(nn.Linear):
         out_features,
         bias=True,
         quantization_config: QuantConfig = None,
-        layer_id=None,
     ):
         super().__init__(in_features, out_features, bias=bias)
         self.quantization_config = quantization_config
-        self.layer_id = layer_id
+        self.quantization_probe = None  # set by attach_quant_probe when logging metrics
 
     @classmethod
     def from_module(
-        cls, module: nn.Linear, quantization_config: QuantConfig, layer_id=None
+        cls, module: nn.Linear, quantization_config: QuantConfig
     ) -> "QuantizedLinear":
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
-        q.layer_id = layer_id
+        q.quantization_probe = None
         return q
 
     def forward(self, x):
         return QuantizedLinearFn.apply(
-            x, self.weight, self.bias, self.quantization_config
+            x, self.weight, self.bias, self.quantization_config, self.quantization_probe
         )

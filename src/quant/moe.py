@@ -144,13 +144,12 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
 
     @classmethod
     def from_module(
-        cls, module: SparseMoEBlock, quantization_config: QuantConfig, layer_id: str
+        cls, module: SparseMoEBlock, quantization_config: QuantConfig
     ) -> "QuantizedSparseMoEBlock":
         """Retype a deep copy of an existing block (independent params/buffers) and
         bind the quantized expert_mm to the config."""
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
-        q.layer_id = layer_id
         q.expert_mm = quantized_expert_mm(quantization_config)
         return q

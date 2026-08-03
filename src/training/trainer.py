@@ -17,6 +17,7 @@ from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
 from src.quant.convert import apply_quantization
+from src.quant.metrics import QuantMetricCollector, attach_quant_probe
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
 from src.training.loss import LOSS_REGISTRY, compute_loss, compute_loss_chunked
@@ -149,17 +150,12 @@ class Trainer:
         # Quantization: swap eligible nn.Linear modules to QuantizedLinear
         apply_quantization(self.model, config)
 
-        # Quant metrics: hooks must attach after apply_quantization (layer_id
-        # exists) and before torch.compile (register on the pre-compile module).
+        # Quant metrics: probes must attach after apply_quantization (the quantized
+        # modules exist) and before torch.compile (attach to the pre-compile module).
         self.quant_collector = None
         if config.logging.log_quant_metrics:
-            from src.quant.metrics import (
-                QuantMetricCollector,
-                register_quant_metric_hooks,
-            )
-
             self.quant_collector = QuantMetricCollector()
-            register_quant_metric_hooks(self.model, self.quant_collector)
+            attach_quant_probe(self.model, self.quant_collector)
 
         # Optimizer & scheduler
         self.optimizer = build_optimizer(self.model, config)

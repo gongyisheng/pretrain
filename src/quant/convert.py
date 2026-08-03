@@ -15,13 +15,6 @@ def _is_passthrough(quantization_config) -> bool:
     )
 
 
-def _layer_id_from_name(name: str) -> str:
-    for part in name.split("."):
-        if part.isdigit():
-            return part
-    return name
-
-
 def apply_quantization(model: nn.Module, config) -> nn.Module:
     """Swap eligible nn.Linear modules to QuantizedLinear per the run's quant rules."""
     quantization_configs = config.training.quant
@@ -57,8 +50,6 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
                 quantized_cls = QuantizedLinear
             else:
                 quantized_cls = QuantizedSparseMoEBlock
-            qmod = quantized_cls.from_module(
-                child, quantization_config, _layer_id_from_name(full_name)
-            )
+            qmod = quantized_cls.from_module(child, quantization_config)
             setattr(parent, child_name, qmod)
     return model
