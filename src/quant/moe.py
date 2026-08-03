@@ -10,13 +10,13 @@ from src.kernel.gemm import (
     scaled_grouped_gemm,
     scaled_grouped_gemm_wgrad,
 )
+from src.layers.mlp import SparseMoEBlock
 from src.quant.quantize import (
     QuantizationSnapshot,
-    quantize_operand,
     dequantize_operand,
     effective_block_size,
+    quantize_operand,
 )
-from src.layers.mlp import SparseMoEBlock
 from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantConfig
 

@@ -6,7 +6,7 @@ from src.layers.mlp import SparseMoEBlock
 from src.quant.constants import QUANT_PASSTHROUGH
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
-from src.quant.utils import resolve_quantization_config, check_hardware_support
+from src.quant.utils import check_hardware_support, resolve_quantization_config
 
 
 def _is_passthrough(quantization_config) -> bool:

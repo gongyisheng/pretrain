@@ -5,18 +5,14 @@ import copy
 import torch
 import torch.nn as nn
 
-from src.quant.utils import (
-    is_fp8,
-    is_int8s,
-    is_quantized,
-)
+from src.kernel.gemm import scaled_gemm
 from src.quant.quantize import (
     QuantizationSnapshot,
-    quantize_operand,
     dequantize_operand,
     effective_block_size,
+    quantize_operand,
 )
-from src.kernel.gemm import scaled_gemm
+from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantConfig
 
 

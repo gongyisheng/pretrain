@@ -6,7 +6,12 @@ import torch
 import torch.nn.functional as F
 
 from src.quant.constants import EPS
-from src.quant.utils import is_int8s, str_to_emax, str_to_qmax, str_to_store_dtype
+from src.quant.utils import (
+    is_int8s,
+    str_to_emax,
+    str_to_qmax,
+    str_to_store_dtype,
+)
 
 
 def effective_block_size(granularity: str, block_size: int, K: int) -> int:
