@@ -323,7 +323,7 @@ _SCALED_CONFIGS = [
 ]
 
 
-@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K"])
+@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
 @triton.jit
 def _scaled_gemm_kernel(
     a_ptr,
@@ -434,7 +434,7 @@ def scaled_gemm(
 # ---------------------------------------------------------------------------
 
 
-@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K"])
+@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
 @triton.jit
 def _scaled_grouped_gemm_kernel(
     a_ptr,
@@ -584,6 +584,13 @@ def scaled_grouped_gemm(
 # rowwise/tensorwise (nrb==1) factor out of the whole reduction as per-k (sa) and
 # per-n (sg) vectors; blockwise rescales once per scale block, each clamped to the
 # group's rows so a block that straddles experts is visited once per expert.
+#
+# mxfp8 (block_size=32) forces the autotuner to BLOCK_M=32, so the inner `while`
+# runs one trip per scale block and loses num_stages pipelining across M: measured
+# 0.542ms vs 0.213ms (rowwise)/0.247ms (blockwise-128)/0.283ms (bf16) at E=8x1024
+# rows/expert, K=512, N=1024. Fused still wins end-to-end at every granularity
+# (_quant_grouped_wgrad): mxfp8 2.233ms vs 2.502ms fake-quant+bf16; rowwise 1.689
+# vs 2.252; blockwise 1.754 vs 2.279.
 # ---------------------------------------------------------------------------
 
 
@@ -706,6 +713,9 @@ def scaled_grouped_gemm_wgrad(
     E = offs.shape[0]
     grad_b = torch.empty((E, K, N), device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
+    assert sa.shape[0] == sg.shape[0], (
+        f"scale block count mismatch: sa {sa.shape[0]}, sg {sg.shape[0]}"
+    )
     wrap_triton(_scaled_grouped_gemm_wgrad_kernel)[(num_sms,)](
         aq,
         gq,

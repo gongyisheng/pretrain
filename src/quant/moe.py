@@ -23,6 +23,9 @@ from src.utils.config import QuantConfig
 def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     """Quantized ragged (a @ b[g]); fake-quant + bf16 fallback off the fused path.
 
+    fp8/int8 use the fused kernel at any granularity, provided both operands share
+    the same family and are on CUDA; anything else falls back to fake-quant + bf16.
+
     Also returns a QuantizationSnapshot per operand (None if its fmt is passthrough);
     a fused dispatch implies both are quantized, so both are set on that path.
     """
@@ -80,7 +83,8 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
 
 def _quant_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
     """grad_b[g] = (a·sa)[g]^T @ (g·sg)[g] -> (E,K,N). fp8/int8 use the fused kernel
-    at any granularity; anything else falls back to fake-quant + bf16 wgrad.
+    at any granularity, provided both operands share the same family and are on
+    CUDA; anything else falls back to fake-quant + bf16 wgrad.
 
     Also returns a QuantizationSnapshot per operand (None if its fmt is passthrough).
     """

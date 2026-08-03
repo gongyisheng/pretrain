@@ -471,7 +471,13 @@ def _quant_wgrad(a, g, fmt, gran="rowwise", bs=0):
 @pytest.mark.parametrize("fmt", ["fp8_e4m3", "int8"])
 @pytest.mark.parametrize(
     "gran,bs",
-    [("rowwise", 0), ("tensorwise", 0), ("blockwise", 32), ("blockwise", 128)],
+    [
+        ("rowwise", 0),
+        ("tensorwise", 0),
+        ("blockwise", 32),
+        ("blockwise", 48),
+        ("blockwise", 128),
+    ],
 )
 @pytest.mark.parametrize(
     "counts,K,N",
@@ -492,7 +498,7 @@ def test_scaled_grouped_gemm_wgrad_matches_oracle(counts, K, N, gran, bs, fmt):
     ref = scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, ebs)
     assert got.shape == (len(counts), K, N)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
-    assert rel < 2e-2, rel
+    assert rel < 1e-5, rel
 
 
 def test_scaled_grouped_gemm_wgrad_blockwise_compiles_fullgraph():

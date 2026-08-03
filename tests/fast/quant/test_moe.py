@@ -142,10 +142,17 @@ def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
     y_f = moe.quantized_expert_mm(cfg)(a_f, b_f, offs)
     y_f.backward(gy)
 
+    assert len(wgrad_calls) == 1, "reference run did not fall back off the fused path"
+
+    # mxfp8 scales are powers of two (torch.exp2(int)): scaling is exact in fp32 and
+    # distributes exactly over addition, and fp8x fp8 products are exact in fp32, so
+    # the fused and fake-quant paths are bitwise identical there. blockwise keeps a
+    # real (if tight) tolerance since fp8 rounding differs between the two paths.
+    bound = 0.0 if scaling == "mxfp8" else 2e-2
     for name, got, ref in (
         ("y", y_q, y_f),
         ("grad_a", a_q.grad, a_f.grad),
         ("grad_b", b_q.grad, b_f.grad),
     ):
         rel = (got.float() - ref.float()).norm() / ref.float().norm().clamp_min(1e-12)
-        assert rel < 2e-2, (scaling, name, rel)
+        assert rel <= bound, (scaling, name, rel)
