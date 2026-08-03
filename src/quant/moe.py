@@ -12,8 +12,9 @@ from src.kernel.gemm import (
 )
 from src.quant.quantize import (
     QuantizationSnapshot,
-    effective_block_size,
     quantize_operand,
+    dequantize_operand,
+    effective_block_size,
 )
 from src.layers.mlp import SparseMoEBlock
 from src.quant.utils import is_fp8, is_int8s, is_quantized
@@ -45,21 +46,16 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     if is_quantized(b_fmt):
         # Per-expert quantize of (E,K,N) along K, i.e. dim 0 of each slab. That
         # partitions scales exactly as contracting dim 1 of the stacked tensor does,
-        # which is what the snapshot records so dequantize needs no expert loop.
+        # which is what the snapshot records so dequantizing needs no expert loop.
         per_expert = [
             quantize_operand(
                 b[g], 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
             )
             for g in range(b.shape[0])
         ]
-        b_snap = QuantizationSnapshot(
-            b,
-            torch.stack([q for q, _ in per_expert]),
-            torch.stack([s for _, s in per_expert]),
-            1,
-            granularity,
-            block_size,
-        )
+        bq = torch.stack([q for q, _ in per_expert])
+        sb = torch.stack([s for _, s in per_expert])
+        b_snap = QuantizationSnapshot(b, bq, sb, 1, granularity, block_size)
 
     if same_family and a.is_cuda:
         y = scaled_grouped_gemm(
@@ -74,9 +70,9 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
         return y, a_snap, b_snap
 
     if a_snap is not None:
-        a = a_snap.dequantize().to(a.dtype)
+        a = dequantize_operand(aq, sa, -1, granularity, block_size).to(a.dtype)
     if b_snap is not None:
-        b = b_snap.dequantize().to(b.dtype)
+        b = dequantize_operand(bq, sb, 1, granularity, block_size).to(b.dtype)
     y = grouped_gemm(a.to(out_dtype), b.to(out_dtype), offs).to(out_dtype)
     return y, a_snap, b_snap
 
@@ -120,9 +116,9 @@ def _quant_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
         return grad_b, a_snap, g_snap
 
     if a_snap is not None:
-        a = a_snap.dequantize().to(a.dtype)
+        a = dequantize_operand(aq, sa, 0, granularity, block_size).to(a.dtype)
     if g_snap is not None:
-        g = g_snap.dequantize().to(g.dtype)
+        g = dequantize_operand(gq, sg, 0, granularity, block_size).to(g.dtype)
     # bf16 ragged Xᵀ@gY via the existing grouped wgrad path
     grad_b = grouped_gemm_wgrad(a.to(out_dtype), g.to(out_dtype), offs).to(out_dtype)
     return grad_b, a_snap, g_snap

@@ -14,6 +14,7 @@ from src.model.transformer import TransformerLM
 from src.quant.constants import EPS
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
+from src.quant.quantize import dequantize_operand
 from src.utils.config import TrainConfig
 
 # ---------------------------------------------------------------------------
@@ -384,7 +385,14 @@ class QuantMetricCollector:
         self._store = {}  # (module_name, site, metric) -> 0-dim tensor
 
     def record(self, module_name, site, snapshot):
-        metrics = compare_quantized(snapshot.source_tensor, snapshot.dequantize())
+        dequantized = dequantize_operand(
+            snapshot.quantized_tensor,
+            snapshot.scale,
+            snapshot.contract_dim,
+            snapshot.granularity,
+            snapshot.block_size,
+        )
+        metrics = compare_quantized(snapshot.source_tensor, dequantized)
         for name, value in metrics.items():
             self._store[(module_name, site, name)] = value
 

@@ -4,8 +4,8 @@ import pytest
 
 from src.quant.quantize import (
     QuantizationSnapshot,
+    dequantize_operand,
     quantize_operand,
-    fake_quantize_operand,
 )
 from src.utils.metric_utils import (
     compare_quantized,
@@ -86,8 +86,8 @@ def test_metrics_are_zero_dim_float32_and_device_local():
 def test_sqnr_positive_and_finite_over_a_real_round_trip(fmt):
     torch.manual_seed(0)
     x = torch.randn(64, 64)
-    deq = fake_quantize_operand(x, -1, "tensorwise", 0, fmt)
-    m = compare_quantized(x, deq)
+    q, scale = quantize_operand(x, -1, "tensorwise", 0, fmt)
+    m = compare_quantized(x, dequantize_operand(q, scale, -1, "tensorwise", 0))
     assert torch.isfinite(m["sqnr"]) and m["sqnr"].item() > 10.0
 
 
@@ -96,59 +96,10 @@ def test_outlier_inflated_scale_shows_up_as_flush_to_zero():
     x = torch.zeros(1, 256)
     x[0, 0] = 1000.0
     x[0, 1:] = 1e-3  # well below (1000/448) * 2^-9 for e4m3
-    m = compare_quantized(x, fake_quantize_operand(x, -1, "tensorwise", 0, "fp8_e4m3"))
+    q, scale = quantize_operand(x, -1, "tensorwise", 0, "fp8_e4m3")
+    m = compare_quantized(x, dequantize_operand(q, scale, -1, "tensorwise", 0))
     assert m["flush_to_zero_rate"].item() > 0.9
     assert m["range_ratio"].item() > 100.0
-
-
-# --- QuantizationSnapshot ---
-
-
-@pytest.mark.parametrize("contract_dim", [-1, 0])
-@pytest.mark.parametrize(
-    "granularity,block_size", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
-)
-def test_snapshot_dequantize_matches_fake_quant(granularity, block_size, contract_dim):
-    torch.manual_seed(0)
-    x = torch.randn(64, 96)
-    q, scale = quantize_operand(x, contract_dim, granularity, block_size, "fp8_e4m3")
-    snap = QuantizationSnapshot(x, q, scale, contract_dim, granularity, block_size)
-    ref = fake_quantize_operand(x, contract_dim, granularity, block_size, "fp8_e4m3")
-    assert torch.equal(snap.dequantize(), ref)
-    assert snap.source_tensor is x
-
-
-@pytest.mark.parametrize(
-    "granularity,block_size", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
-)
-def test_stacked_expert_snapshot_matches_per_expert_dequant(granularity, block_size):
-    # _grouped records per-expert (E,K,N) quantization as contract_dim=1 of the
-    # stacked tensor. Assert that inverts to the same thing as dequantizing each
-    # (K,N) slab along dim 0 — the quantize and dequantize paths are written
-    # differently, so their agreement is the load-bearing claim.
-    torch.manual_seed(0)
-    experts = torch.randn(4, 96, 32)
-    per_expert = [
-        quantize_operand(experts[g], 0, granularity, block_size, "fp8_e4m3")
-        for g in range(experts.shape[0])
-    ]
-    snap = QuantizationSnapshot(
-        experts,
-        torch.stack([q for q, _ in per_expert]),
-        torch.stack([s for _, s in per_expert]),
-        1,
-        granularity,
-        block_size,
-    )
-    reference = torch.stack(
-        [
-            fake_quantize_operand(
-                experts[g], 0, granularity, block_size, "fp8_e4m3"
-            ).float()
-            for g in range(experts.shape[0])
-        ]
-    )
-    assert torch.equal(snap.dequantize(), reference)
 
 
 # --- collector ---

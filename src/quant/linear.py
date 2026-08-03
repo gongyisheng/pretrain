@@ -13,6 +13,7 @@ from src.quant.utils import (
 from src.quant.quantize import (
     QuantizationSnapshot,
     quantize_operand,
+    dequantize_operand,
     effective_block_size,
 )
 from src.kernel.gemm import scaled_gemm
@@ -20,26 +21,17 @@ from src.utils.config import QuantConfig
 
 
 def _quant_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
-    """`a @ b` via a fused GEMM when both operands share a quantized family, else fake-quant."""
+    """`a @ b` via a fused GEMM when both operands share a quantized family, else fake-quant.
+
+    Also returns a QuantizationSnapshot per operand (None if its fmt is passthrough);
+    a fused dispatch implies both are quantized, so both are set on that path.
+    """
     granularity = scaling_cfg.get("granularity", "tensorwise")
     block_size = scaling_cfg.get("block_size", 0)
     scale_dtype = scaling_cfg.get("scale_dtype")
     same_family = (is_fp8(a_fmt) and is_fp8(b_fmt)) or (
         is_int8s(a_fmt) and is_int8s(b_fmt)
     )
-    if same_family and a.is_cuda and b.is_cuda:
-        ebs = effective_block_size(granularity, block_size, a.shape[1])
-        aq, sa = quantize_operand(
-            a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
-        )
-        bq, sb = quantize_operand(
-            b, 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
-        )
-        return (
-            scaled_gemm(aq, bq, sa, sb, out_dtype, ebs),
-            QuantizationSnapshot(a, aq, sa, -1, granularity, block_size),
-            QuantizationSnapshot(b, bq, sb, 0, granularity, block_size),
-        )
 
     a_snap = b_snap = None
     if is_quantized(a_fmt):
@@ -47,13 +39,27 @@ def _quant_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
             a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
         )
         a_snap = QuantizationSnapshot(a, aq, sa, -1, granularity, block_size)
-        a = a_snap.dequantize().to(a.dtype)
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(
             b, 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
         )
         b_snap = QuantizationSnapshot(b, bq, sb, 0, granularity, block_size)
-        b = b_snap.dequantize().to(b.dtype)
+
+    if same_family and a.is_cuda and b.is_cuda:
+        y = scaled_gemm(
+            a_snap.quantized_tensor,
+            b_snap.quantized_tensor,
+            a_snap.scale,
+            b_snap.scale,
+            out_dtype,
+            effective_block_size(granularity, block_size, a.shape[1]),
+        )
+        return y, a_snap, b_snap
+
+    if a_snap is not None:
+        a = dequantize_operand(aq, sa, -1, granularity, block_size).to(a.dtype)
+    if b_snap is not None:
+        b = dequantize_operand(bq, sb, 0, granularity, block_size).to(b.dtype)
     return (a @ b).to(out_dtype), a_snap, b_snap
 
 

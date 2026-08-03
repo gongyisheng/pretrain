@@ -105,8 +105,8 @@ class QuantizationSnapshot(NamedTuple):
 
     Holds references to live tensors, not copies — read it during the GEMM that
     produced it, not later. Carrying the layout alongside the data is what lets
-    `dequantize` be called without re-supplying (and possibly transposing) the
-    contraction axis.
+    `dequantize_operand` invert it without re-supplying (and possibly transposing)
+    the contraction axis.
     """
 
     source_tensor: torch.Tensor  # pre-quantization, in the compute dtype
@@ -115,29 +115,3 @@ class QuantizationSnapshot(NamedTuple):
     contract_dim: int
     granularity: str
     block_size: int
-
-    def dequantize(self):
-        return dequantize_operand(
-            self.quantized_tensor,
-            self.scale,
-            self.contract_dim,
-            self.granularity,
-            self.block_size,
-        )
-
-
-def fake_quantize_operand(
-    x,
-    contract_dim,
-    granularity,
-    block_size,
-    fmt,
-    *,
-    scale_dtype=None,
-):
-    """dequant(quant(x)) in x.dtype — CPU/mixed fallback and numeric oracle."""
-    xq, scale = quantize_operand(
-        x, contract_dim, granularity, block_size, fmt, scale_dtype=scale_dtype
-    )
-    xdeq = dequantize_operand(xq, scale, contract_dim, granularity, block_size)
-    return xdeq.to(x.dtype)
