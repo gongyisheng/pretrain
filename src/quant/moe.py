@@ -33,7 +33,7 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
     scale_dtype = scaling.get("scale_dtype")
-    fused = _same_family(a_fmt, b_fmt) and a.is_cuda and granularity != "blockwise"
+    fused = _same_family(a_fmt, b_fmt) and a.is_cuda
 
     a_snap = b_snap = None
     if is_quantized(a_fmt):
@@ -81,27 +81,27 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
 
 
 def _quant_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
-    """grad_b[g] = (a·sa)[g]^T @ (g·sg)[g] -> (E,K,N). fp8/int8 rowwise|tensorwise
-    use the fused kernel; blockwise falls back to fake-quant + bf16 wgrad.
+    """grad_b[g] = (a·sa)[g]^T @ (g·sg)[g] -> (E,K,N). fp8/int8 use the fused kernel
+    at any granularity; anything else falls back to fake-quant + bf16 wgrad.
 
     Also returns a QuantizationSnapshot per operand (None if its fmt is passthrough).
     """
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
     scale_dtype = scaling.get("scale_dtype")
-    fused = _same_family(a_fmt, g_fmt) and a.is_cuda and granularity != "blockwise"
+    fused = _same_family(a_fmt, g_fmt) and a.is_cuda
 
     a_snap = g_snap = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
             a, 0, granularity, block_size, a_fmt, scale_dtype=scale_dtype
         )
-        a_snap = QuantizationSnapshot(a, aq, sa, 0, granularity, block_size)  # sa (1,K)
+        a_snap = QuantizationSnapshot(a, aq, sa, 0, granularity, block_size)  # (nrb,K)
     if is_quantized(g_fmt):
         gq, sg = quantize_operand(
             g, 0, granularity, block_size, g_fmt, scale_dtype=scale_dtype
         )
-        g_snap = QuantizationSnapshot(g, gq, sg, 0, granularity, block_size)  # sg (1,N)
+        g_snap = QuantizationSnapshot(g, gq, sg, 0, granularity, block_size)  # (nrb,N)
 
     if fused:
         grad_b = scaled_grouped_gemm_wgrad(

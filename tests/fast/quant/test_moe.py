@@ -105,3 +105,46 @@ def test_moe_block_quantized_forward_backward_runs():
     assert x.grad is not None and torch.isfinite(x.grad).all()
     assert torch.isfinite(m.mlp.expert_gate_up.grad).all()
     assert torch.isfinite(m.mlp.expert_down.grad).all()
+
+
+@pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
+@pytest.mark.parametrize("scaling", ["blockwise", "mxfp8"])
+def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
+    # counts give R=299: with block_size 128 the last scale block [256,299) straddles
+    # the expert-2/expert-3 boundary at 258, and expert 1 is empty.
+    a, b, offs = _make([128, 0, 130, 41], K=64, N=48)
+    cfg = _cfg("fp8", scaling)
+
+    wgrad_calls = []
+    real_wgrad = moe.scaled_grouped_gemm_wgrad
+
+    def spy(*args, **kwargs):
+        wgrad_calls.append(args[-1])
+        return real_wgrad(*args, **kwargs)
+
+    monkeypatch.setattr(moe, "scaled_grouped_gemm_wgrad", spy)
+
+    a_q = a.clone().requires_grad_(True)
+    b_q = b.clone().requires_grad_(True)
+    y_q = moe.quantized_expert_mm(cfg)(a_q, b_q, offs)
+    gy = torch.randn_like(y_q)
+    y_q.backward(gy)
+
+    assert wgrad_calls, "wgrad fell back off the fused path"
+    assert wgrad_calls[0] == (128 if scaling == "blockwise" else 32)
+
+    # Reference: identical quantization, but dequantized and multiplied in bf16.
+    # Comparing against this isolates the kernel from the quantization error itself.
+    monkeypatch.setattr(moe, "_same_family", lambda *_: False)
+    a_f = a.clone().requires_grad_(True)
+    b_f = b.clone().requires_grad_(True)
+    y_f = moe.quantized_expert_mm(cfg)(a_f, b_f, offs)
+    y_f.backward(gy)
+
+    for name, got, ref in (
+        ("y", y_q, y_f),
+        ("grad_a", a_q.grad, a_f.grad),
+        ("grad_b", b_q.grad, b_f.grad),
+    ):
+        rel = (got.float() - ref.float()).norm() / ref.float().norm().clamp_min(1e-12)
+        assert rel < 2e-2, (scaling, name, rel)
