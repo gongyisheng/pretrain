@@ -20,10 +20,6 @@ from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantConfig
 
 
-def _same_family(a_fmt: str, b_fmt: str) -> bool:
-    return (is_fp8(a_fmt) and is_fp8(b_fmt)) or (is_int8s(a_fmt) and is_int8s(b_fmt))
-
-
 def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     """Quantized ragged (a @ b[g]); fake-quant + bf16 fallback off the fused path.
 
@@ -33,7 +29,9 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
     scale_dtype = scaling.get("scale_dtype")
-    fused = _same_family(a_fmt, b_fmt) and a.is_cuda
+    same_family = (is_fp8(a_fmt) and is_fp8(b_fmt)) or (
+        is_int8s(a_fmt) and is_int8s(b_fmt)
+    )
 
     a_snap = b_snap = None
     if is_quantized(a_fmt):
@@ -60,7 +58,7 @@ def _quant_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
             block_size,
         )
 
-    if fused:
+    if same_family and a.is_cuda:
         y = scaled_grouped_gemm(
             a_snap.quantized_tensor,
             b_snap.quantized_tensor,
@@ -89,7 +87,9 @@ def _quant_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
     scale_dtype = scaling.get("scale_dtype")
-    fused = _same_family(a_fmt, g_fmt) and a.is_cuda
+    same_family = (is_fp8(a_fmt) and is_fp8(g_fmt)) or (
+        is_int8s(a_fmt) and is_int8s(g_fmt)
+    )
 
     a_snap = g_snap = None
     if is_quantized(a_fmt):
@@ -103,7 +103,7 @@ def _quant_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
         )
         g_snap = QuantizationSnapshot(g, gq, sg, 0, granularity, block_size)  # (nrb,N)
 
-    if fused:
+    if same_family and a.is_cuda:
         grad_b = scaled_grouped_gemm_wgrad(
             a_snap.quantized_tensor,
             g_snap.quantized_tensor,

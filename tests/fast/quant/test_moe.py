@@ -135,7 +135,8 @@ def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
 
     # Reference: identical quantization, but dequantized and multiplied in bf16.
     # Comparing against this isolates the kernel from the quantization error itself.
-    monkeypatch.setattr(moe, "_same_family", lambda *_: False)
+    monkeypatch.setattr(moe, "is_fp8", lambda _: False)
+    monkeypatch.setattr(moe, "is_int8s", lambda _: False)
     a_f = a.clone().requires_grad_(True)
     b_f = b.clone().requires_grad_(True)
     y_f = moe.quantized_expert_mm(cfg)(a_f, b_f, offs)
