@@ -78,6 +78,28 @@ def _amax_to_scale(
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 
+def _quantize_ragged_axis(x, ragged, granularity, *, fmt, scale_dtype):
+    """Quantize (M,C) `x` whose contracted axis M is ragged: one scale row per
+    block of `ragged`, so no scale mixes two groups. Returns codes (M,C) and an
+    (n_blocks,C) fp32 scale — already the layout the wgrad kernel reads.
+    """
+    xf = x.float()
+    # amax over the rows of each block. include_self with a zeros buffer is safe
+    # because the source is abs(): an empty block keeps 0 and clamps to EPS below.
+    amax = xf.new_zeros(ragged.n_blocks, xf.shape[1]).index_reduce_(
+        0, ragged.row_blocks, xf.abs(), "amax", include_self=True
+    )
+    if granularity == "tensorwise":
+        amax = amax.amax(dim=-1, keepdim=True).expand_as(amax)
+    scale = _amax_to_scale(amax, fmt, scale_dtype)
+    q = xf / scale.index_select(0, ragged.row_blocks)
+    if is_int8s(fmt):
+        q = torch.round(q)
+    qmax = str_to_qmax(fmt)
+    q = q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
+    return q.contiguous(), scale.contiguous()
+
+
 def _quantize_last_axis(xf, K, bs, *, fmt, scale_dtype):
     """Blockwise quantize a (..., K) fp32 tensor along the last axis."""
     nkb = (K + bs - 1) // bs
@@ -103,8 +125,19 @@ def quantize_operand(
     fmt,
     *,
     scale_dtype=None,
+    ragged=None,
 ):
-    """Quantize 2D operand x for scaled_gemm along contract_dim (-1: A, 0: B)."""
+    """Quantize 2D operand x for scaled_gemm along contract_dim (-1: A, 0: B).
+
+    `ragged` (a RaggedScaleBlocks) marks the row axis as ragged over groups and
+    keeps every scale inside one group. It is required whenever the contracted
+    axis is the ragged one (contract_dim == 0), and otherwise only changes
+    `tensorwise`, whose single amax would span groups.
+    """
+    if ragged is not None and contract_dim == 0:
+        return _quantize_ragged_axis(
+            x, ragged, granularity, fmt=fmt, scale_dtype=scale_dtype
+        )
     xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
     K = xf.shape[-1]
 

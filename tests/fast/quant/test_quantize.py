@@ -326,3 +326,78 @@ def test_dequantize_operand_partial_block_uses_given_block_size():
     xq, s = quantize_operand(x, -1, "blockwise", 32, **_fp8_kw())
     deq = dequantize_operand(xq, s, -1, "blockwise", 32)
     assert torch.allclose(deq, _manual_dequant(x, -1, 32, **_fp8_kw()), atol=1e-6)
+
+
+# --- ragged contraction axis (wgrad): per-expert scales ---
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 4)]
+)
+def test_ragged_quantize_scale_shape_and_bound(gran, bs):
+    counts = [6, 0, 5]
+    blocks = ragged_scale_blocks(_offs(counts), sum(counts), gran, bs)
+    x = torch.randn(sum(counts), 8)
+    xq, scale = quantize_operand(x, 0, gran, bs, "fp8_e4m3", ragged=blocks)
+    assert xq.shape == x.shape
+    assert scale.shape == (blocks.n_blocks, 8)
+    assert scale.dtype == torch.float32
+
+
+def test_ragged_quantize_cold_group_scale_ignores_hot_group():
+    # The bug this whole change exists to fix: group 0 is 100x hotter than group 1.
+    # A shared amax would scale both by group 0's, wiping out group 1's codes.
+    x = torch.cat([torch.full((4, 3), 100.0), torch.full((4, 3), 1.0)])
+    blocks = ragged_scale_blocks(_offs([4, 4]), 8, "rowwise", 0)
+    _, scale = quantize_operand(x, 0, "rowwise", 0, "fp8_e4m3", ragged=blocks)
+    assert torch.allclose(scale[0] / scale[1], torch.full((3,), 100.0), rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 4)]
+)
+def test_ragged_quantize_matches_independent_per_group_quantize(gran, bs):
+    # Each group quantized on its own must give byte-identical codes to the
+    # fused ragged call — that IS the definition of expert independence.
+    torch.manual_seed(0)
+    counts = [6, 0, 5]
+    x = torch.randn(sum(counts), 8)
+    x[:6] *= 50.0  # make the groups differ enough that a shared amax would show
+    offs = _offs(counts)
+    blocks = ragged_scale_blocks(offs, sum(counts), gran, bs)
+    xq, _ = quantize_operand(x, 0, gran, bs, "fp8_e4m3", ragged=blocks)
+    lo = 0
+    for hi in offs.tolist():
+        if hi > lo:
+            # a single group is a non-ragged tensor: the existing code path
+            expected, _ = quantize_operand(x[lo:hi], 0, gran, bs, "fp8_e4m3")
+            assert torch.equal(xq[lo:hi], expected)
+        lo = hi
+
+
+def test_ragged_quantize_empty_group_scale_is_finite():
+    blocks = ragged_scale_blocks(_offs([4, 0]), 4, "rowwise", 0)
+    _, scale = quantize_operand(
+        torch.randn(4, 3), 0, "rowwise", 0, "fp8_e4m3", ragged=blocks
+    )
+    assert torch.isfinite(scale).all()
+    assert (scale > 0).all()
+
+
+@pytest.mark.parametrize(
+    "contract_dim,gran,bs",
+    [
+        (-1, "rowwise", 0),
+        (-1, "blockwise", 32),
+        (0, "rowwise", 0),
+        (0, "blockwise", 32),
+    ],
+)
+def test_ragged_none_is_unchanged(contract_dim, gran, bs):
+    # QuantizedLinear passes no `ragged`; that path must stay bit-identical.
+    torch.manual_seed(0)
+    x = torch.randn(64, 96)
+    xq, scale = quantize_operand(x, contract_dim, gran, bs, "fp8_e4m3")
+    assert xq.shape == x.shape
+    expected_nkb = 1 if bs == 0 else (96 if contract_dim == -1 else 64) // bs
+    assert scale.shape[-1 if contract_dim == -1 else 0] == expected_nkb
