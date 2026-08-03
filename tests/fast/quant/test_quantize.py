@@ -6,6 +6,7 @@ from src.quant.quantize import (
     quantize_operand,
     dequantize_operand,
     effective_block_size,
+    ragged_scale_blocks,
 )
 from src.quant.utils import str_to_qmax
 
@@ -33,6 +34,60 @@ def test_effective_block_size():
     assert effective_block_size("blockwise", 32, 256) == 32
     assert effective_block_size("rowwise", 128, 256) == 256
     assert effective_block_size("tensorwise", 128, 256) == 256
+
+
+# --- ragged scale blocks ---
+
+
+def _offs(counts):
+    return torch.tensor(counts).cumsum(0).to(torch.int32)
+
+
+@pytest.mark.parametrize("gran,bs", [("tensorwise", 0), ("rowwise", 0)])
+def test_ragged_scale_blocks_one_block_per_group(gran, bs):
+    blocks = ragged_scale_blocks(_offs([3, 4, 3]), 10, gran, bs)
+    assert blocks.row_blocks.tolist() == [0, 0, 0, 1, 1, 1, 1, 2, 2, 2]
+    assert blocks.first_block.tolist() == [0, 1, 2, 3]
+    assert blocks.n_blocks == 3
+
+
+def test_ragged_scale_blocks_blockwise_retiles_inside_each_group():
+    # bs=4 with group sizes 3,4,3: every group starts a fresh block, so no block
+    # spans a boundary even though 3 and 4 are not multiples of each other.
+    blocks = ragged_scale_blocks(_offs([3, 4, 3]), 10, "blockwise", 4)
+    assert blocks.row_blocks.tolist() == [0, 0, 0, 1, 1, 1, 1, 2, 2, 2]
+    assert blocks.first_block.tolist() == [0, 1, 2, 3]
+
+
+def test_ragged_scale_blocks_blockwise_multiple_blocks_and_empty_group():
+    # counts 5,0,4 with bs=2 -> group 0 gets 3 blocks, group 1 none, group 2 two.
+    blocks = ragged_scale_blocks(_offs([5, 0, 4]), 9, "blockwise", 2)
+    assert blocks.row_blocks.tolist() == [0, 0, 1, 1, 2, 3, 3, 4, 4]
+    assert blocks.first_block.tolist() == [0, 3, 3, 5]
+    assert blocks.n_blocks == 9 // 2 + 3
+
+
+def test_ragged_scale_blocks_never_crosses_a_group_boundary():
+    counts = [5, 0, 130, 41, 1]
+    offs = _offs(counts)
+    n_rows = sum(counts)
+    blocks = ragged_scale_blocks(offs, n_rows, "blockwise", 32)
+    group = torch.searchsorted(
+        offs, torch.arange(n_rows, dtype=torch.int32), right=True
+    )
+    # a block id must map to exactly one group
+    for block_id in blocks.row_blocks.unique().tolist():
+        assert group[blocks.row_blocks == block_id].unique().numel() == 1
+
+
+@pytest.mark.parametrize(
+    "counts,bs",
+    [([5, 0, 130, 41, 1], 32), ([300, 5, 120, 0, 44, 210], 128), ([1, 1, 1], 16)],
+)
+def test_ragged_scale_blocks_n_blocks_is_a_valid_upper_bound(counts, bs):
+    blocks = ragged_scale_blocks(_offs(counts), sum(counts), "blockwise", bs)
+    assert int(blocks.row_blocks.max()) < blocks.n_blocks
+    assert int(blocks.first_block[-1]) <= blocks.n_blocks
 
 
 # --- operand quantize: canonical scale shapes ---

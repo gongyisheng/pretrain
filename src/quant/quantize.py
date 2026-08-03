@@ -19,6 +19,52 @@ def effective_block_size(granularity: str, block_size: int, K: int) -> int:
     return block_size if granularity == "blockwise" else K
 
 
+class RaggedScaleBlocks(NamedTuple):
+    """Row -> scale-block mapping for an axis that is ragged over groups.
+
+    Rows are sorted by group and cut by the cumulative end-offsets `offs`, so a
+    scale block must never span two groups: pooling amax across groups is what
+    lets one hot expert set the scale for a cold one. `row_blocks` is int64
+    because it indexes torch reductions; `first_block` is int32 to match `offs`
+    where the Triton kernel reads it; `n_blocks` is a Python int so the scale
+    buffer's shape stays static under torch.compile.
+    """
+
+    row_blocks: torch.Tensor  # (n_rows,) int64, scale row for each row
+    first_block: torch.Tensor  # (n_groups+1,) int32, group g owns [g], [g+1])
+    n_blocks: int  # static upper bound on the scale buffer's height
+
+
+def ragged_scale_blocks(offs, n_rows, granularity, block_size) -> RaggedScaleBlocks:
+    """Scale blocks for a ragged axis, restarting the tiling at each group.
+
+    `tensorwise`/`rowwise` give one block per group. `blockwise` re-tiles
+    `block_size` rows inside each group, so group sizes that are not multiples of
+    `block_size` cost a short trailing block rather than a straddling one.
+    """
+    n_groups = offs.shape[0]
+    rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
+    # right=True: row r belongs to the group whose end-offset first exceeds r.
+    # Rows past offs[-1] cannot occur in the MoE dispatch (offs[-1] == n_rows);
+    # clamping only keeps the gathers below in bounds if one ever did.
+    group = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
+    if granularity != "blockwise":
+        return RaggedScaleBlocks(
+            group.long(),
+            torch.arange(n_groups + 1, device=offs.device, dtype=torch.int32),
+            n_groups,
+        )
+    starts = torch.cat([offs.new_zeros(1), offs[:-1]])
+    counts = offs - starts
+    per_group = torch.div(counts + block_size - 1, block_size, rounding_mode="floor")
+    first_block = torch.cat([offs.new_zeros(1), per_group.cumsum(0)]).to(torch.int32)
+    local = torch.div(rows - starts[group], block_size, rounding_mode="floor")
+    row_blocks = first_block[group].long() + local.long()
+    # sum_g ceil(m_g/bs) <= floor(M/bs) + n_groups for every offs, so this bound
+    # is static even though the per-group counts are not.
+    return RaggedScaleBlocks(row_blocks, first_block, n_rows // block_size + n_groups)
+
+
 def _amax_to_scale(
     amax: torch.Tensor, fmt: str, scale_dtype: str | None
 ) -> torch.Tensor:
