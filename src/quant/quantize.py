@@ -65,7 +65,7 @@ def ragged_scale_blocks(offs, n_rows, granularity, block_size) -> RaggedScaleBlo
     return RaggedScaleBlocks(row_blocks, first_block, n_rows // block_size + n_groups)
 
 
-def _amax_to_scale(
+def _compute_scale(
     amax: torch.Tensor, fmt: str, scale_dtype: str | None
 ) -> torch.Tensor:
     """fp32 dequant scale from per-block amax."""
@@ -78,7 +78,7 @@ def _amax_to_scale(
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 
-def _to_codes(xf: torch.Tensor, scale: torch.Tensor, fmt: str) -> torch.Tensor:
+def _compute_codes(xf: torch.Tensor, scale: torch.Tensor, fmt: str) -> torch.Tensor:
     """Scale into the format's range and cast — the tail every quantizer shares.
 
     `scale` must broadcast against `xf`; both are float32.
@@ -103,8 +103,8 @@ def _quantize_ragged_axis(x, ragged, granularity, *, fmt, scale_dtype):
     )
     if granularity == "tensorwise":
         amax = amax.amax(dim=-1, keepdim=True).expand_as(amax)
-    scale = _amax_to_scale(amax, fmt, scale_dtype)
-    q = _to_codes(xf, scale.index_select(0, ragged.row_blocks), fmt)
+    scale = _compute_scale(amax, fmt, scale_dtype)
+    q = _compute_codes(xf, scale.index_select(0, ragged.row_blocks), fmt)
     return q.contiguous(), scale.contiguous()
 
 
@@ -118,10 +118,10 @@ def _quantize_ragged_rows(x, ragged, *, fmt, scale_dtype):
     amax = row_amax.new_zeros(ragged.n_blocks).index_reduce_(
         0, ragged.row_blocks, row_amax, "amax", include_self=True
     )
-    scale = _amax_to_scale(amax, fmt, scale_dtype).index_select(0, ragged.row_blocks)[
+    scale = _compute_scale(amax, fmt, scale_dtype).index_select(0, ragged.row_blocks)[
         :, None
     ]  # (M,1)
-    return _to_codes(xf, scale, fmt).contiguous(), scale.contiguous()
+    return _compute_codes(xf, scale, fmt).contiguous(), scale.contiguous()
 
 
 def _quantize_tensorwise(xf, fmt, scale_dtype):
@@ -130,8 +130,8 @@ def _quantize_tensorwise(xf, fmt, scale_dtype):
     Layout-agnostic: a 0-dim scale broadcasts against any axis order, so the
     caller need not normalize the contraction axis first.
     """
-    scale = _amax_to_scale(xf.abs().amax(), fmt, scale_dtype)  # 0-dim
-    return _to_codes(xf, scale, fmt), scale
+    scale = _compute_scale(xf.abs().amax(), fmt, scale_dtype)  # 0-dim
+    return _compute_codes(xf, scale, fmt), scale
 
 
 def _quantize_blockwise(xf, fmt, scale_dtype, block_size):
@@ -143,9 +143,9 @@ def _quantize_blockwise(xf, fmt, scale_dtype, block_size):
     pad = nkb * block_size - K
     xp = F.pad(xf, (0, pad)) if pad else xf
     xb = xp.reshape(*xp.shape[:-1], nkb, block_size)  # (..., nkb, block_size)
-    scale = _amax_to_scale(xb.abs().amax(dim=-1), fmt, scale_dtype)  # (..., nkb)
-    q = _to_codes(xb, scale.unsqueeze(-1), fmt)
-    return q.flatten(-2)[..., :K].contiguous(), scale
+    scale = _compute_scale(xb.abs().amax(dim=-1), fmt, scale_dtype)  # (..., nkb)
+    q = _compute_codes(xb, scale.unsqueeze(-1), fmt)
+    return q.flatten(-2)[..., :K].contiguous(), scale  # [..., :K] drops the padding
 
 
 def quantize_operand(
