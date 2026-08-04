@@ -130,9 +130,8 @@ def quantize_operand(
     """Quantize 2D operand x for scaled_gemm along contract_dim (-1: A, 0: B).
 
     `ragged` (a RaggedScaleBlocks) marks the row axis as ragged over groups and
-    keeps every scale inside one group. It is required whenever the contracted
-    axis is the ragged one (contract_dim == 0), and otherwise only changes
-    `tensorwise`, whose single amax would span groups.
+    keeps every scale inside one group. Required when contract_dim == 0; currently
+    ignored for contract_dim == -1.
     """
     if ragged is not None and contract_dim == 0:
         return _quantize_ragged_axis(
