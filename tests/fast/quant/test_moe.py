@@ -161,15 +161,16 @@ def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
 
 @pytest.mark.parametrize("scaling", ["tensorwise", "rowwise", "blockwise"])
 def test_grad_b_quality_is_independent_across_experts(scaling):
-    """A 100x hotter expert must not degrade a cold expert's grad_b.
+    """A 1e5x hotter expert must not degrade a cold expert's grad_b.
 
     This is the whole point of per-expert scales: with one amax shared across the
-    ragged token axis the cold expert's rows land in the bottom ~1% of the fp8
-    range and its grad_b is mostly quantization noise.
+    ragged token axis a big enough hot/cold spread pushes the cold expert's rows
+    into the bottom of the fp8 range and its grad_b becomes mostly quantization
+    noise (100x is absorbed by fp8's exponent range at ~no cost; 1e5x is not).
     """
     counts = [64, 64]
     a, b, offs = _make(counts, K=128, N=96)
-    a[: counts[0]] *= 100.0  # expert 0 hot, expert 1 cold
+    a[: counts[0]] *= 1e5  # expert 0 hot, expert 1 cold
     cfg = _cfg("fp8", scaling)
 
     a_q = a.clone().requires_grad_(True)
@@ -190,8 +191,8 @@ def test_grad_b_quality_is_independent_across_experts(scaling):
         ).item()
         for gi in range(len(counts))
     ]
-    # Record the observed values in this comment when first run, then keep ~2x
-    # headroom. A shared amax puts the cold expert near 1.0.
+    # Observed max(rel): tensorwise 0.0272, rowwise/blockwise 0.0268 (~4x headroom
+    # on the 0.1 bound); max/min ratio ~1.1-1.2 for all three (~3.4x headroom).
     assert max(rel) < 0.1, rel
     assert max(rel) / min(rel) < 4.0, rel
 
