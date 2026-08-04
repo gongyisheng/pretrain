@@ -10,12 +10,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _cfg(recipe="fp8", scaling="rowwise", gemm=None):
+def _cfg(recipe="fp8", scaling="rowwise"):
     return QuantizationConfig(
-        enabled=True,
-        dtype={"recipe": recipe},
-        scaling={"recipe": scaling},
-        gemm=gemm or {},
+        enabled=True, dtype={"recipe": recipe}, scaling={"recipe": scaling}
     )
 
 
@@ -139,9 +136,11 @@ def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
 
     # Reference: identical quantization, but dequantized and multiplied in bf16.
     # Comparing against this isolates the kernel from the quantization error itself.
+    monkeypatch.setattr(moe, "is_fp8", lambda _: False)
+    monkeypatch.setattr(moe, "is_int8s", lambda _: False)
     a_f = a.clone().requires_grad_(True)
     b_f = b.clone().requires_grad_(True)
-    y_f = moe.quantized_expert_mm(_cfg("fp8", scaling, "dequant"))(a_f, b_f, offs)
+    y_f = moe.quantized_expert_mm(cfg)(a_f, b_f, offs)
     y_f.backward(gy)
 
     assert len(wgrad_calls) == 1, "reference run did not fall back off the fused path"
@@ -158,31 +157,6 @@ def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
     ):
         rel = (got.float() - ref.float()).norm() / ref.float().norm().clamp_min(1e-12)
         assert rel <= bound, (scaling, name, rel)
-
-
-@pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
-def test_gemm_key_scopes_to_its_own_gemm():
-    # wgrad on the dequant path must not drag dgrad along with it
-    a, b, offs = _make([128, 0, 130, 41], K=64, N=48)
-    torch.manual_seed(1)
-    gy = torch.randn(a.shape[0], 48, device="cuda", dtype=torch.bfloat16)
-
-    def run(gemm):
-        a_g = a.clone().requires_grad_(True)
-        b_g = b.clone().requires_grad_(True)
-        moe.quantized_expert_mm(_cfg("fp8", "rowwise", gemm))(a_g, b_g, offs).backward(
-            gy
-        )
-        return a_g.grad.clone(), b_g.grad.clone()
-
-    da_all, db_all = run("dequant")
-    da_none, db_none = run("scaled")
-    da_w, db_w = run({"wgrad": "dequant"})
-
-    assert torch.equal(db_w, db_all)  # wgrad followed the dequant path
-    assert not torch.equal(db_w, db_none)
-    assert torch.equal(da_w, da_none)  # dgrad stayed on the kernel
-    assert not torch.equal(da_w, da_all)
 
 
 @pytest.mark.parametrize("scaling", ["tensorwise", "rowwise", "blockwise"])

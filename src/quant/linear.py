@@ -16,7 +16,7 @@ from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
 
 
-def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg, impl="scaled"):
+def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
     granularity = scaling_cfg.get("granularity", "tensorwise")
     block_size = scaling_cfg.get("block_size", 0)
     scale_dtype = scaling_cfg.get("scale_dtype")
@@ -37,8 +37,7 @@ def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg, impl="scaled"):
         )
         b_snap = QuantizationSnapshot(b, bq, sb, 0, granularity, block_size)
 
-    # impl permits the kernel; same_family/is_cuda decide whether it can run.
-    if impl == "scaled" and same_family and a.is_cuda and b.is_cuda:
+    if same_family and a.is_cuda and b.is_cuda:
         y = scaled_gemm(
             aq,
             bq,
@@ -75,7 +74,6 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["weight"],
             compute_dtype,
             cfg.scaling,
-            cfg.gemm["fwd"],
         )
         if probe is not None and probe.enabled:
             probe.record("fwd.act", act_snap)
@@ -107,7 +105,6 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["weight"],
             compute_dtype,
             cfg.scaling,
-            cfg.gemm["dgrad"],
         )
         # dW = gᵀ @ X, (N,M)@(M,K) -> (N,K)
         dw, wgrad_grad_snap, wgrad_act_snap = quantized_gemm(
@@ -117,7 +114,6 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["act"],
             compute_dtype,
             cfg.scaling,
-            cfg.gemm["wgrad"],
         )
         probe = ctx.probe
         if probe is not None and probe.enabled:

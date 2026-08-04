@@ -78,6 +78,18 @@ def _amax_to_scale(
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 
+def _to_codes(xf: torch.Tensor, scale: torch.Tensor, fmt: str) -> torch.Tensor:
+    """Scale into the format's range and cast — the tail every quantizer shares.
+
+    `scale` must broadcast against `xf`; both are float32.
+    """
+    q = xf / scale
+    if is_int8s(fmt):
+        q = torch.round(q)
+    qmax = str_to_qmax(fmt)
+    return q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
+
+
 def _quantize_ragged_axis(x, ragged, granularity, *, fmt, scale_dtype):
     """Quantize (M,C) `x` whose contracted axis M is ragged: one scale row per
     block of `ragged`, so no scale mixes two groups. Returns codes (M,C) and an
@@ -92,11 +104,7 @@ def _quantize_ragged_axis(x, ragged, granularity, *, fmt, scale_dtype):
     if granularity == "tensorwise":
         amax = amax.amax(dim=-1, keepdim=True).expand_as(amax)
     scale = _amax_to_scale(amax, fmt, scale_dtype)
-    q = xf / scale.index_select(0, ragged.row_blocks)
-    if is_int8s(fmt):
-        q = torch.round(q)
-    qmax = str_to_qmax(fmt)
-    q = q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
+    q = _to_codes(xf, scale.index_select(0, ragged.row_blocks), fmt)
     return q.contiguous(), scale.contiguous()
 
 
@@ -113,29 +121,31 @@ def _quantize_ragged_rows(x, ragged, *, fmt, scale_dtype):
     scale = _amax_to_scale(amax, fmt, scale_dtype).index_select(0, ragged.row_blocks)[
         :, None
     ]  # (M,1)
-    q = xf / scale
-    if is_int8s(fmt):
-        q = torch.round(q)
-    qmax = str_to_qmax(fmt)
-    q = q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
-    return q.contiguous(), scale.contiguous()
+    return _to_codes(xf, scale, fmt).contiguous(), scale.contiguous()
 
 
-def _quantize_last_axis(xf, K, bs, *, fmt, scale_dtype):
-    """Blockwise quantize a (..., K) fp32 tensor along the last axis."""
-    nkb = (K + bs - 1) // bs
-    pad = nkb * bs - K
+def _quantize_tensorwise(xf, fmt, scale_dtype):
+    """One scale for the whole tensor.
+
+    Layout-agnostic: a 0-dim scale broadcasts against any axis order, so the
+    caller need not normalize the contraction axis first.
+    """
+    scale = _amax_to_scale(xf.abs().amax(), fmt, scale_dtype)  # 0-dim
+    return _to_codes(xf, scale, fmt), scale
+
+
+def _quantize_blockwise(xf, fmt, scale_dtype, block_size):
+    """One scale per `block_size` elements along the last axis of a (..., K) fp32
+    tensor. `rowwise` is this with block_size == K.
+    """
+    K = xf.shape[-1]
+    nkb = (K + block_size - 1) // block_size
+    pad = nkb * block_size - K
     xp = F.pad(xf, (0, pad)) if pad else xf
-    xb = xp.reshape(*xp.shape[:-1], nkb, bs)  # (..., nkb, bs)
-    amax = xb.abs().amax(dim=-1)  # (..., nkb)
-    scale = _amax_to_scale(amax, fmt, scale_dtype)
-    q = xb / scale.unsqueeze(-1)
-    if is_int8s(fmt):
-        q = torch.round(q)
-    qmax = str_to_qmax(fmt)
-    q = q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
-    xq = q.flatten(-2)[..., :K].contiguous()
-    return xq, scale
+    xb = xp.reshape(*xp.shape[:-1], nkb, block_size)  # (..., nkb, block_size)
+    scale = _amax_to_scale(xb.abs().amax(dim=-1), fmt, scale_dtype)  # (..., nkb)
+    q = _to_codes(xb, scale.unsqueeze(-1), fmt)
+    return q.flatten(-2)[..., :K].contiguous(), scale
 
 
 def quantize_operand(
@@ -163,32 +173,25 @@ def quantize_operand(
         # contract_dim == -1: rowwise/blockwise are already per row here, so only
         # tensorwise has an amax wide enough to span groups.
         return _quantize_ragged_rows(x, ragged, fmt=fmt, scale_dtype=scale_dtype)
-    xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
-    K = xf.shape[-1]
-
-    # tensorwise branch
     if granularity == "tensorwise":
-        amax = xf.abs().amax()
-        scale = _amax_to_scale(amax, fmt, scale_dtype)  # 0-dim
-        q = xf / scale
-        if is_int8s(fmt):
-            q = torch.round(q)
-        qmax = str_to_qmax(fmt)
-        q = q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
-        xq = q.movedim(-1, contract_dim).contiguous()
+        xq, scale = _quantize_tensorwise(x.float(), fmt, scale_dtype)
         # canonical broadcast: A -> (M,1), B -> (1,N)
-        rows = xq.shape[0]
-        cols = xq.shape[1]
+        rows, cols = xq.shape
         s = scale.reshape(1, 1)
         scale2d = s.expand(rows, 1) if contract_dim == -1 else s.expand(1, cols)
-        return xq, scale2d.contiguous()
+        return xq.contiguous(), scale2d.contiguous()
 
-    # rowwise/blockwise branch
-    bs = effective_block_size(granularity, block_size, K)
-    xq_last, scale = _quantize_last_axis(xf, K, bs, fmt=fmt, scale_dtype=scale_dtype)
-    xq = xq_last.movedim(-1, contract_dim).contiguous()
-    scale = scale.movedim(-1, contract_dim).contiguous()  # A:(M,nkb) B:(nkb,N)
-    return xq, scale
+    xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
+    xq, scale = _quantize_blockwise(
+        xf,
+        fmt,
+        scale_dtype,
+        effective_block_size(granularity, block_size, xf.shape[-1]),
+    )
+    return (
+        xq.movedim(-1, contract_dim).contiguous(),
+        scale.movedim(-1, contract_dim).contiguous(),  # A:(M,nkb) B:(nkb,N)
+    )
 
 
 def dequantize_operand(
