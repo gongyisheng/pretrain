@@ -853,6 +853,47 @@ def test_quant_rejects_unsupported_granularity():
         )
 
 
+def test_quant_gemm_defaults_to_scaled():
+    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8"})
+    assert q.gemm == {"fwd": "scaled", "dgrad": "scaled", "wgrad": "scaled"}
+
+
+def test_quant_gemm_str_broadcasts_to_every_gemm():
+    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8"}, gemm="dequant")
+    assert q.gemm == {"fwd": "dequant", "dgrad": "dequant", "wgrad": "dequant"}
+
+
+def test_quant_gemm_partial_dict_defaults_rest_to_scaled():
+    q = QuantizationConfig(
+        enabled=True, dtype={"recipe": "fp8"}, gemm={"wgrad": "dequant"}
+    )
+    assert q.gemm == {"fwd": "scaled", "dgrad": "scaled", "wgrad": "dequant"}
+
+
+def test_quant_rejects_unknown_gemm_key():
+    with pytest.raises(ValueError, match="gemm key"):
+        QuantizationConfig(
+            enabled=True, dtype={"recipe": "fp8"}, gemm={"bwd": "dequant"}
+        )
+
+
+def test_quant_rejects_unknown_gemm_impl():
+    with pytest.raises(ValueError, match="gemm impl"):
+        QuantizationConfig(
+            enabled=True, dtype={"recipe": "fp8"}, gemm={"wgrad": "fake"}
+        )
+
+
+def test_quant_rejects_unknown_gemm_impl_str():
+    with pytest.raises(ValueError, match="gemm impl"):
+        QuantizationConfig(enabled=True, dtype={"recipe": "fp8"}, gemm="fake")
+
+
+def test_quant_gemm_skips_validation_when_disabled():
+    # inert when off, same as dtype: a bad impl is not checked
+    QuantizationConfig(enabled=False, gemm="not_an_impl")
+
+
 def test_training_config_normalizes_single_rule_to_list():
     tc = TrainingConfig(quantization={"enabled": True, "dtype": {"recipe": "fp8"}})
     assert isinstance(tc.quantization, list) and len(tc.quantization) == 1

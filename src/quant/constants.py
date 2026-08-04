@@ -46,6 +46,13 @@ QUANT_DTYPE_RECIPES = {
 
 QUANT_OPERANDS = ("weight", "act", "grad_input", "grad_weight")
 
+# The three GEMMs a linear/expert layer runs. `scaled` dispatches to the
+# low-precision kernel; `dequant` dequantizes the same quantized operands and
+# matmuls in high precision, isolating quantization error from kernel error.
+QUANT_GEMMS = ("fwd", "dgrad", "wgrad")
+
+QUANT_GEMM_IMPLS = ("scaled", "dequant")
+
 
 # --- format property maps ---------------------------------------------------
 

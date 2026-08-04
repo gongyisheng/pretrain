@@ -8,6 +8,8 @@ from src.layers.mlp import MLP_REGISTRY, MOE_ROUTER_SCORE_FNS
 from src.layers.pos_emb import POS_EMB_REGISTRY
 from src.quant.constants import (
     QUANT_FORMATS,
+    QUANT_GEMM_IMPLS,
+    QUANT_GEMMS,
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,
     QUANT_OPERANDS,
@@ -301,6 +303,7 @@ class QuantizationConfig:
     enabled: bool = False
     dtype: dict = field(default_factory=dict)  # {weight/act/grad: fmt}
     scaling: dict = field(default_factory=dict)  # {granularity, block_size}
+    gemm: Union[str, dict] = field(default_factory=dict)  # {fwd/dgrad/wgrad: impl}
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
@@ -374,6 +377,28 @@ class QuantizationConfig:
                     f"unknown quant fmt for {operand}: {fmt!r}; "
                     f"expected one of {sorted(QUANT_FORMATS)}"
                 )
+
+        # A bare impl string applies to every GEMM; a dict scopes it per GEMM.
+        if isinstance(self.gemm, str):
+            if self.gemm not in QUANT_GEMM_IMPLS:
+                raise ValueError(
+                    f"unknown quant gemm impl: {self.gemm!r}; "
+                    f"expected one of {sorted(QUANT_GEMM_IMPLS)}"
+                )
+            self.gemm = dict.fromkeys(QUANT_GEMMS, self.gemm)
+        for gemm, impl in self.gemm.items():
+            if gemm not in QUANT_GEMMS:
+                raise ValueError(
+                    f"unknown quant gemm key: {gemm!r}; "
+                    f"expected one of {sorted(QUANT_GEMMS)}"
+                )
+            if impl not in QUANT_GEMM_IMPLS:
+                raise ValueError(
+                    f"unknown quant gemm impl for {gemm}: {impl!r}; "
+                    f"expected one of {sorted(QUANT_GEMM_IMPLS)}"
+                )
+        for gemm in QUANT_GEMMS:
+            self.gemm.setdefault(gemm, "scaled")
 
         # mxfp8 (blockwise + fp8_e8m0) is defined only over fp8 elements.
         if granularity == "blockwise" and scale_dtype == "fp8_e8m0":

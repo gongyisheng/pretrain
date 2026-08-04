@@ -22,7 +22,7 @@ from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
 
 
-def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
+def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling, impl="scaled"):
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
     scale_dtype = scaling.get("scale_dtype")
@@ -61,7 +61,8 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
         sb = torch.stack([s for _, s in per_expert])
         b_snap = QuantizationSnapshot(b, bq, sb, 1, granularity, block_size, offs)
 
-    if same_family and a.is_cuda:
+    # impl permits the kernel; same_family/is_cuda decide whether it can run.
+    if impl == "scaled" and same_family and a.is_cuda:
         y = scaled_grouped_gemm(
             aq,
             bq,
@@ -81,7 +82,9 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     return y, a_snap, b_snap
 
 
-def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
+def quantized_grouped_wgrad(
+    a, g, offs, a_fmt, g_fmt, out_dtype, scaling, impl="scaled"
+):
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
     scale_dtype = scaling.get("scale_dtype")
@@ -110,7 +113,8 @@ def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
             g, gq, sg, 0, granularity, block_size, offs
         )  # (nrb,N)
 
-    if same_family and a.is_cuda:
+    # impl permits the kernel; same_family/is_cuda decide whether it can run.
+    if impl == "scaled" and same_family and a.is_cuda:
         grad_b = scaled_grouped_gemm_wgrad(
             aq,
             gq,
@@ -141,7 +145,14 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
     def forward(ctx, a, b, offs, cfg: QuantizationConfig, probe=None):
         out_dtype = a.dtype
         y, act_snap, weight_snap = quantized_grouped_gemm(
-            a, b, offs, cfg.dtype["act"], cfg.dtype["weight"], out_dtype, cfg.scaling
+            a,
+            b,
+            offs,
+            cfg.dtype["act"],
+            cfg.dtype["weight"],
+            out_dtype,
+            cfg.scaling,
+            cfg.gemm["fwd"],
         )
         if probe is not None and probe.enabled:
             probe.record("fwd.act", act_snap)
@@ -165,6 +176,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["weight"],
             out_dtype,
             cfg.scaling,
+            cfg.gemm["dgrad"],
         )
         # wgrad: grad_b[g] = a[g]^T @ grad_y[g]
         grad_b, wgrad_act_snap, wgrad_grad_snap = quantized_grouped_wgrad(
@@ -175,6 +187,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["grad_weight"],
             out_dtype,
             cfg.scaling,
+            cfg.gemm["wgrad"],
         )
         probe = ctx.probe
         if probe is not None and probe.enabled:
