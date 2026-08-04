@@ -52,7 +52,7 @@ def test_scaled_grouped_gemm_compiles_fullgraph():
     torch.testing.assert_close(b_c.grad.float(), b_e.grad.float(), rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
+@pytest.mark.skipif(not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9")
 def test_moe_block_quantized_forward_backward_runs():
     import torch.nn as nn
 
@@ -107,7 +107,7 @@ def test_moe_block_quantized_forward_backward_runs():
     assert torch.isfinite(m.mlp.expert_down.grad).all()
 
 
-@pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
+@pytest.mark.skipif(not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9")
 @pytest.mark.parametrize("scaling", ["blockwise", "mxfp8"])
 def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
     # counts give R=299 with expert 1 empty. Scale blocks restart at each expert, so

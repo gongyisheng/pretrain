@@ -745,11 +745,11 @@ def test_quant_operand_defaults_follow_mixed_precision():
     r2 = _only_rule(
         TrainingConfig(
             mixed_precision="bf16",
-            quantization={"enabled": True, "dtype": {"weight": "fp8"}},
+            quantization={"enabled": True, "dtype": {"weight": "fp8_e4m3"}},
         )
     )
     assert r2.dtype == {
-        "weight": "fp8",
+        "weight": "fp8_e4m3",
         "act": "bf16",
         "grad_input": "bf16",
         "grad_weight": "bf16",
@@ -766,9 +766,10 @@ def test_quant_disabled_rule_dtype_stays_empty():
 
 def test_quant_dtype_is_mixable():
     q = QuantizationConfig(
-        enabled=True, dtype={"weight": "fp8", "act": "fp8", "grad_weight": "bf16"}
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_weight": "bf16"},
     )
-    assert q.dtype["weight"] == "fp8" and q.dtype["grad_weight"] == "bf16"
+    assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["grad_weight"] == "bf16"
 
 
 def test_quant_dtype_recipe_fp8():
@@ -864,13 +865,13 @@ def test_training_config_accepts_list_of_rules():
         mixed_precision="bf16",
         quantization=[
             {"enabled": True, "dtype": {"recipe": "fp8"}, "include": ["*.mlp.*"]},
-            {"enabled": True, "dtype": {"weight": "fp8"}, "include": ["*.attn.*"]},
+            {"enabled": True, "dtype": {"weight": "fp8_e4m3"}, "include": ["*.attn.*"]},
         ],
     )
     assert len(tc.quantization) == 2
     assert tc.quantization[0].include == ["*.mlp.*"]
     assert tc.quantization[1].dtype == {
-        "weight": "fp8",
+        "weight": "fp8_e4m3",
         "act": "bf16",
         "grad_input": "bf16",
         "grad_weight": "bf16",

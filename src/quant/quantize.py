@@ -10,7 +10,7 @@ from src.quant.utils import (
     is_int8s,
     str_to_emax,
     str_to_qmax,
-    str_to_store_dtype,
+    str_to_dtype,
 )
 
 
@@ -83,11 +83,11 @@ def _compute_codes(xf: torch.Tensor, scale: torch.Tensor, fmt: str) -> torch.Ten
 
     `scale` must broadcast against `xf`; both are float32.
     """
-    q = xf / scale
+    xq = xf / scale
     if is_int8s(fmt):
-        q = torch.round(q)
+        xq = torch.round(xq)
     qmax = str_to_qmax(fmt)
-    return q.clamp(-qmax, qmax).to(str_to_store_dtype(fmt))
+    return xq.clamp(-qmax, qmax).to(str_to_dtype(fmt))
 
 
 def _quantize_ragged_axis(x, ragged, granularity, *, fmt, scale_dtype):
@@ -104,8 +104,8 @@ def _quantize_ragged_axis(x, ragged, granularity, *, fmt, scale_dtype):
     if granularity == "tensorwise":
         amax = amax.amax(dim=-1, keepdim=True).expand_as(amax)
     scale = _compute_scale(amax, fmt, scale_dtype)
-    q = _compute_codes(xf, scale.index_select(0, ragged.row_blocks), fmt)
-    return q.contiguous(), scale.contiguous()
+    xq = _compute_codes(xf, scale.index_select(0, ragged.row_blocks), fmt)
+    return xq.contiguous(), scale.contiguous()
 
 
 def _quantize_ragged_rows(x, ragged, *, fmt, scale_dtype):
@@ -125,27 +125,19 @@ def _quantize_ragged_rows(x, ragged, *, fmt, scale_dtype):
 
 
 def _quantize_tensorwise(xf, fmt, scale_dtype):
-    """One scale for the whole tensor.
-
-    Layout-agnostic: a 0-dim scale broadcasts against any axis order, so the
-    caller need not normalize the contraction axis first.
-    """
     scale = _compute_scale(xf.abs().amax(), fmt, scale_dtype)  # 0-dim
     return _compute_codes(xf, scale, fmt), scale
 
 
 def _quantize_blockwise(xf, fmt, scale_dtype, block_size):
-    """One scale per `block_size` elements along the last axis of a (..., K) fp32
-    tensor. `rowwise` is this with block_size == K.
-    """
     K = xf.shape[-1]
-    nkb = (K + block_size - 1) // block_size
-    pad = nkb * block_size - K
+    n_blocks = (K + block_size - 1) // block_size
+    pad = n_blocks * block_size - K
     xp = F.pad(xf, (0, pad)) if pad else xf
-    xb = xp.reshape(*xp.shape[:-1], nkb, block_size)  # (..., nkb, block_size)
-    scale = _compute_scale(xb.abs().amax(dim=-1), fmt, scale_dtype)  # (..., nkb)
-    q = _compute_codes(xb, scale.unsqueeze(-1), fmt)
-    return q.flatten(-2)[..., :K].contiguous(), scale  # [..., :K] drops the padding
+    xb = xp.reshape(*xp.shape[:-1], n_blocks, block_size)  # (..., n_blocks, block_size)
+    scale = _compute_scale(xb.abs().amax(dim=-1), fmt, scale_dtype)  # (..., n_blocks)
+    xq = _compute_codes(xb, scale.unsqueeze(-1), fmt)  # (..., n_blocks, block_size)
+    return xq.flatten(-2)[..., :K].contiguous(), scale  # (..., K)
 
 
 def quantize_operand(
@@ -169,53 +161,55 @@ def quantize_operand(
         return _quantize_ragged_axis(
             x, ragged, granularity, fmt=fmt, scale_dtype=scale_dtype
         )
+
     if ragged is not None and granularity == "tensorwise":
         # contract_dim == -1: rowwise/blockwise are already per row here, so only
         # tensorwise has an amax wide enough to span groups.
         return _quantize_ragged_rows(x, ragged, fmt=fmt, scale_dtype=scale_dtype)
+
     if granularity == "tensorwise":
+        # tensorwise branch
         xq, scale = _quantize_tensorwise(x.float(), fmt, scale_dtype)
-        # canonical broadcast: A -> (M,1), B -> (1,N)
         rows, cols = xq.shape
         s = scale.reshape(1, 1)
         scale2d = s.expand(rows, 1) if contract_dim == -1 else s.expand(1, cols)
+
+        # scale shape:
+        # if contract_dim == -1, (rows, 1)
+        # if contract_dim == 0,  (1, cols)
         return xq.contiguous(), scale2d.contiguous()
 
-    xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
-    xq, scale = _quantize_blockwise(
-        xf,
-        fmt,
-        scale_dtype,
-        effective_block_size(granularity, block_size, xf.shape[-1]),
-    )
-    return (
-        xq.movedim(-1, contract_dim).contiguous(),
-        scale.movedim(-1, contract_dim).contiguous(),  # A:(M,nkb) B:(nkb,N)
-    )
+    else:
+        # rowwise/blockwise branch
+        xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
+        xq, scale = _quantize_blockwise(
+            xf,
+            fmt,
+            scale_dtype,
+            effective_block_size(granularity, block_size, xf.shape[-1]),
+        )
+        xq = xq.movedim(-1, contract_dim)
+        scale = scale.movedim(-1, contract_dim)
+
+        # scale shape:
+        # if contract_dim == -1, (M, n_blocks)
+        # if contract_dim == 0,  (n_blocks, N)
+        return xq.contiguous(), scale.contiguous()
 
 
-def dequantize_operand(
-    xq, scale, contract_dim, granularity, block_size, *, ragged=None
-):
-    """float32 `xq * scale` with contract_dim restored — inverse of `quantize_operand`.
-
-    `granularity`/`block_size` must be the values `quantize_operand` used. The block
-    size cannot be recovered from nkb/K, which is ambiguous whenever the last block
-    is partial (e.g. K=100, block_size=32 -> nkb=4 but ceil(100/4)=25 != 32).
-    `ragged` must likewise be the mapping `quantize_operand` was given; it is only
-    consulted when the contracted axis is the ragged one, since a contract_dim==-1
-    scale is per row and already inverts without it.
-    """
+def dequantize_operand(xq, scale, contract_dim, granularity, block_size, ragged=None):
     if ragged is not None and contract_dim == 0:
         return xq.float() * scale.float().index_select(0, ragged.row_blocks)
     qf = xq.movedim(contract_dim, -1).float()  # (..., K)
     K = qf.shape[-1]
-    sf = scale.movedim(contract_dim, -1).float()  # (..., nkb)
-    nkb = sf.shape[-1]
-    bs = effective_block_size(granularity, block_size, K)
-    pad = nkb * bs - K
+    sf = scale.movedim(contract_dim, -1).float()  # (..., n_block)
+    n_block = sf.shape[-1]
+    _block_size = effective_block_size(granularity, block_size, K)
+    pad = n_block * _block_size - K
     qp = F.pad(qf, (0, pad)) if pad else qf
-    deq = (qp.reshape(*qp.shape[:-1], nkb, bs) * sf.unsqueeze(-1)).flatten(-2)[..., :K]
+    deq = (qp.reshape(*qp.shape[:-1], n_block, _block_size) * sf.unsqueeze(-1)).flatten(
+        -2
+    )[..., :K]
     return deq.movedim(-1, contract_dim).contiguous()
 
 

@@ -23,7 +23,9 @@ from src.utils.config import (
     TrainingConfig,
 )
 
-fp8_only = pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
+fp8_only = pytest.mark.skipif(
+    not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9"
+)
 
 
 @pytest.fixture

@@ -7,8 +7,10 @@ import torch
 
 QUANT_PASSTHROUGH = frozenset({"fp32", "fp16", "bf16"})
 
+# "fp8" is a dtype recipe, not an element format: QUANT_DTYPE_RECIPES expands it
+# to fp8_e4m3/fp8_e5m2 per operand, so it must never appear as an operand's dtype.
 QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset(
-    {"fp8", "fp8_e4m3", "fp8_e5m2", "int8", "int7", "int6", "int5", "int4"}
+    {"fp8_e4m3", "fp8_e5m2", "int8", "int7", "int6", "int5", "int4"}
 )
 
 QUANT_GRANULARITY = frozenset({"tensorwise", "rowwise", "blockwise"})
@@ -50,10 +52,14 @@ QUANT_OPERANDS = ("weight", "act", "grad_input", "grad_weight")
 # --- format property maps ---------------------------------------------------
 
 _STR_TO_DTYPE = {
-    "fp8": torch.float8_e4m3fn,
     "fp8_e4m3": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
     "fp8_e8m0": torch.float8_e8m0fnu,
+    "int8": torch.int8,
+    "int7": torch.int8,
+    "int6": torch.int8,
+    "int5": torch.int8,
+    "int4": torch.int8,
 }
 
 _STR_TO_QMAX = {
@@ -84,7 +90,6 @@ _STR_TO_EMAX = {
 
 EPS = 1e-30
 
-_FP8_FORMATS = frozenset(
-    fmt for fmt, dt in _STR_TO_DTYPE.items() if dt is not torch.float8_e8m0fnu
-)
+# Operand formats only: fp8_e8m0 is a scale dtype, never an operand's.
+_FP8_FORMATS = frozenset({"fp8_e4m3", "fp8_e5m2"})
 _INT8_FORMATS = frozenset({"int8", "int7", "int6", "int5", "int4"})

@@ -1,19 +1,53 @@
+import pytest
 import torch
 
 from src.utils.config import QuantizationConfig
-from src.quant.utils import should_quantize, resolve_quantization_config, str_to_dtype
+from src.quant.utils import (
+    is_fp8,
+    is_supported,
+    should_quantize,
+    resolve_quantization_config,
+    str_to_dtype,
+)
 
 
 def test_str_to_dtype_maps_fp8_variants():
-    assert str_to_dtype("fp8") == torch.float8_e4m3fn
     assert str_to_dtype("fp8_e4m3") == torch.float8_e4m3fn
     assert str_to_dtype("fp8_e5m2") == torch.float8_e5m2
     assert str_to_dtype("fp8_e8m0") == torch.float8_e8m0fnu
 
 
-def test_str_to_dtype_passthrough_is_none():
+def test_str_to_dtype_stores_every_int_format_as_int8():
+    for fmt in ("int8", "int7", "int6", "int5", "int4"):
+        assert str_to_dtype(fmt) == torch.int8
+
+
+def test_str_to_dtype_rejects_passthrough():
     for fmt in ("fp32", "fp16", "bf16"):
-        assert str_to_dtype(fmt) is None
+        with pytest.raises(KeyError):
+            str_to_dtype(fmt)
+
+
+def test_int_formats_are_not_fp8():
+    # _FP8_FORMATS was derived from the dtype map, so adding the int entries
+    # there would have silently made is_fp8 true for them.
+    for fmt in ("int8", "int7", "int6", "int5", "int4"):
+        assert not is_fp8(fmt)
+
+
+def test_fp8_is_a_recipe_not_an_element_format():
+    # "fp8" expands to fp8_e4m3/fp8_e5m2 per operand, so it must never reach the
+    # element-format helpers -- loudly, not as a silent unquantized passthrough.
+    with pytest.raises(KeyError):
+        str_to_dtype("fp8")
+    with pytest.raises(ValueError, match="not an element format"):
+        is_supported("fp8")
+    assert not is_fp8("fp8")
+
+
+def test_is_supported_accepts_every_element_format():
+    for fmt in ("fp8_e4m3", "fp8_e5m2", "int8", "int4", "fp32", "bf16"):
+        assert isinstance(is_supported(fmt), bool)
 
 
 def _cfg(**kw):

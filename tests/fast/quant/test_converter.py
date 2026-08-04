@@ -16,7 +16,9 @@ from src.utils.config import (
 )
 
 
-fp8_only = pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
+fp8_only = pytest.mark.skipif(
+    not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9"
+)
 
 
 class _Tiny(nn.Module):
@@ -52,7 +54,7 @@ def test_disabled_is_noop():
 
 
 @pytest.mark.skipif(
-    is_supported("fp8"), reason="testing the unsupported-hardware branch"
+    is_supported("fp8_e4m3"), reason="testing the unsupported-hardware branch"
 )
 def test_raises_without_capable_gpu():
     m = _Tiny()
@@ -61,7 +63,7 @@ def test_raises_without_capable_gpu():
 
 
 @pytest.mark.skipif(
-    is_supported("fp8"), reason="testing the unsupported-hardware branch"
+    is_supported("fp8_e4m3"), reason="testing the unsupported-hardware branch"
 )
 def test_mxfp8_rule_raises_without_capable_gpu():
     # mxfp8 is e4m3 on every operand, so it gates on the same fp8 hardware

@@ -6,6 +6,7 @@ from typing import Optional
 import torch
 
 from src.quant.constants import (
+    QUANT_FORMATS,
     _FP8_FORMATS,
     _INT8_FORMATS,
     _STR_TO_DTYPE,
@@ -15,12 +16,8 @@ from src.quant.constants import (
 from src.utils.config import QuantizationConfig
 
 
-def str_to_dtype(fmt: str) -> Optional[torch.dtype]:
-    return _STR_TO_DTYPE.get(fmt)
-
-
-def str_to_store_dtype(fmt: str) -> torch.dtype:
-    return _STR_TO_DTYPE.get(fmt) or torch.int8
+def str_to_dtype(fmt: str) -> torch.dtype:
+    return _STR_TO_DTYPE[fmt]
 
 
 def str_to_qmax(fmt: str) -> float:
@@ -44,7 +41,11 @@ def is_quantized(fmt: str) -> bool:
 
 
 def is_supported(fmt: str) -> bool:
-    if str_to_dtype(fmt) is not None:
+    if fmt not in QUANT_FORMATS:
+        raise ValueError(
+            f"not an element format: {fmt!r}; expected one of {sorted(QUANT_FORMATS)}"
+        )
+    if is_fp8(fmt):
         return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
             8,
             9,
