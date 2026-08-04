@@ -16,6 +16,7 @@ from src.quant.quantize import (
     dequantize_operand,
     effective_block_size,
     quantize_operand,
+    ragged_scale_blocks,
 )
 from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
@@ -29,11 +30,24 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
         is_int8s(a_fmt) and is_int8s(b_fmt)
     )
 
+    # The row axis is ragged over experts, but only tensorwise has an amax wide
+    # enough to span them here — rowwise/blockwise are already per row.
+    ragged = (
+        ragged_scale_blocks(offs, a.shape[0], granularity, block_size)
+        if granularity == "tensorwise"
+        else None
+    )
     a_snap = b_snap = None
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
-            a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
+            a,
+            -1,
+            granularity,
+            block_size,
+            a_fmt,
+            scale_dtype=scale_dtype,
+            ragged=ragged,
         )
         a_snap = QuantizationSnapshot(a, aq, sa, -1, granularity, block_size, offs)
     if is_quantized(b_fmt):
@@ -75,18 +89,22 @@ def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
         is_int8s(a_fmt) and is_int8s(g_fmt)
     )
 
+    # Both operands are indexed by the same ragged token axis, so one mapping
+    # covers them and the kernel.
+    ragged = ragged_scale_blocks(offs, a.shape[0], granularity, block_size)
+
     a_snap = g_snap = None
     aq = sa = gq = sg = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
-            a, 0, granularity, block_size, a_fmt, scale_dtype=scale_dtype
+            a, 0, granularity, block_size, a_fmt, scale_dtype=scale_dtype, ragged=ragged
         )
         a_snap = QuantizationSnapshot(
             a, aq, sa, 0, granularity, block_size, offs
         )  # (nrb,K)
     if is_quantized(g_fmt):
         gq, sg = quantize_operand(
-            g, 0, granularity, block_size, g_fmt, scale_dtype=scale_dtype
+            g, 0, granularity, block_size, g_fmt, scale_dtype=scale_dtype, ragged=ragged
         )
         g_snap = QuantizationSnapshot(
             g, gq, sg, 0, granularity, block_size, offs
@@ -99,15 +117,20 @@ def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
             sa,
             sg,
             offs,
+            ragged.first_block,
             out_dtype,
-            effective_block_size(granularity, block_size, a.shape[0]),
+            block_size if granularity == "blockwise" else 0,
         )
         return grad_b, a_snap, g_snap
 
     if aq is not None:
-        a = dequantize_operand(aq, sa, 0, granularity, block_size).to(a.dtype)
+        a = dequantize_operand(aq, sa, 0, granularity, block_size, ragged=ragged).to(
+            a.dtype
+        )
     if gq is not None:
-        g = dequantize_operand(gq, sg, 0, granularity, block_size).to(g.dtype)
+        g = dequantize_operand(gq, sg, 0, granularity, block_size, ragged=ragged).to(
+            g.dtype
+        )
     # bf16 ragged Xᵀ@gY via the existing grouped wgrad path
     grad_b = grouped_gemm_wgrad(a.to(out_dtype), g.to(out_dtype), offs).to(out_dtype)
     return grad_b, a_snap, g_snap

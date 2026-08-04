@@ -110,8 +110,9 @@ def test_moe_block_quantized_forward_backward_runs():
 @pytest.mark.skipif(not is_supported("fp8"), reason="fp8 needs SM >= 8.9")
 @pytest.mark.parametrize("scaling", ["blockwise", "mxfp8"])
 def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
-    # counts give R=299: with block_size 128 the last scale block [256,299) straddles
-    # the expert-2/expert-3 boundary at 258, and expert 1 is empty.
+    # counts give R=299 with expert 1 empty. Scale blocks restart at each expert, so
+    # expert 2 (rows 128..257) owns two 128-row blocks and expert 3 (rows 258..298)
+    # its own short one — no block straddles the boundary at 258 any more.
     a, b, offs = _make([128, 0, 130, 41], K=64, N=48)
     cfg = _cfg("fp8", scaling)
 
@@ -156,3 +157,63 @@ def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
     ):
         rel = (got.float() - ref.float()).norm() / ref.float().norm().clamp_min(1e-12)
         assert rel <= bound, (scaling, name, rel)
+
+
+@pytest.mark.parametrize("scaling", ["tensorwise", "rowwise", "blockwise"])
+def test_grad_b_quality_is_independent_across_experts(scaling):
+    """A 100x hotter expert must not degrade a cold expert's grad_b.
+
+    This is the whole point of per-expert scales: with one amax shared across the
+    ragged token axis the cold expert's rows land in the bottom ~1% of the fp8
+    range and its grad_b is mostly quantization noise.
+    """
+    counts = [64, 64]
+    a, b, offs = _make(counts, K=128, N=96)
+    a[: counts[0]] *= 100.0  # expert 0 hot, expert 1 cold
+    cfg = _cfg("fp8", scaling)
+
+    a_q = a.clone().requires_grad_(True)
+    b_q = b.clone().requires_grad_(True)
+    moe.quantized_expert_mm(cfg)(a_q, b_q, offs).sum().backward()
+
+    a_ref = a.float().clone().requires_grad_(True)
+    b_ref = b.float().clone().requires_grad_(True)
+    lo = 0
+    for gi, hi in enumerate(offs.tolist()):
+        (a_ref[lo:hi] @ b_ref[gi]).sum().backward()
+        lo = hi
+
+    rel = [
+        (
+            (b_q.grad[gi].float() - b_ref.grad[gi]).norm()
+            / b_ref.grad[gi].norm().clamp_min(1e-12)
+        ).item()
+        for gi in range(len(counts))
+    ]
+    # Record the observed values in this comment when first run, then keep ~2x
+    # headroom. A shared amax puts the cold expert near 1.0.
+    assert max(rel) < 0.1, rel
+    assert max(rel) / min(rel) < 4.0, rel
+
+
+def test_wgrad_receives_per_expert_block_table(monkeypatch):
+    """The kernel must be handed first_block, and the quantization block size —
+    not effective_block_size, which would collapse rowwise back to one block."""
+    a, b, offs = _make([8, 0, 24], K=64, N=48)
+    seen = {}
+    real = moe.scaled_grouped_gemm_wgrad
+
+    def spy(aq, gq, sa, sg, offs_, first_block, out_dtype, block_size):
+        seen["first_block"] = first_block
+        seen["block_size"] = block_size
+        seen["n_scale_rows"] = sa.shape[0]
+        return real(aq, gq, sa, sg, offs_, first_block, out_dtype, block_size)
+
+    monkeypatch.setattr(moe, "scaled_grouped_gemm_wgrad", spy)
+    a_q = a.clone().requires_grad_(True)
+    moe.quantized_expert_mm(_cfg("fp8", "rowwise"))(
+        a_q, b.clone(), offs
+    ).sum().backward()
+    assert seen["block_size"] == 0  # rowwise -> one block per expert
+    assert seen["first_block"].tolist() == [0, 1, 2, 3]
+    assert seen["n_scale_rows"] == 3
