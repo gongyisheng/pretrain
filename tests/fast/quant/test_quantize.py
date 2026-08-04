@@ -401,3 +401,25 @@ def test_ragged_none_is_unchanged(contract_dim, gran, bs):
     assert xq.shape == x.shape
     expected_nkb = 1 if bs == 0 else (96 if contract_dim == -1 else 64) // bs
     assert scale.shape[-1 if contract_dim == -1 else 0] == expected_nkb
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 4)]
+)
+def test_ragged_dequantize_inverts_ragged_quantize(gran, bs):
+    torch.manual_seed(0)
+    counts = [6, 0, 5]
+    x = torch.randn(sum(counts), 8)
+    x[:6] *= 50.0
+    blocks = ragged_scale_blocks(_offs(counts), sum(counts), gran, bs)
+    xq, scale = quantize_operand(x, 0, gran, bs, "fp8_e4m3", ragged=blocks)
+    deq = dequantize_operand(xq, scale, 0, gran, bs, ragged=blocks)
+    assert deq.shape == x.shape
+    assert deq.dtype == torch.float32
+    # per group, because a shared reduction would hide a mis-scaled cold group
+    lo = 0
+    for hi in _offs(counts).tolist():
+        if hi > lo:
+            rel = (deq[lo:hi] - x[lo:hi]).norm() / x[lo:hi].norm()
+            assert rel < 0.1, (lo, hi, rel)
+        lo = hi

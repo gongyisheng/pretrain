@@ -165,13 +165,20 @@ def quantize_operand(
     return xq, scale
 
 
-def dequantize_operand(xq, scale, contract_dim, granularity, block_size):
+def dequantize_operand(
+    xq, scale, contract_dim, granularity, block_size, *, ragged=None
+):
     """float32 `xq * scale` with contract_dim restored — inverse of `quantize_operand`.
 
     `granularity`/`block_size` must be the values `quantize_operand` used. The block
     size cannot be recovered from nkb/K, which is ambiguous whenever the last block
     is partial (e.g. K=100, block_size=32 -> nkb=4 but ceil(100/4)=25 != 32).
+    `ragged` must likewise be the mapping `quantize_operand` was given; it is only
+    consulted when the contracted axis is the ragged one, since a contract_dim==-1
+    scale is per row and already inverts without it.
     """
+    if ragged is not None and contract_dim == 0:
+        return xq.float() * scale.float().index_select(0, ragged.row_blocks)
     qf = xq.movedim(contract_dim, -1).float()  # (..., K)
     K = qf.shape[-1]
     sf = scale.movedim(contract_dim, -1).float()  # (..., nkb)
