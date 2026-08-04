@@ -56,16 +56,37 @@ def _dequant_b_grouped(bq, sb, bs):
     return torch.stack([_dequant_b(bq[g], sb[g], bs) for g in range(bq.shape[0])])
 
 
-def scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, ebs):
+def _dequant_ragged(xq, scale, offs, first_block, bs):
+    """Dequant (R,C) codes whose (nrb,C) scale rows tile each group's rows.
+
+    Deliberately a plain Python loop: the oracle should restate the layout, not
+    share the vectorised indexing the implementation uses.
+    """
+    out = torch.zeros(xq.shape, device=xq.device, dtype=torch.float32)
+    bounds = [0, *offs.tolist()]
+    fb = first_block.tolist()
+    for gi, (lo, hi) in enumerate(zip(bounds, bounds[1:])):
+        if hi <= lo:
+            continue
+        if bs == 0:
+            out[lo:hi] = xq[lo:hi].float() * scale[fb[gi]].float()
+            continue
+        for j, m in enumerate(range(lo, hi, bs)):
+            stop = min(m + bs, hi)
+            out[m:stop] = xq[m:stop].float() * scale[fb[gi] + j].float()
+    return out
+
+
+def scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, first_block, bs):
     """fp32 oracle for scaled grouped wgrad: gW[g] = (Xq·sa)[g]^T @ (gYq·sg)[g].
 
-    aq (R,K), gq (R,N) fp8/int8; sa (nrb,K), sg (nrb,N) fp32 scales blocked along
-    the contracted ragged token axis (dim 0) with ebs rows per block — nrb == 1 for
-    rowwise/tensorwise; offs (E,) int32 cumulative END-offsets. Returns (E,K,N) fp32.
+    aq (R,K), gq (R,N) fp8/int8; sa (nrb,K), sg (nrb,N) fp32 scales whose blocks
+    restart at each group, so `first_block` (E+1,) says which rows a group owns
+    and `bs` is the rows per block (0 -> one block per group). offs (E,) int32
+    cumulative END-offsets. Returns (E,K,N) fp32.
     """
-    # (R,K) with an (nrb,K) scale along dim 0 is the same layout _dequant_b handles.
-    a = _dequant_b(aq, sa, ebs)  # (R,K) fp32
-    g = _dequant_b(gq, sg, ebs)  # (R,N) fp32
+    a = _dequant_ragged(aq, sa, offs, first_block, bs)
+    g = _dequant_ragged(gq, sg, offs, first_block, bs)
     E, K, N = offs.shape[0], aq.shape[1], gq.shape[1]
     out = torch.zeros(E, K, N, device=aq.device, dtype=torch.float32)
     start = 0

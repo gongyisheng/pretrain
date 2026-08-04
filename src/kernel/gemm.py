@@ -573,6 +573,7 @@ def _scaled_grouped_gemm_wgrad_kernel(
     sa_ptr,
     sg_ptr,
     offs_ptr,
+    first_block_ptr,
     E,
     N,
     K,
@@ -609,23 +610,20 @@ def _scaled_grouped_gemm_wgrad_kernel(
         offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
         k_mask = offs_k < K
         n_mask = offs_n < N
-        # Scale blocks tile the global row axis, so they are independent of offs and
-        # may straddle an expert boundary. Visit only the blocks intersecting this
-        # group; BLOCK_SIZE == 0 means one scale for the whole axis (nrb == 1).
-        if BLOCK_SIZE == 0:
-            jb_start = 0
-            jb_end = 1
-        else:
-            jb_start = m_start // BLOCK_SIZE
-            jb_end = tl.cdiv(m_end, BLOCK_SIZE)
+        # Scale blocks restart at each group, so a block never straddles a group
+        # boundary: group g owns scale rows first_block[g] .. first_block[g+1],
+        # each covering BLOCK_SIZE of its rows (BLOCK_SIZE == 0 -> one row for all
+        # of them). An empty group owns none and falls through to the zero store.
+        jb_start = tl.load(first_block_ptr + g)
+        jb_end = tl.load(first_block_ptr + g + 1)
         acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
         for jb in range(jb_start, jb_end):
             if BLOCK_SIZE == 0:
                 m = m_start
                 m_stop = m_end
             else:
-                m = tl.maximum(jb * BLOCK_SIZE, m_start)
-                m_stop = tl.minimum((jb + 1) * BLOCK_SIZE, m_end)
+                m = m_start + (jb - jb_start) * BLOCK_SIZE
+                m_stop = tl.minimum(m + BLOCK_SIZE, m_end)
             # clamping to m_stop keeps an M tile inside one scale block and one expert
             blk = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
             while m < m_stop:
@@ -668,6 +666,7 @@ def scaled_grouped_gemm_wgrad(
     sa: torch.Tensor,
     sg: torch.Tensor,
     offs: torch.Tensor,
+    first_block: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
 ) -> torch.Tensor:
@@ -686,6 +685,7 @@ def scaled_grouped_gemm_wgrad(
         sa,
         sg,
         offs,
+        first_block,
         E,
         N,
         K,
@@ -701,6 +701,6 @@ def scaled_grouped_gemm_wgrad(
         sg.stride(0),
         sg.stride(1),
         NUM_SMS=num_sms,
-        BLOCK_SIZE=block_size if sa.shape[0] > 1 else 0,
+        BLOCK_SIZE=block_size,
     )
     return grad_b

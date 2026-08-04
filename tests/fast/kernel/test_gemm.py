@@ -15,7 +15,11 @@ from src.kernel.gemm import (
     scaled_grouped_gemm,
     scaled_grouped_gemm_wgrad,
 )
-from src.quant.quantize import effective_block_size, quantize_operand
+from src.quant.quantize import (
+    effective_block_size,
+    quantize_operand,
+    ragged_scale_blocks,
+)
 from tests.fast.kernel._refs import (
     _dequant_a,
     _dequant_b_grouped,
@@ -460,12 +464,16 @@ def test_bench_scaled_grouped_gemm_importable():
     assert hasattr(m, "main")
 
 
-def _quant_wgrad(a, g, fmt, gran="rowwise", bs=0):
-    """Quantize X (R,K) and gY (R,N) along the ragged token axis (dim 0) for wgrad."""
-    ebs = effective_block_size(gran, bs, a.shape[0])
-    aq, sa = quantize_operand(a, 0, gran, bs, fmt=fmt)
-    gq, sg = quantize_operand(g, 0, gran, bs, fmt=fmt)
-    return aq, gq, sa, sg, ebs
+def _quant_wgrad(a, g, fmt, gran="rowwise", bs=0, offs=None):
+    """Quantize X (R,K) and gY (R,N) along the ragged token axis (dim 0) for wgrad.
+
+    Scale blocks restart at each expert, so both operands share one mapping.
+    """
+    blocks = ragged_scale_blocks(offs, a.shape[0], gran, bs)
+    aq, sa = quantize_operand(a, 0, gran, bs, fmt=fmt, ragged=blocks)
+    gq, sg = quantize_operand(g, 0, gran, bs, fmt=fmt, ragged=blocks)
+    kernel_bs = bs if gran == "blockwise" else 0
+    return aq, gq, sa, sg, blocks.first_block, kernel_bs
 
 
 @pytest.mark.parametrize("fmt", ["fp8_e4m3", "int8"])
@@ -483,7 +491,7 @@ def _quant_wgrad(a, g, fmt, gran="rowwise", bs=0):
     "counts,K,N",
     [
         ([128, 128, 128, 128], 64, 48),  # scale blocks aligned to expert boundaries
-        ([5, 0, 130, 41, 1], 64, 48),  # empty group, blocks straddling experts
+        ([5, 0, 130, 41, 1], 64, 48),  # empty group, short trailing blocks
         ([300, 5, 120, 0, 44, 210], 512, 384),  # many blocks per expert
     ],
 )
@@ -493,12 +501,29 @@ def test_scaled_grouped_gemm_wgrad_matches_oracle(counts, K, N, gran, bs, fmt):
     a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
     g = torch.randn(R, N, device="cuda", dtype=torch.bfloat16) * 0.1
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    aq, gq, sa, sg, ebs = _quant_wgrad(a, g, fmt, gran, bs)
-    got = scaled_grouped_gemm_wgrad(aq, gq, sa, sg, offs, torch.float32, ebs)
-    ref = scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, ebs)
+    aq, gq, sa, sg, first_block, kbs = _quant_wgrad(a, g, fmt, gran, bs, offs)
+    got = scaled_grouped_gemm_wgrad(
+        aq, gq, sa, sg, offs, first_block, torch.float32, kbs
+    )
+    ref = scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, first_block, kbs)
     assert got.shape == (len(counts), K, N)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < 1e-5, rel
+
+
+def test_scaled_grouped_gemm_wgrad_empty_group_is_zero():
+    counts = [8, 0, 8]
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a = torch.randn(16, 32, device="cuda", dtype=torch.bfloat16)
+    g = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+    aq, gq, sa, sg, first_block, kbs = _quant_wgrad(
+        a, g, "fp8_e4m3", "blockwise", 32, offs
+    )
+    out = scaled_grouped_gemm_wgrad(
+        aq, gq, sa, sg, offs, first_block, torch.float32, kbs
+    )
+    # an expert with no tokens owns no scale blocks; its slice must still be zeroed
+    assert (out[1] == 0).all()
 
 
 def test_scaled_grouped_gemm_wgrad_blockwise_compiles_fullgraph():
@@ -508,9 +533,13 @@ def test_scaled_grouped_gemm_wgrad_blockwise_compiles_fullgraph():
     a = torch.randn(R, 64, device="cuda", dtype=torch.bfloat16)
     g = torch.randn(R, 48, device="cuda", dtype=torch.bfloat16) * 0.1
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    aq, gq, sa, sg, ebs = _quant_wgrad(a, g, "fp8_e4m3", "blockwise", 32)
+    aq, gq, sa, sg, first_block, kbs = _quant_wgrad(
+        a, g, "fp8_e4m3", "blockwise", 32, offs
+    )
     fn = torch.compile(
-        lambda: scaled_grouped_gemm_wgrad(aq, gq, sa, sg, offs, torch.bfloat16, ebs),
+        lambda: scaled_grouped_gemm_wgrad(
+            aq, gq, sa, sg, offs, first_block, torch.bfloat16, kbs
+        ),
         fullgraph=True,
     )
     assert torch.isfinite(fn()).all()
