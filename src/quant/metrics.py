@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from src.quant.quantize import dequantize_operand
+from src.quant.quantize import dequantize_operand, ragged_scale_blocks
 from src.utils.metric_utils import compute_quantization_metrics
 
 
@@ -33,12 +33,24 @@ class QuantizationMetricProbe:
     def record(self, gemm_operand, snapshot):
         if snapshot is None:  # that operand's format is passthrough
             return
+        # A wgrad operand's scale rows tile each expert's rows, so reproduce the
+        # mapping quantization used. Rebuilt rather than stored on the snapshot,
+        # which holds only what the GEMM already had.
+        ragged = None
+        if snapshot.offs is not None and snapshot.contract_dim == 0:
+            ragged = ragged_scale_blocks(
+                snapshot.offs,
+                snapshot.quantized_tensor.shape[0],
+                snapshot.granularity,
+                snapshot.block_size,
+            )
         dequantized = dequantize_operand(
             snapshot.quantized_tensor,
             snapshot.scale,
             snapshot.contract_dim,
             snapshot.granularity,
             snapshot.block_size,
+            ragged=ragged,
         )
         if snapshot.offs is None:
             metrics = compute_quantization_metrics(snapshot.source_tensor, dequantized)

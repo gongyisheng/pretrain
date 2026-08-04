@@ -5,12 +5,13 @@ import pytest
 from src.layers.mlp import SparseMoEBlock
 from src.quant.convert import attach_quantization_probes
 from src.quant.linear import QuantizedLinear
-from src.quant.metrics import QuantizationMetricsCollector
+from src.quant.metrics import QuantizationMetricProbe, QuantizationMetricsCollector
 from src.quant.moe import QuantizedSparseMoEBlock
 from src.quant.quantize import (
     QuantizationSnapshot,
     dequantize_operand,
     quantize_operand,
+    ragged_scale_blocks,
 )
 from src.utils.config import QuantizationConfig
 from src.utils.metric_utils import compute_quantization_metrics
@@ -331,3 +332,25 @@ def test_moe_disabled_collector_records_nothing():
     out, _ = model.mlp(x)
     out.sum().backward()
     assert collector.to_metrics_dict() == {}
+
+
+def test_probe_dequantizes_ragged_blockwise_with_the_right_blocks():
+    """A wgrad snapshot's scale rows tile each expert, so the probe must rebuild
+    that mapping — indexing it as a global tiling reports invented error."""
+    torch.manual_seed(0)
+    counts = [6, 0, 5]
+    offs = torch.tensor(counts).cumsum(0).to(torch.int32)
+    x = torch.randn(sum(counts), 8)
+    x[:6] *= 50.0
+    blocks = ragged_scale_blocks(offs, x.shape[0], "blockwise", 4)
+    xq, scale = quantize_operand(x, 0, "blockwise", 4, "fp8_e4m3", ragged=blocks)
+
+    probe = QuantizationMetricProbe(enabled=True)
+    probe.record(
+        "wgrad.act",
+        QuantizationSnapshot(x, xq, scale, 0, "blockwise", 4, offs),
+    )
+    metrics = probe.metrics["wgrad.act"]
+    assert torch.isfinite(torch.stack(list(metrics.values()))).all()
+    # fp8 blockwise reconstruction is good; a mis-indexed scale destroys SQNR
+    assert metrics["sqnr"] > 15.0
