@@ -423,3 +423,28 @@ def test_ragged_dequantize_inverts_ragged_quantize(gran, bs):
             rel = (deq[lo:hi] - x[lo:hi]).norm() / x[lo:hi].norm()
             assert rel < 0.1, (lo, hi, rel)
         lo = hi
+
+
+# --- ragged row axis (fwd/dgrad): only tensorwise pooled across groups ---
+
+
+def test_ragged_tensorwise_row_scale_is_per_group():
+    x = torch.cat([torch.full((4, 3), 100.0), torch.full((4, 3), 1.0)])
+    blocks = ragged_scale_blocks(_offs([4, 4]), 8, "tensorwise", 0)
+    xq, scale = quantize_operand(x, -1, "tensorwise", 0, "fp8_e4m3", ragged=blocks)
+    assert scale.shape == (8, 1)  # canonical A layout, unchanged
+    assert torch.allclose(scale[:4], scale[0].expand(4, 1))
+    assert torch.allclose(scale[0] / scale[4], torch.tensor([100.0]), rtol=1e-5)
+    # the cold group keeps its full code range instead of collapsing to ~1/100
+    assert xq[4:].float().abs().max() > 0.5 * xq[:4].float().abs().max()
+
+
+@pytest.mark.parametrize("gran,bs", [("rowwise", 0), ("blockwise", 4)])
+def test_ragged_ignored_for_already_per_row_granularities(gran, bs):
+    torch.manual_seed(0)
+    x = torch.randn(8, 8)
+    blocks = ragged_scale_blocks(_offs([4, 4]), 8, gran, bs)
+    with_ragged = quantize_operand(x, -1, gran, bs, "fp8_e4m3", ragged=blocks)
+    without = quantize_operand(x, -1, gran, bs, "fp8_e4m3")
+    assert torch.equal(with_ragged[0], without[0])
+    assert torch.equal(with_ragged[1], without[1])
