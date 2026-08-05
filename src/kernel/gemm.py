@@ -41,11 +41,6 @@ def _num_sms(device: torch.device | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-# ragged N partitions the output's columns, so a (G,N) bias broadcast over rows has
-# no meaning there — it would need one entry per global column instead.
-_RAGGED_N_BIAS_MSG = "bias is not supported for the ragged-N layout"
-
-
 # ---------------------------------------------------------------------------
 # Triton kernels
 # ---------------------------------------------------------------------------
@@ -212,7 +207,7 @@ def _grouped_gemm(
         size, M, N, K = (G, a.shape[0], b.shape[1]), a.shape[0], b.shape[1], 0
     else:  # (G,M,K) x (K,N) -> (M,N), ragged N
         if bias is not None:
-            raise NotImplementedError(_RAGGED_N_BIAS_MSG)
+            raise NotImplementedError("bias is not supported for the ragged-N layout")
         size, M, N, K = (a.shape[1], b.shape[1]), a.shape[1], 0, a.shape[2]
 
     c = _empty_like_grouped_mm(size, a.device, a.dtype)
@@ -308,7 +303,7 @@ def grouped_gemm(
     if impl not in ("auto", "triton", "torch"):
         raise ValueError(f"impl must be auto|triton|torch, got {impl!r}")
     if bias is not None and a.ndim == 3:
-        raise NotImplementedError(_RAGGED_N_BIAS_MSG)
+        raise NotImplementedError("bias is not supported for the ragged-N layout")
 
     if impl == "auto":
         impl = (
