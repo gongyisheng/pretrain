@@ -464,8 +464,7 @@ def test_bench_scaled_gemm_importable():
 # ---------------------------------------------------------------------------
 
 
-# The scaled kernel's ragged layouts. ragged_n arrives in a later commit.
-SCALED_LAYOUTS = ("ragged_m", "ragged_k")
+SCALED_LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
 _SCALED_COUNTS = [64, 0, 130, 46]  # sums to 240; the empty group is deliberate
 # The ragged-contraction layout dequants the same codes as its oracle and only
 # reorders the fp32 accumulation, so it must agree far more tightly than the
@@ -567,6 +566,20 @@ def test_scaled_grouped_layouts_uneven_groups(layout):
     ref = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL[layout], rel
+
+
+def test_scaled_grouped_ragged_n_shape_and_group_isolation():
+    # (E,M,K) x (K,R) -> (M,R): offs partitions b's columns, so each group's column
+    # block must come from its own expert slice of a
+    counts = [17, 0, 40, 7]
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_n", counts, "rowwise", 0, "fp8_e4m3", M=32, K=64
+    )
+    got = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    ref = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
+    assert got.shape == (32, sum(counts))
+    rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
+    assert rel < 0.02, rel
 
 
 def test_scaled_grouped_ragged_k_empty_group_is_zero():

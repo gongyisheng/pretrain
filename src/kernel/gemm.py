@@ -692,15 +692,13 @@ def scaled_grouped_gemm(
     E = offs.shape[0]
     if not a_is_2d and not b_is_2d:
         raise NotImplementedError("3D x 3D has no ragged dim; use torch.bmm")
-    if not a_is_2d and b_is_2d:
-        raise NotImplementedError(
-            "the ragged-N layout (3D x 2D) is not supported by the scaled grouped GEMM"
-        )
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
     if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
         size, M, N, K = (aq.shape[0], bq.shape[2]), 0, bq.shape[2], aq.shape[1]
-    else:  # (M,K) x (K,N) -> (E,M,N), ragged K
+    elif a_is_2d and b_is_2d:  # (M,K) x (K,N) -> (E,M,N), ragged K
         size, M, N, K = (E, aq.shape[0], bq.shape[1]), aq.shape[0], bq.shape[1], 0
+    else:  # (E,M,K) x (K,N) -> (M,N), ragged N
+        size, M, N, K = (aq.shape[1], bq.shape[1]), aq.shape[1], 0, aq.shape[2]
 
     c = torch.empty(size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
