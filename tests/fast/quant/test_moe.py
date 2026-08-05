@@ -108,11 +108,11 @@ def test_moe_block_quantized_forward_backward_runs():
 
 
 @pytest.mark.skipif(not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9")
-@pytest.mark.parametrize("scaling", ["blockwise", "mxfp8"])
-def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
+@pytest.mark.parametrize("scaling", ["tensorwise", "rowwise", "blockwise", "mxfp8"])
+def test_fused_matches_fake_quant(scaling, monkeypatch):
     # counts give R=299 with expert 1 empty. Scale blocks restart at each expert, so
-    # expert 2 (rows 128..257) owns two 128-row blocks and expert 3 (rows 258..298)
-    # its own short one — no block straddles the boundary at 258 any more.
+    # under blockwise-128 expert 2 (rows 128..257) owns two blocks and expert 3
+    # (rows 258..298) its own short one — no block straddles the boundary at 258.
     a, b, offs = _make([128, 0, 130, 41], K=64, N=48)
     cfg = _cfg("fp8", scaling)
 
@@ -134,7 +134,8 @@ def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
     y_q.backward(gy)
 
     assert wgrad_calls, "wgrad fell back off the fused path"
-    assert wgrad_calls[0] == (128 if scaling == "blockwise" else 32)
+    # row/tensorwise carry no numeric width: one block spans the whole ragged segment
+    assert wgrad_calls[0] == {"blockwise": 128, "mxfp8": 32}.get(scaling, 0)
 
     # Reference: identical quantization, but dequantized and multiplied in bf16.
     # Comparing against this isolates the kernel from the quantization error itself.
@@ -197,6 +198,18 @@ def test_grad_b_quality_is_independent_across_experts(scaling):
     # on the 0.1 bound); max/min ratio ~1.1-1.2 for all three (~3.4x headroom).
     assert max(rel) < 0.1, rel
     assert max(rel) / min(rel) < 4.0, rel
+
+
+def test_ragged_n_layout_raises():
+    # (E,M,K) x (K,N) -> (M,N) with N ragged: the one layout the kernel takes but the
+    # quantizer does not, since B's scale would need a column-wise ragged mapping
+    offs = torch.tensor([8, 32], device="cuda", dtype=torch.int32)
+    a = torch.randn(2, 16, 48, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(48, 32, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(NotImplementedError, match="ragged-N"):
+        moe.quantized_grouped_gemm(
+            a, b, offs, "fp8_e4m3", "fp8_e4m3", a.dtype, _cfg().scaling
+        )
 
 
 def test_wgrad_receives_per_expert_block_table(monkeypatch):
