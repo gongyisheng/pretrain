@@ -23,7 +23,7 @@ sys.path.insert(0, ".")
 
 from src.kernel.gemm import scaled_grouped_gemm
 from src.quant.quantize import (
-    effective_block_size,
+    kernel_block_size,
     quantize_operand,
     ragged_scale_blocks,
 )
@@ -65,16 +65,16 @@ def _make(E, M, K, N, seed=0):
 
 
 def _quant(a, b, scheme):
-    """Quantize A (M,K) and per-expert B (E,K,N) rowwise; return aq,bq,sa,sb,ebs."""
+    """Quantize A (M,K) and per-expert B (E,K,N) rowwise; return aq,bq,sa,sb,bs."""
     kw = _kw(scheme)
-    ebs = effective_block_size("rowwise", 0, a.shape[1])
+    bs = kernel_block_size("rowwise", 0)
     aq, sa = quantize_operand(a, -1, "rowwise", 0, **kw)
     bq_list, sb_list = [], []
     for g in range(b.shape[0]):
         bqg, sbg = quantize_operand(b[g], 0, "rowwise", 0, **kw)
         bq_list.append(bqg)
         sb_list.append(sbg)
-    return aq, torch.stack(bq_list), sa, torch.stack(sb_list), ebs
+    return aq, torch.stack(bq_list), sa, torch.stack(sb_list), bs
 
 
 def _time(fn, iters=50):
@@ -96,10 +96,10 @@ def _bench_point(E, K, N, scheme):
     """Return {triton_ms, bf16_ms, triton_relerr} for one (E, shape, scheme)."""
     a, b, offs = _make(E, M_FIXED, K, N)
     ref = torch._grouped_mm(a, b, offs=offs).float()
-    aq, bq, sa, sb, ebs = _quant(a, b, scheme)
+    aq, bq, sa, sb, bs = _quant(a, b, scheme)
 
     def triton_fn():
-        return scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16, ebs)
+        return scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16, bs)
 
     triton_out = triton_fn()
     triton_ms = _time(triton_fn)

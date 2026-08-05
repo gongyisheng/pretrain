@@ -9,23 +9,12 @@ from src.layers.mlp import SparseMoEBlock
 from src.quant.quantize import (
     QuantizationSnapshot,
     dequantize_operand,
+    kernel_block_size,
     quantize_operand,
     ragged_scale_blocks,
 )
 from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
-
-
-def kernel_block_size(granularity: str, block_size: int) -> int:
-    """Scale-block width the GEMM kernels take: 0 means one block per segment.
-
-    row/tensorwise are the same branch as blockwise with the width set to the
-    segment length, but they cannot say so numerically: when the contraction is the
-    ragged axis that length is per group and only known at runtime, while the
-    kernel's BLOCK_SIZE is a constexpr. An empty group also owns one scale row,
-    which ceil(0 / width) would miss.
-    """
-    return block_size if granularity == "blockwise" else 0
 
 
 def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):

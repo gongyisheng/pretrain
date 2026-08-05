@@ -456,6 +456,13 @@ def scaled_gemm(
     out_dtype: torch.dtype,
     block_size: int,
 ) -> torch.Tensor:
+    """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
+
+    `block_size` follows the same convention as scaled_grouped_gemm: 0 means one
+    scale block spanning the whole contraction. The branch tests `nkb` rather than
+    that sentinel because a blockwise width >= K also collapses to one block, and
+    would otherwise set a BLOCK_K that tl.arange cannot take.
+    """
     M, K = aq.shape
     N = bq.shape[1]
     nkb = sa.shape[1]

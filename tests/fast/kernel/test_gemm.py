@@ -15,6 +15,7 @@ from src.kernel.gemm import (
 )
 from src.quant.quantize import (
     effective_block_size,
+    kernel_block_size,
     quantize_operand,
     ragged_scale_blocks,
 )
@@ -46,11 +47,11 @@ def _int_kw(qmax):
 
 
 def _run(a, b, gran, bs, a_kw, b_kw):
-    ebs = effective_block_size(gran, bs, a.shape[1])
+    # the kernel takes the 0-sentinel width; the oracle's pad math takes a count
     aq, sa = quantize_operand(a, -1, gran, bs, **a_kw)
     bq, sb = quantize_operand(b, 0, gran, bs, **b_kw)
-    out = scaled_gemm(aq, bq, sa, sb, torch.float32, ebs)
-    oracle = scaled_gemm_ref(aq, bq, sa, sb, ebs)
+    out = scaled_gemm(aq, bq, sa, sb, torch.float32, kernel_block_size(gran, bs))
+    oracle = scaled_gemm_ref(aq, bq, sa, sb, effective_block_size(gran, bs, a.shape[1]))
     return out, oracle
 
 
@@ -450,7 +451,7 @@ def test_output_dtype_respected(out_dtype):
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
     aq, sa = quantize_operand(a, -1, "rowwise", 0, **_fp8_kw(E4M3))
     bq, sb = quantize_operand(b, 0, "rowwise", 0, **_fp8_kw(E4M3))
-    out = scaled_gemm(aq, bq, sa, sb, out_dtype, 128)
+    out = scaled_gemm(aq, bq, sa, sb, out_dtype, 0)  # rowwise -> one block over K
     assert out.dtype == out_dtype
 
 

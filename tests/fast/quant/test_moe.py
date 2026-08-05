@@ -201,8 +201,8 @@ def test_grad_b_quality_is_independent_across_experts(scaling):
 
 def test_wgrad_receives_per_expert_block_table(monkeypatch):
     """The kernel re-derives the per-expert block table from offs and block_size, so
-    it must get the quantization block size — not effective_block_size, which would
-    collapse rowwise back to one block — and a scale row per expert to match."""
+    it must get kernel_block_size's width — not an element count, which would collapse
+    rowwise back to one block — and a scale row per expert to match."""
     a, b, offs = _make([8, 0, 24], K=64, N=48)
     seen = {}
     real = moe.scaled_grouped_gemm

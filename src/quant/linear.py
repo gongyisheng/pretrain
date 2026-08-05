@@ -9,7 +9,7 @@ from src.kernel.gemm import scaled_gemm
 from src.quant.quantize import (
     QuantizationSnapshot,
     dequantize_operand,
-    effective_block_size,
+    kernel_block_size,
     quantize_operand,
 )
 from src.quant.utils import is_fp8, is_int8s, is_quantized
@@ -39,12 +39,7 @@ def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
 
     if same_family and a.is_cuda and b.is_cuda:
         y = scaled_gemm(
-            aq,
-            bq,
-            sa,
-            sb,
-            out_dtype,
-            effective_block_size(granularity, block_size, a.shape[1]),
+            aq, bq, sa, sb, out_dtype, kernel_block_size(granularity, block_size)
         )
         return y, a_snap, b_snap
 

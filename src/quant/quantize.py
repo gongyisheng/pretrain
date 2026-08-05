@@ -15,8 +15,24 @@ from src.quant.utils import (
 
 
 def effective_block_size(granularity: str, block_size: int, K: int) -> int:
-    """Elements per scale block along the contraction axis (K for row/tensorwise)."""
+    """Elements per scale block along the contraction axis (K for row/tensorwise).
+
+    An element count, for the reshape/pad arithmetic inside this module. Kernels take
+    `kernel_block_size` instead -- they cannot always be handed a count.
+    """
     return block_size if granularity == "blockwise" else K
+
+
+def kernel_block_size(granularity: str, block_size: int) -> int:
+    """Scale-block width the GEMM kernels take: 0 means one block per segment.
+
+    row/tensorwise are the same branch as blockwise with the width set to the
+    segment length, but they cannot say so numerically: when the contraction is the
+    ragged axis that length is per group and only known at runtime, while the
+    kernel's BLOCK_SIZE is a constexpr. An empty group also owns one scale row,
+    which ceil(0 / width) would miss.
+    """
+    return block_size if granularity == "blockwise" else 0
 
 
 class RaggedScaleBlocks(NamedTuple):
