@@ -211,20 +211,19 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 
 
 def compute_quantization_metrics(source_tensor, dequantized_tensor):
-    """Quant health against the dequantized round-trip, as 0-dim fp32 tensors (no host sync)."""
+    """Quant health against the dequantized round-trip, as 0-dim fp32 tensors (no host sync).
+
+    Both are pure reductions. A former range_ratio (amax/median) was dropped: it is
+    sorted per expert per operand, which made it the dominant cost of a logged step.
+    """
     source = source_tensor.float()
     dequantized = dequantized_tensor.float()
-    magnitude = source.abs()
     error = (source - dequantized).norm().clamp_min(EPS)
 
-    sqnr = 10.0 * torch.log10((source.norm().clamp_min(EPS) / error) ** 2)
-    underflow_rate = ((source != 0) & (dequantized == 0)).sum().float() / source.numel()
-    range_ratio = magnitude.amax() / magnitude.median().clamp_min(EPS)
-
     return {
-        "sqnr": sqnr,
-        "underflow_rate": underflow_rate,
-        "range_ratio": range_ratio,
+        "sqnr": 10.0 * torch.log10((source.norm().clamp_min(EPS) / error) ** 2),
+        "underflow_rate": ((source != 0) & (dequantized == 0)).sum().float()
+        / source.numel(),
     }
 
 

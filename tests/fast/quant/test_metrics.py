@@ -33,7 +33,7 @@ LINEAR_GEMM_OPERANDS = (
     "wgrad.grad",
     "wgrad.act",
 )
-METRICS = ("sqnr", "underflow_rate", "range_ratio")
+METRICS = ("sqnr", "underflow_rate")
 
 
 # --- compute_quantization_metrics: a pure function of (source, dequantized) ---
@@ -67,13 +67,6 @@ def test_sqnr_matches_hand_computed_ratio():
     )
 
 
-def test_range_ratio_is_amax_over_median():
-    x = torch.tensor([[1.0, 1.0, 1.0, 100.0]])
-    assert compute_quantization_metrics(x, x)["range_ratio"].item() == pytest.approx(
-        100.0
-    )
-
-
 def test_metrics_are_zero_dim_float32_and_device_local():
     x = torch.randn(8, 8, dtype=torch.bfloat16)
     m = compute_quantization_metrics(x, x)
@@ -103,7 +96,6 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
         x, dequantize_operand(q, scale, -1, "tensorwise", 0)
     )
     assert m["underflow_rate"].item() > 0.9
-    assert m["range_ratio"].item() > 100.0
 
 
 # --- collector ---
@@ -317,8 +309,8 @@ def test_moe_down_projection_sees_the_post_activation_tensor():
 
     got = collector.to_metrics_dict()
     assert (
-        got["quant/range_ratio/fwd.act/mlp.expert_gate_up"]
-        != got["quant/range_ratio/fwd.act/mlp.expert_down"]
+        got["quant/sqnr/fwd.act/mlp.expert_gate_up"]
+        != got["quant/sqnr/fwd.act/mlp.expert_down"]
     )
 
 
