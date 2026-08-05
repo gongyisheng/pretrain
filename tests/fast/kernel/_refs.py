@@ -80,52 +80,47 @@ def _dequant_ragged(xq, scale, offs, bs):
     return out
 
 
-def scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, bs):
-    """fp32 oracle for scaled grouped wgrad: gW[g] = (Xq·sa)[g]^T @ (gYq·sg)[g].
+def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, block_size):
+    """fp32 oracle for the scaled grouped GEMM, all three ragged layouts.
 
-    aq (R,K), gq (R,N) fp8/int8; sa (nrb,K), sg (nrb,N) fp32 scales whose blocks
-    restart at each group, with `bs` rows per block (0 -> one block per group).
-    offs (E,) int32 cumulative END-offsets. Returns (E,K,N) fp32.
+    Layout follows (aq.ndim, bq.ndim), as in the kernel. `sa`/`sb` each mirror their
+    operand's axis order with the contraction axis replaced by the scale-block axis.
+    `block_size` 0 means one block spanning the whole contraction segment.
+
+    Deliberately restates each layout with its own loop rather than sharing the
+    kernel's block bookkeeping.
     """
-    a = _dequant_ragged(aq, sa, offs, bs)
-    g = _dequant_ragged(gq, sg, offs, bs)
-    E, K, N = offs.shape[0], aq.shape[1], gq.shape[1]
-    out = torch.zeros(E, K, N, device=aq.device, dtype=torch.float32)
-    start = 0
-    for gi, end in enumerate(offs.tolist()):
-        if end > start:
-            out[gi] = a[start:end].t() @ g[start:end]
-        start = end
-    return out
+    a_2d, b_2d = aq.ndim == 2, bq.ndim == 2
+    bounds = list(zip([0, *offs.tolist()], offs.tolist()))
+    E = offs.shape[0]
 
+    if a_2d and not b_2d:  # ragged M: (R,K) x (E,K,N) -> (R,N)
+        K = aq.shape[1]
+        a = _dequant_a(aq, sa, block_size or K)
+        out = torch.zeros(
+            aq.shape[0], bq.shape[2], device=aq.device, dtype=torch.float32
+        )
+        for g, (lo, hi) in enumerate(bounds):
+            if hi > lo:
+                out[lo:hi] = a[lo:hi] @ _dequant_b(bq[g], sb[g], block_size or K)
+        return out
 
-def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, ebs):
-    """fp32 oracle for scaled grouped GEMM. Uses torch._scaled_grouped_mm when it
-    is applicable (per-row/col fp8 on sm90/sm100); otherwise dequants and does a
-    per-group matmul.
+    if a_2d and b_2d:  # ragged K: (M,R) x (R,N) -> (E,M,N)
+        a = _dequant_ragged(aq.mT, sa.mT, offs, block_size).mT  # (M,R)
+        b = _dequant_ragged(bq, sb, offs, block_size)  # (R,N)
+        out = torch.zeros(
+            E, aq.shape[0], bq.shape[1], device=aq.device, dtype=torch.float32
+        )
+        for g, (lo, hi) in enumerate(bounds):
+            if hi > lo:
+                out[g] = a[:, lo:hi] @ b[lo:hi]
+        return out
 
-    aq (R,K), bq (E,K,N) fp8/int8; sa (R,nkb), sb (E,nkb,N) fp32 canonical scales;
-    offs (E,) int32 cumulative END-offsets; ebs = elements/scale-block along K.
-    """
-    # Native path: per-row/col fp8 (nkb==1) on a device torch supports (sm90/sm100).
-    if aq.dtype in (torch.float8_e4m3fn, torch.float8_e5m2) and sa.shape[-1] == 1:
-        try:
-            return torch._scaled_grouped_mm(
-                aq,
-                bq,
-                scale_a=sa.squeeze(-1).float(),  # (R,)
-                scale_b=sb.squeeze(1).float(),  # (E, N)
-                offs=offs,
-                out_dtype=torch.bfloat16,
-            ).float()
-        except (RuntimeError, ValueError):
-            pass  # unsupported here (e.g. sm120) -> dequant fallback below
-    a_deq = _dequant_a(aq, sa, ebs)  # (R, K) fp32
-    b_deq = _dequant_b_grouped(bq, sb, ebs)  # (E, K, N) fp32
-    out = torch.zeros(aq.shape[0], bq.shape[2], device=aq.device, dtype=torch.float32)
-    start = 0
-    for g, end in enumerate(offs.tolist()):
-        if end > start:
-            out[start:end] = a_deq[start:end] @ b_deq[g]
-        start = end
+    # ragged N: (E,M,K) x (K,R) -> (M,R)
+    K = aq.shape[2]
+    b = _dequant_b(bq, sb, block_size or K)  # (K,R), blocks along K
+    out = torch.zeros(aq.shape[1], bq.shape[1], device=aq.device, dtype=torch.float32)
+    for g, (lo, hi) in enumerate(bounds):
+        if hi > lo:
+            out[:, lo:hi] = _dequant_a(aq[g], sa[g], block_size or K) @ b[:, lo:hi]
     return out

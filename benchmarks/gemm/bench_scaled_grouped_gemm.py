@@ -21,7 +21,7 @@ import torch
 
 sys.path.insert(0, ".")
 
-from src.kernel.gemm import scaled_grouped_gemm, scaled_grouped_gemm_wgrad
+from src.kernel.gemm import scaled_grouped_gemm
 from src.quant.quantize import (
     effective_block_size,
     quantize_operand,
@@ -126,7 +126,7 @@ def _bench_wgrad_point(E, K, N, scheme):
     gq, sg = quantize_operand(g, 0, "rowwise", 0, ragged=blocks, **kw)
 
     def triton_fn():
-        return scaled_grouped_gemm_wgrad(aq, gq, sa, sg, offs, torch.bfloat16, 0)
+        return scaled_grouped_gemm(aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0)
 
     triton_out = triton_fn()
     triton_ms = _time(triton_fn)

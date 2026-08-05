@@ -4,22 +4,28 @@ import copy
 
 import torch
 
-from src.kernel.gemm import (
-    _row_group_ids,
-    grouped_gemm,
-    scaled_grouped_gemm,
-    scaled_grouped_gemm_wgrad,
-)
+from src.kernel.gemm import _row_group_ids, grouped_gemm, scaled_grouped_gemm
 from src.layers.mlp import SparseMoEBlock
 from src.quant.quantize import (
     QuantizationSnapshot,
     dequantize_operand,
-    effective_block_size,
     quantize_operand,
     ragged_scale_blocks,
 )
 from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
+
+
+def kernel_block_size(granularity: str, block_size: int) -> int:
+    """Scale-block width the GEMM kernels take: 0 means one block per segment.
+
+    row/tensorwise are the same branch as blockwise with the width set to the
+    segment length, but they cannot say so numerically: when the contraction is the
+    ragged axis that length is per group and only known at runtime, while the
+    kernel's BLOCK_SIZE is a constexpr. An empty group also owns one scale row,
+    which ceil(0 / width) would miss.
+    """
+    return block_size if granularity == "blockwise" else 0
 
 
 def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
@@ -63,13 +69,7 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
 
     if same_family and a.is_cuda:
         y = scaled_grouped_gemm(
-            aq,
-            bq,
-            sa,
-            sb,
-            offs,
-            out_dtype,
-            effective_block_size(granularity, block_size, a.shape[1]),
+            aq, bq, sa, sb, offs, out_dtype, kernel_block_size(granularity, block_size)
         )
         return y, a_snap, b_snap
 
@@ -111,14 +111,16 @@ def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
         )  # (nrb,N)
 
     if same_family and a.is_cuda:
-        grad_b = scaled_grouped_gemm_wgrad(
-            aq,
+        # the ragged axis is the contraction, so this is the ragged-K layout: the
+        # operand transposes and its scale transposes with it
+        grad_b = scaled_grouped_gemm(
+            aq.mT,
             gq,
-            sa,
+            sa.mT,
             sg,
             offs,
             out_dtype,
-            block_size if granularity == "blockwise" else 0,
+            kernel_block_size(granularity, block_size),
         )
         return grad_b, a_snap, g_snap
 

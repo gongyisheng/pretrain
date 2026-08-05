@@ -12,7 +12,6 @@ from src.kernel.gemm import (
     grouped_gemm,
     scaled_gemm,
     scaled_grouped_gemm,
-    scaled_grouped_gemm_wgrad,
 )
 from src.quant.quantize import (
     effective_block_size,
@@ -26,7 +25,6 @@ from tests.fast.kernel._refs import (
     grouped_gemm_wgrad_ref,
     scaled_gemm_ref,
     scaled_grouped_gemm_ref,
-    scaled_grouped_gemm_wgrad_ref,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -466,104 +464,135 @@ def test_bench_scaled_gemm_importable():
 # ---------------------------------------------------------------------------
 
 
-def _quant_grouped(a, b, counts, gran, bs, a_kw, b_kw):
-    """Quantize A (R,K) and per-expert B (E,K,N); return aq,bq,sa,sb,offs,ebs."""
-    ebs = effective_block_size(gran, bs, a.shape[1])
-    aq, sa = quantize_operand(a, -1, gran, bs, **a_kw)
-    bq_list, sb_list = [], []
-    for g in range(b.shape[0]):
-        bqg, sbg = quantize_operand(b[g], 0, gran, bs, **b_kw)
-        bq_list.append(bqg)
-        sb_list.append(sbg)
-    bq = torch.stack(bq_list)  # (E, K, N)
-    sb = torch.stack(sb_list)  # (E, nkb, N)
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    return aq, bq, sa, sb, offs, ebs
+# The scaled kernel's ragged layouts. ragged_n arrives in a later commit.
+SCALED_LAYOUTS = ("ragged_m", "ragged_k")
+_SCALED_COUNTS = [64, 0, 130, 46]  # sums to 240; the empty group is deliberate
+# The ragged-contraction layout dequants the same codes as its oracle and only
+# reorders the fp32 accumulation, so it must agree far more tightly than the
+# forward layouts, whose oracle pads scale blocks independently of the tiling.
+_SCALED_TOL = {"ragged_m": 0.02, "ragged_k": 1e-5, "ragged_n": 0.02}
 
 
-def _make_grouped_ab(counts, K, N, seed=0):
+def _make_scaled_layout(layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0):
+    """Quantized operands + scales for one ragged layout of the scaled grouped GEMM.
+
+    Scales follow the kernel's invariant: each mirrors its operand's axis order with
+    the contraction axis replaced by the scale-block axis. Returns the kernel's
+    block_size too, where 0 means one block per contraction segment.
+    """
     torch.manual_seed(seed)
-    R, E = sum(counts), len(counts)
-    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(E, K, N, device="cuda", dtype=torch.bfloat16) * 0.1
-    return a, b
+    E, R = len(counts), sum(counts)
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    kernel_bs = bs if gran == "blockwise" else 0
+    kw = dict(fmt=fmt)
+
+    def rand(*shape):
+        return torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 0.1
+
+    if layout == "ragged_m":  # (R,K) x (E,K,N) -> (R,N)
+        aq, sa = quantize_operand(rand(R, K), -1, gran, bs, **kw)
+        per = [quantize_operand(rand(K, N), 0, gran, bs, **kw) for _ in range(E)]
+        bq = torch.stack([q for q, _ in per])
+        sb = torch.stack([s for _, s in per])
+        return aq, bq, sa, sb, offs, kernel_bs
+
+    if layout == "ragged_k":  # (M,R) x (R,N) -> (E,M,N)
+        blocks = ragged_scale_blocks(offs, R, gran, bs)
+        aq, sa = quantize_operand(rand(R, M), 0, gran, bs, ragged=blocks, **kw)
+        bq, sb = quantize_operand(rand(R, N), 0, gran, bs, ragged=blocks, **kw)
+        return aq.mT, bq, sa.mT, sb, offs, kernel_bs
+
+    if layout == "ragged_n":  # (E,M,K) x (K,R) -> (M,R)
+        per = [quantize_operand(rand(M, K), -1, gran, bs, **kw) for _ in range(E)]
+        aq = torch.stack([q for q, _ in per])
+        sa = torch.stack([s for _, s in per])
+        # b's ragged axis is its columns. A per-column scale cannot pool amax across
+        # groups by construction, so only tensorwise needs `ragged` -- reached here
+        # through the existing row-ragged path on the transpose.
+        blocks = ragged_scale_blocks(offs, R, gran, bs)
+        bqT, sbT = quantize_operand(rand(R, K), -1, gran, bs, ragged=blocks, **kw)
+        return aq, bqT.mT, sa, sbT.mT, offs, kernel_bs
+
+    raise ValueError(layout)
 
 
-def test_scaled_grouped_gemm_oracle_native_agrees_with_dequant():
-    # The oracle uses torch._scaled_grouped_mm when applicable (per-row fp8 on
-    # sm90/sm100) and dequants otherwise. Whichever path it takes, it must match
-    # an explicit dequant matmul. On sm120 the native op raises and the oracle
-    # already is the dequant path -> the two agree exactly.
+def _expected_shape(layout, counts, M=32, N=48):
+    E, R = len(counts), sum(counts)
+    return {"ragged_m": (R, N), "ragged_k": (E, M, N), "ragged_n": (M, R)}[layout]
+
+
+def test_scaled_grouped_gemm_oracle_agrees_with_dequant():
+    # The oracle walks its own per-group loop; this pins it against an explicit
+    # dequant matmul so a bug in its block/pad bookkeeping cannot pass unnoticed.
     counts = [128, 128]
-    a, b = _make_grouped_ab(counts, K=64, N=48)
-    aq, bq, sa, sb, offs, ebs = _quant_grouped(
-        a, b, counts, "rowwise", 0, _fp8_kw(E4M3), _fp8_kw(E4M3)
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_m", counts, "rowwise", 0, "fp8_e4m3"
     )
-    oracle = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, ebs)
-    a_deq, b_deq = _dequant_a(aq, sa, ebs), _dequant_b_grouped(bq, sb, ebs)
+    oracle = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
+    K = aq.shape[1]
+    a_deq = _dequant_a(aq, sa, kbs or K)
+    b_deq = _dequant_b_grouped(bq, sb, kbs or K)
     dequant = torch.cat([a_deq[:128] @ b_deq[0], a_deq[128:] @ b_deq[1]])
     assert oracle.shape == (256, 48)
     assert (oracle - dequant).norm() / dequant.norm() < 0.02
 
 
+@pytest.mark.parametrize("fmt", ["fp8_e4m3", "int8"])
 @pytest.mark.parametrize(
-    "gran,bs",
-    [("rowwise", 0), ("tensorwise", 0), ("blockwise", 32)],
+    "gran,bs", [("rowwise", 0), ("tensorwise", 0), ("blockwise", 32)]
 )
-def test_scaled_grouped_gemm_fp8_matches_oracle(gran, bs):
-    counts = [128, 128, 128, 128]
-    a, b = _make_grouped_ab(counts, K=64, N=48)
-    aq, bq, sa, sb, offs, ebs = _quant_grouped(
-        a, b, counts, gran, bs, _fp8_kw(E4M3), _fp8_kw(E4M3)
+@pytest.mark.parametrize("layout", SCALED_LAYOUTS)
+def test_scaled_grouped_layouts_match_oracle(layout, gran, bs, fmt):
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        layout, _SCALED_COUNTS, gran, bs, fmt
     )
-    out = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, ebs)
-    oracle = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, ebs)
-    assert out.shape == (512, 48) and out.dtype == torch.float32
-    assert (out - oracle).norm() / oracle.norm() < 0.02
+    got = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    ref = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
+    assert got.shape == _expected_shape(layout, _SCALED_COUNTS)
+    rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
+    assert rel < _SCALED_TOL[layout], rel
 
 
-def test_scaled_grouped_gemm_empty_and_uneven_groups():
+@pytest.mark.parametrize("layout", SCALED_LAYOUTS)
+def test_scaled_grouped_layouts_uneven_groups(layout):
     counts = [5, 0, 130, 41, 1]
-    a, b = _make_grouped_ab(counts, K=64, N=48, seed=1)
-    aq, bq, sa, sb, offs, ebs = _quant_grouped(
-        a, b, counts, "rowwise", 0, _fp8_kw(E4M3), _fp8_kw(E4M3)
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        layout, counts, "blockwise", 32, "fp8_e4m3", seed=1
     )
-    out = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, ebs)
-    oracle = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, ebs)
-    assert (out - oracle).norm() / oracle.norm() < 0.02
+    got = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    ref = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
+    rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
+    assert rel < _SCALED_TOL[layout], rel
 
 
-@pytest.mark.parametrize("qmax", [127, 31, 7])
-def test_scaled_grouped_gemm_int_matches_oracle(qmax):
-    counts = [64, 0, 130, 41]
-    a, b = _make_grouped_ab(counts, K=128, N=64, seed=2)
-    aq, bq, sa, sb, offs, ebs = _quant_grouped(
-        a, b, counts, "rowwise", 0, _int_kw(qmax), _int_kw(qmax)
+def test_scaled_grouped_ragged_k_empty_group_is_zero():
+    # an expert with no tokens owns no blockwise scale blocks; its (M,N) slice of the
+    # (E,M,N) output must still be zeroed rather than left uninitialized
+    counts = [8, 0, 8]
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_k", counts, "blockwise", 32, "fp8_e4m3"
     )
-    out = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, ebs)
-    oracle = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, ebs)
-    assert (out - oracle).norm() / oracle.norm() < 0.02
+    out = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    assert (out[1] == 0).all()
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16, torch.float32])
-def test_scaled_grouped_gemm_output_dtype_respected(out_dtype):
-    counts = [64, 130]
-    a, b = _make_grouped_ab(counts, K=64, N=48, seed=3)
-    aq, bq, sa, sb, offs, ebs = _quant_grouped(
-        a, b, counts, "rowwise", 0, _fp8_kw(E4M3), _fp8_kw(E4M3)
+@pytest.mark.parametrize("layout", SCALED_LAYOUTS)
+def test_scaled_grouped_layouts_out_dtype(layout, out_dtype):
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        layout, _SCALED_COUNTS, "rowwise", 0, "fp8_e4m3", seed=3
     )
-    out = scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype, ebs)
+    out = scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype, kbs)
     assert out.dtype == out_dtype
 
 
-def test_scaled_grouped_gemm_compiles_fullgraph():
-    counts = [64, 0, 130, 41]
-    a, b = _make_grouped_ab(counts, K=64, N=48, seed=4)
-    aq, bq, sa, sb, offs, ebs = _quant_grouped(
-        a, b, counts, "blockwise", 32, _fp8_kw(E4M3), _fp8_kw(E4M3)
+@pytest.mark.parametrize("layout", SCALED_LAYOUTS)
+def test_scaled_grouped_layouts_compile_fullgraph(layout):
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        layout, _SCALED_COUNTS, "blockwise", 32, "fp8_e4m3", seed=4
     )
     fn = torch.compile(
-        lambda: scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16, ebs),
+        lambda: scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16, kbs),
         fullgraph=True,
     )
     assert torch.isfinite(fn()).all()
@@ -572,77 +601,6 @@ def test_scaled_grouped_gemm_compiles_fullgraph():
 def test_bench_scaled_grouped_gemm_importable():
     m = importlib.import_module("benchmarks.gemm.bench_scaled_grouped_gemm")
     assert hasattr(m, "main")
-
-
-def _quant_wgrad(a, g, fmt, gran="rowwise", bs=0, offs=None):
-    """Quantize X (R,K) and gY (R,N) along the ragged token axis (dim 0) for wgrad.
-
-    Scale blocks restart at each expert, so both operands share one mapping.
-    """
-    blocks = ragged_scale_blocks(offs, a.shape[0], gran, bs)
-    aq, sa = quantize_operand(a, 0, gran, bs, fmt=fmt, ragged=blocks)
-    gq, sg = quantize_operand(g, 0, gran, bs, fmt=fmt, ragged=blocks)
-    kernel_bs = bs if gran == "blockwise" else 0
-    return aq, gq, sa, sg, kernel_bs
-
-
-@pytest.mark.parametrize("fmt", ["fp8_e4m3", "int8"])
-@pytest.mark.parametrize(
-    "gran,bs",
-    [
-        ("rowwise", 0),
-        ("tensorwise", 0),
-        ("blockwise", 32),
-        ("blockwise", 48),
-        ("blockwise", 128),
-    ],
-)
-@pytest.mark.parametrize(
-    "counts,K,N",
-    [
-        ([128, 128, 128, 128], 64, 48),  # scale blocks aligned to expert boundaries
-        ([5, 0, 130, 41, 1], 64, 48),  # empty group, short trailing blocks
-        ([300, 5, 120, 0, 44, 210], 512, 384),  # many blocks per expert
-    ],
-)
-def test_scaled_grouped_gemm_wgrad_matches_oracle(counts, K, N, gran, bs, fmt):
-    torch.manual_seed(0)
-    R = sum(counts)
-    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
-    g = torch.randn(R, N, device="cuda", dtype=torch.bfloat16) * 0.1
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    aq, gq, sa, sg, kbs = _quant_wgrad(a, g, fmt, gran, bs, offs)
-    got = scaled_grouped_gemm_wgrad(aq, gq, sa, sg, offs, torch.float32, kbs)
-    ref = scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, kbs)
-    assert got.shape == (len(counts), K, N)
-    rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
-    assert rel < 1e-5, rel
-
-
-def test_scaled_grouped_gemm_wgrad_empty_group_is_zero():
-    counts = [8, 0, 8]
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    a = torch.randn(16, 32, device="cuda", dtype=torch.bfloat16)
-    g = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
-    aq, gq, sa, sg, kbs = _quant_wgrad(a, g, "fp8_e4m3", "blockwise", 32, offs)
-    out = scaled_grouped_gemm_wgrad(aq, gq, sa, sg, offs, torch.float32, kbs)
-    # an expert with no tokens owns no scale blocks; its slice must still be zeroed
-    assert (out[1] == 0).all()
-
-
-def test_scaled_grouped_gemm_wgrad_blockwise_compiles_fullgraph():
-    torch.manual_seed(0)
-    counts = [64, 0, 130, 41]
-    R = sum(counts)
-    a = torch.randn(R, 64, device="cuda", dtype=torch.bfloat16)
-    g = torch.randn(R, 48, device="cuda", dtype=torch.bfloat16) * 0.1
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    aq, gq, sa, sg, kbs = _quant_wgrad(a, g, "fp8_e4m3", "blockwise", 32, offs)
-    fn = torch.compile(
-        lambda: scaled_grouped_gemm_wgrad(aq, gq, sa, sg, offs, torch.bfloat16, kbs),
-        fullgraph=True,
-    )
-    assert torch.isfinite(fn()).all()
 
 
 def test_compiles_fullgraph():

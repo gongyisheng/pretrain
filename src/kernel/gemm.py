@@ -587,48 +587,99 @@ def scaled_grouped_gemm(
     out_dtype: torch.dtype,
     block_size: int,
 ) -> torch.Tensor:
-    R, K = aq.shape
-    E, _, N = bq.shape
-    nkb = sa.shape[1]
-    if nkb > 1:
-        BLOCK_SIZE, BLOCK_K = block_size, block_size
-    else:
-        BLOCK_SIZE, BLOCK_K = K, min(128, triton.next_power_of_2(K))
-    c = torch.empty((R, N), device=aq.device, dtype=out_dtype)
+    """Ragged scaled grouped GEMM, layout picked from the operand ranks.
+
+    Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
+        (M,K) x (E,K,N) -> (M,N)    ragged M
+        (M,K) x (K,N)   -> (E,M,N)  ragged K
+        (E,M,K) x (K,N) -> (M,N)    ragged N
+
+    `sa`/`sb` mirror their operand's axis order with the contraction axis replaced by
+    the scale-block axis, so transposing an operand transposes its scale with it.
+    `block_size` 0 means one scale block spanning the whole contraction segment.
+    """
+    a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
+    E = offs.shape[0]
     num_sms = _num_sms(aq.device)
-    wrap_triton(_scaled_grouped_gemm_kernel)[(num_sms,)](
-        aq,
-        bq,
-        c,
-        sa,
-        sb,
-        offs,
-        E,
-        N,
-        K,
-        nkb,
-        aq.stride(0),
-        aq.stride(1),
-        bq.stride(0),
-        bq.stride(1),
-        bq.stride(2),
-        c.stride(0),
-        c.stride(1),
-        sa.stride(0),
-        sa.stride(1),
-        sb.stride(0),
-        sb.stride(1),
-        sb.stride(2),
-        NUM_SMS=num_sms,
-        BLOCK_SIZE=BLOCK_SIZE,
-        BLOCK_K=BLOCK_K,
+
+    if a_is_2d and not b_is_2d:  # ragged M
+        R, K = aq.shape
+        N = bq.shape[2]
+        c = torch.empty((R, N), device=aq.device, dtype=out_dtype)
+        # the pre-merge kernel takes the element count, not the 0 sentinel
+        bs = block_size or K
+        BLOCK_K = bs if block_size else min(128, triton.next_power_of_2(K))
+        wrap_triton(_scaled_grouped_gemm_kernel)[(num_sms,)](
+            aq,
+            bq,
+            c,
+            sa,
+            sb,
+            offs,
+            E,
+            N,
+            K,
+            sa.shape[1],
+            aq.stride(0),
+            aq.stride(1),
+            bq.stride(0),
+            bq.stride(1),
+            bq.stride(2),
+            c.stride(0),
+            c.stride(1),
+            sa.stride(0),
+            sa.stride(1),
+            sb.stride(0),
+            sb.stride(1),
+            sb.stride(2),
+            NUM_SMS=num_sms,
+            BLOCK_SIZE=bs,
+            BLOCK_K=BLOCK_K,
+        )
+        return c
+
+    if a_is_2d and b_is_2d:  # ragged K
+        M, N = aq.shape[0], bq.shape[1]
+        assert sa.shape[-1] == sb.shape[0], (
+            f"scale block count mismatch: sa {sa.shape[-1]}, sb {sb.shape[0]}"
+        )
+        c = torch.empty((E, M, N), device=aq.device, dtype=out_dtype)
+        # aq/sa arrive transposed (M,R)/(M,nrb); the pre-merge kernel indexes them
+        # in the untransposed orientation, so hand it the swapped strides
+        wrap_triton(_scaled_grouped_gemm_ragged_k_kernel)[(num_sms,)](
+            aq,
+            bq,
+            c,
+            sa,
+            sb,
+            offs,
+            E,
+            N,
+            M,
+            aq.stride(-1),
+            aq.stride(-2),
+            bq.stride(0),
+            bq.stride(1),
+            c.stride(0),
+            c.stride(1),
+            c.stride(2),
+            sa.stride(-1),
+            sa.stride(-2),
+            sb.stride(0),
+            sb.stride(1),
+            NUM_SMS=num_sms,
+            BLOCK_SIZE=block_size,
+        )
+        return c
+
+    raise NotImplementedError(
+        "the ragged-N layout (3D x 2D) is not supported by the scaled grouped GEMM"
     )
-    return c
 
 
 @triton.autotune(configs=_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
 @triton.jit
-def _scaled_grouped_gemm_wgrad_kernel(
+def _scaled_grouped_gemm_ragged_k_kernel(
     a_ptr,
     g_ptr,
     gb_ptr,
@@ -736,48 +787,3 @@ def _scaled_grouped_gemm_wgrad_kernel(
             acc.to(gb_ptr.dtype.element_ty),
             mask=k_mask[:, None] & n_mask[None, :],
         )
-
-
-@triton_op("jit_kernel::scaled_grouped_gemm_wgrad", mutates_args={})
-def scaled_grouped_gemm_wgrad(
-    aq: torch.Tensor,
-    gq: torch.Tensor,
-    sa: torch.Tensor,
-    sg: torch.Tensor,
-    offs: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-) -> torch.Tensor:
-    _, K = aq.shape
-    N = gq.shape[1]
-    E = offs.shape[0]
-    grad_b = torch.empty((E, K, N), device=aq.device, dtype=out_dtype)
-    num_sms = _num_sms(aq.device)
-    assert sa.shape[0] == sg.shape[0], (
-        f"scale block count mismatch: sa {sa.shape[0]}, sg {sg.shape[0]}"
-    )
-    wrap_triton(_scaled_grouped_gemm_wgrad_kernel)[(num_sms,)](
-        aq,
-        gq,
-        grad_b,
-        sa,
-        sg,
-        offs,
-        E,
-        N,
-        K,
-        aq.stride(0),
-        aq.stride(1),
-        gq.stride(0),
-        gq.stride(1),
-        grad_b.stride(0),
-        grad_b.stride(1),
-        grad_b.stride(2),
-        sa.stride(0),
-        sa.stride(1),
-        sg.stride(0),
-        sg.stride(1),
-        NUM_SMS=num_sms,
-        BLOCK_SIZE=block_size,
-    )
-    return grad_b

@@ -117,13 +117,15 @@ def test_blockwise_fuses_and_matches_fake_quant(scaling, monkeypatch):
     cfg = _cfg("fp8", scaling)
 
     wgrad_calls = []
-    real_wgrad = moe.scaled_grouped_gemm_wgrad
+    real_gemm = moe.scaled_grouped_gemm
 
-    def spy(*args, **kwargs):
-        wgrad_calls.append(args[-1])
-        return real_wgrad(*args, **kwargs)
+    def spy(aq, bq, sa, sb, offs_, out_dtype, block_size):
+        # one op serves every layout now; 2D x 2D is ragged-K, i.e. the wgrad
+        if bq.ndim == 2:
+            wgrad_calls.append(block_size)
+        return real_gemm(aq, bq, sa, sb, offs_, out_dtype, block_size)
 
-    monkeypatch.setattr(moe, "scaled_grouped_gemm_wgrad", spy)
+    monkeypatch.setattr(moe, "scaled_grouped_gemm", spy)
 
     a_q = a.clone().requires_grad_(True)
     b_q = b.clone().requires_grad_(True)
@@ -203,14 +205,16 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
     collapse rowwise back to one block — and a scale row per expert to match."""
     a, b, offs = _make([8, 0, 24], K=64, N=48)
     seen = {}
-    real = moe.scaled_grouped_gemm_wgrad
+    real = moe.scaled_grouped_gemm
 
     def spy(aq, gq, sa, sg, offs_, out_dtype, block_size):
-        seen["block_size"] = block_size
-        seen["n_scale_rows"] = sa.shape[0]
+        if gq.ndim == 2:  # ragged-K layout, i.e. the wgrad
+            seen["block_size"] = block_size
+            # sa arrives transposed (K,nrb) with the contraction axis last
+            seen["n_scale_rows"] = sa.shape[-1]
         return real(aq, gq, sa, sg, offs_, out_dtype, block_size)
 
-    monkeypatch.setattr(moe, "scaled_grouped_gemm_wgrad", spy)
+    monkeypatch.setattr(moe, "scaled_grouped_gemm", spy)
     a_q = a.clone().requires_grad_(True)
     moe.quantized_expert_mm(_cfg("fp8", "rowwise"))(
         a_q, b.clone(), offs
