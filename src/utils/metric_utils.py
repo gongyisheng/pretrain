@@ -210,20 +210,65 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def compute_quantization_metrics(source_tensor, dequantized_tensor):
-    """Quant health against the dequantized round-trip, as 0-dim fp32 tensors (no host sync).
+def compute_quantization_metrics(source_tensor, dequantized_tensor, offs=None):
+    """Quant health against the dequantized round-trip, as 0-dim fp32 tensors.
 
-    Both are pure reductions. A former range_ratio (amax/median) was dropped: it is
-    sorted per expert per operand, which made it the dominant cost of a logged step.
+    Pure reductions throughout -- no .item()/.tolist()/.cpu(), so this runs inside a
+    compiled graph without a host sync or a graph break.
+
+    With `offs` (cumulative end-offsets) the metrics are per expert, then averaged.
+    One grouped GEMM covers every expert and each is quantized against its own amax,
+    so reducing over the whole operand would let the experts holding the most tokens
+    set the number -- one cold, badly scaled expert has to show up. Stacked expert
+    weights carry the expert on dim 0; dispatched rows are ragged along `offs`. Empty
+    experts are excluded: they have no error to report.
+
+    A former range_ratio (amax/median) was dropped: the median is a sort, per expert
+    per operand, and it dominated the cost of a logged step.
     """
     source = source_tensor.float()
     dequantized = dequantized_tensor.float()
-    error = (source - dequantized).norm().clamp_min(EPS)
+    squares = source.square()
+    err_squares = (source - dequantized).square()
+    underflows = ((source != 0) & (dequantized == 0)).float()
 
+    if offs is None:
+        src_sq = squares.sum().reshape(1)
+        err_sq = err_squares.sum().reshape(1)
+        under = underflows.sum().reshape(1)
+        numel = torch.full_like(src_sq, source.numel())
+    elif source.ndim == 3:  # stacked expert weights, expert on dim 0
+        src_sq = squares.flatten(1).sum(1)
+        err_sq = err_squares.flatten(1).sum(1)
+        under = underflows.flatten(1).sum(1)
+        numel = torch.full_like(src_sq, source[0].numel())
+    else:  # dispatched rows, ragged along offs -- a row belongs to exactly one expert
+        n_groups = offs.shape[0]
+        # right=True: row r belongs to the group whose end-offset first exceeds r
+        rows = torch.arange(source.shape[0], device=offs.device)
+        ids = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
+
+        def by_expert(t):
+            per_row = t.flatten(1).sum(1)
+            return per_row.new_zeros(n_groups).index_add_(0, ids, per_row)
+
+        src_sq, err_sq, under = (
+            by_expert(squares),
+            by_expert(err_squares),
+            by_expert(underflows),
+        )
+        starts = torch.cat([offs.new_zeros(1), offs[:-1]])
+        numel = ((offs - starts) * source.shape[1]).to(src_sq.dtype)
+
+    # clamps match the pre-vectorized form, which clamped each norm before the ratio
+    sqnr = 20.0 * torch.log10(
+        src_sq.sqrt().clamp_min(EPS) / err_sq.sqrt().clamp_min(EPS)
+    )
+    valid = (numel > 0).to(src_sq.dtype)
+    n_valid = valid.sum().clamp_min(1.0)
     return {
-        "sqnr": 10.0 * torch.log10((source.norm().clamp_min(EPS) / error) ** 2),
-        "underflow_rate": ((source != 0) & (dequantized == 0)).sum().float()
-        / source.numel(),
+        "sqnr": (sqnr * valid).sum() / n_valid,
+        "underflow_rate": (under / numel.clamp_min(1.0) * valid).sum() / n_valid,
     }
 
 

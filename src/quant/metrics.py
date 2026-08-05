@@ -6,18 +6,6 @@ from src.quant.quantize import dequantize_operand, ragged_scale_blocks
 from src.utils.metric_utils import compute_quantization_metrics
 
 
-def _expert_slices(tensor, offs):
-    """The per-expert pieces of one grouped-GEMM operand: stacked expert weights
-    carry the expert on dim 0, dispatched rows are ragged along the cumulative
-    `offs`. Empty groups are dropped — an expert that got no tokens has no error
-    to report, and the reductions are undefined on a 0-row slice.
-    """
-    if tensor.ndim == 3:
-        return tensor.unbind(0)
-    bounds = [0, *offs.tolist()]  # one host sync, and only on log steps
-    return [tensor[lo:hi] for lo, hi in zip(bounds, bounds[1:]) if hi > lo]
-
-
 class QuantizationMetricProbe:
     """The metrics one quantized module recorded this step, keyed by GEMM operand.
     Created and retained by a QuantizationMetricsCollector, which arms `enabled`
@@ -52,27 +40,11 @@ class QuantizationMetricProbe:
             snapshot.block_size,
             ragged=ragged,
         )
-        if snapshot.offs is None:
-            metrics = compute_quantization_metrics(snapshot.source_tensor, dequantized)
-        else:
-            # One grouped GEMM covers every expert, and each expert is quantized
-            # against its own amax. Reducing over the whole operand would let the
-            # experts holding the most tokens set the number, so average the
-            # per-expert metrics instead — one cold, badly scaled expert shows up.
-            per_expert = [
-                compute_quantization_metrics(source, deq)
-                for source, deq in zip(
-                    _expert_slices(snapshot.source_tensor, snapshot.offs),
-                    _expert_slices(dequantized, snapshot.offs),
-                )
-            ]
-            if not per_expert:
-                return
-            metrics = {
-                name: torch.stack([m[name] for m in per_expert]).mean()
-                for name in per_expert[0]
-            }
-        self.metrics[gemm_operand] = metrics
+        # offs makes the reduction per expert and averaged, so one hot expert cannot
+        # set the number for a cold one
+        self.metrics[gemm_operand] = compute_quantization_metrics(
+            snapshot.source_tensor, dequantized, offs=snapshot.offs
+        )
 
 
 class QuantizationMetricsCollector:
