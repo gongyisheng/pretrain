@@ -9,7 +9,6 @@ import torch
 from src.kernel import gemm
 from src.kernel.gemm import (
     _grouped_gemm,
-    grouped_gemm_wgrad,
     grouped_gemm,
     scaled_gemm,
     scaled_grouped_gemm,
@@ -67,6 +66,38 @@ def _make(counts, K, N, seed=0):
     return a, b, offs
 
 
+# Ragged layouts, named by which dim `offs` partitions. Counts sum to a multiple
+# of 8 so every operand satisfies torch's 16-byte stride alignment; the empty group
+# exercises the degenerate case.
+LAYOUTS = ("ragged_m", "ragged_k")
+_LAYOUT_COUNTS = [64, 0, 130, 46]  # sums to 240
+
+
+def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
+    """Build (a, b, offs) for one ragged layout, in torch._grouped_mm's convention."""
+    torch.manual_seed(seed)
+    G, R = len(counts), sum(counts)
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+
+    def rand(*shape):
+        return torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 0.1
+
+    if layout == "ragged_m":  # (R,K) x (G,K,N) -> (R,N)
+        return rand(R, K), rand(G, N, K).mT, offs
+    if layout == "ragged_k":  # (M,R) x (R,N) -> (G,M,N)
+        return rand(R, M).mT, rand(R, N), offs
+    raise ValueError(layout)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_all_ragged_layouts_match_torch(layout):
+    a, b, offs = _make_layout(layout)
+    ref = torch._grouped_mm(a, b, offs=offs)
+    got = grouped_gemm(a, b, offs)
+    assert got.shape == ref.shape
+    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+
+
 def test_parity_balanced_groups():
     a, b, offs = _make([128, 128, 128, 128], K=64, N=48)
     got = grouped_gemm(a, b, offs)
@@ -120,7 +151,7 @@ def test_wgrad_parity_uneven_and_empty():
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     ref = grouped_gemm_wgrad_ref(a, grad_c, offs)
-    got = grouped_gemm_wgrad(a, grad_c, offs)
+    got = grouped_gemm(a.mT, grad_c, offs)
     assert got.shape == (len(counts), K, N)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
@@ -145,7 +176,7 @@ def test_wgrad_parity_config_shapes(K, N):
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16) * 0.1
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     ref = grouped_gemm_wgrad_ref(a, grad_c, offs)
-    got = grouped_gemm_wgrad(a, grad_c, offs)
+    got = grouped_gemm(a.mT, grad_c, offs)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 

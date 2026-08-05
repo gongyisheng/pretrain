@@ -6,7 +6,6 @@ import torch
 
 from src.kernel.gemm import (
     grouped_gemm,
-    grouped_gemm_wgrad,
     scaled_grouped_gemm,
     scaled_grouped_gemm_wgrad,
 )
@@ -130,8 +129,8 @@ def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
         g = dequantize_operand(gq, sg, 0, granularity, block_size, ragged=ragged).to(
             g.dtype
         )
-    # bf16 ragged Xᵀ@gY via the existing grouped wgrad path
-    grad_b = grouped_gemm_wgrad(a.to(out_dtype), g.to(out_dtype), offs).to(out_dtype)
+    # bf16 ragged Xᵀ@gY via the ragged-K grouped GEMM layout
+    grad_b = grouped_gemm(a.to(out_dtype).mT, g.to(out_dtype), offs).to(out_dtype)
     return grad_b, a_snap, g_snap
 
 

@@ -116,21 +116,21 @@ def _grouped_gemm_kernel(
 
 @triton.autotune(configs=_CONFIGS, key=["N", "K"])
 @triton.jit
-def _grouped_gemm_wgrad_kernel(
+def _grouped_gemm_ragged_k_kernel(
     a_ptr,
-    gc_ptr,
-    gb_ptr,
+    b_ptr,
+    c_ptr,
     offs_ptr,
     E,
     N,
     K,
     stride_am,
     stride_ak,
-    stride_gm,
-    stride_gn,
-    stride_ge,
-    stride_gk,
-    stride_gn2,
+    stride_bm,
+    stride_bn,
+    stride_cg,
+    stride_ck,
+    stride_cn,
     NUM_SMS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -161,20 +161,20 @@ def _grouped_gemm_wgrad_kernel(
             m_mask = offs_m < m_end
             # load A as (BLOCK_K, BLOCK_M) so tl.dot contracts over M
             a_ptrs = a_ptr + offs_k[:, None] * stride_ak + offs_m[None, :] * stride_am
-            gc_ptrs = gc_ptr + offs_m[:, None] * stride_gm + offs_n[None, :] * stride_gn
+            b_ptrs = b_ptr + offs_m[:, None] * stride_bm + offs_n[None, :] * stride_bn
             a = tl.load(a_ptrs, mask=k_mask[:, None] & m_mask[None, :], other=0.0)
-            gc = tl.load(gc_ptrs, mask=m_mask[:, None] & n_mask[None, :], other=0.0)
-            acc += tl.dot(a, gc)  # (BLOCK_K, BLOCK_M) @ (BLOCK_M, BLOCK_N)
+            b = tl.load(b_ptrs, mask=m_mask[:, None] & n_mask[None, :], other=0.0)
+            acc += tl.dot(a, b)  # (BLOCK_K, BLOCK_M) @ (BLOCK_M, BLOCK_N)
             m += BLOCK_M
-        gb_ptrs = (
-            gb_ptr
-            + g * stride_ge
-            + offs_k[:, None] * stride_gk
-            + offs_n[None, :] * stride_gn2
+        c_ptrs = (
+            c_ptr
+            + g * stride_cg
+            + offs_k[:, None] * stride_ck
+            + offs_n[None, :] * stride_cn
         )
         tl.store(
-            gb_ptrs,
-            acc.to(gb_ptr.dtype.element_ty),
+            c_ptrs,
+            acc.to(c_ptr.dtype.element_ty),
             mask=k_mask[:, None] & n_mask[None, :],
         )
 
@@ -184,27 +184,59 @@ def _grouped_gemm_wgrad_kernel(
 # ---------------------------------------------------------------------------
 
 
+def _empty_like_grouped_mm(size, device, dtype):
+    """Allocate like torch._grouped_mm: last dim padded to a 16-byte boundary."""
+    align = 16 // dtype.itemsize
+    padded = (size[-1] + align - 1) // align * align
+    stride = (size[1] * padded, padded, 1) if len(size) == 3 else (padded, 1)
+    return torch.empty_strided(size, stride, device=device, dtype=dtype)
+
+
 @triton_op("jit_kernel::grouped_gemm", mutates_args={})
 def _grouped_gemm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
-    R, K = a.shape
-    N = b.shape[2]
-    c = torch.empty((R, N), device=a.device, dtype=a.dtype)
     num_sms = _num_sms(a.device)
-    wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
+    if b.ndim == 3:  # ragged-M: (M,K) x (G,K,N) -> (M,N), offs partitions a's rows
+        M, K = a.shape
+        N = b.shape[2]
+        c = _empty_like_grouped_mm((M, N), a.device, a.dtype)
+        wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
+            a,
+            b,
+            c,
+            offs,
+            b.shape[0],
+            N,
+            K,
+            a.stride(0),
+            a.stride(1),
+            b.stride(0),
+            b.stride(1),
+            b.stride(2),
+            c.stride(0),
+            c.stride(1),
+            NUM_SMS=num_sms,
+        )
+        return c
+    # ragged-K: (M,R) x (R,N) -> (G,M,N), offs partitions the contraction dim
+    M = a.shape[0]
+    N = b.shape[1]
+    G = offs.shape[0]
+    c = _empty_like_grouped_mm((G, M, N), a.device, a.dtype)
+    wrap_triton(_grouped_gemm_ragged_k_kernel)[(num_sms,)](
         a,
         b,
         c,
         offs,
-        b.shape[0],
+        G,
         N,
-        K,
-        a.stride(0),
-        a.stride(1),
+        M,
+        a.stride(1),  # stride_am: along the ragged contraction dim
+        a.stride(0),  # stride_ak: along the output row dim
         b.stride(0),
         b.stride(1),
-        b.stride(2),
         c.stride(0),
         c.stride(1),
+        c.stride(2),
         NUM_SMS=num_sms,
     )
     return c
@@ -217,9 +249,14 @@ def _grouped_gemm_setup_context(ctx, inputs, output):
 
 def _grouped_gemm_backward(ctx, grad_c):
     a, b, offs = ctx.saved_tensors
-    grad_a = _grouped_gemm(grad_c, b.transpose(-2, -1), offs)  # dgrad reuses forward
-    grad_b = grouped_gemm_wgrad(a, grad_c, offs)  # wgrad
-    return grad_a, grad_b, None
+    if b.ndim != 3:
+        # dgrad of ragged-K is the ragged-N layout, which has no kernel yet
+        raise NotImplementedError("ragged-K grouped_gemm is not differentiable")
+    return (
+        _grouped_gemm(grad_c, b.mT, offs),  # dgrad: (M,N) x (G,N,K) -> (M,K)
+        _grouped_gemm(a.mT, grad_c, offs),  # wgrad: (K,M) x (M,N) -> (G,K,N)
+        None,
+    )
 
 
 _grouped_gemm.register_autograd(
@@ -227,42 +264,19 @@ _grouped_gemm.register_autograd(
 )
 
 
-@triton_op("jit_kernel::grouped_gemm_wgrad", mutates_args={})
-def grouped_gemm_wgrad(
-    a: torch.Tensor, grad_c: torch.Tensor, offs: torch.Tensor
-) -> torch.Tensor:
-    assert a.dtype == grad_c.dtype, (
-        f"dtype mismatch: a {a.dtype}, grad_c {grad_c.dtype}"
-    )
-    R, K = a.shape
-    N = grad_c.shape[1]
-    E = offs.shape[0]
-    grad_b = torch.empty((E, K, N), device=a.device, dtype=a.dtype)
-    num_sms = _num_sms(a.device)
-    wrap_triton(_grouped_gemm_wgrad_kernel)[(num_sms,)](
-        a,
-        grad_c,
-        grad_b,
-        offs,
-        E,
-        N,
-        K,
-        a.stride(0),
-        a.stride(1),
-        grad_c.stride(0),
-        grad_c.stride(1),
-        grad_b.stride(0),
-        grad_b.stride(1),
-        grad_b.stride(2),
-        NUM_SMS=num_sms,
-    )
-    return grad_b
-
-
 def grouped_gemm(
     a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor, impl: str = "auto", **_
 ) -> torch.Tensor:
+    """Ragged grouped GEMM matching torch._grouped_mm's layout convention.
 
+    Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
+        (M,K) x (G,K,N) -> (M,N)    ragged M
+        (M,K) x (K,N)   -> (G,M,N)  ragged K
+
+    Note `impl="torch"` additionally requires the non-unit stride of the last two
+    dims to be a multiple of 16 bytes, which the Triton path does not — for the
+    ragged-K layout with a contiguous source that means K % 8 == 0 in bf16.
+    """
     if impl not in ("auto", "triton", "torch"):
         raise ValueError(f"impl must be auto|triton|torch, got {impl!r}")
 
@@ -280,9 +294,14 @@ def grouped_gemm(
     if impl == "torch":
         return torch._grouped_mm(a, b, offs=offs)
 
-    assert a.ndim == 2 and b.ndim == 3 and offs.ndim == 1
-    assert a.shape[1] == b.shape[1], f"K mismatch: a K={a.shape[1]}, b K={b.shape[1]}"
-    assert offs.shape[0] == b.shape[0], f"offs len {offs.shape[0]} != E {b.shape[0]}"
+    assert a.ndim == 2 and b.ndim in (2, 3) and offs.ndim == 1
+    assert a.shape[1] == b.shape[-2], (
+        f"contraction mismatch: a {a.shape[1]}, b {b.shape[-2]}"
+    )
+    if b.ndim == 3:
+        assert offs.shape[0] == b.shape[0], (
+            f"offs len {offs.shape[0]} != G {b.shape[0]}"
+        )
     assert offs.dtype == torch.int32
     assert a.dtype == b.dtype, f"dtype mismatch: a {a.dtype}, b {b.dtype}"
     assert a.device == b.device == offs.device, "a, b, offs must share same device"
