@@ -21,8 +21,12 @@ import torch
 
 sys.path.insert(0, ".")
 
-from src.kernel.gemm import scaled_grouped_gemm
-from src.quant.quantize import effective_block_size, quantize_operand
+from src.kernel.gemm import scaled_grouped_gemm, scaled_grouped_gemm_wgrad
+from src.quant.quantize import (
+    effective_block_size,
+    quantize_operand,
+    ragged_scale_blocks,
+)
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
 M_FIXED = 8 * 1024 * 8
@@ -105,6 +109,35 @@ def _bench_point(E, K, N, scheme):
     return dict(triton_ms=triton_ms, bf16_ms=bf16_ms, triton_relerr=triton_relerr)
 
 
+def _bench_wgrad_point(E, K, N, scheme):
+    """Return {triton_ms, bf16_ms, triton_relerr} for one wgrad (E, shape, scheme).
+
+    Both operands are indexed by the same ragged token axis, so one block mapping
+    covers them -- matching what src/quant/moe.py does. The bf16 baseline is the
+    ragged-K grouped GEMM the quantized kernel replaces.
+    """
+    a, _, offs = _make(E, M_FIXED, K, N)
+    g = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16) * 0.1
+    ref = torch._grouped_mm(a.mT, g, offs=offs).float()
+
+    kw = _kw(scheme)
+    blocks = ragged_scale_blocks(offs, a.shape[0], "rowwise", 0)
+    aq, sa = quantize_operand(a, 0, "rowwise", 0, ragged=blocks, **kw)
+    gq, sg = quantize_operand(g, 0, "rowwise", 0, ragged=blocks, **kw)
+
+    def triton_fn():
+        return scaled_grouped_gemm_wgrad(aq, gq, sa, sg, offs, torch.bfloat16, 0)
+
+    triton_out = triton_fn()
+    triton_ms = _time(triton_fn)
+    bf16_ms = _time(lambda: torch._grouped_mm(a.mT, g, offs=offs))
+    return dict(
+        triton_ms=triton_ms,
+        bf16_ms=bf16_ms,
+        triton_relerr=_relerr(triton_out, ref),
+    )
+
+
 def plot(results, path, device=""):
     """Write a grouped-bar chart (rows = scheme, cols = E) from `results`.
 
@@ -175,6 +208,13 @@ def main():
         "--out", default=DEFAULT_OUT, help="path to write the latency chart"
     )
     ap.add_argument("--no-plot", action="store_true", help="skip writing the chart")
+    ap.add_argument(
+        "--direction",
+        choices=["fwd", "wgrad"],
+        default="fwd",
+        help="fwd: (M,K)x(E,K,N). wgrad: ragged contraction, X^T @ gY -> (E,K,N). "
+        "wgrad is table-only (no chart).",
+    )
     args = ap.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -186,11 +226,12 @@ def main():
         f"{'triton_relerr':>14s}"
     )
     print(hdr)
+    point = _bench_wgrad_point if args.direction == "wgrad" else _bench_point
     results = []
     for role, K, N in SHAPES:
         for E in E_LIST:
             for scheme in SCHEMES:
-                r = _bench_point(E, K, N, scheme)
+                r = point(E, K, N, scheme)
                 label = f"{role} K{K} N{N}"
                 print(
                     f"{label:22s} {E:>4d} {scheme:13s} "
@@ -201,7 +242,7 @@ def main():
                     {"role": role, "K": K, "N": N, "E": E, "scheme": scheme, **r}
                 )
 
-    if not args.no_plot:
+    if not args.no_plot and args.direction == "fwd":
         plot(results, args.out, device=device)
         print(f"\nwrote {args.out}")
 
