@@ -12,7 +12,6 @@ def grouped_mlp(
     act_fn,
     offs: torch.Tensor,
     gated: bool,
-    row_expert_ids: torch.Tensor = None,
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
     expert_mm=grouped_gemm,
@@ -27,18 +26,14 @@ def grouped_mlp(
             b_in = b_in.to(dt)
         if b_down is not None:
             b_down = b_down.to(dt)
-    h = expert_mm(x, w_in.mT, offs, projection="gate_up")
-    if b_in is not None:
-        h = h + b_in[row_expert_ids]
+    # the per-expert bias is (E, out) and rides in the GEMM epilogue
+    h = expert_mm(x, w_in.mT, offs, projection="gate_up", bias=b_in)
     if gated:
         gate, up = h.chunk(2, dim=-1)
         h = act_fn(gate, up)
     else:
         h = act_fn(h)
-    out = expert_mm(h, w_down.mT, offs, projection="down")
-    if b_down is not None:
-        out = out + b_down[row_expert_ids]
-    return out
+    return expert_mm(h, w_down.mT, offs, projection="down", bias=b_down)
 
 
 class DenseMLPBlock(nn.Module):
@@ -428,7 +423,6 @@ class SparseMoEBlock(nn.Module):
             self.act_fn,
             offs,
             self.gated,
-            row_expert_ids=expert_ids_sorted if b_in is not None else None,
             b_in=b_in,
             b_down=self.expert_down_bias,
             expert_mm=self.expert_mm,

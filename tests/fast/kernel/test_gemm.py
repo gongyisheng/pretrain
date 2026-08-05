@@ -127,6 +127,56 @@ def test_output_stride_matches_torch():
     )
 
 
+def _bias_ref(a, b, offs, bias, layout):
+    """torch._grouped_mm plus a (G,N) bias broadcast over the output's row dim.
+
+    torch rejects bias outright, so the oracle adds it separately: per output row
+    for ragged M (each row belongs to one group), per group slice for ragged K.
+    """
+    out = torch._grouped_mm(a, b, offs=offs).float()
+    if layout == "ragged_k":
+        return out + bias.float()[:, None, :]
+    rows = torch.arange(out.shape[0], device=out.device)
+    return out + bias.float()[torch.searchsorted(offs, rows, right=True)]
+
+
+@pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
+def test_bias_matches_reference(layout):
+    a, b, offs = _make_layout(layout)
+    G, N = offs.shape[0], 48
+    bias = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
+    got = grouped_gemm(a, b, offs, bias=bias)
+    ref = _bias_ref(a, b, offs, bias, layout)
+    torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
+def test_bias_grads_match_reference(layout):
+    a0, b0, offs = _make_layout(layout)
+    G, N = offs.shape[0], 48
+    bias0 = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
+
+    def run(fn):
+        a, b = a0.clone().requires_grad_(True), b0.clone().requires_grad_(True)
+        bias = bias0.clone().requires_grad_(True)
+        out = fn(a, b, offs, bias)
+        (out * out).sum().backward()
+        return out, a.grad, b.grad, bias.grad
+
+    ref = run(lambda a, b, o, bias: _bias_ref(a, b, o, bias, layout))
+    got = run(lambda a, b, o, bias: _grouped_gemm(a, b, o, bias))
+    for g, r in zip(got, ref):
+        torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_bias_rejected_for_ragged_n():
+    """Ragged N partitions the columns, so a (G,N) row-broadcast bias is meaningless."""
+    a, b, offs = _make_layout("ragged_n")
+    bias = torch.zeros(offs.shape[0], b.shape[1], device="cuda", dtype=torch.bfloat16)
+    with pytest.raises((ValueError, AssertionError, NotImplementedError)):
+        grouped_gemm(a, b, offs, bias=bias)
+
+
 def test_parity_balanced_groups():
     a, b, offs = _make([128, 128, 128, 128], K=64, N=48)
     got = grouped_gemm(a, b, offs)

@@ -41,6 +41,11 @@ def _num_sms(device: torch.device | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
+# ragged N partitions the output's columns, so a (G,N) bias broadcast over rows has
+# no meaning there — it would need one entry per global column instead.
+_RAGGED_N_BIAS_MSG = "bias is not supported for the ragged-N layout"
+
+
 # ---------------------------------------------------------------------------
 # Triton kernels
 # ---------------------------------------------------------------------------
@@ -52,6 +57,7 @@ def _grouped_gemm_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
+    bias_ptr,
     offs_ptr,
     G,
     M,
@@ -66,20 +72,26 @@ def _grouped_gemm_kernel(
     stride_cg,
     stride_cm,
     stride_cn,
+    stride_biasg,
+    stride_biasn,
     NUM_SMS: tl.constexpr,
     A_IS_2D: tl.constexpr,
     B_IS_2D: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """Ragged grouped GEMM over any one of M, N, K.
+    """Ragged grouped GEMM over any one of M, N, K, with an optional (G,N) bias.
 
     Which dim `offs` partitions follows from the operand ranks, exactly as in
     torch._grouped_mm. The tile grid is always (M, N) and the reduction always
     over K, so one tile body serves all three layouts; the extent of the ragged
     dim is passed as 0 (unused -- its bounds come from `offs`) to keep the
     autotune key stable as that dim changes size step to step.
+
+    The bias is per group, broadcast over the output's row dim; torch._grouped_mm
+    rejects bias entirely, so this is a deliberate superset of its behaviour.
     """
     M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
@@ -144,6 +156,12 @@ def _grouped_gemm_kernel(
                 a = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
                 b = tl.load(b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0)
                 acc += tl.dot(a, b)
+            if HAS_BIAS:
+                acc += tl.load(
+                    bias_ptr + g * stride_biasg + (n_start + offs_n) * stride_biasn,
+                    mask=n_mask,
+                    other=0.0,
+                )[None, :]
             c_ptrs = (
                 c_ptr
                 + (g * stride_cg if K_VARY else 0)
@@ -172,8 +190,19 @@ def _empty_like_grouped_mm(size, device, dtype):
     return torch.empty_strided(size, stride, device=device, dtype=dtype)
 
 
+def _row_group_ids(offs: torch.Tensor, n_rows: int) -> torch.Tensor:
+    """Group index of each output row, from cumulative end-offsets."""
+    rows = torch.arange(n_rows, device=offs.device)
+    return torch.searchsorted(offs, rows, right=True)
+
+
 @triton_op("jit_kernel::grouped_gemm", mutates_args={})
-def _grouped_gemm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+def _grouped_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    offs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     a_is_2d, b_is_2d = a.ndim == 2, b.ndim == 2
     G = offs.shape[0]
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
@@ -182,6 +211,8 @@ def _grouped_gemm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch
     elif a_is_2d and b_is_2d:  # (M,K) x (K,N) -> (G,M,N), ragged K
         size, M, N, K = (G, a.shape[0], b.shape[1]), a.shape[0], b.shape[1], 0
     else:  # (G,M,K) x (K,N) -> (M,N), ragged N
+        if bias is not None:
+            raise NotImplementedError(_RAGGED_N_BIAS_MSG)
         size, M, N, K = (a.shape[1], b.shape[1]), a.shape[1], 0, a.shape[2]
 
     c = _empty_like_grouped_mm(size, a.device, a.dtype)
@@ -190,6 +221,7 @@ def _grouped_gemm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch
         a,
         b,
         c,
+        c if bias is None else bias,  # unused when HAS_BIAS is False
         offs,
         G,
         M,
@@ -204,26 +236,44 @@ def _grouped_gemm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch
         c.stride(0) if c.ndim == 3 else 0,
         c.stride(-2),
         c.stride(-1),
+        0 if bias is None else bias.stride(0),
+        0 if bias is None else bias.stride(1),
         NUM_SMS=num_sms,
         A_IS_2D=a_is_2d,
         B_IS_2D=b_is_2d,
+        HAS_BIAS=bias is not None,
     )
     return c
 
 
 def _grouped_gemm_setup_context(ctx, inputs, output):
-    a, b, offs = inputs
+    a, b, offs, _bias = inputs
     ctx.save_for_backward(a, b, offs)
+    ctx.bias_needs_grad = ctx.needs_input_grad[3]
 
 
 def _grouped_gemm_backward(ctx, grad_c):
-    # each layout's grads land in another layout of the same set, so one formula
-    # serves all three
+    # each layout's dgrad/wgrad lands in another layout of the same set, so one
+    # formula serves all three
     a, b, offs = ctx.saved_tensors
+    grad_bias = None
+    if ctx.bias_needs_grad:
+        # bias is (G,N) broadcast over the output's row dim, so its grad sums that
+        # dim. Both branches accumulate in fp32: over thousands of rows a bf16
+        # accumulator drifts percent-level.
+        if grad_c.ndim == 3:
+            grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
+        else:
+            # a segmented column-sum IS the ragged-K layout, with a row of ones as
+            # the left operand -- reuses the kernel's fp32 accumulator and reads
+            # grad_c once, where index_add_ would need an fp32 copy of it
+            ones = grad_c.new_ones(1, grad_c.shape[0])
+            grad_bias = _grouped_gemm(ones, grad_c, offs).squeeze(1)
     return (
         _grouped_gemm(grad_c, b.mT, offs),
         _grouped_gemm(a.mT, grad_c, offs),
         None,
+        grad_bias,
     )
 
 
@@ -233,7 +283,12 @@ _grouped_gemm.register_autograd(
 
 
 def grouped_gemm(
-    a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor, impl: str = "auto", **_
+    a: torch.Tensor,
+    b: torch.Tensor,
+    offs: torch.Tensor,
+    impl: str = "auto",
+    bias: torch.Tensor | None = None,
+    **_,
 ) -> torch.Tensor:
     """Ragged grouped GEMM matching torch._grouped_mm's layout convention.
 
@@ -242,12 +297,18 @@ def grouped_gemm(
         (M,K) x (K,N)   -> (G,M,N)  ragged K
         (G,M,K) x (K,N) -> (M,N)    ragged N
 
+    `bias` is an optional (G,N) tensor broadcast over the output's row dim, fused
+    into the Triton epilogue. It goes beyond torch._grouped_mm, which rejects bias,
+    so `impl="torch"` adds it separately and unfused.
+
     Note `impl="torch"` additionally requires the non-unit stride of the last two
     dims to be a multiple of 16 bytes, which the Triton path does not — for the
     ragged-K layout with a contiguous source that means K % 8 == 0 in bf16.
     """
     if impl not in ("auto", "triton", "torch"):
         raise ValueError(f"impl must be auto|triton|torch, got {impl!r}")
+    if bias is not None and a.ndim == 3:
+        raise NotImplementedError(_RAGGED_N_BIAS_MSG)
 
     if impl == "auto":
         impl = (
@@ -261,7 +322,14 @@ def grouped_gemm(
         )
 
     if impl == "torch":
-        return torch._grouped_mm(a, b, offs=offs)
+        out = torch._grouped_mm(a, b, offs=offs)
+        if bias is not None:
+            out = out + (
+                bias[:, None, :]
+                if out.ndim == 3
+                else bias[_row_group_ids(offs, out.shape[0])]
+            )
+        return out
 
     assert a.ndim in (2, 3) and b.ndim in (2, 3) and offs.ndim == 1
     assert a.ndim == 2 or b.ndim == 2, "3D x 3D has no ragged dim; use torch.bmm"
@@ -280,9 +348,15 @@ def grouped_gemm(
     assert a.dtype == b.dtype, f"dtype mismatch: a {a.dtype}, b {b.dtype}"
     assert a.device == b.device == offs.device, "a, b, offs must share same device"
 
+    if bias is not None:
+        assert bias.shape == (offs.shape[0], b.shape[-1]), (
+            f"bias must be (G,N)=({offs.shape[0]},{b.shape[-1]}), got {tuple(bias.shape)}"
+        )
+        assert bias.dtype == a.dtype, f"bias dtype {bias.dtype} != a {a.dtype}"
+
     if not (a.is_cuda and a.dtype == torch.bfloat16):
         raise ValueError("impl='triton' requires bf16 CUDA tensors")
-    return _grouped_gemm(a, b, offs)
+    return _grouped_gemm(a, b, offs, bias)
 
 
 # ---------------------------------------------------------------------------

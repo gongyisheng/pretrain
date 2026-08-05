@@ -5,6 +5,7 @@ import copy
 import torch
 
 from src.kernel.gemm import (
+    _row_group_ids,
     grouped_gemm,
     scaled_grouped_gemm,
     scaled_grouped_gemm_wgrad,
@@ -185,9 +186,13 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
 
 def quantized_expert_mm(cfg: QuantizationConfig, probes=None):
 
-    def expert_mm(a, b, offs, projection=None):
+    def expert_mm(a, b, offs, projection=None, bias=None):
         probe = probes.get(projection) if probes else None
-        return ScaledGroupedGemmFn.apply(a, b, offs, cfg, probe)
+        out = ScaledGroupedGemmFn.apply(a, b, offs, cfg, probe)
+        if bias is not None:
+            # the quantized kernels have no bias epilogue, so add it after the GEMM
+            out = out + bias[_row_group_ids(offs, out.shape[0])]
+        return out
 
     return expert_mm
 

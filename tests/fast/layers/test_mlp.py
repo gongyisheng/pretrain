@@ -943,7 +943,6 @@ def test_grouped_mlp_matches_per_group_loop(
     b_in = torch.randn(E, out_dim, dtype=dtype) * 0.1 if use_bias else None
     b_down = torch.randn(E, D, dtype=dtype) * 0.1 if use_bias else None
 
-    row_expert_ids = torch.repeat_interleave(torch.arange(E), torch.tensor(counts))
     offs = torch.tensor(counts).cumsum(0).to(torch.int32)
 
     got = grouped_mlp(
@@ -953,7 +952,6 @@ def test_grouped_mlp_matches_per_group_loop(
         act,
         offs,
         gated,
-        row_expert_ids=row_expert_ids,
         b_in=b_in,
         b_down=b_down,
     )
@@ -1341,9 +1339,9 @@ def test_moe_expert_mm_seam_is_pluggable():
 
     seen = []
 
-    def spy(a, b, offs, projection=None):
+    def spy(a, b, offs, projection=None, bias=None):
         seen.append(projection)
-        return grouped_gemm(a, b, offs)
+        return grouped_gemm(a, b, offs, bias=bias)
 
     blk.expert_mm = spy
     x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16)
