@@ -66,10 +66,10 @@ def _make(counts, K, N, seed=0):
     return a, b, offs
 
 
-# Ragged layouts, named by which dim `offs` partitions. Counts sum to a multiple
-# of 8 so every operand satisfies torch's 16-byte stride alignment; the empty group
-# exercises the degenerate case.
-LAYOUTS = ("ragged_m", "ragged_k")
+# The three ragged layouts, named by which dim `offs` partitions. Counts sum to a
+# multiple of 8 so every operand satisfies torch's 16-byte stride alignment; the
+# empty group exercises the degenerate case.
+LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
 _LAYOUT_COUNTS = [64, 0, 130, 46]  # sums to 240
 
 
@@ -86,6 +86,8 @@ def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
         return rand(R, K), rand(G, N, K).mT, offs
     if layout == "ragged_k":  # (M,R) x (R,N) -> (G,M,N)
         return rand(R, M).mT, rand(R, N), offs
+    if layout == "ragged_n":  # (G,M,K) x (K,R) -> (M,R)
+        return rand(G, M, K), rand(K, R), offs
     raise ValueError(layout)
 
 
@@ -96,6 +98,33 @@ def test_all_ragged_layouts_match_torch(layout):
     got = grouped_gemm(a, b, offs)
     assert got.shape == ref.shape
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_all_ragged_layouts_grads_match_torch(layout):
+    """Every layout's dgrad/wgrad lands in another layout of the same set, so the
+    set is only differentiable once all three are implemented."""
+    a0, b0, offs = _make_layout(layout)
+
+    def run(fn):
+        a = a0.clone().requires_grad_(True)
+        b = b0.clone().requires_grad_(True)
+        out = fn(a, b, offs)
+        (out * out).sum().backward()
+        return out, a.grad, b.grad
+
+    ref = run(lambda a, b, o: torch._grouped_mm(a, b, offs=o))
+    got = run(lambda a, b, o: _grouped_gemm(a, b, o))
+    for g, r in zip(got, ref):
+        torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_output_stride_matches_torch():
+    """A last dim that is not 8-element aligned is where torch's padding shows."""
+    a, b, offs = _make_layout("ragged_m", N=51)
+    assert (
+        grouped_gemm(a, b, offs).stride() == torch._grouped_mm(a, b, offs=offs).stride()
+    )
 
 
 def test_parity_balanced_groups():

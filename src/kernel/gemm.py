@@ -46,64 +46,110 @@ def _num_sms(device: torch.device | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 
-@triton.autotune(configs=_CONFIGS, key=["N", "K"])
+@triton.autotune(configs=_CONFIGS, key=["M", "N", "K", "A_IS_2D", "B_IS_2D"])
 @triton.jit
 def _grouped_gemm_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
     offs_ptr,
-    E,
+    G,
+    M,
     N,
     K,
+    stride_ag,
     stride_am,
     stride_ak,
-    stride_be,
+    stride_bg,
     stride_bk,
     stride_bn,
+    stride_cg,
     stride_cm,
     stride_cn,
     NUM_SMS: tl.constexpr,
+    A_IS_2D: tl.constexpr,
+    B_IS_2D: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    num_n_tiles = tl.cdiv(N, BLOCK_N)
-    tile_idx = pid  # this persistent program handles tiles pid, pid+NUM_SMS, ...
+    """Ragged grouped GEMM over any one of M, N, K.
+
+    Which dim `offs` partitions follows from the operand ranks, exactly as in
+    torch._grouped_mm. The tile grid is always (M, N) and the reduction always
+    over K, so one tile body serves all three layouts; the extent of the ragged
+    dim is passed as 0 (unused -- its bounds come from `offs`) to keep the
+    autotune key stable as that dim changes size step to step.
+    """
+    M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
+    N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
+    K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
+
+    tile_idx = tl.program_id(0)  # this persistent program owns pid, pid+NUM_SMS, ...
     last_end = 0  # running count of tiles before the current group
-    m_start = 0  # first row of the current group (prev group's end-offset)
-    for g in range(E):
-        m_end = tl.load(offs_ptr + g)
-        m_g = m_end - m_start
-        num_m_tiles = tl.cdiv(m_g, BLOCK_M)
-        num_tiles_g = num_m_tiles * num_n_tiles
-        # process every tile of group g that this program owns
+    m_end = 0  # offs are END-offsets, so the previous end is the next start
+    n_end = 0
+    k_end = 0
+    for g in range(G):
+        if M_VARY:
+            m_start = m_end
+            m_end = tl.load(offs_ptr + g)
+            m_size = m_end - m_start
+        else:
+            m_start = 0
+            m_size = M
+        if N_VARY:
+            n_start = n_end
+            n_end = tl.load(offs_ptr + g)
+            n_size = n_end - n_start
+        else:
+            n_start = 0
+            n_size = N
+        if K_VARY:
+            k_start = k_end
+            k_end = tl.load(offs_ptr + g)
+            k_size = k_end - k_start
+        else:
+            k_start = 0
+            k_size = K
+
+        num_n_tiles = tl.cdiv(n_size, BLOCK_N)
+        num_tiles_g = tl.cdiv(m_size, BLOCK_M) * num_n_tiles
+        # process every tile of group g that this program owns. An empty ragged M or
+        # N group has no tiles; an empty ragged K group still stores its zero slice.
         while (tile_idx >= last_end) and (tile_idx < last_end + num_tiles_g):
             local = tile_idx - last_end
             tile_m = local // num_n_tiles
             tile_n = local % num_n_tiles
-            offs_m = m_start + tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
             offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
-            offs_k = tl.arange(0, BLOCK_K)
-            a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
-            b_ptrs = (
-                b_ptr
-                + g * stride_be
-                + offs_k[:, None] * stride_bk
-                + offs_n[None, :] * stride_bn
-            )
-            m_mask = offs_m < m_end
-            n_mask = offs_n < N
+            m_mask = offs_m < m_size
+            n_mask = offs_n < n_size
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-            for k0 in range(0, K, BLOCK_K):
-                k_mask = offs_k < K - k0
+            for k0 in range(0, k_size, BLOCK_K):
+                offs_k = k0 + tl.arange(0, BLOCK_K)
+                k_mask = offs_k < k_size
+                a_ptrs = (
+                    a_ptr
+                    + (0 if A_IS_2D else g * stride_ag)
+                    + (m_start + offs_m)[:, None] * stride_am
+                    + (k_start + offs_k)[None, :] * stride_ak
+                )
+                b_ptrs = (
+                    b_ptr
+                    + (0 if B_IS_2D else g * stride_bg)
+                    + (k_start + offs_k)[:, None] * stride_bk
+                    + (n_start + offs_n)[None, :] * stride_bn
+                )
                 a = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
                 b = tl.load(b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0)
                 acc += tl.dot(a, b)
-                a_ptrs += BLOCK_K * stride_ak
-                b_ptrs += BLOCK_K * stride_bk
-            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            c_ptrs = (
+                c_ptr
+                + (g * stride_cg if K_VARY else 0)
+                + (m_start + offs_m)[:, None] * stride_cm
+                + (n_start + offs_n)[None, :] * stride_cn
+            )
             tl.store(
                 c_ptrs,
                 acc.to(c_ptr.dtype.element_ty),
@@ -111,72 +157,6 @@ def _grouped_gemm_kernel(
             )
             tile_idx += NUM_SMS
         last_end += num_tiles_g
-        m_start = m_end
-
-
-@triton.autotune(configs=_CONFIGS, key=["N", "K"])
-@triton.jit
-def _grouped_gemm_ragged_k_kernel(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    offs_ptr,
-    E,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bm,
-    stride_bn,
-    stride_cg,
-    stride_ck,
-    stride_cn,
-    NUM_SMS: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    num_k_tiles = tl.cdiv(K, BLOCK_K)
-    num_n_tiles = tl.cdiv(N, BLOCK_N)
-    tiles_per_group = num_k_tiles * num_n_tiles
-    total_tiles = E * tiles_per_group
-    for tile_id in range(pid, total_tiles, NUM_SMS):
-        g = tile_id // tiles_per_group
-        local = tile_id % tiles_per_group
-        tile_k = local // num_n_tiles
-        tile_n = local % num_n_tiles
-        # group g owns rows [m_start, m_end); offs are END-offsets, so prev end is
-        # the start. mask the g-1 load so g==0 does not read out of bounds.
-        m_start = tl.load(offs_ptr + g - 1, mask=g > 0, other=0)
-        m_end = tl.load(offs_ptr + g)
-        offs_k = tile_k * BLOCK_K + tl.arange(0, BLOCK_K)
-        offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        k_mask = offs_k < K
-        n_mask = offs_n < N
-        acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
-        m = m_start
-        while m < m_end:
-            offs_m = m + tl.arange(0, BLOCK_M)
-            m_mask = offs_m < m_end
-            # load A as (BLOCK_K, BLOCK_M) so tl.dot contracts over M
-            a_ptrs = a_ptr + offs_k[:, None] * stride_ak + offs_m[None, :] * stride_am
-            b_ptrs = b_ptr + offs_m[:, None] * stride_bm + offs_n[None, :] * stride_bn
-            a = tl.load(a_ptrs, mask=k_mask[:, None] & m_mask[None, :], other=0.0)
-            b = tl.load(b_ptrs, mask=m_mask[:, None] & n_mask[None, :], other=0.0)
-            acc += tl.dot(a, b)  # (BLOCK_K, BLOCK_M) @ (BLOCK_M, BLOCK_N)
-            m += BLOCK_M
-        c_ptrs = (
-            c_ptr
-            + g * stride_cg
-            + offs_k[:, None] * stride_ck
-            + offs_n[None, :] * stride_cn
-        )
-        tl.store(
-            c_ptrs,
-            acc.to(c_ptr.dtype.element_ty),
-            mask=k_mask[:, None] & n_mask[None, :],
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -194,50 +174,39 @@ def _empty_like_grouped_mm(size, device, dtype):
 
 @triton_op("jit_kernel::grouped_gemm", mutates_args={})
 def _grouped_gemm(a: torch.Tensor, b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
-    num_sms = _num_sms(a.device)
-    if b.ndim == 3:  # ragged-M: (M,K) x (G,K,N) -> (M,N), offs partitions a's rows
-        M, K = a.shape
-        N = b.shape[2]
-        c = _empty_like_grouped_mm((M, N), a.device, a.dtype)
-        wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
-            a,
-            b,
-            c,
-            offs,
-            b.shape[0],
-            N,
-            K,
-            a.stride(0),
-            a.stride(1),
-            b.stride(0),
-            b.stride(1),
-            b.stride(2),
-            c.stride(0),
-            c.stride(1),
-            NUM_SMS=num_sms,
-        )
-        return c
-    # ragged-K: (M,R) x (R,N) -> (G,M,N), offs partitions the contraction dim
-    M = a.shape[0]
-    N = b.shape[1]
+    a_is_2d, b_is_2d = a.ndim == 2, b.ndim == 2
     G = offs.shape[0]
-    c = _empty_like_grouped_mm((G, M, N), a.device, a.dtype)
-    wrap_triton(_grouped_gemm_ragged_k_kernel)[(num_sms,)](
+    # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
+    if a_is_2d and not b_is_2d:  # (M,K) x (G,K,N) -> (M,N), ragged M
+        size, M, N, K = (a.shape[0], b.shape[2]), 0, b.shape[2], a.shape[1]
+    elif a_is_2d and b_is_2d:  # (M,K) x (K,N) -> (G,M,N), ragged K
+        size, M, N, K = (G, a.shape[0], b.shape[1]), a.shape[0], b.shape[1], 0
+    else:  # (G,M,K) x (K,N) -> (M,N), ragged N
+        size, M, N, K = (a.shape[1], b.shape[1]), a.shape[1], 0, a.shape[2]
+
+    c = _empty_like_grouped_mm(size, a.device, a.dtype)
+    num_sms = _num_sms(a.device)
+    wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
         a,
         b,
         c,
         offs,
         G,
-        N,
         M,
-        a.stride(1),  # stride_am: along the ragged contraction dim
-        a.stride(0),  # stride_ak: along the output row dim
-        b.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        c.stride(2),
+        N,
+        K,
+        0 if a_is_2d else a.stride(0),
+        a.stride(-2),
+        a.stride(-1),
+        0 if b_is_2d else b.stride(0),
+        b.stride(-2),
+        b.stride(-1),
+        c.stride(0) if c.ndim == 3 else 0,
+        c.stride(-2),
+        c.stride(-1),
         NUM_SMS=num_sms,
+        A_IS_2D=a_is_2d,
+        B_IS_2D=b_is_2d,
     )
     return c
 
@@ -248,13 +217,12 @@ def _grouped_gemm_setup_context(ctx, inputs, output):
 
 
 def _grouped_gemm_backward(ctx, grad_c):
+    # each layout's grads land in another layout of the same set, so one formula
+    # serves all three
     a, b, offs = ctx.saved_tensors
-    if b.ndim != 3:
-        # dgrad of ragged-K is the ragged-N layout, which has no kernel yet
-        raise NotImplementedError("ragged-K grouped_gemm is not differentiable")
     return (
-        _grouped_gemm(grad_c, b.mT, offs),  # dgrad: (M,N) x (G,N,K) -> (M,K)
-        _grouped_gemm(a.mT, grad_c, offs),  # wgrad: (K,M) x (M,N) -> (G,K,N)
+        _grouped_gemm(grad_c, b.mT, offs),
+        _grouped_gemm(a.mT, grad_c, offs),
         None,
     )
 
@@ -272,6 +240,7 @@ def grouped_gemm(
     Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
         (M,K) x (G,K,N) -> (M,N)    ragged M
         (M,K) x (K,N)   -> (G,M,N)  ragged K
+        (G,M,K) x (K,N) -> (M,N)    ragged N
 
     Note `impl="torch"` additionally requires the non-unit stride of the last two
     dims to be a multiple of 16 bytes, which the Triton path does not — for the
@@ -294,10 +263,15 @@ def grouped_gemm(
     if impl == "torch":
         return torch._grouped_mm(a, b, offs=offs)
 
-    assert a.ndim == 2 and b.ndim in (2, 3) and offs.ndim == 1
-    assert a.shape[1] == b.shape[-2], (
-        f"contraction mismatch: a {a.shape[1]}, b {b.shape[-2]}"
+    assert a.ndim in (2, 3) and b.ndim in (2, 3) and offs.ndim == 1
+    assert a.ndim == 2 or b.ndim == 2, "3D x 3D has no ragged dim; use torch.bmm"
+    assert a.shape[-1] == b.shape[-2], (
+        f"contraction mismatch: a {a.shape[-1]}, b {b.shape[-2]}"
     )
+    if a.ndim == 3:
+        assert offs.shape[0] == a.shape[0], (
+            f"offs len {offs.shape[0]} != G {a.shape[0]}"
+        )
     if b.ndim == 3:
         assert offs.shape[0] == b.shape[0], (
             f"offs len {offs.shape[0]} != G {b.shape[0]}"
