@@ -56,37 +56,39 @@ def _dequant_b_grouped(bq, sb, bs):
     return torch.stack([_dequant_b(bq[g], sb[g], bs) for g in range(bq.shape[0])])
 
 
-def _dequant_ragged(xq, scale, offs, first_block, bs):
+def _dequant_ragged(xq, scale, offs, bs):
     """Dequant (R,C) codes whose (nrb,C) scale rows tile each group's rows.
 
-    Deliberately a plain Python loop: the oracle should restate the layout, not
-    share the vectorised indexing the implementation uses.
+    Deliberately a plain Python loop that walks the scale rows with its own running
+    counter: the oracle should restate the layout, not share the block bookkeeping
+    the implementation and the kernel derive.
     """
     out = torch.zeros(xq.shape, device=xq.device, dtype=torch.float32)
     bounds = [0, *offs.tolist()]
-    fb = first_block.tolist()
-    for gi, (lo, hi) in enumerate(zip(bounds, bounds[1:])):
-        if hi <= lo:
-            continue
+    # blocks restart at each group, so a group's rows start where the last one's ended
+    first_block = 0
+    for lo, hi in zip(bounds, bounds[1:]):
         if bs == 0:
-            out[lo:hi] = xq[lo:hi].float() * scale[fb[gi]].float()
+            if hi > lo:
+                out[lo:hi] = xq[lo:hi].float() * scale[first_block].float()
+            first_block += 1  # an empty group still owns its one row
             continue
         for j, m in enumerate(range(lo, hi, bs)):
             stop = min(m + bs, hi)
-            out[m:stop] = xq[m:stop].float() * scale[fb[gi] + j].float()
+            out[m:stop] = xq[m:stop].float() * scale[first_block + j].float()
+        first_block += (hi - lo + bs - 1) // bs
     return out
 
 
-def scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, first_block, bs):
+def scaled_grouped_gemm_wgrad_ref(aq, gq, sa, sg, offs, bs):
     """fp32 oracle for scaled grouped wgrad: gW[g] = (Xq·sa)[g]^T @ (gYq·sg)[g].
 
     aq (R,K), gq (R,N) fp8/int8; sa (nrb,K), sg (nrb,N) fp32 scales whose blocks
-    restart at each group, so `first_block` (E+1,) says which rows a group owns
-    and `bs` is the rows per block (0 -> one block per group). offs (E,) int32
-    cumulative END-offsets. Returns (E,K,N) fp32.
+    restart at each group, with `bs` rows per block (0 -> one block per group).
+    offs (E,) int32 cumulative END-offsets. Returns (E,K,N) fp32.
     """
-    a = _dequant_ragged(aq, sa, offs, first_block, bs)
-    g = _dequant_ragged(gq, sg, offs, first_block, bs)
+    a = _dequant_ragged(aq, sa, offs, bs)
+    g = _dequant_ragged(gq, sg, offs, bs)
     E, K, N = offs.shape[0], aq.shape[1], gq.shape[1]
     out = torch.zeros(E, K, N, device=aq.device, dtype=torch.float32)
     start = 0

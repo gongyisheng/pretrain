@@ -25,13 +25,11 @@ class RaggedScaleBlocks(NamedTuple):
     Rows are sorted by group and cut by the cumulative end-offsets `offs`, so a
     scale block must never span two groups: pooling amax across groups is what
     lets one hot expert set the scale for a cold one. `row_blocks` is int64
-    because it indexes torch reductions; `first_block` is int32 to match `offs`
-    where the Triton kernel reads it; `n_blocks` is a Python int so the scale
+    because it indexes torch reductions; `n_blocks` is a Python int so the scale
     buffer's shape stays static under torch.compile.
     """
 
     row_blocks: torch.Tensor  # (n_rows,) int64, scale row for each row
-    first_block: torch.Tensor  # (n_groups+1,) int32, group g owns [g], [g+1])
     n_blocks: int  # static upper bound on the scale buffer's height
 
 
@@ -49,20 +47,16 @@ def ragged_scale_blocks(offs, n_rows, granularity, block_size) -> RaggedScaleBlo
     # clamping only keeps the gathers below in bounds if one ever did.
     group = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
     if granularity != "blockwise":
-        return RaggedScaleBlocks(
-            group.long(),
-            torch.arange(n_groups + 1, device=offs.device, dtype=torch.int32),
-            n_groups,
-        )
+        return RaggedScaleBlocks(group.long(), n_groups)
     starts = torch.cat([offs.new_zeros(1), offs[:-1]])
     counts = offs - starts
     per_group = torch.div(counts + block_size - 1, block_size, rounding_mode="floor")
-    first_block = torch.cat([offs.new_zeros(1), per_group.cumsum(0)]).to(torch.int32)
+    first_block = torch.cat([offs.new_zeros(1), per_group.cumsum(0)])
     local = torch.div(rows - starts[group], block_size, rounding_mode="floor")
     row_blocks = first_block[group].long() + local.long()
     # sum_g ceil(m_g/bs) <= floor(M/bs) + n_groups for every offs, so this bound
     # is static even though the per-group counts are not.
-    return RaggedScaleBlocks(row_blocks, first_block, n_rows // block_size + n_groups)
+    return RaggedScaleBlocks(row_blocks, n_rows // block_size + n_groups)
 
 
 def _compute_scale(
@@ -90,38 +84,46 @@ def _compute_codes(xf: torch.Tensor, scale: torch.Tensor, fmt: str) -> torch.Ten
     return xq.clamp(-qmax, qmax).to(str_to_dtype(fmt))
 
 
-def _quantize_ragged_axis(x, ragged, granularity, *, fmt, scale_dtype):
-    """Quantize (M,C) `x` whose contracted axis M is ragged: one scale row per
-    block of `ragged`, so no scale mixes two groups. Returns codes (M,C) and an
-    (n_blocks,C) fp32 scale — already the layout the wgrad kernel reads.
+def _compute_ragged_scale(src, ragged, fmt, scale_dtype):
+    """Scale from a per-block amax of the (M,C') rows of `src`, giving (n_blocks,C').
+
+    include_self with a zeros buffer is safe because `src` is abs(): an empty block
+    keeps 0 and clamps to EPS in _compute_scale.
+    """
+    amax = src.new_zeros(ragged.n_blocks, src.shape[1]).index_reduce_(
+        0, ragged.row_blocks, src, "amax", include_self=True
+    )
+    return _compute_scale(amax, fmt, scale_dtype)
+
+
+def _to_row_scale(scale, ragged):
+    """Per-block scale -> per-row, so it broadcasts against the (M,C) operand."""
+    return scale.index_select(0, ragged.row_blocks)
+
+
+def _quantize_ragged_tensorwise(x, ragged, contract_dim, *, fmt, scale_dtype):
+    """Quantize (M,C) `x` with one amax per group of `ragged` instead of one for the
+    whole tensor, so no scale mixes two groups. `contract_dim` picks the layout the
+    kernel reads: (n_blocks,C) along the contracted axis, else (M,1) per row.
     """
     xf = x.float()
-    # amax over the rows of each block. include_self with a zeros buffer is safe
-    # because the source is abs(): an empty block keeps 0 and clamps to EPS below.
-    amax = xf.new_zeros(ragged.n_blocks, xf.shape[1]).index_reduce_(
-        0, ragged.row_blocks, xf.abs(), "amax", include_self=True
-    )
-    if granularity == "tensorwise":
-        amax = amax.amax(dim=-1, keepdim=True).expand_as(amax)
-    scale = _compute_scale(amax, fmt, scale_dtype)
-    xq = _compute_codes(xf, scale.index_select(0, ragged.row_blocks), fmt)
+    amax = xf.abs().amax(dim=-1, keepdim=True)  # (M,1)
+    scale = _compute_ragged_scale(amax, ragged, fmt, scale_dtype)  # (n_blocks,1)
+    row_scale = _to_row_scale(scale, ragged)  # (M,1)
+    xq = _compute_codes(xf, row_scale, fmt)
+    out_scale = scale.expand(-1, xf.shape[1]) if contract_dim == 0 else row_scale
+    return xq.contiguous(), out_scale.contiguous()
+
+
+def _quantize_ragged_blockwise(x, ragged, *, fmt, scale_dtype):
+    """Quantize (M,C) `x` whose contracted axis M is ragged: a per-column amax within
+    each scale block of `ragged`, so no scale mixes two groups. Returns codes (M,C)
+    and an (n_blocks,C) fp32 scale — already the layout the wgrad kernel reads.
+    """
+    xf = x.float()
+    scale = _compute_ragged_scale(xf.abs(), ragged, fmt, scale_dtype)  # (n_blocks,C)
+    xq = _compute_codes(xf, _to_row_scale(scale, ragged), fmt)
     return xq.contiguous(), scale.contiguous()
-
-
-def _quantize_ragged_rows(x, ragged, *, fmt, scale_dtype):
-    """Tensorwise quantize (M,C) `x` with one amax per group instead of one for
-    the whole tensor, returned in the canonical (M,1) A-operand layout so the
-    grouped GEMM kernel — which already indexes the scale per row — is unchanged.
-    """
-    xf = x.float()
-    row_amax = xf.abs().amax(dim=-1)  # (M,)
-    amax = row_amax.new_zeros(ragged.n_blocks).index_reduce_(
-        0, ragged.row_blocks, row_amax, "amax", include_self=True
-    )
-    scale = _compute_scale(amax, fmt, scale_dtype).index_select(0, ragged.row_blocks)[
-        :, None
-    ]  # (M,1)
-    return _compute_codes(xf, scale, fmt).contiguous(), scale.contiguous()
 
 
 def _quantize_tensorwise(xf, fmt, scale_dtype):
@@ -157,15 +159,15 @@ def quantize_operand(
     (contract_dim == 0); for contract_dim == -1 it changes tensorwise only, while
     rowwise/blockwise are already per-row and ignore it.
     """
-    if ragged is not None and contract_dim == 0:
-        return _quantize_ragged_axis(
-            x, ragged, granularity, fmt=fmt, scale_dtype=scale_dtype
+    if ragged is not None and granularity == "tensorwise":
+        # Checked before contract_dim: for contract_dim == -1 only tensorwise has an
+        # amax wide enough to span groups (rowwise/blockwise are already per row).
+        return _quantize_ragged_tensorwise(
+            x, ragged, contract_dim, fmt=fmt, scale_dtype=scale_dtype
         )
 
-    if ragged is not None and granularity == "tensorwise":
-        # contract_dim == -1: rowwise/blockwise are already per row here, so only
-        # tensorwise has an amax wide enough to span groups.
-        return _quantize_ragged_rows(x, ragged, fmt=fmt, scale_dtype=scale_dtype)
+    if ragged is not None and contract_dim == 0:
+        return _quantize_ragged_blockwise(x, ragged, fmt=fmt, scale_dtype=scale_dtype)
 
     if granularity == "tensorwise":
         # tensorwise branch
@@ -199,7 +201,7 @@ def quantize_operand(
 
 def dequantize_operand(xq, scale, contract_dim, granularity, block_size, ragged=None):
     if ragged is not None and contract_dim == 0:
-        return xq.float() * scale.float().index_select(0, ragged.row_blocks)
+        return xq.float() * _to_row_scale(scale.float(), ragged)
     qf = xq.movedim(contract_dim, -1).float()  # (..., K)
     K = qf.shape[-1]
     sf = scale.movedim(contract_dim, -1).float()  # (..., n_block)

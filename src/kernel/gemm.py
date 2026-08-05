@@ -573,7 +573,6 @@ def _scaled_grouped_gemm_wgrad_kernel(
     sa_ptr,
     sg_ptr,
     offs_ptr,
-    first_block_ptr,
     E,
     N,
     K,
@@ -599,8 +598,25 @@ def _scaled_grouped_gemm_wgrad_kernel(
     num_n_tiles = tl.cdiv(N, BLOCK_N)
     tiles_per_group = num_k_tiles * num_n_tiles
     total_tiles = E * tiles_per_group
+    # first_block[g] on the fly, mirroring ragged_scale_blocks: a group owns
+    # ceil(rows / BLOCK_SIZE) scale rows, or exactly one when BLOCK_SIZE == 0 (even if
+    # empty), so a block never straddles a group boundary. tile_id ascends, hence g
+    # never decreases and the running total only advances as groups are reached --
+    # O(E) scalar loads per program in total, no per-tile prefix sum.
+    seen_groups = 0
+    jb_start = 0
     for tile_id in range(pid, total_tiles, NUM_SMS):
         g = tile_id // tiles_per_group
+        while seen_groups < g:
+            done_end = tl.load(offs_ptr + seen_groups)
+            done_start = tl.load(
+                offs_ptr + seen_groups - 1, mask=seen_groups > 0, other=0
+            )
+            if BLOCK_SIZE == 0:
+                jb_start += 1
+            else:
+                jb_start += tl.cdiv(done_end - done_start, BLOCK_SIZE)
+            seen_groups += 1
         local = tile_id % tiles_per_group
         tile_k = local // num_n_tiles
         tile_n = local % num_n_tiles
@@ -610,12 +626,13 @@ def _scaled_grouped_gemm_wgrad_kernel(
         offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
         k_mask = offs_k < K
         n_mask = offs_n < N
-        # Scale blocks restart at each group, so a block never straddles a group
-        # boundary: group g owns scale rows first_block[g] .. first_block[g+1],
-        # each covering BLOCK_SIZE of its rows (BLOCK_SIZE == 0 -> one row for all
-        # of them). An empty group owns none and falls through to the zero store.
-        jb_start = tl.load(first_block_ptr + g)
-        jb_end = tl.load(first_block_ptr + g + 1)
+        # jb_start now counts every earlier group's rows; group g's own count comes from
+        # the row bounds loaded above. An empty blockwise group owns none, so the jb
+        # loop is skipped and the tile falls through to the zero store.
+        if BLOCK_SIZE == 0:
+            jb_end = jb_start + 1
+        else:
+            jb_end = jb_start + tl.cdiv(m_end - m_start, BLOCK_SIZE)
         acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
         for jb in range(jb_start, jb_end):
             if BLOCK_SIZE == 0:
@@ -666,7 +683,6 @@ def scaled_grouped_gemm_wgrad(
     sa: torch.Tensor,
     sg: torch.Tensor,
     offs: torch.Tensor,
-    first_block: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
 ) -> torch.Tensor:
@@ -685,7 +701,6 @@ def scaled_grouped_gemm_wgrad(
         sa,
         sg,
         offs,
-        first_block,
         E,
         N,
         K,

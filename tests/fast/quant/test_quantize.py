@@ -47,7 +47,6 @@ def _offs(counts):
 def test_ragged_scale_blocks_one_block_per_group(gran, bs):
     blocks = ragged_scale_blocks(_offs([3, 4, 3]), 10, gran, bs)
     assert blocks.row_blocks.tolist() == [0, 0, 0, 1, 1, 1, 1, 2, 2, 2]
-    assert blocks.first_block.tolist() == [0, 1, 2, 3]
     assert blocks.n_blocks == 3
 
 
@@ -56,14 +55,12 @@ def test_ragged_scale_blocks_blockwise_retiles_inside_each_group():
     # spans a boundary even though 3 and 4 are not multiples of each other.
     blocks = ragged_scale_blocks(_offs([3, 4, 3]), 10, "blockwise", 4)
     assert blocks.row_blocks.tolist() == [0, 0, 0, 1, 1, 1, 1, 2, 2, 2]
-    assert blocks.first_block.tolist() == [0, 1, 2, 3]
 
 
 def test_ragged_scale_blocks_blockwise_multiple_blocks_and_empty_group():
     # counts 5,0,4 with bs=2 -> group 0 gets 3 blocks, group 1 none, group 2 two.
     blocks = ragged_scale_blocks(_offs([5, 0, 4]), 9, "blockwise", 2)
     assert blocks.row_blocks.tolist() == [0, 0, 1, 1, 2, 3, 3, 4, 4]
-    assert blocks.first_block.tolist() == [0, 3, 3, 5]
     assert blocks.n_blocks == 9 // 2 + 3
 
 
@@ -87,7 +84,6 @@ def test_ragged_scale_blocks_never_crosses_a_group_boundary():
 def test_ragged_scale_blocks_n_blocks_is_a_valid_upper_bound(counts, bs):
     blocks = ragged_scale_blocks(_offs(counts), sum(counts), "blockwise", bs)
     assert int(blocks.row_blocks.max()) < blocks.n_blocks
-    assert int(blocks.first_block[-1]) <= blocks.n_blocks
 
 
 # --- operand quantize: canonical scale shapes ---

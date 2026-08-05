@@ -198,17 +198,17 @@ def test_grad_b_quality_is_independent_across_experts(scaling):
 
 
 def test_wgrad_receives_per_expert_block_table(monkeypatch):
-    """The kernel must be handed first_block, and the quantization block size —
-    not effective_block_size, which would collapse rowwise back to one block."""
+    """The kernel re-derives the per-expert block table from offs and block_size, so
+    it must get the quantization block size — not effective_block_size, which would
+    collapse rowwise back to one block — and a scale row per expert to match."""
     a, b, offs = _make([8, 0, 24], K=64, N=48)
     seen = {}
     real = moe.scaled_grouped_gemm_wgrad
 
-    def spy(aq, gq, sa, sg, offs_, first_block, out_dtype, block_size):
-        seen["first_block"] = first_block
+    def spy(aq, gq, sa, sg, offs_, out_dtype, block_size):
         seen["block_size"] = block_size
         seen["n_scale_rows"] = sa.shape[0]
-        return real(aq, gq, sa, sg, offs_, first_block, out_dtype, block_size)
+        return real(aq, gq, sa, sg, offs_, out_dtype, block_size)
 
     monkeypatch.setattr(moe, "scaled_grouped_gemm_wgrad", spy)
     a_q = a.clone().requires_grad_(True)
@@ -216,5 +216,4 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
         a_q, b.clone(), offs
     ).sum().backward()
     assert seen["block_size"] == 0  # rowwise -> one block per expert
-    assert seen["first_block"].tolist() == [0, 1, 2, 3]
-    assert seen["n_scale_rows"] == 3
+    assert seen["n_scale_rows"] == 3  # including the empty expert

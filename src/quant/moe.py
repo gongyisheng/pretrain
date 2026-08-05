@@ -117,7 +117,6 @@ def quantized_grouped_wgrad(a, g, offs, a_fmt, g_fmt, out_dtype, scaling):
             sa,
             sg,
             offs,
-            ragged.first_block,
             out_dtype,
             block_size if granularity == "blockwise" else 0,
         )
