@@ -372,6 +372,23 @@ _SCALED_CONFIGS = [
     for (bm, bn, w, s) in _SCALED_CFG
 ]
 
+# _CONFIGS plus BLOCK_K=128 entries. The pre-merge forward derived
+# BLOCK_K = min(128, next_pow2(K)) for tensorwise/rowwise, and _CONFIGS tops out at
+# 64 -- without these the forward would lose its 128-wide reduction on the K=512-1408
+# MoE shapes. Kept separate from _CONFIGS so the bf16 grouped GEMM's tuning space
+# does not change.
+_SCALED_GROUPED_CONFIGS = _CONFIGS + [
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": 128}, num_warps=w, num_stages=s
+    )
+    for (bm, bn, w, s) in [
+        (64, 64, 4, 3),
+        (128, 64, 8, 4),
+        (64, 128, 8, 4),
+        (128, 128, 8, 3),
+    ]
+]
+
 
 @triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
 @triton.jit
@@ -482,7 +499,10 @@ def scaled_gemm(
 # ---------------------------------------------------------------------------
 
 
-@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
+@triton.autotune(
+    configs=_SCALED_GROUPED_CONFIGS,
+    key=["M", "N", "K", "A_IS_2D", "B_IS_2D", "BLOCK_SIZE"],
+)
 @triton.jit
 def _scaled_grouped_gemm_kernel(
     a_ptr,
@@ -491,62 +511,122 @@ def _scaled_grouped_gemm_kernel(
     sa_ptr,
     sb_ptr,
     offs_ptr,
-    E,
+    G,
+    M,
     N,
     K,
-    nkb,
+    stride_ag,
     stride_am,
     stride_ak,
-    stride_be,
+    stride_bg,
     stride_bk,
     stride_bn,
+    stride_cg,
     stride_cm,
     stride_cn,
+    stride_sag,
     stride_sam,
     stride_sak,
-    stride_sbe,
+    stride_sbg,
     stride_sbk,
     stride_sbn,
     NUM_SMS: tl.constexpr,
+    A_IS_2D: tl.constexpr,
+    B_IS_2D: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    BLOCK_K: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    num_n_tiles = tl.cdiv(N, BLOCK_N)
-    tile_idx = pid  # this persistent program handles tiles pid, pid+NUM_SMS, ...
+    """Ragged scaled grouped GEMM over any one of M, N, K, with block scaling.
+
+    Same layout model as _grouped_gemm_kernel: the tile grid is (M, N) and the
+    reduction is over K for every layout, so one tile body serves all three. The
+    quantized addition is `sblk`, the scale-block index along the contraction axis --
+    a global index when the contraction is dense, and a per-group re-tiled index
+    carried across the group loop when the contraction is itself ragged.
+
+    BLOCK_SIZE is the scale block's width along the contraction axis; 0 means one
+    block spanning the whole segment.
+    """
+    M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
+    N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
+    K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
+
+    tile_idx = tl.program_id(0)  # this persistent program owns pid, pid+NUM_SMS, ...
     last_end = 0  # running count of tiles before the current group
-    m_start = 0  # first row of the current group (prev group's end-offset)
-    for g in range(E):
-        m_end = tl.load(offs_ptr + g)
-        m_g = m_end - m_start
-        num_m_tiles = tl.cdiv(m_g, BLOCK_M)
-        num_tiles_g = num_m_tiles * num_n_tiles
+    m_end = 0  # offs are END-offsets, so the previous end is the next start
+    n_end = 0
+    k_end = 0
+    sblk_end = 0  # scale-block cursor, only advanced when the contraction is ragged
+    for g in range(G):
+        if M_VARY:
+            m_start = m_end
+            m_end = tl.load(offs_ptr + g)
+            m_size = m_end - m_start
+        else:
+            m_start = 0
+            m_size = M
+        if N_VARY:
+            n_start = n_end
+            n_end = tl.load(offs_ptr + g)
+            n_size = n_end - n_start
+        else:
+            n_start = 0
+            n_size = N
+        if K_VARY:
+            k_start = k_end
+            k_end = tl.load(offs_ptr + g)
+            k_size = k_end - k_start
+            # blocks re-tile inside each group, so the cursor carries across g -- the
+            # group loop already visits g in order, so no prefix scan is needed
+            sblk_start = sblk_end
+            sblk_end = sblk_start + (
+                1 if BLOCK_SIZE == 0 else tl.cdiv(k_size, BLOCK_SIZE)
+            )
+        else:
+            k_start = 0
+            k_size = K
+            sblk_start = 0
+            sblk_end = 1 if BLOCK_SIZE == 0 else tl.cdiv(K, BLOCK_SIZE)
+
+        num_n_tiles = tl.cdiv(n_size, BLOCK_N)
+        num_tiles_g = tl.cdiv(m_size, BLOCK_M) * num_n_tiles
         while (tile_idx >= last_end) and (tile_idx < last_end + num_tiles_g):
             local = tile_idx - last_end
             tile_m = local // num_n_tiles
             tile_n = local % num_n_tiles
-            offs_m = m_start + tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
             offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
-            m_mask = offs_m < m_end
-            n_mask = offs_n < N
+            m_mask = offs_m < m_size
+            n_mask = offs_n < n_size
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-            for kb in range(nkb):
+            for sblk in range(sblk_start, sblk_end):
+                if BLOCK_SIZE == 0:
+                    r0 = k_start
+                    r1 = k_start + k_size
+                else:
+                    r0 = k_start + (sblk - sblk_start) * BLOCK_SIZE
+                    r1 = tl.minimum(r0 + BLOCK_SIZE, k_start + k_size)
+                # one scale block: accumulate in fp32, then apply both scales once
                 blk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-                for kk in range(0, BLOCK_SIZE, BLOCK_K):
-                    offs_k = kb * BLOCK_SIZE + kk + tl.arange(0, BLOCK_K)
-                    k_mask = offs_k < K
+                # a computed trip count rather than `while k < r1`: Triton's software
+                # pipeliner runs on scf.for, so a while loop here serializes the global
+                # loads instead of overlapping them with the dots
+                for step in range(tl.cdiv(r1 - r0, BLOCK_K)):
+                    offs_k = r0 + step * BLOCK_K + tl.arange(0, BLOCK_K)  # absolute
+                    k_mask = offs_k < r1
                     a_ptrs = (
                         a_ptr
-                        + offs_m[:, None] * stride_am
+                        + (0 if A_IS_2D else g * stride_ag)
+                        + (m_start + offs_m)[:, None] * stride_am
                         + offs_k[None, :] * stride_ak
                     )
                     b_ptrs = (
                         b_ptr
-                        + g * stride_be
+                        + (0 if B_IS_2D else g * stride_bg)
                         + offs_k[:, None] * stride_bk
-                        + offs_n[None, :] * stride_bn
+                        + (n_start + offs_n)[None, :] * stride_bn
                     )
                     a = tl.load(
                         a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0
@@ -556,17 +636,28 @@ def _scaled_grouped_gemm_kernel(
                     )
                     blk += tl.dot(a, b).to(tl.float32)
                 sa = tl.load(
-                    sa_ptr + offs_m * stride_sam + kb * stride_sak,
+                    sa_ptr
+                    + (0 if A_IS_2D else g * stride_sag)
+                    + (m_start + offs_m) * stride_sam
+                    + sblk * stride_sak,
                     mask=m_mask,
                     other=0.0,
                 )
                 sb = tl.load(
-                    sb_ptr + g * stride_sbe + kb * stride_sbk + offs_n * stride_sbn,
+                    sb_ptr
+                    + (0 if B_IS_2D else g * stride_sbg)
+                    + sblk * stride_sbk
+                    + (n_start + offs_n) * stride_sbn,
                     mask=n_mask,
                     other=0.0,
                 )
                 acc += sa[:, None] * blk * sb[None, :]
-            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            c_ptrs = (
+                c_ptr
+                + (g * stride_cg if K_VARY else 0)
+                + (m_start + offs_m)[:, None] * stride_cm
+                + (n_start + offs_n)[None, :] * stride_cn
+            )
             tl.store(
                 c_ptrs,
                 acc.to(c_ptr.dtype.element_ty),
@@ -574,7 +665,6 @@ def _scaled_grouped_gemm_kernel(
             )
             tile_idx += NUM_SMS
         last_end += num_tiles_g
-        m_start = m_end
 
 
 @triton_op("jit_kernel::scaled_grouped_gemm", mutates_args={})
@@ -600,190 +690,49 @@ def scaled_grouped_gemm(
     """
     a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
     E = offs.shape[0]
+    if not a_is_2d and not b_is_2d:
+        raise NotImplementedError("3D x 3D has no ragged dim; use torch.bmm")
+    if not a_is_2d and b_is_2d:
+        raise NotImplementedError(
+            "the ragged-N layout (3D x 2D) is not supported by the scaled grouped GEMM"
+        )
+    # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
+    if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
+        size, M, N, K = (aq.shape[0], bq.shape[2]), 0, bq.shape[2], aq.shape[1]
+    else:  # (M,K) x (K,N) -> (E,M,N), ragged K
+        size, M, N, K = (E, aq.shape[0], bq.shape[1]), aq.shape[0], bq.shape[1], 0
+
+    c = torch.empty(size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
-
-    if a_is_2d and not b_is_2d:  # ragged M
-        R, K = aq.shape
-        N = bq.shape[2]
-        c = torch.empty((R, N), device=aq.device, dtype=out_dtype)
-        # the pre-merge kernel takes the element count, not the 0 sentinel
-        bs = block_size or K
-        BLOCK_K = bs if block_size else min(128, triton.next_power_of_2(K))
-        wrap_triton(_scaled_grouped_gemm_kernel)[(num_sms,)](
-            aq,
-            bq,
-            c,
-            sa,
-            sb,
-            offs,
-            E,
-            N,
-            K,
-            sa.shape[1],
-            aq.stride(0),
-            aq.stride(1),
-            bq.stride(0),
-            bq.stride(1),
-            bq.stride(2),
-            c.stride(0),
-            c.stride(1),
-            sa.stride(0),
-            sa.stride(1),
-            sb.stride(0),
-            sb.stride(1),
-            sb.stride(2),
-            NUM_SMS=num_sms,
-            BLOCK_SIZE=bs,
-            BLOCK_K=BLOCK_K,
-        )
-        return c
-
-    if a_is_2d and b_is_2d:  # ragged K
-        M, N = aq.shape[0], bq.shape[1]
-        assert sa.shape[-1] == sb.shape[0], (
-            f"scale block count mismatch: sa {sa.shape[-1]}, sb {sb.shape[0]}"
-        )
-        c = torch.empty((E, M, N), device=aq.device, dtype=out_dtype)
-        # aq/sa arrive transposed (M,R)/(M,nrb); the pre-merge kernel indexes them
-        # in the untransposed orientation, so hand it the swapped strides
-        wrap_triton(_scaled_grouped_gemm_ragged_k_kernel)[(num_sms,)](
-            aq,
-            bq,
-            c,
-            sa,
-            sb,
-            offs,
-            E,
-            N,
-            M,
-            aq.stride(-1),
-            aq.stride(-2),
-            bq.stride(0),
-            bq.stride(1),
-            c.stride(0),
-            c.stride(1),
-            c.stride(2),
-            sa.stride(-1),
-            sa.stride(-2),
-            sb.stride(0),
-            sb.stride(1),
-            NUM_SMS=num_sms,
-            BLOCK_SIZE=block_size,
-        )
-        return c
-
-    raise NotImplementedError(
-        "the ragged-N layout (3D x 2D) is not supported by the scaled grouped GEMM"
+    wrap_triton(_scaled_grouped_gemm_kernel)[(num_sms,)](
+        aq,
+        bq,
+        c,
+        sa,
+        sb,
+        offs,
+        E,
+        M,
+        N,
+        K,
+        0 if a_is_2d else aq.stride(0),
+        aq.stride(-2),
+        aq.stride(-1),
+        0 if b_is_2d else bq.stride(0),
+        bq.stride(-2),
+        bq.stride(-1),
+        c.stride(0) if c.ndim == 3 else 0,
+        c.stride(-2),
+        c.stride(-1),
+        0 if a_is_2d else sa.stride(0),
+        sa.stride(-2),
+        sa.stride(-1),
+        0 if b_is_2d else sb.stride(0),
+        sb.stride(-2),
+        sb.stride(-1),
+        NUM_SMS=num_sms,
+        A_IS_2D=a_is_2d,
+        B_IS_2D=b_is_2d,
+        BLOCK_SIZE=block_size,
     )
-
-
-@triton.autotune(configs=_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
-@triton.jit
-def _scaled_grouped_gemm_ragged_k_kernel(
-    a_ptr,
-    g_ptr,
-    gb_ptr,
-    sa_ptr,
-    sg_ptr,
-    offs_ptr,
-    E,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_gm,
-    stride_gn,
-    stride_ge,
-    stride_gk,
-    stride_gn2,
-    stride_sam,
-    stride_sak,
-    stride_sgm,
-    stride_sgn,
-    NUM_SMS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    num_k_tiles = tl.cdiv(K, BLOCK_K)
-    num_n_tiles = tl.cdiv(N, BLOCK_N)
-    tiles_per_group = num_k_tiles * num_n_tiles
-    total_tiles = E * tiles_per_group
-    # first_block[g] on the fly, mirroring ragged_scale_blocks: a group owns
-    # ceil(rows / BLOCK_SIZE) scale rows, or exactly one when BLOCK_SIZE == 0 (even if
-    # empty), so a block never straddles a group boundary. tile_id ascends, hence g
-    # never decreases and the running total only advances as groups are reached --
-    # O(E) scalar loads per program in total, no per-tile prefix sum.
-    seen_groups = 0
-    jb_start = 0
-    for tile_id in range(pid, total_tiles, NUM_SMS):
-        g = tile_id // tiles_per_group
-        while seen_groups < g:
-            done_end = tl.load(offs_ptr + seen_groups)
-            done_start = tl.load(
-                offs_ptr + seen_groups - 1, mask=seen_groups > 0, other=0
-            )
-            if BLOCK_SIZE == 0:
-                jb_start += 1
-            else:
-                jb_start += tl.cdiv(done_end - done_start, BLOCK_SIZE)
-            seen_groups += 1
-        local = tile_id % tiles_per_group
-        tile_k = local // num_n_tiles
-        tile_n = local % num_n_tiles
-        m_start = tl.load(offs_ptr + g - 1, mask=g > 0, other=0)
-        m_end = tl.load(offs_ptr + g)
-        offs_k = tile_k * BLOCK_K + tl.arange(0, BLOCK_K)
-        offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        k_mask = offs_k < K
-        n_mask = offs_n < N
-        # jb_start now counts every earlier group's rows; group g's own count comes from
-        # the row bounds loaded above. An empty blockwise group owns none, so the jb
-        # loop is skipped and the tile falls through to the zero store.
-        if BLOCK_SIZE == 0:
-            jb_end = jb_start + 1
-        else:
-            jb_end = jb_start + tl.cdiv(m_end - m_start, BLOCK_SIZE)
-        acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
-        for jb in range(jb_start, jb_end):
-            if BLOCK_SIZE == 0:
-                m = m_start
-                m_stop = m_end
-            else:
-                m = m_start + (jb - jb_start) * BLOCK_SIZE
-                m_stop = tl.minimum(m + BLOCK_SIZE, m_end)
-            # clamping to m_stop keeps an M tile inside one scale block and one expert
-            blk = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
-            while m < m_stop:
-                offs_m = m + tl.arange(0, BLOCK_M)
-                m_mask = offs_m < m_stop
-                a_ptrs = (
-                    a_ptr + offs_k[:, None] * stride_ak + offs_m[None, :] * stride_am
-                )
-                g_ptrs = (
-                    g_ptr + offs_m[:, None] * stride_gm + offs_n[None, :] * stride_gn
-                )
-                a = tl.load(a_ptrs, mask=k_mask[:, None] & m_mask[None, :], other=0.0)
-                gc = tl.load(g_ptrs, mask=m_mask[:, None] & n_mask[None, :], other=0.0)
-                blk += tl.dot(a, gc).to(tl.float32)
-                m += BLOCK_M
-            sa = tl.load(
-                sa_ptr + jb * stride_sam + offs_k * stride_sak, mask=k_mask, other=0.0
-            )
-            sg = tl.load(
-                sg_ptr + jb * stride_sgm + offs_n * stride_sgn, mask=n_mask, other=0.0
-            )
-            acc += sa[:, None] * blk * sg[None, :]
-        gb_ptrs = (
-            gb_ptr
-            + g * stride_ge
-            + offs_k[:, None] * stride_gk
-            + offs_n[None, :] * stride_gn2
-        )
-        tl.store(
-            gb_ptrs,
-            acc.to(gb_ptr.dtype.element_ty),
-            mask=k_mask[:, None] & n_mask[None, :],
-        )
+    return c

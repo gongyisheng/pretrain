@@ -539,7 +539,11 @@ def test_scaled_grouped_gemm_oracle_agrees_with_dequant():
 
 @pytest.mark.parametrize("fmt", ["fp8_e4m3", "int8"])
 @pytest.mark.parametrize(
-    "gran,bs", [("rowwise", 0), ("tensorwise", 0), ("blockwise", 32)]
+    "gran,bs",
+    # 48 is deliberately not a multiple of any BLOCK_K: the kernel masks the
+    # reduction to the scale block's end rather than clamping BLOCK_K to it, so
+    # correctness must not depend on which config autotune picks.
+    [("rowwise", 0), ("tensorwise", 0), ("blockwise", 32), ("blockwise", 48)],
 )
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
 def test_scaled_grouped_layouts_match_oracle(layout, gran, bs, fmt):
