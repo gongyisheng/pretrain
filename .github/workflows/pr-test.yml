@@ -21,11 +21,13 @@ permissions:
   contents: read
 
 env:
-  # xdist workers for the GPU-bound jobs, overriding the pyproject default of 6.
-  # gpu_lock_exec.py gives each job a card to itself, so the binding constraint
-  # is host RAM, not GPU memory: two of these jobs hold the two cards at once and
-  # every worker is a full torch process with its own CUDA context.
-  GPU_TEST_WORKERS: 3
+  # xdist workers for the GPU-bound jobs. Six is the largest test-file count in
+  # any one of their directories, and `--dist loadfile` pins a file to a worker,
+  # so a seventh would have no file to take -- it would just pay a torch import
+  # and a CUDA context to sit idle. Measured on tests/fast/layers: 26s/6.8GB at
+  # -n 3, 27s/8.8GB at -n 6, 32s/15.2GB at -n 23. Past the file count more
+  # workers cost memory and give back wall clock.
+  GPU_TEST_WORKERS: 6
 
 jobs:
   prepare:
@@ -190,12 +192,15 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
+      # The only single-file directory, so `--dist loadfile` would hand the whole
+      # thing to one worker and leave the rest idle. `--dist load` splits it per
+      # test instead: 88s serial, 54s at -n 6, 44s at -n 12.
       - name: Run kernel tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run python tests/ci/gpu_lock_exec.py -- \
-            uv run pytest tests/fast/kernel/ -n "$GPU_TEST_WORKERS"
+            uv run pytest tests/fast/kernel/ -n 12 --dist load
 
   test-quant:
     needs: [prepare]
