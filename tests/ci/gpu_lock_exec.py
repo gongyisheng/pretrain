@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
-"""Pick an idle GPU index for CI tests and print it to stdout.
+"""Reserve an idle GPU, then exec a command pinned to it.
 
-Polls `nvidia-smi` until a GPU has utilization <= 10% AND free memory
->= 8 GiB, then prints the chosen index on a single line. Waits
-indefinitely; the workflow's `timeout-minutes` bounds the total wait.
+    gpu_lock_exec.py -- pytest tests/fast/layers -v
 
-stderr carries per-poll status. Only the chosen integer goes to stdout
-so the workflow can capture it into a step output.
+Polls until some GPU is both unlocked by another CI job and idle by
+`nvidia-smi` (utilization <= 10%, free memory >= 8 GiB), then runs the command
+with `CUDA_VISIBLE_DEVICES` set to that index. The reservation is an exclusive
+`flock` on a lock file, held open for as long as the child runs and dropped
+when this process exits -- so the lock spans the whole test run rather than the
+step that picked the GPU.
+
+Locking and the `nvidia-smi` thresholds answer different questions and both are
+needed: the lock keeps two CI jobs off one card during the seconds before the
+first job's memory shows up in `nvidia-smi`, while the thresholds keep CI off a
+card that a training run outside CI is already using.
+
+Waits indefinitely; the workflow's `timeout-minutes` bounds the total wait.
+Exits with the child's status. stderr carries per-poll status.
 """
 
+import fcntl
+import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 POLL_INTERVAL_S = 30
+LOCK_DIR = Path(os.environ.get("GPU_LOCK_DIR", "/tmp/pretrain-gpu-locks"))
 
 
 @dataclass(frozen=True)
@@ -41,18 +55,6 @@ def parse_nvidia_smi(output: str) -> list[GpuInfo]:
     return gpus
 
 
-def pick_available(
-    gpus: list[GpuInfo],
-    max_util_pct: int = 10,
-    min_free_mib: int = 8 * 1024,  # 8 GiB
-) -> int | None:
-    """Return the lowest-index GPU whose util and free memory clear thresholds."""
-    for g in gpus:
-        if g.util_pct <= max_util_pct and g.free_mib >= min_free_mib:
-            return g.index
-    return None
-
-
 def query_nvidia_smi() -> str:
     """Return the CSV body of `nvidia-smi --query-gpu=...`.
 
@@ -71,10 +73,47 @@ def query_nvidia_smi() -> str:
     return result.stdout
 
 
-def main() -> None:
+def reserve(
+    gpus: list[GpuInfo],
+    max_util_pct: int = 10,
+    min_free_mib: int = 8 * 1024,  # 8 GiB
+) -> tuple[int, int] | None:
+    """Lock and return the lowest-index idle GPU as (index, held fd), else None.
+
+    The fd is returned rather than closed because closing it drops the lock; the
+    caller keeps it open for the child's lifetime.
+    """
+    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    for gpu in gpus:
+        fd = os.open(LOCK_DIR / f"{gpu.index}.lock", os.O_CREAT | os.O_RDWR, 0o666)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            print(f"gpu {gpu.index}: locked by another job", file=sys.stderr)
+            continue
+        if gpu.util_pct <= max_util_pct and gpu.free_mib >= min_free_mib:
+            return gpu.index, fd
+        # Idle enough to lock, busy enough to skip: something outside CI has it.
+        os.close(fd)
+        print(
+            f"gpu {gpu.index}: util={gpu.util_pct}% free={gpu.free_mib} MiB — busy",
+            file=sys.stderr,
+        )
+    return None
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        print(f"usage: {sys.argv[0]} -- COMMAND [ARGS...]", file=sys.stderr)
+        return 2
+
     while True:
         try:
-            output = query_nvidia_smi()
+            gpus = parse_nvidia_smi(query_nvidia_smi())
         except subprocess.CalledProcessError as e:
             print(
                 f"nvidia-smi failed (rc={e.returncode}): {e.stderr.strip()}",
@@ -83,20 +122,18 @@ def main() -> None:
             time.sleep(POLL_INTERVAL_S)
             continue
 
-        gpus = parse_nvidia_smi(output)
-        idx = pick_available(gpus)
-        if idx is not None:
-            print(idx)
-            return
-
-        for g in gpus:
-            print(
-                f"gpu {g.index}: util={g.util_pct}% free={g.free_mib} MiB — busy",
-                file=sys.stderr,
-            )
+        reserved = reserve(gpus)
+        if reserved is not None:
+            break
         print(f"no idle gpu; retrying in {POLL_INTERVAL_S}s", file=sys.stderr)
         time.sleep(POLL_INTERVAL_S)
 
+    index, _fd = reserved  # _fd stays open so the lock outlives the poll loop
+    print(f"reserved gpu {index} for: {' '.join(argv)}", file=sys.stderr)
+    return subprocess.run(
+        argv, env={**os.environ, "CUDA_VISIBLE_DEVICES": str(index)}
+    ).returncode
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -20,13 +20,22 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # xdist workers for the GPU-bound jobs, overriding the pyproject default of 6.
+  # gpu_lock_exec.py gives each job a card to itself, so the binding constraint
+  # is host RAM, not GPU memory: two of these jobs hold the two cards at once and
+  # every worker is a full torch process with its own CUDA context.
+  GPU_TEST_WORKERS: 3
+
 jobs:
   prepare:
     runs-on: [self-hosted]
     outputs:
       has_data: ${{ steps.detect.outputs.has_data }}
+      has_kernel: ${{ steps.detect.outputs.has_kernel }}
       has_layers: ${{ steps.detect.outputs.has_layers }}
       has_model: ${{ steps.detect.outputs.has_model }}
+      has_quant: ${{ steps.detect.outputs.has_quant }}
       has_training: ${{ steps.detect.outputs.has_training }}
       has_utils: ${{ steps.detect.outputs.has_utils }}
     steps:
@@ -38,8 +47,10 @@ jobs:
           script: |
             if (context.eventName === 'workflow_dispatch' || context.eventName === 'push') {
               core.setOutput('has_data', 'true');
+              core.setOutput('has_kernel', 'true');
               core.setOutput('has_layers', 'true');
               core.setOutput('has_model', 'true');
+              core.setOutput('has_quant', 'true');
               core.setOutput('has_training', 'true');
               core.setOutput('has_utils', 'true');
               return;
@@ -56,15 +67,21 @@ jobs:
 
             // Each flag maps a source subtree to its test directory:
             //   src/data      -> tests/fast/data
+            //   src/kernel    -> tests/fast/kernel
             //   src/layers    -> tests/fast/layers
             //   src/model     -> tests/fast/model
+            //   src/quant     -> tests/fast/quant
             //   src/utils     -> tests/fast/utils
+            // has_quant also fires on src/kernel, since the quantized GEMM paths
+            // call straight into those kernels.
             // has_training (tests/fast/training + tests/e2e) is the integration
             // catch-all: any src/ change runs it, since the end-to-end training
             // path can break from a change anywhere in the stack.
             const has_data = matchAny([/^src\/data\//]);
+            const has_kernel = matchAny([/^src\/kernel\//]);
             const has_layers = matchAny([/^src\/layers\//]);
             const has_model = matchAny([/^src\/model\//]);
+            const has_quant = matchAny([/^src\/quant\//, /^src\/kernel\//]);
             const has_utils = matchAny([/^src\/utils\//]);
             const has_training = matchAny([
               /^src\//,
@@ -72,12 +89,14 @@ jobs:
             ]);
 
             core.setOutput('has_data', String(has_data));
+            core.setOutput('has_kernel', String(has_kernel));
             core.setOutput('has_layers', String(has_layers));
             core.setOutput('has_model', String(has_model));
+            core.setOutput('has_quant', String(has_quant));
             core.setOutput('has_training', String(has_training));
             core.setOutput('has_utils', String(has_utils));
 
-            core.info(`has_data=${has_data} has_layers=${has_layers} has_model=${has_model} has_training=${has_training} has_utils=${has_utils}`);
+            core.info(`has_data=${has_data} has_kernel=${has_kernel} has_layers=${has_layers} has_model=${has_model} has_quant=${has_quant} has_training=${has_training} has_utils=${has_utils}`);
 
   lint:
     runs-on: [self-hosted]
@@ -122,11 +141,13 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
+      # -n 12 rather than the pyproject default of 6: nothing here touches the
+      # GPU, so the only ceiling is the runner's cores.
       - name: Run data tests (CPU only)
         env:
           CUDA_VISIBLE_DEVICES: ""
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/data/ -v
+        run: uv run pytest tests/fast/data/ -n 12
 
   test-layers:
     needs: [prepare]
@@ -145,20 +166,60 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      - name: Pick free GPU
-        id: pick
+      - name: Run layer tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
-          idx=$(uv run python tests/ci/gpu_lock_exec.py)
-          echo "index=$idx" >> "$GITHUB_OUTPUT"
-          echo "Picked GPU $idx"
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/layers/ -n "$GPU_TEST_WORKERS"
 
-      - name: Run layer tests
+  test-kernel:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_kernel == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - run: uv sync --frozen
         env:
-          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/layers/ -v
+
+      - name: Run kernel tests
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+        run: |
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/kernel/ -n "$GPU_TEST_WORKERS"
+
+  test-quant:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_quant == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - run: uv sync --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+
+      - name: Run quant tests
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+        run: |
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/quant/ -n "$GPU_TEST_WORKERS"
 
   test-model:
     needs: [prepare]
@@ -177,20 +238,12 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      - name: Pick free GPU
-        id: pick
+      - name: Run model tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
-          idx=$(uv run python tests/ci/gpu_lock_exec.py)
-          echo "index=$idx" >> "$GITHUB_OUTPUT"
-          echo "Picked GPU $idx"
-
-      - name: Run model tests
-        env:
-          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
-          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/model/ -v
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/model/ -n "$GPU_TEST_WORKERS"
 
   test-utils:
     needs: [prepare]
@@ -209,20 +262,12 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      - name: Pick free GPU
-        id: pick
+      - name: Run utils tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
-          idx=$(uv run python tests/ci/gpu_lock_exec.py)
-          echo "index=$idx" >> "$GITHUB_OUTPUT"
-          echo "Picked GPU $idx"
-
-      - name: Run utils tests
-        env:
-          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
-          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/utils/ -v
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/utils/ -n "$GPU_TEST_WORKERS"
 
   test-training:
     needs: [prepare]
@@ -246,15 +291,6 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      - name: Pick free GPU
-        id: pick
-        env:
-          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: |
-          idx=$(uv run python tests/ci/gpu_lock_exec.py)
-          echo "index=$idx" >> "$GITHUB_OUTPUT"
-          echo "Picked GPU $idx"
-
       - name: Restore tokenizer + dataset
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
@@ -269,10 +305,10 @@ jobs:
 
       - name: Run training tests
         env:
-          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
-          uv run pytest \
-            tests/fast/training/ \
-            tests/e2e/ \
-            -v
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest \
+              tests/fast/training/ \
+              tests/e2e/ \
+              -n "$GPU_TEST_WORKERS"
