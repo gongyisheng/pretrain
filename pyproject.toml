@@ -25,10 +25,16 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Roughly halves the suite. `loadfile` keeps a file on one worker, so the GPU
+# tests in it reuse a single CUDA context and one autotune cache instead of
+# paying for both on every worker. Six workers, not `auto`: the tests share one
+# GPU, and more of them contend for memory rather than overlapping.
+addopts = "-n 6 --dist loadfile"
 
 [dependency-groups]
 dev = [
     "pytest>=9.0",
+    "pytest-xdist>=3.6",
     "transformers>=4.51",
     "ruff>=0.15.6",
     "pre-commit>=4.0",
