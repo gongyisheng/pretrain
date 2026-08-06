@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
-"""Reserve an idle GPU, then exec a command pinned to it.
+"""Reserve an idle GPU, then run a command pinned to it.
 
-    gpu_lock_exec.py -- pytest tests/fast/layers -v
+    gpu_lock_exec.py -- pytest tests/fast/layers
 
-Polls until some GPU is both unlocked by another CI job and idle by
-`nvidia-smi` (utilization <= 10%, free memory >= 8 GiB), then runs the command
-with `CUDA_VISIBLE_DEVICES` set to that index. The reservation is an exclusive
-`flock` on a lock file, held open for as long as the child runs and dropped
-when this process exits -- so the lock spans the whole test run rather than the
-step that picked the GPU.
+Polls until a GPU is free, then runs the command with `CUDA_VISIBLE_DEVICES`
+set to it and exits with the child's status. "Free" means two things, because
+they catch different squatters: an flock excludes other CI jobs, including in
+the seconds before their memory reaches `nvidia-smi`, and the nvidia-smi
+thresholds exclude training runs started outside CI.
 
-Locking and the `nvidia-smi` thresholds answer different questions and both are
-needed: the lock keeps two CI jobs off one card during the seconds before the
-first job's memory shows up in `nvidia-smi`, while the thresholds keep CI off a
-card that a training run outside CI is already using.
-
-Waits indefinitely; the workflow's `timeout-minutes` bounds the total wait.
-Exits with the child's status. stderr carries per-poll status.
+Waits indefinitely; the workflow's `timeout-minutes` bounds the wait.
 """
 
 import fcntl
@@ -80,8 +73,7 @@ def reserve(
 ) -> tuple[int, int] | None:
     """Lock and return the lowest-index idle GPU as (index, held fd), else None.
 
-    The fd is returned rather than closed because closing it drops the lock; the
-    caller keeps it open for the child's lifetime.
+    The fd comes back open because closing it drops the lock.
     """
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
     for gpu in gpus:

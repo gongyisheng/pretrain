@@ -21,13 +21,12 @@ permissions:
   contents: read
 
 env:
-  # xdist workers for the GPU-bound jobs. Six is the largest test-file count in
-  # any one of their directories, and `--dist loadfile` pins a file to a worker,
-  # so a seventh would have no file to take -- it would just pay a torch import
-  # and a CUDA context to sit idle. Measured on tests/fast/layers: 26s/6.8GB at
-  # -n 3, 27s/8.8GB at -n 6, 32s/15.2GB at -n 23. Past the file count more
-  # workers cost memory and give back wall clock.
-  GPU_TEST_WORKERS: 6
+  # Two xdist splits, each measured faster on the dirs that use it. Per test
+  # suits dirs with a few slow tests; per file suits dirs with many quick ones,
+  # where per-test dispatch costs more than it saves, and dirs holding a test
+  # big enough that twelve CUDA contexts alongside it would exhaust the card.
+  SPLIT_BY_TEST: -n 12 --dist load
+  SPLIT_BY_FILE: -n 6 --dist loadfile
 
 jobs:
   prepare:
@@ -143,13 +142,11 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      # -n 12 rather than the pyproject default of 6: nothing here touches the
-      # GPU, so the only ceiling is the runner's cores.
       - name: Run data tests (CPU only)
         env:
           CUDA_VISIBLE_DEVICES: ""
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/data/ -n 12
+        run: uv run pytest tests/fast/data/ $SPLIT_BY_TEST
 
   test-layers:
     needs: [prepare]
@@ -173,7 +170,7 @@ jobs:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run python tests/ci/gpu_lock_exec.py -- \
-            uv run pytest tests/fast/layers/ -n "$GPU_TEST_WORKERS"
+            uv run pytest tests/fast/layers/ $SPLIT_BY_FILE
 
   test-kernel:
     needs: [prepare]
@@ -192,15 +189,12 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      # The only single-file directory, so `--dist loadfile` would hand the whole
-      # thing to one worker and leave the rest idle. `--dist load` splits it per
-      # test instead: 88s serial, 54s at -n 6, 44s at -n 12.
       - name: Run kernel tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run python tests/ci/gpu_lock_exec.py -- \
-            uv run pytest tests/fast/kernel/ -n 12 --dist load
+            uv run pytest tests/fast/kernel/ $SPLIT_BY_TEST
 
   test-quant:
     needs: [prepare]
@@ -224,7 +218,7 @@ jobs:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run python tests/ci/gpu_lock_exec.py -- \
-            uv run pytest tests/fast/quant/ -n "$GPU_TEST_WORKERS"
+            uv run pytest tests/fast/quant/ $SPLIT_BY_TEST
 
   test-model:
     needs: [prepare]
@@ -248,7 +242,7 @@ jobs:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run python tests/ci/gpu_lock_exec.py -- \
-            uv run pytest tests/fast/model/ -n "$GPU_TEST_WORKERS"
+            uv run pytest tests/fast/model/ $SPLIT_BY_FILE
 
   test-utils:
     needs: [prepare]
@@ -272,7 +266,7 @@ jobs:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
           uv run python tests/ci/gpu_lock_exec.py -- \
-            uv run pytest tests/fast/utils/ -n "$GPU_TEST_WORKERS"
+            uv run pytest tests/fast/utils/ $SPLIT_BY_FILE
 
   test-training:
     needs: [prepare]
@@ -316,4 +310,4 @@ jobs:
             uv run pytest \
               tests/fast/training/ \
               tests/e2e/ \
-              -n "$GPU_TEST_WORKERS"
+              $SPLIT_BY_FILE

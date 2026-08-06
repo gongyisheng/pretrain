@@ -25,10 +25,10 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-# Roughly halves the suite. `loadfile` keeps a file on one worker, so the GPU
-# tests in it reuse a single CUDA context and one autotune cache instead of
-# paying for both on every worker. Six workers, not `auto`: the tests share one
-# GPU, and more of them contend for memory rather than overlapping.
+# 16 min -> 2 min. Six workers, not `auto`: every worker holds its own CUDA
+# context on the one GPU, and past this the whole suite OOMs on its largest
+# allocation. `--dist load` is faster per directory but OOMs for the same
+# reason; CI opts into it for the directories where it measured safe.
 addopts = "-n 6 --dist loadfile"
 
 [dependency-groups]

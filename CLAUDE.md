@@ -12,10 +12,12 @@ Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML)
 # Install
 uv sync
 
-# Tests
-uv run pytest                          # all tests
+# Tests (parallel by default: `-n 6 --dist loadfile` from pyproject addopts)
+uv run pytest                          # all tests, ~2 min
 uv run pytest tests/fast/model/test_transformer.py       # single file
 uv run pytest tests/fast/model/test_transformer.py -k "test_forward"  # single test
+uv run pytest -n 0                     # serial, for a debugger or clean output
+uv run pytest tests/fast/kernel/ -n 12 --dist load       # single-file dir: 99s -> 46s
 
 # Lint
 uv run ruff check src/ tests/
@@ -68,6 +70,25 @@ Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated ui
 
 1. Run related tests before and after changes to confirm nothing breaks.
 2. For perf-sensitive changes, run `benchmarks/bench_train.py` before/after to guard against regressions.
+
+### Running tests in parallel
+
+`pyproject.toml` sets `addopts = "-n 6 --dist loadfile"`, so every `pytest` invocation is already parallel. Two things bound how far that can be pushed, and they pull in opposite directions:
+
+- **`--dist loadfile` pins a whole file to one worker**, so workers past a directory's *file count* have nothing to claim and just pay a torch import and a CUDA context. Three dirs are a single file (`kernel`, `model`, `e2e`); the largest is six (`layers`, `quant`).
+- **`--dist load` splits per test** and beats `loadfile` wherever a directory has few slow tests, but each worker holds its own ~0.5 GiB CUDA context. Twelve of them plus a large allocation exhausts a 16 GB card — the whole suite under `-n 12 --dist load` OOMs in `tests/fast/utils/test_metric_utils.py`, which alone wants 3 GiB.
+
+Measured per directory (one RTX 5060 Ti), best in bold:
+
+| dir | files | `-n 6 --dist loadfile` | `-n 12 --dist load` | peak GPU at `-n 12` |
+|---|---|---|---|---|
+| `kernel` | 1 | 99s | **46s** | 6.6 GB |
+| `quant` | 6 | 66s | **50s** | 7.1 GB |
+| `layers` | 6 | **30s** | 61s | — |
+| `utils` | 3 | **36s** | 27s but 13.2 GB | 13.2 GB |
+| `model` | 1 | **25s** | 26s | — |
+
+So: **`-n 12 --dist load` for `kernel` and `quant`, the `-n 6 --dist loadfile` default everywhere else.** `layers` is 2× *worse* per-test (many quick tests, dispatch overhead dominates); `utils` is faster per-test but leaves only 2 GB of headroom, so it stays on the default. Going past `-n 12` lost in every case measured. `.github/workflows/pr-test.yml` encodes this as `SPLIT_BY_TEST` / `SPLIT_BY_FILE`.
 
 ### Config defaults and validation
 
