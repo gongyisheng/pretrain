@@ -22,7 +22,7 @@ def _roundtrip(x, contract_dim, granularity, block_size, fmt, *, scale_dtype=Non
     xq, scale = quantize_operand(
         x, contract_dim, granularity, block_size, fmt, scale_dtype=scale_dtype
     )
-    return dequantize_operand(xq, scale, contract_dim, granularity, block_size)
+    return dequantize_operand(xq, scale, contract_dim, block_size)
 
 
 def _fp8_capable():
@@ -176,7 +176,7 @@ def test_gemm_passthrough_is_plain_matmul():
     assert a_snap is None and b_snap is None  # nothing was quantized
 
 
-@pytest.mark.parametrize("fmt", _INT8_FORMATS)
+@pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
     out, a_snap, b_snap = quantized_gemm(a, b, fmt, "bf16", torch.float32, {})
@@ -185,7 +185,7 @@ def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
 
 
 @int_gpu
-@pytest.mark.parametrize("fmt", _INT8_FORMATS)
+@pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")

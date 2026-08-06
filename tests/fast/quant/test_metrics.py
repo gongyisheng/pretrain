@@ -80,9 +80,7 @@ def test_sqnr_positive_and_finite_over_a_real_round_trip(fmt):
     torch.manual_seed(0)
     x = torch.randn(64, 64)
     q, scale = quantize_operand(x, -1, "tensorwise", 0, fmt)
-    m = compute_quantization_metrics(
-        x, dequantize_operand(q, scale, -1, "tensorwise", 0)
-    )
+    m = compute_quantization_metrics(x, dequantize_operand(q, scale, -1, 0))
     assert torch.isfinite(m["sqnr"]) and m["sqnr"].item() > 10.0
 
 
@@ -92,9 +90,7 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
     x[0, 0] = 1000.0
     x[0, 1:] = 1e-3  # well below (1000/448) * 2^-9 for e4m3
     q, scale = quantize_operand(x, -1, "tensorwise", 0, "fp8_e4m3")
-    m = compute_quantization_metrics(
-        x, dequantize_operand(q, scale, -1, "tensorwise", 0)
-    )
+    m = compute_quantization_metrics(x, dequantize_operand(q, scale, -1, 0))
     assert m["underflow_rate"].item() > 0.9
 
 
@@ -103,7 +99,7 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
 
 def _snapshot(x, fmt="fp8_e4m3"):
     q, scale = quantize_operand(x, -1, "tensorwise", 0, fmt)
-    return QuantizationSnapshot(x, q, scale, -1, "tensorwise", 0)
+    return QuantizationSnapshot(x, q, scale, -1, 0)
 
 
 def _collector():
@@ -334,13 +330,13 @@ def test_probe_dequantizes_ragged_blockwise_with_the_right_blocks():
     offs = torch.tensor(counts).cumsum(0).to(torch.int32)
     x = torch.randn(sum(counts), 8)
     x[:6] *= 50.0
-    blocks = ragged_scale_blocks(offs, x.shape[0], "blockwise", 4)
+    blocks = ragged_scale_blocks(offs, x.shape[0], 4)
     xq, scale = quantize_operand(x, 0, "blockwise", 4, "fp8_e4m3", ragged=blocks)
 
     probe = QuantizationMetricProbe(enabled=True)
     probe.record(
         "wgrad.act",
-        QuantizationSnapshot(x, xq, scale, 0, "blockwise", 4, offs),
+        QuantizationSnapshot(x, xq, scale, 0, 4, offs),
     )
     metrics = probe.metrics["wgrad.act"]
     assert torch.isfinite(torch.stack(list(metrics.values()))).all()

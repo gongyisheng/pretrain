@@ -214,7 +214,7 @@ def test_ragged_n_layout_raises():
 
 def test_wgrad_receives_per_expert_block_table(monkeypatch):
     """The kernel re-derives the per-expert block table from offs and block_size, so
-    it must get kernel_block_size's width — not an element count, which would collapse
+    it must get the 0-sentinel width — not an element count, which would collapse
     rowwise back to one block — and a scale row per expert to match."""
     a, b, offs = _make([8, 0, 24], K=64, N=48)
     seen = {}

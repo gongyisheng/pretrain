@@ -9,7 +9,6 @@ from src.layers.mlp import SparseMoEBlock
 from src.quant.quantize import (
     QuantizationSnapshot,
     dequantize_operand,
-    kernel_block_size,
     quantize_operand,
     ragged_scale_blocks,
 )
@@ -65,7 +64,7 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
     contract_a = 0 if ragged_k else -1
     contract_b = 0 if ragged_k else 1
     ragged = (
-        ragged_scale_blocks(offs, src_a.shape[0], granularity, block_size)
+        ragged_scale_blocks(offs, src_a.shape[0], block_size)
         if ragged_k or granularity == "tensorwise"
         else None
     )
@@ -85,16 +84,12 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
             scale_dtype=scale_dtype,
             ragged=ragged,
         )
-        a_snap = QuantizationSnapshot(
-            src_a, aq, sa, contract_a, granularity, block_size, offs
-        )
+        a_snap = QuantizationSnapshot(src_a, aq, sa, contract_a, block_size, offs)
     if is_quantized(b_fmt):
         bq, sb = _quantize_b(
             b, granularity, block_size, b_fmt, scale_dtype, contract_ragged
         )
-        b_snap = QuantizationSnapshot(
-            b, bq, sb, contract_b, granularity, block_size, offs
-        )
+        b_snap = QuantizationSnapshot(b, bq, sb, contract_b, block_size, offs)
 
     if same_family and a.is_cuda:
         y = scaled_grouped_gemm(
@@ -104,17 +99,17 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
             sb,
             offs,
             out_dtype,
-            kernel_block_size(granularity, block_size),
+            block_size,
         )
         return y, a_snap, b_snap
 
     if aq is not None:
         src_a = dequantize_operand(
-            aq, sa, contract_a, granularity, block_size, ragged=contract_ragged
+            aq, sa, contract_a, block_size, ragged=contract_ragged
         ).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(
-            bq, sb, contract_b, granularity, block_size, ragged=contract_ragged
+            bq, sb, contract_b, block_size, ragged=contract_ragged
         ).to(b.dtype)
     y = grouped_gemm(
         (src_a.mT if ragged_k else src_a).to(out_dtype), b.to(out_dtype), offs

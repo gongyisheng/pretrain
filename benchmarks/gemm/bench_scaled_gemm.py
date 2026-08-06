@@ -25,7 +25,7 @@ import torch.nn.functional as F
 sys.path.insert(0, ".")
 
 from src.kernel.gemm import scaled_gemm
-from src.quant.quantize import quantize_operand, kernel_block_size
+from src.quant.quantize import quantize_operand
 
 E4M3 = torch.float8_e4m3fn
 E5M2 = torch.float8_e5m2
@@ -191,7 +191,7 @@ def _mx_kw():
 def _bench_fp8_tensorwise(a, b, ref):
     aq, sa = quantize_operand(a, -1, "tensorwise", 0, **_fp8_kw(E4M3))
     bq, sb = quantize_operand(b, 0, "tensorwise", 0, **_fp8_kw(E4M3))
-    bs = kernel_block_size("tensorwise", 0)
+    bs = 0  # one scale block per contraction segment
 
     def triton_fn():
         return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs)
@@ -227,7 +227,7 @@ def _bench_fp8_tensorwise(a, b, ref):
 def _bench_fp8_rowwise(a, b, ref):
     aq, sa = quantize_operand(a, -1, "rowwise", 0, **_fp8_kw(E4M3))
     bq, sb = quantize_operand(b, 0, "rowwise", 0, **_fp8_kw(E4M3))
-    bs = kernel_block_size("rowwise", 0)
+    bs = 0  # one scale block per contraction segment
 
     def triton_fn():
         return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs)
@@ -268,7 +268,7 @@ def _bench_int8_rowwise(a, b, ref, M, K, N):
 
     aq, sa = quantize_operand(a, -1, "rowwise", 0, **_int8_kw())
     bq, sb = quantize_operand(b, 0, "rowwise", 0, **_int8_kw())
-    bs = kernel_block_size("rowwise", 0)
+    bs = 0  # one scale block per contraction segment
 
     def triton_fn():
         return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs)
@@ -300,7 +300,7 @@ def _bench_int8_rowwise(a, b, ref, M, K, N):
 def _bench_mxfp8(a, b, ref):
     aq, sa = quantize_operand(a, -1, "blockwise", MXFP8_BLOCK, **_mx_kw())
     bq, sb = quantize_operand(b, 0, "blockwise", MXFP8_BLOCK, **_mx_kw())
-    bs = kernel_block_size("blockwise", MXFP8_BLOCK)
+    bs = MXFP8_BLOCK
 
     def triton_fn():
         return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs)

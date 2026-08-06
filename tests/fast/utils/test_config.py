@@ -822,6 +822,18 @@ def test_quant_default_granularity_is_tensorwise():
     assert q.scaling["granularity"] == "tensorwise"
 
 
+@pytest.mark.parametrize("granularity", ["tensorwise", "rowwise"])
+def test_quant_block_size_normalized_to_zero_off_blockwise(granularity):
+    # block_size only means anything blockwise, so a stale one is zeroed here rather
+    # than re-checked against the granularity at every consumer.
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"recipe": "fp8"},
+        scaling={"granularity": granularity, "block_size": 128},
+    )
+    assert q.scaling["block_size"] == 0
+
+
 def test_quant_recipe_sets_both_backward_grads():
     r = TrainingConfig(
         quantization={"enabled": True, "dtype": {"recipe": "fp8"}}

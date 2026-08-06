@@ -9,7 +9,6 @@ from src.kernel.gemm import scaled_gemm
 from src.quant.quantize import (
     QuantizationSnapshot,
     dequantize_operand,
-    kernel_block_size,
     quantize_operand,
 )
 from src.quant.utils import is_fp8, is_int8s, is_quantized
@@ -30,23 +29,21 @@ def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
         aq, sa = quantize_operand(
             a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
         )
-        a_snap = QuantizationSnapshot(a, aq, sa, -1, granularity, block_size)
+        a_snap = QuantizationSnapshot(a, aq, sa, -1, block_size)
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(
             b, 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
         )
-        b_snap = QuantizationSnapshot(b, bq, sb, 0, granularity, block_size)
+        b_snap = QuantizationSnapshot(b, bq, sb, 0, block_size)
 
     if same_family and a.is_cuda and b.is_cuda:
-        y = scaled_gemm(
-            aq, bq, sa, sb, out_dtype, kernel_block_size(granularity, block_size)
-        )
+        y = scaled_gemm(aq, bq, sa, sb, out_dtype, block_size)
         return y, a_snap, b_snap
 
     if aq is not None:
-        a = dequantize_operand(aq, sa, -1, granularity, block_size).to(a.dtype)
+        a = dequantize_operand(aq, sa, -1, block_size).to(a.dtype)
     if bq is not None:
-        b = dequantize_operand(bq, sb, 0, granularity, block_size).to(b.dtype)
+        b = dequantize_operand(bq, sb, 0, block_size).to(b.dtype)
     return (a @ b).to(out_dtype), a_snap, b_snap
 
 

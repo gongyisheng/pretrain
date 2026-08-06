@@ -362,6 +362,11 @@ class QuantizationConfig:
                     "quant granularity 'blockwise' requires block_size a positive "
                     f"multiple of 16, got {block_size!r}"
                 )
+        else:
+            # block_size only means anything blockwise. Normalize it to the sentinel
+            # every consumer reads as "one scale block per contraction segment", so
+            # nothing downstream has to re-check the granularity to know that.
+            self.scaling["block_size"] = 0
 
         for operand, fmt in self.dtype.items():
             if operand not in QUANT_OPERANDS:

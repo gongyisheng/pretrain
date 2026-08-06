@@ -228,7 +228,7 @@ def test_moe_expert_mm_default_when_excluded():
 # runs on any GPU, so these are not fp8-gated) ---
 
 
-@pytest.mark.parametrize("fmt", _INT8_FORMATS)
+@pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_recipe_expands(fmt):
     # int8-series is weight-only: uniform quant lacks the dynamic range for
     # activations/gradients, so those stay bf16.
@@ -241,7 +241,7 @@ def test_int8s_recipe_expands(fmt):
     }
 
 
-@pytest.mark.parametrize("fmt", _INT8_FORMATS)
+@pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_apply_quantization_swaps(fmt):
     model = nn.Sequential(nn.Linear(64, 64))
     rule = QuantizationConfig(enabled=True, dtype={"recipe": fmt}, include=["0"])

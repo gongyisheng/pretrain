@@ -29,14 +29,12 @@ class QuantizationMetricProbe:
             ragged = ragged_scale_blocks(
                 snapshot.offs,
                 snapshot.quantized_tensor.shape[0],
-                snapshot.granularity,
                 snapshot.block_size,
             )
         dequantized = dequantize_operand(
             snapshot.quantized_tensor,
             snapshot.scale,
             snapshot.contract_dim,
-            snapshot.granularity,
             snapshot.block_size,
             ragged=ragged,
         )

@@ -14,27 +14,6 @@ from src.quant.utils import (
 )
 
 
-def effective_block_size(granularity: str, block_size: int, K: int) -> int:
-    """Elements per scale block along the contraction axis (K for row/tensorwise).
-
-    An element count, for the reshape/pad arithmetic inside this module. Kernels take
-    `kernel_block_size` instead -- they cannot always be handed a count.
-    """
-    return block_size if granularity == "blockwise" else K
-
-
-def kernel_block_size(granularity: str, block_size: int) -> int:
-    """Scale-block width the GEMM kernels take: 0 means one block per segment.
-
-    row/tensorwise are the same branch as blockwise with the width set to the
-    segment length, but they cannot say so numerically: when the contraction is the
-    ragged axis that length is per group and only known at runtime, while the
-    kernel's BLOCK_SIZE is a constexpr. An empty group also owns one scale row,
-    which ceil(0 / width) would miss.
-    """
-    return block_size if granularity == "blockwise" else 0
-
-
 class RaggedScaleBlocks(NamedTuple):
     """Row -> scale-block mapping for an axis that is ragged over groups.
 
@@ -49,12 +28,13 @@ class RaggedScaleBlocks(NamedTuple):
     n_blocks: int  # static upper bound on the scale buffer's height
 
 
-def ragged_scale_blocks(offs, n_rows, granularity, block_size) -> RaggedScaleBlocks:
+def ragged_scale_blocks(offs, n_rows, block_size) -> RaggedScaleBlocks:
     """Scale blocks for a ragged axis, restarting the tiling at each group.
 
-    `tensorwise`/`rowwise` give one block per group. `blockwise` re-tiles
-    `block_size` rows inside each group, so group sizes that are not multiples of
-    `block_size` cost a short trailing block rather than a straddling one.
+    `block_size` 0 (row/tensorwise) gives one block per group. A positive one
+    (blockwise) re-tiles `block_size` rows inside each group, so group sizes that are
+    not multiples of `block_size` cost a short trailing block rather than a
+    straddling one.
     """
     n_groups = offs.shape[0]
     rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
@@ -62,7 +42,7 @@ def ragged_scale_blocks(offs, n_rows, granularity, block_size) -> RaggedScaleBlo
     # Rows past offs[-1] cannot occur in the MoE dispatch (offs[-1] == n_rows);
     # clamping only keeps the gathers below in bounds if one ever did.
     group = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
-    if granularity != "blockwise":
+    if not block_size:
         return RaggedScaleBlocks(group.long(), n_groups)
     starts = torch.cat([offs.new_zeros(1), offs[:-1]])
     counts = offs - starts
@@ -201,10 +181,7 @@ def quantize_operand(
         # rowwise/blockwise branch
         xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
         xq, scale = _quantize_blockwise(
-            xf,
-            fmt,
-            scale_dtype,
-            effective_block_size(granularity, block_size, xf.shape[-1]),
+            xf, fmt, scale_dtype, block_size or xf.shape[-1]
         )
         xq = xq.movedim(-1, contract_dim)
         scale = scale.movedim(-1, contract_dim)
@@ -215,14 +192,14 @@ def quantize_operand(
         return xq.contiguous(), scale.contiguous()
 
 
-def dequantize_operand(xq, scale, contract_dim, granularity, block_size, ragged=None):
+def dequantize_operand(xq, scale, contract_dim, block_size, ragged=None):
     if ragged is not None and contract_dim == 0:
         return xq.float() * _to_row_scale(scale.float(), ragged)
     qf = xq.movedim(contract_dim, -1).float()  # (..., K)
     K = qf.shape[-1]
     sf = scale.movedim(contract_dim, -1).float()  # (..., n_block)
     n_block = sf.shape[-1]
-    _block_size = effective_block_size(granularity, block_size, K)
+    _block_size = block_size or K  # 0: the one block spans the whole contraction
     pad = n_block * _block_size - K
     qp = F.pad(qf, (0, pad)) if pad else qf
     deq = (qp.reshape(*qp.shape[:-1], n_block, _block_size) * sf.unsqueeze(-1)).flatten(
@@ -244,6 +221,5 @@ class QuantizationSnapshot(NamedTuple):
     quantized_tensor: torch.Tensor  # low-precision codes
     scale: torch.Tensor  # fp32 dequant scale
     contract_dim: int
-    granularity: str
-    block_size: int
+    block_size: int  # 0: one scale block spans the whole contraction
     offs: torch.Tensor | None = None  # set by grouped GEMMs, marks an expert axis

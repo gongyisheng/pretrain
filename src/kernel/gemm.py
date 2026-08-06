@@ -554,7 +554,11 @@ def _scaled_grouped_gemm_kernel(
     carried across the group loop when the contraction is itself ragged.
 
     BLOCK_SIZE is the scale block's width along the contraction axis; 0 means one
-    block spanning the whole segment.
+    block spanning the whole segment. row/tensorwise are that case, and cannot state
+    the width numerically instead: when the contraction is the ragged axis the segment
+    length is per group and only known at runtime, while BLOCK_SIZE is a constexpr.
+    An empty group also owns one scale row, which cdiv(0, width) would skip, leaving
+    the cursor a row behind the scale buffer for every group after it.
     """
     M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D

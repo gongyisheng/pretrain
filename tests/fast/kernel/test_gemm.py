@@ -14,8 +14,6 @@ from src.kernel.gemm import (
     scaled_grouped_gemm,
 )
 from src.quant.quantize import (
-    effective_block_size,
-    kernel_block_size,
     quantize_operand,
     ragged_scale_blocks,
 )
@@ -50,8 +48,8 @@ def _run(a, b, gran, bs, a_kw, b_kw):
     # the kernel takes the 0-sentinel width; the oracle's pad math takes a count
     aq, sa = quantize_operand(a, -1, gran, bs, **a_kw)
     bq, sb = quantize_operand(b, 0, gran, bs, **b_kw)
-    out = scaled_gemm(aq, bq, sa, sb, torch.float32, kernel_block_size(gran, bs))
-    oracle = scaled_gemm_ref(aq, bq, sa, sb, effective_block_size(gran, bs, a.shape[1]))
+    out = scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
+    oracle = scaled_gemm_ref(aq, bq, sa, sb, bs or a.shape[1])
     return out, oracle
 
 
@@ -477,13 +475,12 @@ def _make_scaled_layout(layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0)
     """Quantized operands + scales for one ragged layout of the scaled grouped GEMM.
 
     Scales follow the kernel's invariant: each mirrors its operand's axis order with
-    the contraction axis replaced by the scale-block axis. Returns the kernel's
-    block_size too, where 0 means one block per contraction segment.
+    the contraction axis replaced by the scale-block axis. `bs` 0 (row/tensorwise)
+    means one block per contraction segment.
     """
     torch.manual_seed(seed)
     E, R = len(counts), sum(counts)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    kernel_bs = bs if gran == "blockwise" else 0
     kw = dict(fmt=fmt)
 
     def rand(*shape):
@@ -494,13 +491,13 @@ def _make_scaled_layout(layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0)
         per = [quantize_operand(rand(K, N), 0, gran, bs, **kw) for _ in range(E)]
         bq = torch.stack([q for q, _ in per])
         sb = torch.stack([s for _, s in per])
-        return aq, bq, sa, sb, offs, kernel_bs
+        return aq, bq, sa, sb, offs, bs
 
     if layout == "ragged_k":  # (M,R) x (R,N) -> (E,M,N)
-        blocks = ragged_scale_blocks(offs, R, gran, bs)
+        blocks = ragged_scale_blocks(offs, R, bs)
         aq, sa = quantize_operand(rand(R, M), 0, gran, bs, ragged=blocks, **kw)
         bq, sb = quantize_operand(rand(R, N), 0, gran, bs, ragged=blocks, **kw)
-        return aq.mT, bq, sa.mT, sb, offs, kernel_bs
+        return aq.mT, bq, sa.mT, sb, offs, bs
 
     if layout == "ragged_n":  # (E,M,K) x (K,R) -> (M,R)
         per = [quantize_operand(rand(M, K), -1, gran, bs, **kw) for _ in range(E)]
@@ -509,9 +506,9 @@ def _make_scaled_layout(layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0)
         # b's ragged axis is its columns. A per-column scale cannot pool amax across
         # groups by construction, so only tensorwise needs `ragged` -- reached here
         # through the existing row-ragged path on the transpose.
-        blocks = ragged_scale_blocks(offs, R, gran, bs)
+        blocks = ragged_scale_blocks(offs, R, bs)
         bqT, sbT = quantize_operand(rand(R, K), -1, gran, bs, ragged=blocks, **kw)
-        return aq, bqT.mT, sa, sbT.mT, offs, kernel_bs
+        return aq, bqT.mT, sa, sbT.mT, offs, bs
 
     raise ValueError(layout)
 

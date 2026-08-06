@@ -23,7 +23,6 @@ sys.path.insert(0, ".")
 
 from src.kernel.gemm import scaled_grouped_gemm
 from src.quant.quantize import (
-    kernel_block_size,
     quantize_operand,
     ragged_scale_blocks,
 )
@@ -67,7 +66,7 @@ def _make(E, M, K, N, seed=0):
 def _quant(a, b, scheme):
     """Quantize A (M,K) and per-expert B (E,K,N) rowwise; return aq,bq,sa,sb,bs."""
     kw = _kw(scheme)
-    bs = kernel_block_size("rowwise", 0)
+    bs = 0  # rowwise: one scale block per contraction segment
     aq, sa = quantize_operand(a, -1, "rowwise", 0, **kw)
     bq_list, sb_list = [], []
     for g in range(b.shape[0]):
@@ -121,7 +120,7 @@ def _bench_wgrad_point(E, K, N, scheme):
     ref = torch._grouped_mm(a.mT, g, offs=offs).float()
 
     kw = _kw(scheme)
-    blocks = ragged_scale_blocks(offs, a.shape[0], "rowwise", 0)
+    blocks = ragged_scale_blocks(offs, a.shape[0], 0)
     aq, sa = quantize_operand(a, 0, "rowwise", 0, ragged=blocks, **kw)
     gq, sg = quantize_operand(g, 0, "rowwise", 0, ragged=blocks, **kw)
 
