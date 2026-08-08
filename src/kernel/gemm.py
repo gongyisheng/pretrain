@@ -92,8 +92,9 @@ def _grouped_gemm_kernel(
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
     K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
 
-    tile_idx = tl.program_id(0)  # this persistent program owns pid, pid+NUM_SMS, ...
-    last_end = 0  # running count of tiles before the current group
+    # this persistent program owns pid, pid+NUM_SMS, ...
+    global_tile_idx = tl.program_id(0)
+    group_tile_start = 0  # flat index of the current group's first tile
     m_end = 0  # offs are END-offsets, so the previous end is the next start
     n_end = 0
     k_end = 0
@@ -121,13 +122,14 @@ def _grouped_gemm_kernel(
             k_size = K
 
         num_n_tiles = tl.cdiv(n_size, BLOCK_N)
-        num_tiles_g = tl.cdiv(m_size, BLOCK_M) * num_n_tiles
+        num_m_tiles = tl.cdiv(m_size, BLOCK_M)
+        group_tile_count = num_m_tiles * num_n_tiles
         # process every tile of group g that this program owns. An empty ragged M or
         # N group has no tiles; an empty ragged K group still stores its zero slice.
-        while (tile_idx >= last_end) and (tile_idx < last_end + num_tiles_g):
-            local = tile_idx - last_end
-            tile_m = local // num_n_tiles
-            tile_n = local % num_n_tiles
+        while global_tile_idx < group_tile_start + group_tile_count:
+            group_tile_idx = global_tile_idx - group_tile_start
+            tile_m = group_tile_idx // num_n_tiles
+            tile_n = group_tile_idx % num_n_tiles
             offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
             offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
             m_mask = offs_m < m_size
@@ -168,8 +170,8 @@ def _grouped_gemm_kernel(
                 acc.to(c_ptr.dtype.element_ty),
                 mask=m_mask[:, None] & n_mask[None, :],
             )
-            tile_idx += NUM_SMS
-        last_end += num_tiles_g
+            global_tile_idx += NUM_SMS
+        group_tile_start += group_tile_count
 
 
 # ---------------------------------------------------------------------------
@@ -559,8 +561,9 @@ def _scaled_grouped_gemm_kernel(
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
     K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
 
-    tile_idx = tl.program_id(0)  # this persistent program owns pid, pid+NUM_SMS, ...
-    last_end = 0  # running count of tiles before the current group
+    # this persistent program owns pid, pid+NUM_SMS, ...
+    global_tile_idx = tl.program_id(0)
+    group_tile_start = 0  # flat index of the current group's first tile
     m_end = 0  # offs are END-offsets, so the previous end is the next start
     n_end = 0
     k_end = 0
@@ -597,11 +600,12 @@ def _scaled_grouped_gemm_kernel(
             sblk_end = 1 if BLOCK_SIZE == 0 else tl.cdiv(K, BLOCK_SIZE)
 
         num_n_tiles = tl.cdiv(n_size, BLOCK_N)
-        num_tiles_g = tl.cdiv(m_size, BLOCK_M) * num_n_tiles
-        while (tile_idx >= last_end) and (tile_idx < last_end + num_tiles_g):
-            local = tile_idx - last_end
-            tile_m = local // num_n_tiles
-            tile_n = local % num_n_tiles
+        num_m_tiles = tl.cdiv(m_size, BLOCK_M)
+        group_tile_count = num_m_tiles * num_n_tiles
+        while global_tile_idx < group_tile_start + group_tile_count:
+            group_tile_idx = global_tile_idx - group_tile_start
+            tile_m = group_tile_idx // num_n_tiles
+            tile_n = group_tile_idx % num_n_tiles
             offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
             offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
             m_mask = offs_m < m_size
@@ -669,8 +673,8 @@ def _scaled_grouped_gemm_kernel(
                 acc.to(c_ptr.dtype.element_ty),
                 mask=m_mask[:, None] & n_mask[None, :],
             )
-            tile_idx += NUM_SMS
-        last_end += num_tiles_g
+            global_tile_idx += NUM_SMS
+        group_tile_start += group_tile_count
 
 
 @triton_op("jit_kernel::scaled_grouped_gemm", mutates_args={})
