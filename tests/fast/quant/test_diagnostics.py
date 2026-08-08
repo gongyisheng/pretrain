@@ -49,6 +49,11 @@ def _quantized_moe():
         n_routed_experts=4,
         n_routed_experts_per_token=2,
     )
+    # SparseMoEBlock allocates the stacked expert weights with torch.empty and relies
+    # on TransformerLM._init_weights; a bare block never reaches it, so seeding alone
+    # would not make two builds identical.
+    nn.init.normal_(block.expert_gate_up, mean=0.0, std=0.02)
+    nn.init.normal_(block.expert_down, mean=0.0, std=0.02)
     parent = nn.Module()
     parent.add_module("mlp", QuantizedSparseMoEBlock.from_module(block, cfg))
     return parent
@@ -219,3 +224,87 @@ def test_diagnostics_restore_grads_when_the_forward_raises():
     with pytest.raises(RuntimeError, match="boom"):
         diagnostics.collect_quantization_diagnostics(model, boom)
     assert torch.equal(model.down_proj.weight.grad, grad_before)
+
+
+# --- parity against the probe this replaces (deleted in the next commit) ---
+
+
+def _probe_metrics(model, forward_loss):
+    from src.quant.convert import attach_quantization_probes
+    from src.quant.metrics import QuantizationMetricsCollector
+
+    collector = QuantizationMetricsCollector()
+    attach_quantization_probes(model, collector)
+    collector.enabled = True
+    forward_loss(model).backward()
+    collector.enabled = False
+    return collector.to_metrics_dict()
+
+
+@fp8_only
+@pytest.mark.parametrize("granularity", ["tensorwise", "rowwise", "blockwise"])
+def test_replay_matches_the_probe_for_a_linear(granularity):
+    scaling = {"granularity": granularity}
+    if granularity == "blockwise":
+        scaling |= {"block_size": 32, "scale_dtype": "fp32"}
+
+    torch.manual_seed(0)
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+
+    torch.manual_seed(1)
+    probed = _quantized_mlp(scaling=scaling).cuda().to(torch.bfloat16)
+    expected = _probe_metrics(probed, _loss(x))
+
+    torch.manual_seed(1)
+    replayed = _quantized_mlp(scaling=scaling).cuda().to(torch.bfloat16)
+    got = diagnostics.collect_quantization_diagnostics(replayed, _loss(x))
+
+    assert set(expected) <= set(got)  # got also carries the new clip_rate
+    for key, value in expected.items():
+        assert got[key] == pytest.approx(value, rel=1e-5, abs=1e-6), key
+
+
+@fp8_only
+def test_replay_matches_the_probe_for_the_moe_projections():
+    torch.manual_seed(0)
+    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16)
+
+    def forward_loss(m):
+        out, _ = m.mlp(x)
+        return out.square().mean()
+
+    torch.manual_seed(1)
+    probed = _quantized_moe().cuda().to(torch.bfloat16)
+    expected = _probe_metrics(probed, forward_loss)
+
+    torch.manual_seed(1)
+    replayed = _quantized_moe().cuda().to(torch.bfloat16)
+    got = diagnostics.collect_quantization_diagnostics(replayed, forward_loss)
+
+    assert set(expected) <= set(got)
+    for key, value in expected.items():
+        assert got[key] == pytest.approx(value, rel=1e-5, abs=1e-6), key
+
+
+def test_replay_matches_the_probe_for_ragged_blockwise_empty_experts():
+    """counts=[6, 0, 5]: a wgrad operand whose scale rows tile each expert, with one
+    expert holding no tokens -- the case the probe's own regression test pins."""
+    from src.quant.metrics import QuantizationMetricProbe
+    from src.quant.quantize import QuantizationSnapshot, quantize_operand
+
+    torch.manual_seed(0)
+    counts = [6, 0, 5]
+    offs = torch.tensor(counts).cumsum(0).to(torch.int32)
+    x = torch.randn(sum(counts), 8)
+    x[:6] *= 50.0
+    blocks = diagnostics.ragged_scale_blocks(offs, x.shape[0], 4)
+    xq, scale = quantize_operand(x, 0, "blockwise", 4, "fp8_e4m3", ragged=blocks)
+    snapshot = QuantizationSnapshot(x, xq, scale, 0, 4, offs, "fp8_e4m3")
+
+    probe = QuantizationMetricProbe(enabled=True)
+    probe.record("wgrad.act", snapshot)
+
+    got = diagnostics._snapshot_metrics(snapshot)
+    for key, value in probe.metrics["wgrad.act"].items():
+        assert got[key].item() == pytest.approx(value.item(), rel=1e-6), key
+    assert got["sqnr"].item() > 15.0
