@@ -223,3 +223,4 @@ class QuantizationSnapshot(NamedTuple):
     contract_dim: int
     block_size: int  # 0: one scale block spans the whole contraction
     offs: torch.Tensor | None = None  # set by grouped GEMMs, marks an expert axis
+    fmt: str = ""  # the element format the codes are in, for qmax

@@ -29,12 +29,12 @@ def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
         aq, sa = quantize_operand(
             a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
         )
-        a_snap = QuantizationSnapshot(a, aq, sa, -1, block_size)
+        a_snap = QuantizationSnapshot(a, aq, sa, -1, block_size, fmt=a_fmt)
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(
             b, 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
         )
-        b_snap = QuantizationSnapshot(b, bq, sb, 0, block_size)
+        b_snap = QuantizationSnapshot(b, bq, sb, 0, block_size, fmt=b_fmt)
 
     if same_family and a.is_cuda and b.is_cuda:
         y = scaled_gemm(aq, bq, sa, sb, out_dtype, block_size)
