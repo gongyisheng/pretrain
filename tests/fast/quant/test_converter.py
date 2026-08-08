@@ -251,10 +251,10 @@ def test_int8s_apply_quantization_swaps(fmt):
 
 
 @fp8_only
-def test_apply_quantization_leaves_probe_unset():
-    # Metric probes are attached separately (attach_quantization_probes), so conversion
-    # alone must not wire one up — an unattached model records nothing.
+def test_apply_quantization_attaches_no_metric_state():
+    # Metrics are collected separately (collect_quantization_diagnostics), so conversion
+    # alone must leave no metric state on the swapped modules — nothing in the graph.
     m = _Tiny().cuda().to(torch.bfloat16)
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
     qls = [mod for mod in m.modules() if isinstance(mod, QuantizedLinear)]
-    assert qls and all(mod.quantization_probe is None for mod in qls)
+    assert qls and all(not hasattr(mod, "quantization_probe") for mod in qls)

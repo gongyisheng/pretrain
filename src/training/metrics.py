@@ -4,7 +4,6 @@ import time
 import torch
 from tokenizers import Tokenizer
 
-from src.quant.metrics import QuantizationMetricsCollector
 from src.utils import metric_utils
 from src.utils.config import TrainConfig
 from src.utils.tracking_utils import WandbLogger
@@ -22,9 +21,6 @@ class MetricsCollector:
         self.config = config
         self.device = device
         self.logger = logger
-
-        # Quantization error, filled by the probes attach_quantization_probes installs.
-        self.quantization_collector = QuantizationMetricsCollector()
 
         self.is_moe = config.model.is_moe
         if self.is_moe:
@@ -120,15 +116,6 @@ class MetricsCollector:
         self._variance_norm = None
         self._moe_expert_load = None
 
-    def on_train_step_begin(self, step: int) -> None:
-        """Arm cadence-gated capture for the step about to run: each recorded operand
-        costs a dequant + reductions, so probes only fire on the pre-log step.
-        """
-        logging = self.config.logging
-        self.quantization_collector.enabled = (
-            logging.log_quant_metrics and (step + 1) % logging.log_every == 0
-        )
-
     def snapshot_pre_step(self, model: torch.nn.Module, step: int) -> None:
         """Cache θ before optimizer.step() so on_train_step can compute ||Δθ||.
 
@@ -191,6 +178,7 @@ class MetricsCollector:
         step: int,
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
+        quant_metrics: dict[str, float] | None = None,
     ) -> dict[str, float] | None:
         """On a log-cadence step: assemble the train log_dict, dispatch it to
         the logger, reset window counters, and return the dict (for the pbar).
@@ -270,8 +258,8 @@ class MetricsCollector:
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val
 
-        d.update(self.quantization_collector.to_metrics_dict())
-        self.quantization_collector.enabled = False
+        if quant_metrics:
+            d.update(quant_metrics)
 
         self.logger.log(d, step=step)
 

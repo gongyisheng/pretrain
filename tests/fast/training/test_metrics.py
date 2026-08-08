@@ -143,38 +143,26 @@ def test_grad_clip_ratio_reflects_window():
 
 def test_log_train_merges_quant_metrics():
     tracker, _ = _tracker(_cfg(log_every=1))
-    probe = tracker.quantization_collector.get_probe("layer_0")
-    probe.metrics["act"] = {"sqnr": torch.tensor(42.0)}
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
-    d = tracker.log_train(step=1, model=model, optimizer=opt)
+    d = tracker.log_train(
+        step=1,
+        model=model,
+        optimizer=opt,
+        quant_metrics={"quant/sqnr/act/layer_0": 42.0},
+    )
     assert d["quant/sqnr/act/layer_0"] == 42.0
     assert tracker.logger.logs[-1][1]["quant/sqnr/act/layer_0"] == 42.0
 
 
-def test_quant_capture_armed_only_for_the_pre_log_step():
-    """The gate opens at the top of the step that will be logged and closes as soon
-    as it is drained, so eval/generation between steps runs with probes dark.
-    """
-    tracker, _ = _tracker(_cfg(log_every=2, log_quant_metrics=True))
-    probe = tracker.quantization_collector.get_probe("layer_0")
+def test_log_train_without_quant_metrics_has_no_quant_keys():
+    tracker, _ = _tracker(_cfg(log_every=1))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
-
-    tracker.on_train_step_begin(0)  # step 1 is logged, not this one
-    assert tracker.quantization_collector.enabled is False
-    assert probe.enabled is False
     _do_step(tracker, model, opt, scaler, step=0)
-    assert tracker.log_train(step=1, model=model, optimizer=opt) is None
-
-    tracker.on_train_step_begin(1)
-    assert tracker.quantization_collector.enabled is True
-    assert probe.enabled is True
-    _do_step(tracker, model, opt, scaler, step=1)
-    tracker.log_train(step=2, model=model, optimizer=opt)
-    assert tracker.quantization_collector.enabled is False
-    assert probe.enabled is False
+    d = tracker.log_train(step=1, model=model, optimizer=opt)
+    assert not any(k.startswith("quant/") for k in d)
 
 
 # ---------------------------------------------------------------------------

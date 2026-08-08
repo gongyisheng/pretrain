@@ -121,17 +121,13 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
 
 class ScaledGroupedGemmFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, offs, cfg: QuantizationConfig, probe=None):
+    def forward(ctx, a, b, offs, cfg: QuantizationConfig):
         out_dtype = a.dtype
-        y, act_snap, weight_snap = quantized_grouped_gemm(
+        y, _, _ = quantized_grouped_gemm(
             a, b, offs, cfg.dtype["act"], cfg.dtype["weight"], out_dtype, cfg.scaling
         )
-        if probe is not None and probe.enabled:
-            probe.record("fwd.act", act_snap)
-            probe.record("fwd.weight", weight_snap)
         ctx.save_for_backward(a, b, offs)
         ctx.cfg = cfg
-        ctx.probe = probe
         return y
 
     @staticmethod
@@ -140,7 +136,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         cfg = ctx.cfg
         out_dtype = a.dtype
         # dgrad: grad_a = grad_y @ b^T
-        grad_a, dgrad_grad_snap, dgrad_weight_snap = quantized_grouped_gemm(
+        grad_a, _, _ = quantized_grouped_gemm(
             grad_y,
             b.transpose(-2, -1).contiguous(),
             offs,
@@ -151,7 +147,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         )
         # wgrad: grad_b[g] = a[g]^T @ grad_y[g] — the ragged token axis is the
         # contraction, i.e. the ragged-K layout
-        grad_b, wgrad_act_snap, wgrad_grad_snap = quantized_grouped_gemm(
+        grad_b, _, _ = quantized_grouped_gemm(
             a.mT,
             grad_y,
             offs,
@@ -160,20 +156,13 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             out_dtype,
             cfg.scaling,
         )
-        probe = ctx.probe
-        if probe is not None and probe.enabled:
-            probe.record("dgrad.grad", dgrad_grad_snap)
-            probe.record("dgrad.weight", dgrad_weight_snap)
-            probe.record("wgrad.act", wgrad_act_snap)
-            probe.record("wgrad.grad", wgrad_grad_snap)
-        return grad_a, grad_b, None, None, None
+        return grad_a, grad_b, None, None
 
 
-def quantized_expert_mm(cfg: QuantizationConfig, probes=None):
+def quantized_expert_mm(cfg: QuantizationConfig):
 
     def expert_mm(a, b, offs, projection=None, bias=None):
-        probe = probes.get(projection) if probes else None
-        out = ScaledGroupedGemmFn.apply(a, b, offs, cfg, probe)
+        out = ScaledGroupedGemmFn.apply(a, b, offs, cfg)
         if bias is not None:
             # the quantized kernels have no bias epilogue, so add it after the GEMM
             out = out + bias[_row_group_ids(offs, out.shape[0])]
@@ -192,9 +181,3 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
         q.quantization_config = quantization_config
         q.expert_mm = quantized_expert_mm(quantization_config)
         return q
-
-    def set_quantization_probe(self, gate_up_probe, down_probe):
-        self.expert_mm = quantized_expert_mm(
-            self.quantization_config,
-            {"gate_up": gate_up_probe, "down": down_probe},
-        )

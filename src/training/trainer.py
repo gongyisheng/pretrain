@@ -16,7 +16,8 @@ from src.model import build_model
 from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
-from src.quant.convert import apply_quantization, attach_quantization_probes
+from src.quant.convert import apply_quantization
+from src.quant.diagnostics import collect_quantization_diagnostics
 from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.metrics import MetricsCollector, TokenizerMetricsCollector
 from src.training.loss import LOSS_REGISTRY, compute_loss, compute_loss_chunked
@@ -146,13 +147,15 @@ class Trainer:
             worker_init_fn=Trainer._worker_init_fn,
         )
 
-        # Quantization: swap eligible nn.Linear modules to QuantizedLinear, then
-        # point the metric probes at the swapped modules (both before torch.compile).
+        # Quantization: swap eligible nn.Linear modules to QuantizedLinear
+        # (before torch.compile).
         apply_quantization(self.model, config)
         self.logger = WandbLogger(config, enabled=wandb_enabled)
         self.metrics = MetricsCollector(config, self.device, logger=self.logger)
-        if config.logging.log_quant_metrics:
-            attach_quantization_probes(self.model, self.metrics.quantization_collector)
+        # a fixed batch, pulled from the val loader on first use, so the quant series
+        # tracks the model's scales rather than the data and the train stream is
+        # untouched
+        self._diagnostic_batch = None
 
         # Optimizer & scheduler
         self.optimizer = build_optimizer(self.model, config)
@@ -177,6 +180,8 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
+        # the quant diagnostic pass must not run inside a compiled region
+        self._eager_model = self.model
         if config.training.enable_torch_compile:
             self.model = torch.compile(self.model)
 
@@ -228,7 +233,6 @@ class Trainer:
             total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True
         )
         while self.step < stop_at:
-            self.metrics.on_train_step_begin(self.step)
             self.optimizer.zero_grad(set_to_none=True)
 
             # Read previous step's loss NOW (GPU has been computing since we launched it)
@@ -380,6 +384,7 @@ class Trainer:
                 step=self.step,
                 model=self.model,
                 optimizer=self.optimizer,
+                quant_metrics=self._quant_diagnostics(self.step),
             )
             if log_dict is not None:
                 pbar.set_postfix(
@@ -401,7 +406,7 @@ class Trainer:
         pbar.close()
         self.logger.finish()
 
-    def _forward_batch(self, batch):
+    def _forward_batch(self, batch, model=None):
         """Move a (input_ids, position_ids, labels) batch to device, build the
         attention mask, and run a forward pass under autocast. Returns
         (logits, labels, aux_loss). Loss is left to the caller — wrap it in
@@ -428,10 +433,39 @@ class Trainer:
                     self.device,
                     attn_implementation=self.config.model.attn_implementation,
                 )
-            logits, aux_loss = self.model(
+            logits, aux_loss = (model if model is not None else self.model)(
                 input_ids, position_ids=position_ids, attn_mask=attn_mask
             )
         return logits, labels, aux_loss
+
+    def _quant_diagnostics(self, step: int) -> dict[str, float]:
+        """Quant health for a logged step, from one eager fwd/bwd on a fixed batch.
+
+        Off cadence this is a modulo and nothing else.
+        """
+        logging = self.config.logging
+        if not logging.log_quant_metrics or step % logging.log_every != 0:
+            return {}
+        if self._diagnostic_batch is None:
+            self._diagnostic_batch = next(iter(self.val_loader))
+        batch = self._diagnostic_batch
+
+        def forward_loss(model):
+            logits, labels, aux_loss = self._forward_batch(batch, model=model)
+            with torch.amp.autocast(
+                self.device, dtype=self.amp_dtype, enabled=self.use_amp
+            ):
+                # the training loss, not the chunked eval one: that is no-grad, and
+                # the backward is what carries the grad operands into the capture
+                loss = compute_loss(
+                    logits,
+                    labels,
+                    self.config.training.loss_fn,
+                    label_smoothing=self.config.training.label_smoothing,
+                )
+            return loss if aux_loss is None else loss + aux_loss
+
+        return collect_quantization_diagnostics(self._eager_model, forward_loss)
 
     @torch.no_grad()
     def _evaluate(self):

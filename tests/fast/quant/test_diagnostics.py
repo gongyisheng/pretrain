@@ -226,70 +226,10 @@ def test_diagnostics_restore_grads_when_the_forward_raises():
     assert torch.equal(model.down_proj.weight.grad, grad_before)
 
 
-# --- parity against the probe this replaces (deleted in the next commit) ---
-
-
-def _probe_metrics(model, forward_loss):
-    from src.quant.convert import attach_quantization_probes
-    from src.quant.metrics import QuantizationMetricsCollector
-
-    collector = QuantizationMetricsCollector()
-    attach_quantization_probes(model, collector)
-    collector.enabled = True
-    forward_loss(model).backward()
-    collector.enabled = False
-    return collector.to_metrics_dict()
-
-
-@fp8_only
-@pytest.mark.parametrize("granularity", ["tensorwise", "rowwise", "blockwise"])
-def test_replay_matches_the_probe_for_a_linear(granularity):
-    scaling = {"granularity": granularity}
-    if granularity == "blockwise":
-        scaling |= {"block_size": 32, "scale_dtype": "fp32"}
-
-    torch.manual_seed(0)
-    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-
-    torch.manual_seed(1)
-    probed = _quantized_mlp(scaling=scaling).cuda().to(torch.bfloat16)
-    expected = _probe_metrics(probed, _loss(x))
-
-    torch.manual_seed(1)
-    replayed = _quantized_mlp(scaling=scaling).cuda().to(torch.bfloat16)
-    got = diagnostics.collect_quantization_diagnostics(replayed, _loss(x))
-
-    assert set(expected) <= set(got)  # got also carries the new clip_rate
-    for key, value in expected.items():
-        assert got[key] == pytest.approx(value, rel=1e-5, abs=1e-6), key
-
-
-@fp8_only
-def test_replay_matches_the_probe_for_the_moe_projections():
-    torch.manual_seed(0)
-    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16)
-
-    def forward_loss(m):
-        out, _ = m.mlp(x)
-        return out.square().mean()
-
-    torch.manual_seed(1)
-    probed = _quantized_moe().cuda().to(torch.bfloat16)
-    expected = _probe_metrics(probed, forward_loss)
-
-    torch.manual_seed(1)
-    replayed = _quantized_moe().cuda().to(torch.bfloat16)
-    got = diagnostics.collect_quantization_diagnostics(replayed, forward_loss)
-
-    assert set(expected) <= set(got)
-    for key, value in expected.items():
-        assert got[key] == pytest.approx(value, rel=1e-5, abs=1e-6), key
-
-
-def test_replay_matches_the_probe_for_ragged_blockwise_empty_experts():
-    """counts=[6, 0, 5]: a wgrad operand whose scale rows tile each expert, with one
-    expert holding no tokens -- the case the probe's own regression test pins."""
-    from src.quant.metrics import QuantizationMetricProbe
+def test_ragged_blockwise_metrics_use_the_per_expert_scale_blocks():
+    """counts=[6, 0, 5]: a wgrad operand's scale rows tile each expert, so the metrics
+    must rebuild that mapping -- indexing it as a global tiling reports invented
+    error, and one expert here holds no tokens at all."""
     from src.quant.quantize import QuantizationSnapshot, quantize_operand
 
     torch.manual_seed(0)
@@ -299,12 +239,10 @@ def test_replay_matches_the_probe_for_ragged_blockwise_empty_experts():
     x[:6] *= 50.0
     blocks = diagnostics.ragged_scale_blocks(offs, x.shape[0], 4)
     xq, scale = quantize_operand(x, 0, "blockwise", 4, "fp8_e4m3", ragged=blocks)
-    snapshot = QuantizationSnapshot(x, xq, scale, 0, 4, offs, "fp8_e4m3")
 
-    probe = QuantizationMetricProbe(enabled=True)
-    probe.record("wgrad.act", snapshot)
-
-    got = diagnostics._snapshot_metrics(snapshot)
-    for key, value in probe.metrics["wgrad.act"].items():
-        assert got[key].item() == pytest.approx(value.item(), rel=1e-6), key
+    got = diagnostics._snapshot_metrics(
+        QuantizationSnapshot(x, xq, scale, 0, 4, offs, "fp8_e4m3")
+    )
+    assert torch.isfinite(torch.stack(list(got.values()))).all()
+    # fp8 blockwise reconstruction is good; a mis-indexed scale destroys SQNR
     assert got["sqnr"].item() > 15.0

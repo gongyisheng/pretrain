@@ -55,15 +55,3 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
             qmod = quantized_cls.from_module(child, quantization_config)
             setattr(parent, child_name, qmod)
     return model
-
-
-def attach_quantization_probes(model: nn.Module, collector) -> None:
-    """Create and attach metrics probe for every quantized module"""
-    for name, module in model.named_modules():
-        if isinstance(module, QuantizedSparseMoEBlock):
-            module.set_quantization_probe(
-                collector.get_probe(f"{name}.expert_gate_up"),
-                collector.get_probe(f"{name}.expert_down"),
-            )
-        elif isinstance(module, QuantizedLinear):
-            module.set_quantization_probe(collector.get_probe(name))
