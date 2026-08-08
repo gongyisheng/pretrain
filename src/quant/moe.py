@@ -4,7 +4,7 @@ import copy
 
 import torch
 
-from src.kernel.gemm import _row_group_ids, grouped_gemm, scaled_grouped_gemm
+from src.kernel.gemm import grouped_gemm, scaled_grouped_gemm
 from src.layers.mlp import SparseMoEBlock
 from src.quant.quantize import (
     QuantizationSnapshot,
@@ -165,7 +165,8 @@ def quantized_expert_mm(cfg: QuantizationConfig):
         out = ScaledGroupedGemmFn.apply(a, b, offs, cfg)
         if bias is not None:
             # the quantized kernels have no bias epilogue, so add it after the GEMM
-            out = out + bias[_row_group_ids(offs, out.shape[0])]
+            rows = torch.arange(out.shape[0], device=offs.device)
+            out = out + bias[torch.searchsorted(offs, rows, right=True)]
         return out
 
     return expert_mm

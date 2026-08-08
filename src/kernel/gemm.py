@@ -177,12 +177,6 @@ def _grouped_gemm_kernel(
 # ---------------------------------------------------------------------------
 
 
-def _row_group_ids(offs: torch.Tensor, n_rows: int) -> torch.Tensor:
-    """Group index of each output row, from cumulative end-offsets."""
-    rows = torch.arange(n_rows, device=offs.device)
-    return torch.searchsorted(offs, rows, right=True)
-
-
 @triton_op("jit_kernel::grouped_gemm", mutates_args={})
 def _grouped_gemm(
     a: torch.Tensor,
@@ -319,10 +313,11 @@ def grouped_gemm(
     if impl == "torch":
         out = torch._grouped_mm(a, b, offs=offs)
         if bias is not None:
+            rows = torch.arange(out.shape[0], device=offs.device)
             out = out + (
                 bias[:, None, :]
                 if out.ndim == 3
-                else bias[_row_group_ids(offs, out.shape[0])]
+                else bias[torch.searchsorted(offs, rows, right=True)]
             )
         return out
 
