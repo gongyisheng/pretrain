@@ -177,14 +177,6 @@ def _grouped_gemm_kernel(
 # ---------------------------------------------------------------------------
 
 
-def _empty_row_aligned(size, device, dtype):
-    """Allocate like torch._grouped_mm: last dim padded to a 16-byte boundary."""
-    align = 16 // dtype.itemsize
-    padded = (size[-1] + align - 1) // align * align
-    stride = (size[1] * padded, padded, 1) if len(size) == 3 else (padded, 1)
-    return torch.empty_strided(size, stride, device=device, dtype=dtype)
-
-
 def _row_group_ids(offs: torch.Tensor, n_rows: int) -> torch.Tensor:
     """Group index of each output row, from cumulative end-offsets."""
     rows = torch.arange(n_rows, device=offs.device)
@@ -213,7 +205,12 @@ def _grouped_gemm(
         M, N, K = a.shape[1], 0, a.shape[2]
         output_size = (M, b.shape[1])
 
-    c = _empty_row_aligned(output_size, a.device, a.dtype)
+    # allocate like torch._grouped_mm: last dim padded to a 16-byte boundary, so the
+    # output is itself a legal torch._grouped_mm operand when backward feeds it back
+    align = 16 // a.dtype.itemsize
+    padded = (output_size[-1] + align - 1) // align * align
+    stride = (M * padded, padded, 1) if len(output_size) == 3 else (padded, 1)
+    c = torch.empty_strided(output_size, stride, device=a.device, dtype=a.dtype)
     num_sms = _num_sms(a.device)
     wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
         a,
