@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from src.quant.quantize import dequantize_operand, ragged_scale_blocks
+from src.quant.utils import str_to_qmax
 from src.utils.metric_utils import compute_quantization_metrics
 
 
@@ -41,7 +42,11 @@ class QuantizationMetricProbe:
         # offs makes the reduction per expert and averaged, so one hot expert cannot
         # set the number for a cold one
         self.metrics[gemm_operand] = compute_quantization_metrics(
-            snapshot.source_tensor, dequantized, offs=snapshot.offs
+            snapshot.source_tensor,
+            dequantized,
+            snapshot.quantized_tensor,
+            str_to_qmax(snapshot.fmt),
+            offs=snapshot.offs,
         )
 
 

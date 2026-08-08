@@ -210,37 +210,46 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def compute_quantization_metrics(source_tensor, dequantized_tensor, offs=None):
+def compute_quantization_metrics(
+    source_tensor, dequantized_tensor, codes, qmax, offs=None
+):
     """Quant health against the dequantized round-trip, as 0-dim fp32 tensors.
 
-    Pure reductions throughout -- no .item()/.tolist()/.cpu(), so this runs inside a
-    compiled graph without a host sync or a graph break.
+    `codes` are the low-precision values themselves: scales are positive, so
+    `codes == 0` is exactly the operand rounding to zero, and `|codes| == qmax` is
+    saturation -- the other tail of the same scale-selection failure.
 
     With `offs` (cumulative end-offsets) the metrics are per expert, then averaged.
     One grouped GEMM covers every expert and each is quantized against its own amax,
     so reducing over the whole operand would let the experts holding the most tokens
     set the number -- one cold, badly scaled expert has to show up. Stacked expert
     weights carry the expert on dim 0; dispatched rows are ragged along `offs`. Empty
-    experts are excluded: they have no error to report.
+    experts are excluded: they have no error to report. Grouped operands also report
+    the worst expert, because averaging over experts hides the single bad one that
+    per-expert scales exist to prevent.
 
     A former range_ratio (amax/median) was dropped: the median is a sort, per expert
     per operand, and it dominated the cost of a logged step.
     """
     source = source_tensor.float()
     dequantized = dequantized_tensor.float()
+    code_values = codes.float()  # fp8 has no abs/eq kernels of its own
     squares = source.square()
     err_squares = (source - dequantized).square()
-    underflows = ((source != 0) & (dequantized == 0)).float()
+    underflows = ((source != 0) & (code_values == 0)).float()
+    clips = (code_values.abs() == qmax).float()
 
     if offs is None:
         src_sq = squares.sum().reshape(1)
         err_sq = err_squares.sum().reshape(1)
         under = underflows.sum().reshape(1)
+        clip = clips.sum().reshape(1)
         numel = torch.full_like(src_sq, source.numel())
     elif source.ndim == 3:  # stacked expert weights, expert on dim 0
         src_sq = squares.flatten(1).sum(1)
         err_sq = err_squares.flatten(1).sum(1)
         under = underflows.flatten(1).sum(1)
+        clip = clips.flatten(1).sum(1)
         numel = torch.full_like(src_sq, source[0].numel())
     else:  # dispatched rows, ragged along offs -- a row belongs to exactly one expert
         n_groups = offs.shape[0]
@@ -252,10 +261,11 @@ def compute_quantization_metrics(source_tensor, dequantized_tensor, offs=None):
             per_row = t.flatten(1).sum(1)
             return per_row.new_zeros(n_groups).index_add_(0, ids, per_row)
 
-        src_sq, err_sq, under = (
+        src_sq, err_sq, under, clip = (
             by_expert(squares),
             by_expert(err_squares),
             by_expert(underflows),
+            by_expert(clips),
         )
         starts = torch.cat([offs.new_zeros(1), offs[:-1]])
         numel = ((offs - starts) * source.shape[1]).to(src_sq.dtype)
@@ -266,10 +276,25 @@ def compute_quantization_metrics(source_tensor, dequantized_tensor, offs=None):
     )
     valid = (numel > 0).to(src_sq.dtype)
     n_valid = valid.sum().clamp_min(1.0)
-    return {
+    underflow_rate = under / numel.clamp_min(1.0)
+    clip_rate = clip / numel.clamp_min(1.0)
+    metrics = {
         "sqnr": (sqnr * valid).sum() / n_valid,
-        "underflow_rate": (under / numel.clamp_min(1.0) * valid).sum() / n_valid,
+        "underflow_rate": (underflow_rate * valid).sum() / n_valid,
+        "clip_rate": (clip_rate * valid).sum() / n_valid,
     }
+    if offs is None:
+        return metrics
+    # min over a dB quantity, max over the rates: both are defined over the whole
+    # range, unlike the max/min ratio a signed dB value would make meaningless
+    keep = valid > 0
+    zeros = torch.zeros_like(underflow_rate)
+    metrics["sqnr_min"] = torch.where(
+        keep, sqnr, torch.full_like(sqnr, float("inf"))
+    ).min()
+    metrics["underflow_rate_max"] = torch.where(keep, underflow_rate, zeros).max()
+    metrics["clip_rate_max"] = torch.where(keep, clip_rate, zeros).max()
+    return metrics
 
 
 # ---------------------------------------------------------------------------
