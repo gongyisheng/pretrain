@@ -216,7 +216,7 @@ def _grouped_gemm(
         a,
         b,
         c,
-        c if bias is None else bias,  # unused when HAS_BIAS is False
+        bias,
         offs,
         G,
         M,
