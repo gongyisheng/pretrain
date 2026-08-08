@@ -177,7 +177,7 @@ def _grouped_gemm_kernel(
 # ---------------------------------------------------------------------------
 
 
-def _empty_like_grouped_mm(size, device, dtype):
+def _empty_row_aligned(size, device, dtype):
     """Allocate like torch._grouped_mm: last dim padded to a 16-byte boundary."""
     align = 16 // dtype.itemsize
     padded = (size[-1] + align - 1) // align * align
@@ -202,15 +202,18 @@ def _grouped_gemm(
     G = offs.shape[0]
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
     if a_is_2d and not b_is_2d:  # (M,K) x (G,K,N) -> (M,N), ragged M
-        output_size, M, N, K = (a.shape[0], b.shape[2]), 0, b.shape[2], a.shape[1]
+        M, N, K = 0, b.shape[2], a.shape[1]
+        output_size = (a.shape[0], N)
     elif a_is_2d and b_is_2d:  # (M,K) x (K,N) -> (G,M,N), ragged K
-        output_size, M, N, K = (G, a.shape[0], b.shape[1]), a.shape[0], b.shape[1], 0
+        M, N, K = a.shape[0], b.shape[1], 0
+        output_size = (G, M, N)
     else:  # (G,M,K) x (K,N) -> (M,N), ragged N
         if bias is not None:
             raise NotImplementedError("bias is not supported for the ragged-N layout")
-        output_size, M, N, K = (a.shape[1], b.shape[1]), a.shape[1], 0, a.shape[2]
+        M, N, K = a.shape[1], 0, a.shape[2]
+        output_size = (M, b.shape[1])
 
-    c = _empty_like_grouped_mm(output_size, a.device, a.dtype)
+    c = _empty_row_aligned(output_size, a.device, a.dtype)
     num_sms = _num_sms(a.device)
     wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
         a,
@@ -705,16 +708,14 @@ def scaled_grouped_gemm(
         raise NotImplementedError("3D x 3D has no ragged dim; use torch.bmm")
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
     if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
-        output_size, M, N, K = (aq.shape[0], bq.shape[2]), 0, bq.shape[2], aq.shape[1]
+        M, N, K = 0, bq.shape[2], aq.shape[1]
+        output_size = (aq.shape[0], N)
     elif a_is_2d and b_is_2d:  # (M,K) x (K,N) -> (E,M,N), ragged K
-        output_size, M, N, K = (
-            (E, aq.shape[0], bq.shape[1]),
-            aq.shape[0],
-            bq.shape[1],
-            0,
-        )
+        M, N, K = aq.shape[0], bq.shape[1], 0
+        output_size = (E, M, N)
     else:  # (E,M,K) x (K,N) -> (M,N), ragged N
-        output_size, M, N, K = (aq.shape[1], bq.shape[1]), aq.shape[1], 0, aq.shape[2]
+        M, N, K = aq.shape[1], 0, aq.shape[2]
+        output_size = (M, bq.shape[1])
 
     c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
