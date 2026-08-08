@@ -187,6 +187,9 @@ def collect_quantization_diagnostics(model, forward_loss) -> dict[str, float]:
     rng_state = torch.random.get_rng_state()
     cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
     grads = {name: p.grad for name, p in model.named_parameters()}
+    # the forward runs in train mode, so any buffer it mutates -- today the MoE
+    # expert-load counters -- would otherwise leak a val batch into training
+    buffers = {name: buffer.clone() for name, buffer in model.named_buffers()}
     for parameter in model.parameters():
         parameter.grad = None
     try:
@@ -202,6 +205,8 @@ def collect_quantization_diagnostics(model, forward_loss) -> dict[str, float]:
     finally:
         for name, parameter in model.named_parameters():
             parameter.grad = grads[name]
+        for name, buffer in model.named_buffers():
+            buffer.copy_(buffers[name])
         torch.random.set_rng_state(rng_state)
         if cuda_rng_state is not None:
             torch.cuda.set_rng_state(cuda_rng_state)

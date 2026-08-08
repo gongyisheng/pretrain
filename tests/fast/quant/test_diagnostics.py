@@ -246,3 +246,26 @@ def test_ragged_blockwise_metrics_use_the_per_expert_scale_blocks():
     assert torch.isfinite(torch.stack(list(got.values()))).all()
     # fp8 blockwise reconstruction is good; a mis-indexed scale destroys SQNR
     assert got["sqnr"].item() > 15.0
+
+
+@fp8_only
+def test_diagnostics_leave_the_moe_expert_load_untouched():
+    """The pass forwards in train mode, so routing accumulates into the expert-load
+    buffer. post_step resets train_load before the diagnostic runs, so anything left
+    behind here lands in the next expert-bias update and moves the training run.
+    """
+    torch.manual_seed(0)
+    model = _quantized_moe().cuda().to(torch.bfloat16)
+    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16)
+
+    def forward_loss(m):
+        out, _ = m.mlp(x)
+        return out.square().mean()
+
+    forward_loss(model).backward()  # one training step's worth of routed counts
+    load_before = model.mlp.expert_load.train_load.clone()
+    assert load_before.sum() > 0
+
+    diagnostics.collect_quantization_diagnostics(model, forward_loss)
+
+    assert torch.equal(model.mlp.expert_load.train_load, load_before)
