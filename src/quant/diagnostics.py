@@ -4,8 +4,11 @@ import contextlib
 
 import torch
 
-from src.quant.linear import QuantizedLinear
-from src.quant.moe import QuantizedSparseMoEBlock
+from src.quant.linear import QuantizedLinear, quantized_gemm
+from src.quant.moe import QuantizedSparseMoEBlock, quantized_grouped_gemm
+from src.quant.quantize import dequantize_operand, ragged_scale_blocks
+from src.quant.utils import str_to_qmax
+from src.utils.metric_utils import compute_quantization_metrics
 
 
 def _linear_hook(module, name, store):
@@ -89,3 +92,120 @@ def _capture(model):
             handle.remove()
         for module, inner in wrapped:
             module.expert_mm = inner
+
+
+def _replay(record):
+    """Re-quantize one site's captured operands through the same functions the
+    training path calls, so the measured quantization cannot drift from the
+    performed one. Returns {gemm_operand: snapshot}, snapshot None for passthrough.
+
+    The two paths order their wgrad operands differently -- linear contracts
+    (gᵀ, x), the grouped path contracts (aᵀ, g) -- so the unpacking differs too.
+    """
+    cfg = record["cfg"]
+    fmt, scaling = cfg.dtype, cfg.scaling
+    snapshots = {}
+
+    if record["kind"] == "linear":
+        x2d, w, compute_dtype = (
+            record["x2d"],
+            record["weight"],
+            record["compute_dtype"],
+        )
+        _, snapshots["fwd.act"], snapshots["fwd.weight"] = quantized_gemm(
+            x2d, w.t(), fmt["act"], fmt["weight"], compute_dtype, scaling
+        )
+        g = record.get("grad2d")
+        if g is None:
+            return snapshots
+        _, snapshots["dgrad.grad"], snapshots["dgrad.weight"] = quantized_gemm(
+            g, w, fmt["grad_input"], fmt["weight"], compute_dtype, scaling
+        )
+        _, snapshots["wgrad.grad"], snapshots["wgrad.act"] = quantized_gemm(
+            g.t(), x2d, fmt["grad_weight"], fmt["act"], compute_dtype, scaling
+        )
+        return snapshots
+
+    a, b, offs = record["a"], record["b"], record["offs"]
+    out_dtype = a.dtype
+    _, snapshots["fwd.act"], snapshots["fwd.weight"] = quantized_grouped_gemm(
+        a, b, offs, fmt["act"], fmt["weight"], out_dtype, scaling
+    )
+    g = record.get("grad_out")
+    if g is None:
+        return snapshots
+    _, snapshots["dgrad.grad"], snapshots["dgrad.weight"] = quantized_grouped_gemm(
+        g,
+        b.transpose(-2, -1).contiguous(),
+        offs,
+        fmt["grad_input"],
+        fmt["weight"],
+        out_dtype,
+        scaling,
+    )
+    _, snapshots["wgrad.act"], snapshots["wgrad.grad"] = quantized_grouped_gemm(
+        a.mT, g, offs, fmt["act"], fmt["grad_weight"], out_dtype, scaling
+    )
+    return snapshots
+
+
+def _snapshot_metrics(snapshot):
+    """Metrics for one quantized operand. A wgrad operand's scale rows tile each
+    expert, so rebuild that mapping -- indexing it as a global tiling reports
+    invented error.
+    """
+    ragged = None
+    if snapshot.offs is not None and snapshot.contract_dim == 0:
+        ragged = ragged_scale_blocks(
+            snapshot.offs, snapshot.quantized_tensor.shape[0], snapshot.block_size
+        )
+    dequantized = dequantize_operand(
+        snapshot.quantized_tensor,
+        snapshot.scale,
+        snapshot.contract_dim,
+        snapshot.block_size,
+        ragged=ragged,
+    )
+    return compute_quantization_metrics(
+        snapshot.source_tensor,
+        dequantized,
+        snapshot.quantized_tensor,
+        str_to_qmax(snapshot.fmt),
+        offs=snapshot.offs,
+    )
+
+
+def collect_quantization_diagnostics(model, forward_loss) -> dict[str, float]:
+    """Quant health for every quantized site, from one eager fwd/bwd on a fixed batch.
+
+    `forward_loss(model)` returns a scalar loss and owns its own autocast context, so
+    the capture below sees the dtypes training quantizes. Runs outside the compiled
+    model and discards its gradients, so it observes the quantization the training
+    step performs without perturbing it. Returns
+    `quant/<metric>/<gemm_operand>/<module>` -> float.
+    """
+    rng_state = torch.random.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+    grads = {name: p.grad for name, p in model.named_parameters()}
+    for parameter in model.parameters():
+        parameter.grad = None
+    try:
+        with _capture(model) as store:
+            forward_loss(model).backward()
+        metrics = {}
+        for site, record in store.items():
+            for gemm_operand, snapshot in _replay(record).items():
+                if snapshot is None:  # that operand's format is passthrough
+                    continue
+                for name, value in _snapshot_metrics(snapshot).items():
+                    metrics[f"quant/{name}/{gemm_operand}/{site}"] = value
+    finally:
+        for name, parameter in model.named_parameters():
+            parameter.grad = grads[name]
+        torch.random.set_rng_state(rng_state)
+        if cuda_rng_state is not None:
+            torch.cuda.set_rng_state(cuda_rng_state)
+    if not metrics:
+        return {}
+    keys = list(metrics)
+    return dict(zip(keys, torch.stack([metrics[k] for k in keys]).tolist()))  # one sync

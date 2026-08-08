@@ -120,3 +120,102 @@ def test_capture_omits_the_grad_when_nothing_requires_it():
         with torch.no_grad():
             model(x)
     assert "grad2d" not in store["down_proj"]
+
+
+# --- replay + entrypoint ---
+
+
+def _loss(x):
+    return lambda model: model(x).square().mean()
+
+
+@fp8_only
+def test_diagnostics_report_every_site_and_metric_for_a_linear():
+    torch.manual_seed(0)
+    model = _quantized_mlp().cuda().to(torch.bfloat16)
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+
+    got = diagnostics.collect_quantization_diagnostics(model, _loss(x))
+
+    assert set(got) == {
+        f"quant/{metric}/{operand}/down_proj"
+        for operand in GEMM_OPERANDS
+        for metric in ("sqnr", "underflow_rate", "clip_rate")
+    }
+    assert all(isinstance(v, float) for v in got.values())
+
+
+@fp8_only
+def test_diagnostics_report_the_moe_projections_with_spread_metrics():
+    torch.manual_seed(0)
+    model = _quantized_moe().cuda().to(torch.bfloat16)
+    x = torch.randn(4, 16, 32, device="cuda", dtype=torch.bfloat16)
+
+    def forward_loss(m):
+        out, _ = m.mlp(x)
+        return out.square().mean()
+
+    got = diagnostics.collect_quantization_diagnostics(model, forward_loss)
+
+    assert set(got) == {
+        f"quant/{metric}/{operand}/mlp.{projection}"
+        for projection in ("expert_gate_up", "expert_down")
+        for operand in GEMM_OPERANDS
+        for metric in (
+            "sqnr",
+            "underflow_rate",
+            "clip_rate",
+            "sqnr_min",
+            "underflow_rate_max",
+            "clip_rate_max",
+        )
+    }
+
+
+@fp8_only
+def test_diagnostics_skip_passthrough_operands():
+    # grad_weight in bf16 -> the wgrad.grad operand is never quantized.
+    torch.manual_seed(0)
+    model = _quantized_mlp({"grad_weight": "bf16"}).cuda().to(torch.bfloat16)
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+
+    got = diagnostics.collect_quantization_diagnostics(model, _loss(x))
+    assert not any("wgrad.grad" in key for key in got)
+    assert any("dgrad.grad" in key for key in got)
+
+
+def test_diagnostics_on_a_model_with_no_quantized_sites_are_empty():
+    model = nn.Linear(8, 8)
+    x = torch.randn(4, 8)
+    assert diagnostics.collect_quantization_diagnostics(model, _loss(x)) == {}
+
+
+@fp8_only
+def test_diagnostics_leave_grads_rng_and_seams_untouched():
+    torch.manual_seed(0)
+    model = _quantized_mlp().cuda().to(torch.bfloat16)
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    model(x).sum().backward()
+    grad_before = model.down_proj.weight.grad.clone()
+    rng_before = torch.random.get_rng_state()
+
+    diagnostics.collect_quantization_diagnostics(model, _loss(x))
+
+    assert torch.equal(model.down_proj.weight.grad, grad_before)
+    assert torch.equal(torch.random.get_rng_state(), rng_before)
+    assert not model.down_proj._forward_hooks
+
+
+@fp8_only
+def test_diagnostics_restore_grads_when_the_forward_raises():
+    model = _quantized_mlp().cuda().to(torch.bfloat16)
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    model(x).sum().backward()
+    grad_before = model.down_proj.weight.grad.clone()
+
+    def boom(_model):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        diagnostics.collect_quantization_diagnostics(model, boom)
+    assert torch.equal(model.down_proj.weight.grad, grad_before)
