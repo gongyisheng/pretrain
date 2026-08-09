@@ -13,7 +13,10 @@ Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML)
 uv sync
 
 # Tests (parallel by default: `-n 6 --dist loadfile` from pyproject addopts)
-uv run pytest                          # all tests, ~2 min
+# Run the two trees separately: `uv run pytest` at -n 6 can exhaust GPU memory on a
+# 16 GB card, because tests/e2e does real 124M dry runs alongside five other contexts.
+uv run pytest tests/fast                 # all fast tests, ~2 min
+uv run pytest tests/e2e -n 0             # e2e serially, one CUDA context
 uv run pytest tests/fast/model/test_transformer.py       # single file
 uv run pytest tests/fast/model/test_transformer.py -k "test_forward"  # single test
 uv run pytest -n 0                     # serial, for a debugger or clean output
