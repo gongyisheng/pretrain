@@ -80,62 +80,106 @@ def _compute_codes(xf: torch.Tensor, scale: torch.Tensor, fmt: str) -> torch.Ten
     return xq.clamp(-qmax, qmax).to(str_to_dtype(fmt))
 
 
-def _compute_ragged_scale(src, ragged, fmt, scale_dtype):
-    """Scale from a per-block amax of the (M,C') rows of `src`, giving (n_blocks,C').
+def _tile(a, dim, block_size):
+    """View `dim` as (n_blocks, block_size), zero-padding it to a multiple.
 
-    include_self with a zeros buffer is safe because `src` is abs(): an empty block
+    The tile axis lands at -1 for `dim == -1` and -2 for `dim == -2`. Both are free
+    views on contiguous input -- splitting a dim never transposes.
+    """
+    length = a.shape[dim]
+    n_blocks = (length + block_size - 1) // block_size
+    pad = n_blocks * block_size - length
+    if dim == -1:
+        if pad:
+            a = F.pad(a, (0, pad))
+        return a.reshape(*a.shape[:-1], n_blocks, block_size)
+    if pad:
+        a = F.pad(a, (0, 0, 0, pad))
+    return a.reshape(*a.shape[:-2], n_blocks, block_size, a.shape[-1])
+
+
+def _untile(a, dim, length):
+    """Inverse of `_tile`: fold the tile axis back in and drop the padding."""
+    if dim == -1:
+        return a.flatten(-2).narrow(-1, 0, length).contiguous()
+    return a.flatten(-3, -2).narrow(-2, 0, length).contiguous()
+
+
+def _tile_amax(a, dim, block_size):
+    """Dense per-block amax along `dim`, giving `n_blocks` there."""
+    return _tile(a, dim, block_size).amax(dim=-1 if dim == -1 else -2)
+
+
+def _segment_amax(a, dim, blocks):
+    """Per-block amax along a segmented `dim`, giving `blocks.n_blocks` there.
+
+    include_self with a zeros buffer is safe because `a` is abs(): an empty block
     keeps 0 and clamps to EPS in _compute_scale.
     """
-    amax = src.new_zeros(ragged.n_blocks, src.shape[1]).index_reduce_(
-        0, ragged.row_blocks, src, "amax", include_self=True
+    shape = list(a.shape)
+    shape[dim] = blocks.n_blocks
+    return a.new_zeros(shape).index_reduce_(
+        dim % a.ndim, blocks.row_blocks, a, "amax", include_self=True
     )
-    return _compute_scale(amax, fmt, scale_dtype)
 
 
-def _to_row_scale(scale, ragged):
-    """Per-block scale -> per-row, so it broadcasts against the (M,C) operand."""
-    return scale.index_select(0, ragged.row_blocks)
+def _quantize(
+    x, contract_dim, fmt, granularity, block_size, scale_dtype, blocks, ragged_dim
+):
+    """Tile x into scale groups, amax each, divide. One path for every case.
 
-
-def _quantize_ragged_tensorwise(x, ragged, contract_dim, *, fmt, scale_dtype):
-    """Quantize (M,C) `x` with one amax per group of `ragged` instead of one for the
-    whole tensor, so no scale mixes two groups. `contract_dim` picks the layout the
-    kernel reads: (n_blocks,C) along the contracted axis, else (M,1) per row.
+    `contract_dim` and `ragged_dim` each name one of the last two dims; leading dims
+    are batch and are never pooled into a scale group. Segmenting an axis only matters
+    where a tile spans more than one element along it -- which is why rowwise and
+    blockwise ignore a ragged axis that is not the contraction.
     """
     xf = x.float()
-    amax = xf.abs().amax(dim=-1, keepdim=True)  # (M,1)
-    scale = _compute_ragged_scale(amax, ragged, fmt, scale_dtype)  # (n_blocks,1)
-    row_scale = _to_row_scale(scale, ragged)  # (M,1)
-    xq = _compute_codes(xf, row_scale, fmt)
-    out_scale = scale.expand(-1, xf.shape[1]) if contract_dim == 0 else row_scale
-    return xq.contiguous(), out_scale.contiguous()
+    outer_dim = -1 if contract_dim == -2 else -2
+    width = block_size or x.shape[contract_dim]
+    # only tensorwise pools the outer axis into a tile, so only there can a ragged
+    # outer axis fold it down to one row per group -- rowwise/blockwise leave it at
+    # full length and must not be re-indexed.
+    outer_segmented = granularity == "tensorwise" and ragged_dim == outer_dim
 
+    amax = xf.abs()
+    if granularity == "tensorwise":
+        amax = (
+            _segment_amax(amax, outer_dim, blocks)
+            if outer_segmented
+            else amax.amax(outer_dim, keepdim=True)
+        )
+    if ragged_dim == contract_dim:
+        amax = _segment_amax(amax, contract_dim, blocks)
+    else:
+        amax = _tile_amax(amax, contract_dim, width)
+    scale = _compute_scale(amax, fmt, scale_dtype)
 
-def _quantize_ragged_blockwise(x, ragged, *, fmt, scale_dtype):
-    """Quantize (M,C) `x` whose contracted axis M is ragged: a per-column amax within
-    each scale block of `ragged`, so no scale mixes two groups. Returns codes (M,C)
-    and an (n_blocks,C) fp32 scale — already the layout the wgrad kernel reads.
-    """
-    xf = x.float()
-    scale = _compute_ragged_scale(xf.abs(), ragged, fmt, scale_dtype)  # (n_blocks,C)
-    xq = _compute_codes(xf, _to_row_scale(scale, ragged), fmt)
-    return xq.contiguous(), scale.contiguous()
+    if ragged_dim == contract_dim:
+        codes = _compute_codes(
+            xf, scale.index_select(contract_dim, blocks.row_blocks), fmt
+        )
+    else:
+        div = scale
+        if outer_segmented:
+            div = div.index_select(outer_dim, blocks.row_blocks)
+        tile_axis = -1 if contract_dim == -1 else -2
+        codes = _untile(
+            _compute_codes(
+                _tile(xf, contract_dim, width), div.unsqueeze(tile_axis), fmt
+            ),
+            contract_dim,
+            x.shape[contract_dim],
+        )
 
-
-def _quantize_tensorwise(xf, fmt, scale_dtype):
-    scale = _compute_scale(xf.abs().amax(), fmt, scale_dtype)  # 0-dim
-    return _compute_codes(xf, scale, fmt), scale
-
-
-def _quantize_blockwise(xf, fmt, scale_dtype, block_size):
-    K = xf.shape[-1]
-    n_blocks = (K + block_size - 1) // block_size
-    pad = n_blocks * block_size - K
-    xp = F.pad(xf, (0, pad)) if pad else xf
-    xb = xp.reshape(*xp.shape[:-1], n_blocks, block_size)  # (..., n_blocks, block_size)
-    scale = _compute_scale(xb.abs().amax(dim=-1), fmt, scale_dtype)  # (..., n_blocks)
-    xq = _compute_codes(xb, scale.unsqueeze(-1), fmt)  # (..., n_blocks, block_size)
-    return xq.flatten(-2)[..., :K].contiguous(), scale  # (..., K)
+    # the invariant: outer restored to full length, contract left at n_blocks
+    if granularity == "tensorwise":
+        if outer_segmented:
+            scale = scale.index_select(outer_dim, blocks.row_blocks)
+        else:
+            shape = list(scale.shape)
+            shape[outer_dim] = x.shape[outer_dim]
+            scale = scale.expand(shape)
+    return codes.contiguous(), scale.contiguous()
 
 
 def quantize_operand(
@@ -150,62 +194,35 @@ def quantize_operand(
 ):
     """Quantize 2D operand x for scaled_gemm along contract_dim (-1: A, 0: B).
 
-    `ragged` (a RaggedScaleBlocks) marks the row axis as ragged over groups and
-    keeps every scale inside one group. Required when the contracted axis is ragged
-    (contract_dim == 0); for contract_dim == -1 it changes tensorwise only, while
-    rowwise/blockwise are already per-row and ignore it.
+    `ragged` (a RaggedScaleBlocks) marks the row axis as ragged over groups and keeps
+    every scale inside one group.
     """
-    if ragged is not None and granularity == "tensorwise":
-        # Checked before contract_dim: for contract_dim == -1 only tensorwise has an
-        # amax wide enough to span groups (rowwise/blockwise are already per row).
-        return _quantize_ragged_tensorwise(
-            x, ragged, contract_dim, fmt=fmt, scale_dtype=scale_dtype
-        )
-
-    if ragged is not None and contract_dim == 0:
-        return _quantize_ragged_blockwise(x, ragged, fmt=fmt, scale_dtype=scale_dtype)
-
-    if granularity == "tensorwise":
-        # tensorwise branch
-        xq, scale = _quantize_tensorwise(x.float(), fmt, scale_dtype)
-        rows, cols = xq.shape
-        s = scale.reshape(1, 1)
-        scale2d = s.expand(rows, 1) if contract_dim == -1 else s.expand(1, cols)
-
-        # scale shape:
-        # if contract_dim == -1, (rows, 1)
-        # if contract_dim == 0,  (1, cols)
-        return xq.contiguous(), scale2d.contiguous()
-
-    else:
-        # rowwise/blockwise branch
-        xf = x.movedim(contract_dim, -1).float().contiguous()  # (..., K)
-        xq, scale = _quantize_blockwise(
-            xf, fmt, scale_dtype, block_size or xf.shape[-1]
-        )
-        xq = xq.movedim(-1, contract_dim)
-        scale = scale.movedim(-1, contract_dim)
-
-        # scale shape:
-        # if contract_dim == -1, (M, n_blocks)
-        # if contract_dim == 0,  (n_blocks, N)
-        return xq.contiguous(), scale.contiguous()
+    # this signature's ragged axis is always the row axis, i.e. -2: the contraction
+    # when contract_dim is 0, the outer axis otherwise
+    return _quantize(
+        x,
+        -2 if contract_dim == 0 else -1,
+        fmt,
+        granularity,
+        block_size,
+        scale_dtype,
+        ragged,
+        None if ragged is None else -2,
+    )
 
 
 def dequantize_operand(xq, scale, contract_dim, block_size, ragged=None):
+    # contract_dim is positive for the stacked-expert layouts (dim 1 of an (E,K,N)
+    # slab), so normalize onto the {-2, -1} the tiling helpers take.
+    dim = contract_dim if contract_dim < 0 else contract_dim - xq.ndim
+    qf, sf = xq.float(), scale.float()
     if ragged is not None and contract_dim == 0:
-        return xq.float() * _to_row_scale(scale.float(), ragged)
-    qf = xq.movedim(contract_dim, -1).float()  # (..., K)
-    K = qf.shape[-1]
-    sf = scale.movedim(contract_dim, -1).float()  # (..., n_block)
-    n_block = sf.shape[-1]
-    _block_size = block_size or K  # 0: the one block spans the whole contraction
-    pad = n_block * _block_size - K
-    qp = F.pad(qf, (0, pad)) if pad else qf
-    deq = (qp.reshape(*qp.shape[:-1], n_block, _block_size) * sf.unsqueeze(-1)).flatten(
-        -2
-    )[..., :K]
-    return deq.movedim(-1, contract_dim).contiguous()
+        return (qf * sf.index_select(dim, ragged.row_blocks)).contiguous()
+    length = xq.shape[dim]
+    width = block_size or length  # 0: the one block spans the whole contraction
+    return _untile(
+        _tile(qf, dim, width) * sf.unsqueeze(-1 if dim == -1 else -2), dim, length
+    )
 
 
 class QuantizationSnapshot(NamedTuple):

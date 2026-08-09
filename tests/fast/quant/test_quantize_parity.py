@@ -9,36 +9,30 @@ import pytest
 import torch
 
 from src.quant.constants import EPS
-from src.quant.quantize import quantize_operand, ragged_scale_blocks
+from src.quant.quantize import _quantize, ragged_scale_blocks
 from src.quant.utils import is_int8s, str_to_dtype, str_to_emax, str_to_qmax
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
 
 
 def _call(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
-    """Adapter onto the API under test. Tasks 2 and 3 re-point this and nothing else.
-
-    Today's API takes contract_dim in {0, -1} and a precomputed RaggedScaleBlocks whose
-    row axis is always dim 0, so -2 maps to 0 and ragged_dim is implied.
-    """
-    if ragged_dim == -1:
-        pytest.skip("ragged_dim=-1 arrives in Task 2")
-    old_contract = 0 if contract_dim == -2 else -1
-    ragged = None
+    """Adapter onto the API under test. Task 3 re-points this and nothing else."""
+    blocks = None
     if offs is not None:
-        ragged = ragged_scale_blocks(
+        blocks = ragged_scale_blocks(
             offs,
             x.shape[ragged_dim],
             scaling["block_size"] if ragged_dim == contract_dim else 0,
         )
-    return quantize_operand(
+    return _quantize(
         x,
-        old_contract,
+        contract_dim,
+        fmt,
         scaling["granularity"],
         scaling["block_size"],
-        fmt,
-        scale_dtype=scaling.get("scale_dtype"),
-        ragged=ragged,
+        scaling.get("scale_dtype"),
+        blocks,
+        ragged_dim,
     )
 
 
@@ -172,13 +166,7 @@ def _offs(counts):
 CASES = [
     ("A_dense", (24, 32), -1, None),
     ("B_dense", (32, 16), -2, None),
-    pytest.param(
-        "B_experts",
-        (3, 32, 16),
-        -2,
-        None,
-        marks=pytest.mark.xfail(reason="3D path arrives in Task 2", strict=True),
-    ),
+    ("B_experts", (3, 32, 16), -2, None),
     ("A_ragged_outer", (24, 32), -1, -2),
     ("A_ragged_last", (32, 24), -1, -1),
     ("B_ragged_first", (24, 16), -2, -2),
