@@ -314,13 +314,13 @@ def test_dispatch_impl_selection_and_parity():
     b = w.mT
     ref = torch._grouped_mm(a, b, offs=offs)
     for impl in ("auto", "triton", "torch"):
-        got = gemm.grouped_gemm(a, b, offs, impl)
+        got = gemm.grouped_gemm(a, b, offs, impl=impl)
         torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
     # torch path is exactly torch._grouped_mm
-    assert torch.equal(gemm.grouped_gemm(a, b, offs, "torch"), ref)
+    assert torch.equal(gemm.grouped_gemm(a, b, offs, impl="torch"), ref)
     # invalid impl rejected
     with pytest.raises((ValueError, AssertionError)):
-        gemm.grouped_gemm(a, b, offs, "nonsense")
+        gemm.grouped_gemm(a, b, offs, impl="nonsense")
 
 
 def test_grouped_gemm_auto_compiles_fullgraph():
@@ -330,7 +330,9 @@ def test_grouped_gemm_auto_compiles_fullgraph():
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
     w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
-    fn = torch.compile(lambda a, b, o: grouped_gemm(a, b, o, "auto"), fullgraph=True)
+    fn = torch.compile(
+        lambda a, b, o: grouped_gemm(a, b, o, impl="auto"), fullgraph=True
+    )
     out = fn(a, w.mT, offs)
     torch.testing.assert_close(
         out.float(),
@@ -351,8 +353,8 @@ def test_grouped_gemm_auto_selects_triton_on_this_arch():
     b = (torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1).mT
     # auto must take the Triton path here → bitwise-identical to forcing triton,
     # and (almost certainly) NOT bitwise-equal to the torch fallback.
-    auto = gemm.grouped_gemm(a, b, offs, "auto")
-    assert torch.equal(auto, gemm.grouped_gemm(a, b, offs, "triton"))
+    auto = gemm.grouped_gemm(a, b, offs, impl="auto")
+    assert torch.equal(auto, gemm.grouped_gemm(a, b, offs, impl="triton"))
 
 
 def test_grouped_gemm_auto_uses_torch_for_non_bf16():
@@ -362,7 +364,7 @@ def test_grouped_gemm_auto_uses_torch_for_non_bf16():
     a = torch.randn(R, K, device="cuda", dtype=torch.float32)
     b = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32).mT
     assert torch.equal(
-        gemm.grouped_gemm(a, b, offs, "auto"), torch._grouped_mm(a, b, offs=offs)
+        gemm.grouped_gemm(a, b, offs, impl="auto"), torch._grouped_mm(a, b, offs=offs)
     )
 
 
@@ -374,7 +376,7 @@ def test_dispatch_triton_rejects_non_bf16():
     w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32) * 0.1
     b = w.mT
     with pytest.raises(ValueError):
-        gemm.grouped_gemm(a, b, offs, "triton")
+        gemm.grouped_gemm(a, b, offs, impl="triton")
 
 
 @pytest.mark.parametrize(
@@ -431,6 +433,42 @@ def test_int_matches_oracle(qmax):
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
     out, oracle = _run(a, b, "rowwise", 0, _int_kw(qmax), _int_kw(qmax))
     assert (out - oracle).norm() / oracle.norm() < 0.02
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
+)
+def test_bias_matches_oracle(gran, bs):
+    """Fused (N,) bias, broadcast over rows.
+
+    Blockwise is the discriminating case: the bias belongs on the final
+    accumulator, so an implementation that folded it into the per-scale-block
+    partial would add it once per block (8x here) instead of once.
+    """
+    torch.manual_seed(0)
+    a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(256, 96, device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
+    aq, sa = quantize_operand(a, -1, gran, bs, **_fp8_kw(E4M3))
+    bq, sb = quantize_operand(b, 0, gran, bs, **_fp8_kw(E4M3))
+    out = scaled_gemm(aq, bq, sa, sb, torch.float32, bs, bias=bias)
+    oracle = scaled_gemm_ref(aq, bq, sa, sb, bs or a.shape[1]) + bias.float()
+    assert (out - oracle).norm() / oracle.norm() < 0.02
+
+
+def test_bias_none_unchanged():
+    """bias=None must be byte-identical to omitting it -- the HAS_BIAS=False path."""
+    torch.manual_seed(0)
+    a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
+    aq, sa = quantize_operand(a, -1, "rowwise", 0, **_fp8_kw(E4M3))
+    bq, sb = quantize_operand(b, 0, "rowwise", 0, **_fp8_kw(E4M3))
+    torch.testing.assert_close(
+        scaled_gemm(aq, bq, sa, sb, torch.float32, 0, bias=None),
+        scaled_gemm(aq, bq, sa, sb, torch.float32, 0),
+        rtol=0,
+        atol=0,
+    )
 
 
 def test_nonmultiple_shapes_mask_correctly():

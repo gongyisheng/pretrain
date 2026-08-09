@@ -277,8 +277,8 @@ def grouped_gemm(
     a: torch.Tensor,
     b: torch.Tensor,
     offs: torch.Tensor,
-    impl: str = "auto",
     bias: torch.Tensor | None = None,
+    impl: str = "auto",
     **_,
 ) -> torch.Tensor:
     """Ragged grouped GEMM matching torch._grouped_mm's layout convention.
@@ -387,7 +387,7 @@ _SCALED_GROUPED_CONFIGS = _CONFIGS + [
 ]
 
 
-@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K", "BLOCK_SIZE"])
+@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K", "SCALE_BLOCK_SIZE"])
 @triton.jit
 def _scaled_gemm_kernel(
     a_ptr,
@@ -395,10 +395,11 @@ def _scaled_gemm_kernel(
     c_ptr,
     sa_ptr,
     sb_ptr,
+    bias_ptr,
     M,
     N,
     K,
-    nkb,
+    n_scale_blocks,
     stride_am,
     stride_ak,
     stride_bk,
@@ -409,11 +410,14 @@ def _scaled_gemm_kernel(
     stride_sak,
     stride_sbk,
     stride_sbn,
-    BLOCK_SIZE: tl.constexpr,
+    stride_biasn,
+    SCALE_BLOCK_SIZE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
+    """C[m,n] = Σ_b sa[m,b] · sb[b,n] · (Σ_{k∈b} aq[m,k] · bq[k,n]) + bias[n]."""
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -421,23 +425,34 @@ def _scaled_gemm_kernel(
     m_mask = offs_m < M
     n_mask = offs_n < N
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for kb in range(nkb):
-        blk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        for kk in range(0, BLOCK_SIZE, BLOCK_K):
-            offs_k = kb * BLOCK_SIZE + kk + tl.arange(0, BLOCK_K)
+    for scale_block_idx in range(n_scale_blocks):
+        block_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k_in_block in range(0, SCALE_BLOCK_SIZE, BLOCK_K):
+            offs_k = (
+                scale_block_idx * SCALE_BLOCK_SIZE + k_in_block + tl.arange(0, BLOCK_K)
+            )
             k_mask = offs_k < K
             a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
             b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
             a = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0)
-            blk += tl.dot(a, b).to(tl.float32)
+            block_acc += tl.dot(a, b).to(tl.float32)
         sa = tl.load(
-            sa_ptr + offs_m * stride_sam + kb * stride_sak, mask=m_mask, other=0.0
+            sa_ptr + offs_m * stride_sam + scale_block_idx * stride_sak,
+            mask=m_mask,
+            other=0.0,
         )
         sb = tl.load(
-            sb_ptr + kb * stride_sbk + offs_n * stride_sbn, mask=n_mask, other=0.0
+            sb_ptr + scale_block_idx * stride_sbk + offs_n * stride_sbn,
+            mask=n_mask,
+            other=0.0,
         )
-        acc += sa[:, None] * blk * sb[None, :]
+        acc += sa[:, None] * block_acc * sb[None, :]
+    # on acc, not block_acc: the bias is unscaled and belongs to the whole row, so
+    # folding it into a per-scale-block partial would scale it and add it once per block
+    if HAS_BIAS:
+        bias = tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)
+        acc += bias[None, :]
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     tl.store(
         c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=m_mask[:, None] & n_mask[None, :]
@@ -452,21 +467,25 @@ def scaled_gemm(
     sb: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
 
     `block_size` follows the same convention as scaled_grouped_gemm: 0 means one
-    scale block spanning the whole contraction. The branch tests `nkb` rather than
-    that sentinel because a blockwise width >= K also collapses to one block, and
-    would otherwise set a BLOCK_K that tl.arange cannot take.
+    scale block spanning the whole contraction. The branch tests `n_scale_blocks`
+    rather than that sentinel because a blockwise width >= K also collapses to one
+    block, and would otherwise set a BLOCK_K that tl.arange cannot take.
+
+    `bias` is an optional (N,) tensor broadcast over the rows, added to the fp32
+    accumulator in the epilogue so it never passes through the scales.
     """
     M, K = aq.shape
     N = bq.shape[1]
-    nkb = sa.shape[1]
-    if nkb > 1:
-        BLOCK_SIZE, BLOCK_K = block_size, block_size
+    n_scale_blocks = sa.shape[1]
+    if n_scale_blocks > 1:
+        SCALE_BLOCK_SIZE, BLOCK_K = block_size, block_size
     else:
-        BLOCK_SIZE, BLOCK_K = K, min(128, triton.next_power_of_2(K))
+        SCALE_BLOCK_SIZE, BLOCK_K = K, min(128, triton.next_power_of_2(K))
     c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
 
     def grid(meta):
@@ -478,10 +497,11 @@ def scaled_gemm(
         c,
         sa,
         sb,
+        bias,
         M,
         N,
         K,
-        nkb,
+        n_scale_blocks,
         aq.stride(0),
         aq.stride(1),
         bq.stride(0),
@@ -492,7 +512,9 @@ def scaled_gemm(
         sa.stride(1),
         sb.stride(0),
         sb.stride(1),
-        BLOCK_SIZE=BLOCK_SIZE,
+        0 if bias is None else bias.stride(0),
+        SCALE_BLOCK_SIZE=SCALE_BLOCK_SIZE,
+        HAS_BIAS=bias is not None,
         BLOCK_K=BLOCK_K,
     )
     return c
@@ -505,7 +527,7 @@ def scaled_gemm(
 
 @triton.autotune(
     configs=_SCALED_GROUPED_CONFIGS,
-    key=["M", "N", "K", "A_IS_2D", "B_IS_2D", "BLOCK_SIZE"],
+    key=["M", "N", "K", "A_IS_2D", "B_IS_2D", "SCALE_BLOCK_SIZE"],
 )
 @triton.jit
 def _scaled_grouped_gemm_kernel(
@@ -537,7 +559,7 @@ def _scaled_grouped_gemm_kernel(
     NUM_SMS: tl.constexpr,
     A_IS_2D: tl.constexpr,
     B_IS_2D: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    SCALE_BLOCK_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -546,14 +568,14 @@ def _scaled_grouped_gemm_kernel(
 
     Same layout model as _grouped_gemm_kernel: the tile grid is (M, N) and the
     reduction is over K for every layout, so one tile body serves all three. The
-    quantized addition is `sblk`, the scale-block index along the contraction axis --
+    quantized addition is `scale_block_idx`, the index along the contraction axis --
     a global index when the contraction is dense, and a per-group re-tiled index
     carried across the group loop when the contraction is itself ragged.
 
-    BLOCK_SIZE is the scale block's width along the contraction axis; 0 means one
+    SCALE_BLOCK_SIZE is the scale block's width along the contraction axis; 0 means one
     block spanning the whole segment. row/tensorwise are that case, and cannot state
     the width numerically instead: when the contraction is the ragged axis the segment
-    length is per group and only known at runtime, while BLOCK_SIZE is a constexpr.
+    length is per group and only known at runtime, while SCALE_BLOCK_SIZE is a constexpr.
     An empty group also owns one scale row, which cdiv(0, width) would skip, leaving
     the cursor a row behind the scale buffer for every group after it.
     """
@@ -567,7 +589,7 @@ def _scaled_grouped_gemm_kernel(
     m_end = 0  # offs are END-offsets, so the previous end is the next start
     n_end = 0
     k_end = 0
-    sblk_end = 0  # scale-block cursor, only advanced when the contraction is ragged
+    scale_block_end = 0  # cursor, only advanced when the contraction is ragged
     for g in range(G):
         if M_VARY:
             m_start = m_end
@@ -589,15 +611,17 @@ def _scaled_grouped_gemm_kernel(
             k_size = k_end - k_start
             # blocks re-tile inside each group, so the cursor carries across g -- the
             # group loop already visits g in order, so no prefix scan is needed
-            sblk_start = sblk_end
-            sblk_end = sblk_start + (
-                1 if BLOCK_SIZE == 0 else tl.cdiv(k_size, BLOCK_SIZE)
+            scale_block_start = scale_block_end
+            scale_block_end = scale_block_start + (
+                1 if SCALE_BLOCK_SIZE == 0 else tl.cdiv(k_size, SCALE_BLOCK_SIZE)
             )
         else:
             k_start = 0
             k_size = K
-            sblk_start = 0
-            sblk_end = 1 if BLOCK_SIZE == 0 else tl.cdiv(K, BLOCK_SIZE)
+            scale_block_start = 0
+            scale_block_end = (
+                1 if SCALE_BLOCK_SIZE == 0 else tl.cdiv(K, SCALE_BLOCK_SIZE)
+            )
 
         num_n_tiles = tl.cdiv(n_size, BLOCK_N)
         num_m_tiles = tl.cdiv(m_size, BLOCK_M)
@@ -611,15 +635,18 @@ def _scaled_grouped_gemm_kernel(
             m_mask = offs_m < m_size
             n_mask = offs_n < n_size
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-            for sblk in range(sblk_start, sblk_end):
-                if BLOCK_SIZE == 0:
+            for scale_block_idx in range(scale_block_start, scale_block_end):
+                if SCALE_BLOCK_SIZE == 0:
                     r0 = k_start
                     r1 = k_start + k_size
                 else:
-                    r0 = k_start + (sblk - sblk_start) * BLOCK_SIZE
-                    r1 = tl.minimum(r0 + BLOCK_SIZE, k_start + k_size)
+                    r0 = (
+                        k_start
+                        + (scale_block_idx - scale_block_start) * SCALE_BLOCK_SIZE
+                    )
+                    r1 = tl.minimum(r0 + SCALE_BLOCK_SIZE, k_start + k_size)
                 # one scale block: accumulate in fp32, then apply both scales once
-                blk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+                block_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
                 # a computed trip count rather than `while k < r1`: Triton's software
                 # pipeliner runs on scf.for, so a while loop here serializes the global
                 # loads instead of overlapping them with the dots
@@ -644,24 +671,24 @@ def _scaled_grouped_gemm_kernel(
                     b = tl.load(
                         b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0
                     )
-                    blk += tl.dot(a, b).to(tl.float32)
+                    block_acc += tl.dot(a, b).to(tl.float32)
                 sa = tl.load(
                     sa_ptr
                     + (0 if A_IS_2D else g * stride_sag)
                     + (m_start + offs_m) * stride_sam
-                    + sblk * stride_sak,
+                    + scale_block_idx * stride_sak,
                     mask=m_mask,
                     other=0.0,
                 )
                 sb = tl.load(
                     sb_ptr
                     + (0 if B_IS_2D else g * stride_sbg)
-                    + sblk * stride_sbk
+                    + scale_block_idx * stride_sbk
                     + (n_start + offs_n) * stride_sbn,
                     mask=n_mask,
                     other=0.0,
                 )
-                acc += sa[:, None] * blk * sb[None, :]
+                acc += sa[:, None] * block_acc * sb[None, :]
             c_ptrs = (
                 c_ptr
                 + (g * stride_cg if K_VARY else 0)
@@ -744,6 +771,6 @@ def scaled_grouped_gemm(
         NUM_SMS=num_sms,
         A_IS_2D=a_is_2d,
         B_IS_2D=b_is_2d,
-        BLOCK_SIZE=block_size,
+        SCALE_BLOCK_SIZE=block_size,
     )
     return c

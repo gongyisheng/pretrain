@@ -27,13 +27,13 @@ def grouped_mlp(
         if b_down is not None:
             b_down = b_down.to(dt)
     # the per-expert bias is (E, out) and rides in the GEMM epilogue
-    h = expert_mm(x, w_in.mT, offs, projection="gate_up", bias=b_in)
+    h = expert_mm(x, w_in.mT, offs, bias=b_in, projection="gate_up")
     if gated:
         gate, up = h.chunk(2, dim=-1)
         h = act_fn(gate, up)
     else:
         h = act_fn(h)
-    return expert_mm(h, w_down.mT, offs, projection="down", bias=b_down)
+    return expert_mm(h, w_down.mT, offs, bias=b_down, projection="down")
 
 
 class DenseMLPBlock(nn.Module):

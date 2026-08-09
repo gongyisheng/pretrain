@@ -184,6 +184,50 @@ def test_gemm_withholds_snapshots_unless_asked():
     assert a_snap is None and b_snap is None
 
 
+def test_gemm_applies_bias_on_the_fallback_path():
+    """bf16 x bf16 never reaches the kernel, so the unfused branch must add it too."""
+    a, b = torch.randn(20, 32), torch.randn(32, 40)
+    bias = torch.randn(40)
+    out, _, _ = quantized_gemm(a, b, "bf16", "bf16", torch.float32, {}, bias=bias)
+    assert torch.allclose(out, a @ b + bias, atol=1e-4)
+
+
+@fp8_only
+def test_gemm_applies_bias_in_the_fused_kernel():
+    """fp8 x fp8 on CUDA takes scaled_gemm, so the bias rides its epilogue."""
+    torch.manual_seed(0)
+    a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
+    cfg = {"granularity": "rowwise", "block_size": 0}
+    with_bias, _, _ = quantized_gemm(
+        a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg, bias=bias
+    )
+    without, _, _ = quantized_gemm(a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg)
+    torch.testing.assert_close(
+        with_bias.float(), without.float() + bias.float(), rtol=2e-2, atol=2e-2
+    )
+
+
+@fp8_only
+def test_quantized_linear_adds_bias_exactly_once():
+    """Guards the fused wiring: a leftover post-GEMM add would double the bias."""
+    torch.manual_seed(0)
+    lin = nn.Linear(128, 96, bias=True).cuda().to(torch.bfloat16)
+    q = QuantizedLinear.from_module(lin, _cfg())
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    with_bias = q(x)
+    with torch.no_grad():
+        bias = q.bias.clone()
+        q.bias.zero_()
+    torch.testing.assert_close(
+        (with_bias - q(x)).float(),
+        bias.float().expand(64, 96),
+        rtol=2e-2,
+        atol=2e-2,
+    )
+
+
 @pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback

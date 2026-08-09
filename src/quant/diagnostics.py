@@ -55,8 +55,8 @@ def _wrap_expert_mm(module, name, store):
     """
     inner = module.expert_mm
 
-    def wrapped(a, b, offs, projection=None, bias=None):
-        out = inner(a, b, offs, projection=projection, bias=bias)
+    def wrapped(a, b, offs, bias=None, projection=None):
+        out = inner(a, b, offs, bias=bias, projection=projection)
         record = {
             "kind": "moe",
             "cfg": module.quantization_config,
@@ -113,16 +113,34 @@ def _replay(record):
             record["compute_dtype"],
         )
         _, snapshots["fwd.act"], snapshots["fwd.weight"] = quantized_gemm(
-            x2d, w.t(), fmt["act"], fmt["weight"], compute_dtype, scaling, True
+            x2d,
+            w.t(),
+            fmt["act"],
+            fmt["weight"],
+            compute_dtype,
+            scaling,
+            enable_snapshot=True,
         )
         g = record.get("grad2d")
         if g is None:
             return snapshots
         _, snapshots["dgrad.grad"], snapshots["dgrad.weight"] = quantized_gemm(
-            g, w, fmt["grad_input"], fmt["weight"], compute_dtype, scaling, True
+            g,
+            w,
+            fmt["grad_input"],
+            fmt["weight"],
+            compute_dtype,
+            scaling,
+            enable_snapshot=True,
         )
         _, snapshots["wgrad.grad"], snapshots["wgrad.act"] = quantized_gemm(
-            g.t(), x2d, fmt["grad_weight"], fmt["act"], compute_dtype, scaling, True
+            g.t(),
+            x2d,
+            fmt["grad_weight"],
+            fmt["act"],
+            compute_dtype,
+            scaling,
+            enable_snapshot=True,
         )
         return snapshots
 

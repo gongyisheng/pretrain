@@ -1339,7 +1339,7 @@ def test_moe_expert_mm_seam_is_pluggable():
 
     seen = []
 
-    def spy(a, b, offs, projection=None, bias=None):
+    def spy(a, b, offs, bias=None, projection=None):
         seen.append(projection)
         return grouped_gemm(a, b, offs, bias=bias)
 

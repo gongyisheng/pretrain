@@ -15,12 +15,18 @@ from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
 
 
-def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg, enable_snapshot=False):
+def quantized_gemm(
+    a, b, a_fmt, b_fmt, out_dtype, scaling_cfg, bias=None, enable_snapshot=False
+):
     """Returns (y, a_snap, b_snap). The snapshots are the diagnostic replay's only
     product and are `None` unless `enable_snapshot`; training discards them, so the
     default keeps the operand tensors off the hot path. Kept a parameter rather than a
     module-level flag: the compiled path only ever passes False, so Dynamo sees one
     value, whereas a flag that flips would specialize and recompile.
+
+    `bias` is an optional (N,) tensor added to the fp32 accumulator in the kernel
+    epilogue, so it never passes through the scales. Both paths add it before the
+    downcast to `out_dtype`, matching what cuBLAS does for an unquantized addmm.
     """
     granularity = scaling_cfg.get("granularity", "tensorwise")
     block_size = scaling_cfg.get("block_size", 0)
@@ -45,14 +51,17 @@ def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg, enable_snapshot=F
             b_snap = QuantizationSnapshot(b, bq, sb, 0, block_size, fmt=b_fmt)
 
     if same_family and a.is_cuda and b.is_cuda:
-        y = scaled_gemm(aq, bq, sa, sb, out_dtype, block_size)
+        y = scaled_gemm(aq, bq, sa, sb, out_dtype, block_size, bias=bias)
         return y, a_snap, b_snap
 
     if aq is not None:
         a = dequantize_operand(aq, sa, -1, block_size).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(bq, sb, 0, block_size).to(b.dtype)
-    return (a @ b).to(out_dtype), a_snap, b_snap
+    y = a @ b
+    if bias is not None:
+        y = y + bias
+    return y.to(out_dtype), a_snap, b_snap
 
 
 class QuantizedLinearFn(torch.autograd.Function):
@@ -74,9 +83,8 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["weight"],
             compute_dtype,
             cfg.scaling,
+            bias=None if bias is None else bias.to(compute_dtype),
         )
-        if bias is not None:
-            y = y + bias.to(compute_dtype)
 
         ctx.save_for_backward(x2d, w)
         ctx.cfg = cfg
