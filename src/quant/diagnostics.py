@@ -113,23 +113,23 @@ def _replay(record):
             record["compute_dtype"],
         )
         _, snapshots["fwd.act"], snapshots["fwd.weight"] = quantized_gemm(
-            x2d, w.t(), fmt["act"], fmt["weight"], compute_dtype, scaling
+            x2d, w.t(), fmt["act"], fmt["weight"], compute_dtype, scaling, True
         )
         g = record.get("grad2d")
         if g is None:
             return snapshots
         _, snapshots["dgrad.grad"], snapshots["dgrad.weight"] = quantized_gemm(
-            g, w, fmt["grad_input"], fmt["weight"], compute_dtype, scaling
+            g, w, fmt["grad_input"], fmt["weight"], compute_dtype, scaling, True
         )
         _, snapshots["wgrad.grad"], snapshots["wgrad.act"] = quantized_gemm(
-            g.t(), x2d, fmt["grad_weight"], fmt["act"], compute_dtype, scaling
+            g.t(), x2d, fmt["grad_weight"], fmt["act"], compute_dtype, scaling, True
         )
         return snapshots
 
     a, b, offs = record["a"], record["b"], record["offs"]
     out_dtype = a.dtype
     _, snapshots["fwd.act"], snapshots["fwd.weight"] = quantized_grouped_gemm(
-        a, b, offs, fmt["act"], fmt["weight"], out_dtype, scaling
+        a, b, offs, fmt["act"], fmt["weight"], out_dtype, scaling, True
     )
     g = record.get("grad_out")
     if g is None:
@@ -142,9 +142,10 @@ def _replay(record):
         fmt["weight"],
         out_dtype,
         scaling,
+        True,
     )
     _, snapshots["wgrad.act"], snapshots["wgrad.grad"] = quantized_grouped_gemm(
-        a.mT, g, offs, fmt["act"], fmt["grad_weight"], out_dtype, scaling
+        a.mT, g, offs, fmt["act"], fmt["grad_weight"], out_dtype, scaling, True
     )
     return snapshots
 

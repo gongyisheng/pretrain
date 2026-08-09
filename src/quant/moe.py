@@ -36,7 +36,9 @@ def _quantize_b(b, granularity, block_size, fmt, scale_dtype, ragged):
     )
 
 
-def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
+def quantized_grouped_gemm(
+    a, b, offs, a_fmt, b_fmt, out_dtype, scaling, enable_snapshot=False
+):
     """Quantized ragged grouped GEMM, layout picked from the operand ranks.
 
         (M,K) x (E,K,N) -> (M,N)    ragged M: A's row axis, not the contraction
@@ -84,14 +86,18 @@ def quantized_grouped_gemm(a, b, offs, a_fmt, b_fmt, out_dtype, scaling):
             scale_dtype=scale_dtype,
             ragged=ragged,
         )
-        a_snap = QuantizationSnapshot(
-            src_a, aq, sa, contract_a, block_size, offs, a_fmt
-        )
+        if enable_snapshot:
+            a_snap = QuantizationSnapshot(
+                src_a, aq, sa, contract_a, block_size, offs, a_fmt
+            )
     if is_quantized(b_fmt):
         bq, sb = _quantize_b(
             b, granularity, block_size, b_fmt, scale_dtype, contract_ragged
         )
-        b_snap = QuantizationSnapshot(b, bq, sb, contract_b, block_size, offs, b_fmt)
+        if enable_snapshot:
+            b_snap = QuantizationSnapshot(
+                b, bq, sb, contract_b, block_size, offs, b_fmt
+            )
 
     if same_family and a.is_cuda:
         y = scaled_grouped_gemm(

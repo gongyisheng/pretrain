@@ -440,6 +440,8 @@ def test_snapshot_carries_the_element_format_of_each_operand():
     """Metrics need the format's qmax for clip_rate, and the snapshot is all they get."""
     a = torch.randn(16, 32)
     b = torch.randn(32, 8)
-    _, a_snap, b_snap = quantized_gemm(a, b, "int8", "int8", torch.float32, {})
+    _, a_snap, b_snap = quantized_gemm(
+        a, b, "int8", "int8", torch.float32, {}, enable_snapshot=True
+    )
     assert a_snap.fmt == "int8"
     assert b_snap.fmt == "int8"

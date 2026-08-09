@@ -15,7 +15,13 @@ from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
 
 
-def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
+def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg, enable_snapshot=False):
+    """Returns (y, a_snap, b_snap). The snapshots are the diagnostic replay's only
+    product and are `None` unless `enable_snapshot`; training discards them, so the
+    default keeps the operand tensors off the hot path. Kept a parameter rather than a
+    module-level flag: the compiled path only ever passes False, so Dynamo sees one
+    value, whereas a flag that flips would specialize and recompile.
+    """
     granularity = scaling_cfg.get("granularity", "tensorwise")
     block_size = scaling_cfg.get("block_size", 0)
     scale_dtype = scaling_cfg.get("scale_dtype")
@@ -29,12 +35,14 @@ def quantized_gemm(a, b, a_fmt, b_fmt, out_dtype, scaling_cfg):
         aq, sa = quantize_operand(
             a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
         )
-        a_snap = QuantizationSnapshot(a, aq, sa, -1, block_size, fmt=a_fmt)
+        if enable_snapshot:
+            a_snap = QuantizationSnapshot(a, aq, sa, -1, block_size, fmt=a_fmt)
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(
             b, 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
         )
-        b_snap = QuantizationSnapshot(b, bq, sb, 0, block_size, fmt=b_fmt)
+        if enable_snapshot:
+            b_snap = QuantizationSnapshot(b, bq, sb, 0, block_size, fmt=b_fmt)
 
     if same_family and a.is_cuda and b.is_cuda:
         y = scaled_gemm(aq, bq, sa, sb, out_dtype, block_size)

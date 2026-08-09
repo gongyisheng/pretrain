@@ -176,10 +176,20 @@ def test_gemm_passthrough_is_plain_matmul():
     assert a_snap is None and b_snap is None  # nothing was quantized
 
 
+def test_gemm_withholds_snapshots_unless_asked():
+    """Training discards them; only the diagnostic replay opts in."""
+    a, b = torch.randn(20, 32), torch.randn(32, 40)
+    out, a_snap, b_snap = quantized_gemm(a, b, "int8", "int8", torch.float32, {})
+    assert torch.isfinite(out).all()
+    assert a_snap is None and b_snap is None
+
+
 @pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
-    out, a_snap, b_snap = quantized_gemm(a, b, fmt, "bf16", torch.float32, {})
+    out, a_snap, b_snap = quantized_gemm(
+        a, b, fmt, "bf16", torch.float32, {}, enable_snapshot=True
+    )
     assert out.shape == (20, 40) and torch.isfinite(out).all()
     assert a_snap is not None and b_snap is None  # only a is a quantized format
 
