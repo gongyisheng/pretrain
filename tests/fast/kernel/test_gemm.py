@@ -124,26 +124,13 @@ def test_output_stride_matches_torch():
     )
 
 
-def _bias_ref(a, b, offs, bias, layout):
-    """torch._grouped_mm plus a (G,N) bias broadcast over the output's row dim.
-
-    torch rejects bias outright, so the oracle adds it separately: per output row
-    for ragged M (each row belongs to one group), per group slice for ragged K.
-    """
-    out = torch._grouped_mm(a, b, offs=offs).float()
-    if layout == "ragged_k":
-        return out + bias.float()[:, None, :]
-    rows = torch.arange(out.shape[0], device=out.device)
-    return out + bias.float()[torch.searchsorted(offs, rows, right=True)]
-
-
 @pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
 def test_bias_matches_reference(layout):
     a, b, offs = _make_layout(layout)
     G, N = offs.shape[0], 48
     bias = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
     got = grouped_gemm(a, b, offs, bias=bias)
-    ref = _bias_ref(a, b, offs, bias, layout)
+    ref = grouped_gemm_ref(a, b, offs, bias=bias)
     torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
 
 
@@ -160,7 +147,7 @@ def test_bias_grads_match_reference(layout):
         (out * out).sum().backward()
         return out, a.grad, b.grad, bias.grad
 
-    ref = run(lambda a, b, o, bias: _bias_ref(a, b, o, bias, layout))
+    ref = run(lambda a, b, o, bias: grouped_gemm_ref(a, b, o, bias))
     got = run(lambda a, b, o, bias: _grouped_gemm(a, b, o, bias))
     for g, r in zip(got, ref):
         torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
@@ -649,6 +636,50 @@ def test_scaled_grouped_layouts_compile_fullgraph(layout):
         fullgraph=True,
     )
     assert torch.isfinite(fn()).all()
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
+)
+@pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
+def test_scaled_grouped_bias_matches_oracle(layout, gran, bs):
+    """Fused (G,N) bias, broadcast over the output's row dim.
+
+    Blockwise is the discriminating case: the bias is unscaled and belongs on the
+    final accumulator, so folding it into a per-scale-block partial would both
+    multiply it by that block's scales and add it once per block.
+    """
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        layout, _SCALED_COUNTS, gran, bs, "fp8_e4m3"
+    )
+    bias = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16)
+    got = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs, bias=bias)
+    ref = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs, bias=bias)
+    rel = (got.float() - ref).norm() / ref.norm()
+    assert rel < _SCALED_TOL[layout], rel
+
+
+def test_scaled_grouped_bias_none_unchanged():
+    """bias=None must be byte-identical to omitting it -- the HAS_BIAS=False path."""
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_m", _SCALED_COUNTS, "rowwise", 0, "fp8_e4m3"
+    )
+    torch.testing.assert_close(
+        scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs, bias=None),
+        scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_scaled_grouped_bias_rejected_for_ragged_n():
+    """Ragged N partitions the columns, so a (G,N) row-broadcast bias is meaningless."""
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_n", _SCALED_COUNTS, "rowwise", 0, "fp8_e4m3"
+    )
+    bias = torch.zeros(offs.shape[0], bq.shape[1], device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(NotImplementedError):
+        scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs, bias=bias)
 
 
 def test_bench_scaled_grouped_gemm_importable():

@@ -536,6 +536,7 @@ def _scaled_grouped_gemm_kernel(
     c_ptr,
     sa_ptr,
     sb_ptr,
+    bias_ptr,
     offs_ptr,
     G,
     M,
@@ -556,10 +557,13 @@ def _scaled_grouped_gemm_kernel(
     stride_sbg,
     stride_sbk,
     stride_sbn,
+    stride_biasg,
+    stride_biasn,
     NUM_SMS: tl.constexpr,
     A_IS_2D: tl.constexpr,
     B_IS_2D: tl.constexpr,
     SCALE_BLOCK_SIZE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -578,6 +582,9 @@ def _scaled_grouped_gemm_kernel(
     length is per group and only known at runtime, while SCALE_BLOCK_SIZE is a constexpr.
     An empty group also owns one scale row, which cdiv(0, width) would skip, leaving
     the cursor a row behind the scale buffer for every group after it.
+
+    The optional bias is per group, broadcast over the output's row dim, and added
+    to the fp32 accumulator after the scales so it never passes through them.
     """
     M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
@@ -689,6 +696,14 @@ def _scaled_grouped_gemm_kernel(
                     other=0.0,
                 )
                 acc += sa[:, None] * block_acc * sb[None, :]
+            # on acc, not block_acc: the bias is unscaled and belongs to the whole
+            # row, so folding it into a per-scale-block partial would scale it and
+            # add it once per block
+            if HAS_BIAS:
+                bias_ptrs = (
+                    bias_ptr + g * stride_biasg + (n_start + offs_n) * stride_biasn
+                )
+                acc += tl.load(bias_ptrs, mask=n_mask, other=0.0)[None, :]
             c_ptrs = (
                 c_ptr
                 + (g * stride_cg if K_VARY else 0)
@@ -713,6 +728,7 @@ def scaled_grouped_gemm(
     offs: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Ragged scaled grouped GEMM, layout picked from the operand ranks.
 
@@ -724,11 +740,16 @@ def scaled_grouped_gemm(
     `sa`/`sb` mirror their operand's axis order with the contraction axis replaced by
     the scale-block axis, so transposing an operand transposes its scale with it.
     `block_size` 0 means one scale block spanning the whole contraction segment.
+
+    `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
+    the fp32 accumulator in the epilogue so it never passes through the scales.
     """
     a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
     E = offs.shape[0]
     if not a_is_2d and not b_is_2d:
         raise NotImplementedError("3D x 3D has no ragged dim; use torch.bmm")
+    if bias is not None and not a_is_2d:
+        raise NotImplementedError("bias is not supported for the ragged-N layout")
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
     if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
         M, N, K = 0, bq.shape[2], aq.shape[1]
@@ -748,6 +769,7 @@ def scaled_grouped_gemm(
         c,
         sa,
         sb,
+        bias,
         offs,
         E,
         M,
@@ -768,9 +790,12 @@ def scaled_grouped_gemm(
         0 if b_is_2d else sb.stride(0),
         sb.stride(-2),
         sb.stride(-1),
+        0 if bias is None else bias.stride(0),
+        0 if bias is None else bias.stride(1),
         NUM_SMS=num_sms,
         A_IS_2D=a_is_2d,
         B_IS_2D=b_is_2d,
         SCALE_BLOCK_SIZE=block_size,
+        HAS_BIAS=bias is not None,
     )
     return c

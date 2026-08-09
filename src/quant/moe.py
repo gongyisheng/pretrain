@@ -37,7 +37,7 @@ def _quantize_b(b, granularity, block_size, fmt, scale_dtype, ragged):
 
 
 def quantized_grouped_gemm(
-    a, b, offs, a_fmt, b_fmt, out_dtype, scaling, enable_snapshot=False
+    a, b, offs, a_fmt, b_fmt, out_dtype, scaling, bias=None, enable_snapshot=False
 ):
     """Quantized ragged grouped GEMM, layout picked from the operand ranks.
 
@@ -46,6 +46,9 @@ def quantized_grouped_gemm(
 
     The ragged-N layout (3D x 2D) is unimplemented: a per-group scale on B's ragged
     column axis would need a column-wise ragged mapping, and nothing asks for it.
+
+    `bias` is an optional (E,N) tensor broadcast over the output's row dim. It is
+    never quantized -- it rides the epilogue, past the scales.
     """
     granularity = scaling["granularity"]
     block_size = scaling.get("block_size", 0)
@@ -108,6 +111,7 @@ def quantized_grouped_gemm(
             offs,
             out_dtype,
             block_size,
+            bias=bias,
         )
         return y, a_snap, b_snap
 
@@ -120,20 +124,31 @@ def quantized_grouped_gemm(
             bq, sb, contract_b, block_size, ragged=contract_ragged
         ).to(b.dtype)
     y = grouped_gemm(
-        (src_a.mT if ragged_k else src_a).to(out_dtype), b.to(out_dtype), offs
+        (src_a.mT if ragged_k else src_a).to(out_dtype),
+        b.to(out_dtype),
+        offs,
+        bias=None if bias is None else bias.to(out_dtype),
     )
     return y.to(out_dtype), a_snap, b_snap
 
 
 class ScaledGroupedGemmFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, offs, cfg: QuantizationConfig):
+    def forward(ctx, a, b, bias, offs, cfg: QuantizationConfig):
         out_dtype = a.dtype
         y, _, _ = quantized_grouped_gemm(
-            a, b, offs, cfg.dtype["act"], cfg.dtype["weight"], out_dtype, cfg.scaling
+            a,
+            b,
+            offs,
+            cfg.dtype["act"],
+            cfg.dtype["weight"],
+            out_dtype,
+            cfg.scaling,
+            bias=bias,
         )
         ctx.save_for_backward(a, b, offs)
         ctx.cfg = cfg
+        ctx.bias_needs_grad = ctx.needs_input_grad[2]
         return y
 
     @staticmethod
@@ -162,18 +177,25 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             out_dtype,
             cfg.scaling,
         )
-        return grad_a, grad_b, None, None
+        grad_bias = None
+        if ctx.bias_needs_grad:
+            # bias is (E,N) broadcast over the ragged row axis, so its grad sums that
+            # axis. The fp32 accumulator is the point: autograd's own index backward
+            # sums each expert's hundreds of rows in grad_y's dtype, and bf16 drifts
+            # percent-level over that many terms. Unquantized on purpose -- a plain
+            # reduction of the incoming grad has no operand worth quantizing.
+            rows = torch.arange(grad_y.shape[0], device=offs.device)
+            group_of_row = torch.searchsorted(offs, rows, right=True)
+            acc = grad_y.new_zeros(offs.shape[0], grad_y.shape[1], dtype=torch.float32)
+            acc.index_add_(0, group_of_row, grad_y.float())
+            grad_bias = acc.to(grad_y.dtype)
+        return grad_a, grad_b, grad_bias, None, None
 
 
 def quantized_expert_mm(cfg: QuantizationConfig):
 
     def expert_mm(a, b, offs, bias=None, projection=None):
-        out = ScaledGroupedGemmFn.apply(a, b, offs, cfg)
-        if bias is not None:
-            # the quantized kernels have no bias epilogue, so add it after the GEMM
-            rows = torch.arange(out.shape[0], device=offs.device)
-            out = out + bias[torch.searchsorted(offs, rows, right=True)]
-        return out
+        return ScaledGroupedGemmFn.apply(a, b, bias, offs, cfg)
 
     return expert_mm
 

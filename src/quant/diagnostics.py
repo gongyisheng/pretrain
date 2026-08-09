@@ -147,7 +147,7 @@ def _replay(record):
     a, b, offs = record["a"], record["b"], record["offs"]
     out_dtype = a.dtype
     _, snapshots["fwd.act"], snapshots["fwd.weight"] = quantized_grouped_gemm(
-        a, b, offs, fmt["act"], fmt["weight"], out_dtype, scaling, True
+        a, b, offs, fmt["act"], fmt["weight"], out_dtype, scaling, enable_snapshot=True
     )
     g = record.get("grad_out")
     if g is None:
@@ -160,10 +160,17 @@ def _replay(record):
         fmt["weight"],
         out_dtype,
         scaling,
-        True,
+        enable_snapshot=True,
     )
     _, snapshots["wgrad.act"], snapshots["wgrad.grad"] = quantized_grouped_gemm(
-        a.mT, g, offs, fmt["act"], fmt["grad_weight"], out_dtype, scaling, True
+        a.mT,
+        g,
+        offs,
+        fmt["act"],
+        fmt["grad_weight"],
+        out_dtype,
+        scaling,
+        enable_snapshot=True,
     )
     return snapshots
 

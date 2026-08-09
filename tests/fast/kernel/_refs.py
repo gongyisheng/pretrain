@@ -2,8 +2,29 @@ import torch
 import torch.nn.functional as F
 
 
-def grouped_gemm_ref(a, b, offs):
-    return torch._grouped_mm(a, b, offs=offs)
+def _add_bias(out, offs, bias):
+    """Add a (G,N) bias to a grouped output, broadcast over its row dim.
+
+    Per group slice when the output is 3D (ragged K), else per output row -- every
+    row belongs to exactly one group. Promotes to fp32, so an oracle keeps summing
+    in fp32 whatever dtype the GEMM under test returned.
+    """
+    if bias is None:
+        return out
+    out = out.float()
+    if out.ndim == 3:
+        return out + bias.float()[:, None, :]
+    rows = torch.arange(out.shape[0], device=out.device)
+    return out + bias.float()[torch.searchsorted(offs, rows, right=True)]
+
+
+def grouped_gemm_ref(a, b, offs, bias=None):
+    """torch._grouped_mm, plus the optional (G,N) bias that torch itself rejects.
+
+    Without a bias the torch dtype passes through untouched; with one the sum is
+    formed in fp32.
+    """
+    return _add_bias(torch._grouped_mm(a, b, offs=offs), offs, bias)
 
 
 def grouped_gemm_wgrad_ref(a, grad_c, offs):
@@ -80,12 +101,13 @@ def _dequant_ragged(xq, scale, offs, bs):
     return out
 
 
-def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, block_size):
+def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, block_size, bias=None):
     """fp32 oracle for the scaled grouped GEMM, all three ragged layouts.
 
     Layout follows (aq.ndim, bq.ndim), as in the kernel. `sa`/`sb` each mirror their
     operand's axis order with the contraction axis replaced by the scale-block axis.
-    `block_size` 0 means one block spanning the whole contraction segment.
+    `block_size` 0 means one block spanning the whole contraction segment. The
+    optional (E,N) `bias` is added after the scales, as the kernel's epilogue does.
 
     Deliberately restates each layout with its own loop rather than sharing the
     kernel's block bookkeeping.
@@ -93,6 +115,8 @@ def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, block_size):
     a_2d, b_2d = aq.ndim == 2, bq.ndim == 2
     bounds = list(zip([0, *offs.tolist()], offs.tolist()))
     E = offs.shape[0]
+    if bias is not None and not a_2d:
+        raise NotImplementedError("bias is not supported for the ragged-N layout")
 
     if a_2d and not b_2d:  # ragged M: (R,K) x (E,K,N) -> (R,N)
         K = aq.shape[1]
@@ -103,9 +127,7 @@ def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, block_size):
         for g, (lo, hi) in enumerate(bounds):
             if hi > lo:
                 out[lo:hi] = a[lo:hi] @ _dequant_b(bq[g], sb[g], block_size or K)
-        return out
-
-    if a_2d and b_2d:  # ragged K: (M,R) x (R,N) -> (E,M,N)
+    elif a_2d and b_2d:  # ragged K: (M,R) x (R,N) -> (E,M,N)
         a = _dequant_ragged(aq.mT, sa.mT, offs, block_size).mT  # (M,R)
         b = _dequant_ragged(bq, sb, offs, block_size)  # (R,N)
         out = torch.zeros(
@@ -114,13 +136,13 @@ def scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, block_size):
         for g, (lo, hi) in enumerate(bounds):
             if hi > lo:
                 out[g] = a[:, lo:hi] @ b[lo:hi]
-        return out
-
-    # ragged N: (E,M,K) x (K,R) -> (M,R)
-    K = aq.shape[2]
-    b = _dequant_b(bq, sb, block_size or K)  # (K,R), blocks along K
-    out = torch.zeros(aq.shape[1], bq.shape[1], device=aq.device, dtype=torch.float32)
-    for g, (lo, hi) in enumerate(bounds):
-        if hi > lo:
-            out[:, lo:hi] = _dequant_a(aq[g], sa[g], block_size or K) @ b[:, lo:hi]
-    return out
+    else:  # ragged N: (E,M,K) x (K,R) -> (M,R)
+        K = aq.shape[2]
+        b = _dequant_b(bq, sb, block_size or K)  # (K,R), blocks along K
+        out = torch.zeros(
+            aq.shape[1], bq.shape[1], device=aq.device, dtype=torch.float32
+        )
+        for g, (lo, hi) in enumerate(bounds):
+            if hi > lo:
+                out[:, lo:hi] = _dequant_a(aq[g], sa[g], block_size or K) @ b[:, lo:hi]
+    return _add_bias(out, offs, bias)

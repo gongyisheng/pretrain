@@ -52,8 +52,48 @@ def test_scaled_grouped_gemm_compiles_fullgraph():
     torch.testing.assert_close(b_c.grad.float(), b_e.grad.float(), rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.parametrize("scaling", ["rowwise", "blockwise"])
+def test_expert_mm_bias_is_additive(scaling):
+    """The fused bias must stay purely additive: same output and same grad_a/grad_b as
+    running the GEMM without it and adding it per row afterwards.
+    """
+    a, b, offs = _make([128, 0, 130, 41], K=64, N=48)
+    bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16) * 0.1
+    gy = torch.randn(a.shape[0], 48, device="cuda", dtype=torch.bfloat16)
+    group_of_row = torch.searchsorted(
+        offs, torch.arange(a.shape[0], device=offs.device), right=True
+    )
+    mm = moe.quantized_expert_mm(_cfg("fp8", scaling))
+
+    def run(fused):
+        a_ = a.clone().requires_grad_(True)
+        b_ = b.clone().requires_grad_(True)
+        bias = bias0.clone().requires_grad_(True)
+        y = (
+            mm(a_, b_, offs, bias=bias)
+            if fused
+            else mm(a_, b_, offs) + bias[group_of_row]
+        )
+        y.backward(gy)
+        return y, a_.grad, b_.grad, bias.grad
+
+    got, ref = run(True), run(False)
+    for name, g, r in zip(("y", "grad_a", "grad_b", "grad_bias"), got, ref):
+        rel = (g.float() - r.float()).norm() / r.float().norm().clamp_min(1e-12)
+        assert rel < 2e-2, (name, rel)
+
+    # grad_bias sums each group's rows. Pin it against an exact fp32 segment sum: it
+    # is a reduction over hundreds of rows, which the unfused path only approximates
+    # because autograd's index backward accumulates in grad_out's dtype (bf16).
+    exact = torch.zeros(offs.shape[0], 48, device="cuda", dtype=torch.float32)
+    exact.index_add_(0, group_of_row, gy.float())
+    rel = (got[3].float() - exact).norm() / exact.norm()
+    assert rel < 5e-3, rel
+
+
 @pytest.mark.skipif(not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9")
-def test_moe_block_quantized_forward_backward_runs():
+@pytest.mark.parametrize("bias", [False, True])
+def test_moe_block_quantized_forward_backward_runs(bias):
     import torch.nn as nn
 
     from src.kernel.gemm import grouped_gemm
@@ -75,6 +115,7 @@ def test_moe_block_quantized_forward_backward_runs():
                 intermediate_size=48,
                 n_routed_experts=4,
                 n_routed_experts_per_token=2,
+                bias=bias,
             )
 
     m = M().cuda().bfloat16()
@@ -105,6 +146,12 @@ def test_moe_block_quantized_forward_backward_runs():
     assert x.grad is not None and torch.isfinite(x.grad).all()
     assert torch.isfinite(m.mlp.expert_gate_up.grad).all()
     assert torch.isfinite(m.mlp.expert_down.grad).all()
+    if bias:
+        # the per-expert bias rides the fused epilogue, so its grad comes from the
+        # quantized Function rather than from a separate add
+        for p in (m.mlp.expert_gate_up_bias, m.mlp.expert_down_bias):
+            assert p.grad is not None and torch.isfinite(p.grad).all()
+            assert p.grad.abs().sum() > 0
 
 
 @pytest.mark.skipif(not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9")
@@ -119,11 +166,11 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
     wgrad_calls = []
     real_gemm = moe.scaled_grouped_gemm
 
-    def spy(aq, bq, sa, sb, offs_, out_dtype, block_size):
+    def spy(aq, bq, sa, sb, offs_, out_dtype, block_size, bias=None):
         # one op serves every layout now; 2D x 2D is ragged-K, i.e. the wgrad
         if bq.ndim == 2:
             wgrad_calls.append(block_size)
-        return real_gemm(aq, bq, sa, sb, offs_, out_dtype, block_size)
+        return real_gemm(aq, bq, sa, sb, offs_, out_dtype, block_size, bias=bias)
 
     monkeypatch.setattr(moe, "scaled_grouped_gemm", spy)
 
@@ -220,12 +267,12 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
     seen = {}
     real = moe.scaled_grouped_gemm
 
-    def spy(aq, gq, sa, sg, offs_, out_dtype, block_size):
+    def spy(aq, gq, sa, sg, offs_, out_dtype, block_size, bias=None):
         if gq.ndim == 2:  # ragged-K layout, i.e. the wgrad
             seen["block_size"] = block_size
             # sa arrives transposed (K,nrb) with the contraction axis last
             seen["n_scale_rows"] = sa.shape[-1]
-        return real(aq, gq, sa, sg, offs_, out_dtype, block_size)
+        return real(aq, gq, sa, sg, offs_, out_dtype, block_size, bias=bias)
 
     monkeypatch.setattr(moe, "scaled_grouped_gemm", spy)
     a_q = a.clone().requires_grad_(True)
