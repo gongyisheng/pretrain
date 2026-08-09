@@ -79,14 +79,13 @@ def _grouped_gemm_kernel(
 ):
     """Ragged grouped GEMM over any one of M, N, K, with an optional (G,N) bias.
 
-    Which dim `offs` partitions follows from the operand ranks, exactly as in
-    torch._grouped_mm. The tile grid is always (M, N) and the reduction always
-    over K, so one tile body serves all three layouts; the extent of the ragged
-    dim is passed as 0 (unused -- its bounds come from `offs`) to keep the
-    autotune key stable as that dim changes size step to step.
+    Which dim `offs` partitions follows from the operand ranks, as in
+    torch._grouped_mm. The tile grid is always (M, N) and the reduction always over
+    K, so one tile body serves all three layouts. The ragged dim's extent is passed
+    as 0 (its bounds come from `offs`) to keep the autotune key stable.
 
-    The bias is per group, broadcast over the output's row dim; torch._grouped_mm
-    rejects bias entirely, so this is a deliberate superset of its behaviour.
+    The bias is per group, broadcast over the output's row dim -- a superset of
+    torch._grouped_mm, which rejects bias.
     """
     M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
@@ -124,8 +123,8 @@ def _grouped_gemm_kernel(
         num_n_tiles = tl.cdiv(n_size, BLOCK_N)
         num_m_tiles = tl.cdiv(m_size, BLOCK_M)
         group_tile_count = num_m_tiles * num_n_tiles
-        # process every tile of group g that this program owns. An empty ragged M or
-        # N group has no tiles; an empty ragged K group still stores its zero slice.
+        # an empty ragged M/N group has no tiles; an empty ragged K group still
+        # stores its zero slice
         while global_tile_idx < group_tile_start + group_tile_count:
             group_tile_idx = global_tile_idx - group_tile_start
             tile_m = group_tile_idx // num_n_tiles
@@ -201,8 +200,8 @@ def _grouped_gemm(
         M, N, K = a.shape[1], 0, a.shape[2]
         output_size = (M, b.shape[1])
 
-    # allocate like torch._grouped_mm: last dim padded to a 16-byte boundary, so the
-    # output is itself a legal torch._grouped_mm operand when backward feeds it back
+    # pad the last dim to 16 bytes like torch._grouped_mm, so the output is itself a
+    # legal torch._grouped_mm operand when backward feeds it back
     align = 16 // a.dtype.itemsize
     padded = (output_size[-1] + align - 1) // align * align
     stride = (M * padded, padded, 1) if len(output_size) == 3 else (padded, 1)
@@ -249,15 +248,15 @@ def _grouped_gemm_backward(ctx, grad_c):
     a, b, offs = ctx.saved_tensors
     grad_bias = None
     if ctx.bias_needs_grad:
-        # bias is (G,N) broadcast over the output's row dim, so its grad sums that
-        # dim. Both branches accumulate in fp32: over thousands of rows a bf16
+        # bias is broadcast over the output's row dim, so its grad sums that dim.
+        # Both branches accumulate in fp32: over thousands of rows a bf16
         # accumulator drifts percent-level.
         if grad_c.ndim == 3:
             grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
         else:
-            # a segmented column-sum IS the ragged-K layout, with a row of ones as
-            # the left operand -- reuses the kernel's fp32 accumulator and reads
-            # grad_c once, where index_add_ would need an fp32 copy of it
+            # a segmented column-sum IS the ragged-K layout with a row of ones on the
+            # left -- reuses the kernel's fp32 accumulator and reads grad_c once,
+            # where index_add_ would need an fp32 copy of it
             ones = grad_c.new_ones(1, grad_c.shape[0])
             grad_bias = _grouped_gemm(ones, grad_c, offs).squeeze(1)
     return (
@@ -289,12 +288,12 @@ def grouped_gemm(
         (G,M,K) x (K,N) -> (M,N)    ragged N
 
     `bias` is an optional (G,N) tensor broadcast over the output's row dim, fused
-    into the Triton epilogue. It goes beyond torch._grouped_mm, which rejects bias,
-    so `impl="torch"` adds it separately and unfused.
+    into the Triton epilogue. torch._grouped_mm rejects bias, so `impl="torch"` adds
+    it separately and unfused.
 
-    Note `impl="torch"` additionally requires the non-unit stride of the last two
-    dims to be a multiple of 16 bytes, which the Triton path does not — for the
-    ragged-K layout with a contiguous source that means K % 8 == 0 in bf16.
+    `impl="torch"` also requires the non-unit stride of the last two dims to be a
+    multiple of 16 bytes, which the Triton path does not — for the ragged-K layout
+    with a contiguous source that means K % 8 == 0 in bf16.
     """
     if impl not in ("auto", "triton", "torch"):
         raise ValueError(f"impl must be auto|triton|torch, got {impl!r}")
@@ -369,11 +368,9 @@ _SCALED_CONFIGS = [
     for (bm, bn, w, s) in _SCALED_CFG
 ]
 
-# _CONFIGS plus BLOCK_K=128 entries. The pre-merge forward derived
-# BLOCK_K = min(128, next_pow2(K)) for tensorwise/rowwise, and _CONFIGS tops out at
-# 64 -- without these the forward would lose its 128-wide reduction on the K=512-1408
-# MoE shapes. Kept separate from _CONFIGS so the bf16 grouped GEMM's tuning space
-# does not change.
+# _CONFIGS plus BLOCK_K=128 entries: _CONFIGS tops out at 64, which would cost the
+# forward its 128-wide reduction on the K=512-1408 MoE shapes. Kept separate so the
+# bf16 grouped GEMM's tuning space does not change.
 _SCALED_GROUPED_CONFIGS = _CONFIGS + [
     triton.Config(
         {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": 128}, num_warps=w, num_stages=s
@@ -448,8 +445,8 @@ def _scaled_gemm_kernel(
             other=0.0,
         )
         acc += sa[:, None] * block_acc * sb[None, :]
-    # on acc, not block_acc: the bias is unscaled and belongs to the whole row, so
-    # folding it into a per-scale-block partial would scale it and add it once per block
+    # on acc, not block_acc: the bias is unscaled, so folding it into a per-block
+    # partial would scale it and add it once per block
     if HAS_BIAS:
         bias = tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)
         acc += bias[None, :]
@@ -471,18 +468,18 @@ def scaled_gemm(
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
 
-    `block_size` follows the same convention as scaled_grouped_gemm: 0 means one
-    scale block spanning the whole contraction. The branch tests `n_scale_blocks`
-    rather than that sentinel because a blockwise width >= K also collapses to one
-    block, and would otherwise set a BLOCK_K that tl.arange cannot take.
+    `block_size` 0 means one scale block spanning the whole contraction. The branch
+    below tests `n_scale_blocks` rather than that sentinel because a blockwise width
+    >= K also collapses to one block, and would otherwise set a BLOCK_K that
+    tl.arange cannot take.
 
     `bias` is an optional (N,) tensor broadcast over the rows, added to the fp32
     accumulator in the epilogue so it never passes through the scales.
 
-    M and K come from `aq`, N from `bq` and the scale-block count from `sa`; every
-    other operand is only read through those, so the asserts below are what stands
-    between a mismatch and an out-of-bounds load. Device is not among them --
-    Triton's own pointer check already rejects an operand on another device.
+    Shapes come from `aq`, `bq` and `sa` alone; every other operand is read through
+    those, so the asserts below are what stands between a mismatch and an
+    out-of-bounds load. Device is not among them -- Triton's pointer check already
+    rejects an operand on another device.
     """
     M, K = aq.shape
     N = bq.shape[1]
@@ -495,7 +492,7 @@ def scaled_gemm(
     assert aq.dtype.is_floating_point == bq.dtype.is_floating_point, (
         f"aq {aq.dtype} and bq {bq.dtype} are not the same family"
     )
-    # a short sa would leave the tail of K out of the block loop entirely, silently
+    # a short sa would silently leave the tail of K out of the block loop
     expected_blocks = triton.cdiv(K, block_size) if block_size else 1
     assert n_scale_blocks == expected_blocks, (
         f"sa has {n_scale_blocks} scale blocks, block_size {block_size} over K={K} "
@@ -510,8 +507,8 @@ def scaled_gemm(
             f"bias must be (N,)=({N},), got {tuple(bias.shape)}"
         )
     if n_scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
-        # it becomes BLOCK_K below, which tl.arange needs a power of two and tl.dot
-        # needs >= 16; unchecked, both fail inside Triton pointing at unrelated lines
+        # it becomes BLOCK_K below: tl.arange needs a power of two, tl.dot needs >= 16;
+        # unchecked, both fail inside Triton pointing at unrelated lines
         raise ValueError(
             f"block_size must be a power of two >= 16 when it tiles K, got {block_size}"
         )
@@ -603,18 +600,17 @@ def _scaled_grouped_gemm_kernel(
 ):
     """Ragged scaled grouped GEMM over any one of M, N, K, with block scaling.
 
-    Same layout model as _grouped_gemm_kernel: the tile grid is (M, N) and the
-    reduction is over K for every layout, so one tile body serves all three. The
-    quantized addition is `scale_block_idx`, the index along the contraction axis --
-    a global index when the contraction is dense, and a per-group re-tiled index
-    carried across the group loop when the contraction is itself ragged.
+    Same layout model as _grouped_gemm_kernel. The quantized addition is
+    `scale_block_idx`, the index along the contraction axis -- global when the
+    contraction is dense, per-group re-tiled and carried across the group loop when
+    the contraction is itself ragged.
 
-    SCALE_BLOCK_SIZE is the scale block's width along the contraction axis; 0 means one
-    block spanning the whole segment. row/tensorwise are that case, and cannot state
-    the width numerically instead: when the contraction is the ragged axis the segment
-    length is per group and only known at runtime, while SCALE_BLOCK_SIZE is a constexpr.
-    An empty group also owns one scale row, which cdiv(0, width) would skip, leaving
-    the cursor a row behind the scale buffer for every group after it.
+    SCALE_BLOCK_SIZE is the scale block's width along the contraction axis; 0 means
+    one block spanning the whole segment. row/tensorwise are that case and cannot
+    state a width instead: a ragged contraction has a per-group segment length known
+    only at runtime, while SCALE_BLOCK_SIZE is a constexpr. An empty group also owns
+    one scale row, which cdiv(0, width) would skip, leaving the cursor a row behind
+    for every group after it.
 
     The optional bias is per group, broadcast over the output's row dim, and added
     to the fp32 accumulator after the scales so it never passes through them.
@@ -649,8 +645,8 @@ def _scaled_grouped_gemm_kernel(
             k_start = k_end
             k_end = tl.load(offs_ptr + g)
             k_size = k_end - k_start
-            # blocks re-tile inside each group, so the cursor carries across g -- the
-            # group loop already visits g in order, so no prefix scan is needed
+            # blocks re-tile inside each group, so the cursor carries across g; the
+            # group loop visits g in order, so no prefix scan is needed
             scale_block_start = scale_block_end
             scale_block_end = scale_block_start + (
                 1 if SCALE_BLOCK_SIZE == 0 else tl.cdiv(k_size, SCALE_BLOCK_SIZE)
@@ -688,8 +684,8 @@ def _scaled_grouped_gemm_kernel(
                 # one scale block: accumulate in fp32, then apply both scales once
                 block_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
                 # a computed trip count rather than `while k < r1`: Triton's software
-                # pipeliner runs on scf.for, so a while loop here serializes the global
-                # loads instead of overlapping them with the dots
+                # pipeliner runs on scf.for, so a while loop would serialize the
+                # global loads instead of overlapping them with the dots
                 for step in range(tl.cdiv(r1 - r0, BLOCK_K)):
                     offs_k = r0 + step * BLOCK_K + tl.arange(0, BLOCK_K)  # absolute
                     k_mask = offs_k < r1
@@ -729,9 +725,8 @@ def _scaled_grouped_gemm_kernel(
                     other=0.0,
                 )
                 acc += sa[:, None] * block_acc * sb[None, :]
-            # on acc, not block_acc: the bias is unscaled and belongs to the whole
-            # row, so folding it into a per-scale-block partial would scale it and
-            # add it once per block
+            # on acc, not block_acc: the bias is unscaled, so folding it into a
+            # per-block partial would scale it and add it once per block
             if HAS_BIAS:
                 bias_ptrs = (
                     bias_ptr + g * stride_biasg + (n_start + offs_n) * stride_biasn
@@ -771,7 +766,7 @@ def scaled_grouped_gemm(
         (E,M,K) x (K,N) -> (M,N)    ragged N
 
     `sa`/`sb` mirror their operand's axis order with the contraction axis replaced by
-    the scale-block axis, so transposing an operand transposes its scale with it.
+    the scale-block axis, so transposing an operand transposes its scale too.
     `block_size` 0 means one scale block spanning the whole contraction segment.
 
     `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
