@@ -478,10 +478,43 @@ def scaled_gemm(
 
     `bias` is an optional (N,) tensor broadcast over the rows, added to the fp32
     accumulator in the epilogue so it never passes through the scales.
+
+    M and K come from `aq`, N from `bq` and the scale-block count from `sa`; every
+    other operand is only read through those, so the asserts below are what stands
+    between a mismatch and an out-of-bounds load. Device is not among them --
+    Triton's own pointer check already rejects an operand on another device.
     """
     M, K = aq.shape
     N = bq.shape[1]
+    assert sa.ndim == 2 and sb.ndim == 2, (
+        f"sa/sb must be 2-D, got {sa.ndim}-D and {sb.ndim}-D"
+    )
     n_scale_blocks = sa.shape[1]
+    assert bq.shape[0] == K, f"contraction mismatch: aq {K}, bq {bq.shape[0]}"
+    # e4m3 x e5m2 is deliberately allowed, fp8 x int8 is not: tl.dot needs one family
+    assert aq.dtype.is_floating_point == bq.dtype.is_floating_point, (
+        f"aq {aq.dtype} and bq {bq.dtype} are not the same family"
+    )
+    # a short sa would leave the tail of K out of the block loop entirely, silently
+    expected_blocks = triton.cdiv(K, block_size) if block_size else 1
+    assert n_scale_blocks == expected_blocks, (
+        f"sa has {n_scale_blocks} scale blocks, block_size {block_size} over K={K} "
+        f"needs {expected_blocks}"
+    )
+    assert sa.shape[0] == M and sb.shape[0] == n_scale_blocks and sb.shape[1] == N, (
+        f"scales must be sa (M,B)=({M},{n_scale_blocks}) and "
+        f"sb (B,N)=({n_scale_blocks},{N}), got {tuple(sa.shape)} and {tuple(sb.shape)}"
+    )
+    if bias is not None:
+        assert bias.ndim == 1 and bias.shape[0] == N, (
+            f"bias must be (N,)=({N},), got {tuple(bias.shape)}"
+        )
+    if n_scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
+        # it becomes BLOCK_K below, which tl.arange needs a power of two and tl.dot
+        # needs >= 16; unchecked, both fail inside Triton pointing at unrelated lines
+        raise ValueError(
+            f"block_size must be a power of two >= 16 when it tiles K, got {block_size}"
+        )
     if n_scale_blocks > 1:
         SCALE_BLOCK_SIZE, BLOCK_K = block_size, block_size
     else:

@@ -484,6 +484,96 @@ def test_bench_scaled_gemm_importable():
 
 
 # ---------------------------------------------------------------------------
+# Scaled GEMM: input validation
+# ---------------------------------------------------------------------------
+
+_VM, _VK, _VN, _VBS = 64, 256, 96, 128  # K / block_size -> 2 scale blocks
+
+
+def _valid_scaled_args(bs=_VBS):
+    """Consistent (aq, bq, sa, sb, bias), for a case below to break one way."""
+    torch.manual_seed(0)
+    a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
+    aq, sa = quantize_operand(a, -1, "blockwise", bs, **_fp8_kw(E4M3))
+    bq, sb = quantize_operand(b, 0, "blockwise", bs, **_fp8_kw(E4M3))
+    return aq, bq, sa, sb, torch.randn(_VN, device="cuda", dtype=torch.bfloat16)
+
+
+# Each case breaks exactly one invariant and leaves the rest consistent, so the named
+# check is the one that has to fire. Untouched, all of them index out of bounds: the
+# kernel takes M/K from aq, N from bq and the block count from sa, and trusts every
+# other operand to agree.
+_MALFORMED = {
+    "contraction": lambda aq, bq, sa, sb, bias: (aq, bq[: _VK // 2], sa, sb, bias),
+    "sa_rows": lambda aq, bq, sa, sb, bias: (aq, bq, sa[: _VM // 2], sb, bias),
+    "sa_1d": lambda aq, bq, sa, sb, bias: (aq, bq, sa[:, 0], sb, bias),
+    "sb_cols": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb[:, : _VN // 2], bias),
+    "sb_blocks": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb[:1], bias),
+    "sb_1d": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb[0], bias),
+    # sa and sb agree with each other but not with block_size: the block loop then
+    # covers 1 x 128 of K instead of 256, dropping the tail with no error at all
+    "scale_blocks_vs_block_size": lambda aq, bq, sa, sb, bias: (
+        aq,
+        bq,
+        sa[:, :1],
+        sb[:1],
+        bias,
+    ),
+    "bias_len": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb, bias[: _VN // 2]),
+    "bias_2d": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb, bias[None]),
+    "cross_family_dtype": lambda aq, bq, sa, sb, bias: (
+        aq,
+        bq.to(torch.int8),
+        sa,
+        sb,
+        bias,
+    ),
+}
+# no device case: Triton's own pointer check already raises ValueError for an operand
+# on another device, whether that is the CPU or a second GPU
+
+
+@pytest.mark.parametrize("case", sorted(_MALFORMED))
+def test_scaled_gemm_rejects_malformed_inputs(case):
+    """Reject on the host rather than reading out of bounds in the kernel.
+
+    Left unchecked these do not raise: a short sb or a wrong-length bias returns
+    finite garbage and a bad contraction returns nan, so a training run keeps going
+    on numbers that mean nothing.
+    """
+    aq, bq, sa, sb, bias = _MALFORMED[case](*_valid_scaled_args())
+    with pytest.raises((ValueError, AssertionError)):
+        scaled_gemm(aq, bq, sa, sb, torch.float32, _VBS, bias=bias)
+
+
+@pytest.mark.parametrize("bs", [8, 96])
+def test_scaled_gemm_rejects_unusable_block_size(bs):
+    """block_size becomes BLOCK_K, which tl.arange needs a power of two and tl.dot
+    needs >= 16. It comes straight from the scaling config, and unchecked it fails
+    deep inside Triton's compiler pointing at a line unrelated to the cause.
+    """
+    a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
+    aq, sa = quantize_operand(a, -1, "blockwise", bs, **_fp8_kw(E4M3))
+    bq, sb = quantize_operand(b, 0, "blockwise", bs, **_fp8_kw(E4M3))
+    with pytest.raises(ValueError):
+        scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
+
+
+def test_scaled_gemm_accepts_non_pow2_block_size_spanning_k():
+    """Guards the check above against over-rejecting: a block_size >= K collapses to
+    a single scale block, where it never becomes BLOCK_K and so needs no power of two.
+    """
+    a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
+    aq, sa = quantize_operand(a, -1, "blockwise", _VK + 44, **_fp8_kw(E4M3))
+    bq, sb = quantize_operand(b, 0, "blockwise", _VK + 44, **_fp8_kw(E4M3))
+    assert sa.shape[1] == 1
+    assert torch.isfinite(scaled_gemm(aq, bq, sa, sb, torch.float32, _VK + 44)).all()
+
+
+# ---------------------------------------------------------------------------
 # Scaled grouped GEMM: fp8/int8 ragged expert matmul
 # ---------------------------------------------------------------------------
 
