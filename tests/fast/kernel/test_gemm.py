@@ -371,6 +371,9 @@ def test_dispatch_triton_rejects_non_bf16():
     [
         ("tensorwise", 0),
         ("rowwise", 0),
+        # 16 is the finest tiling width; BLOCK_K floors at 32, so it exercises the
+        # scale-block mask that keeps a 32-wide tile inside a 16-wide block.
+        ("blockwise", 16),
         ("blockwise", 32),
         ("blockwise", 64),
         ("blockwise", 128),
@@ -655,7 +658,13 @@ def test_scaled_grouped_gemm_oracle_agrees_with_dequant():
     # 48 is deliberately not a multiple of any BLOCK_K: the kernel masks the
     # reduction to the scale block's end rather than clamping BLOCK_K to it, so
     # correctness must not depend on which config autotune picks.
-    [("rowwise", 0), ("tensorwise", 0), ("blockwise", 32), ("blockwise", 48)],
+    [
+        ("rowwise", 0),
+        ("tensorwise", 0),
+        ("blockwise", 16),
+        ("blockwise", 32),
+        ("blockwise", 48),
+    ],
 )
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
 def test_scaled_grouped_layouts_match_oracle(layout, gran, bs, fmt):

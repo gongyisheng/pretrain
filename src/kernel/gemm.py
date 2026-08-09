@@ -423,12 +423,16 @@ def _scaled_gemm_kernel(
     n_mask = offs_n < N
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for scale_block_idx in range(n_scale_blocks):
+        # BLOCK_K floors at 32 (fp8/int8 tl.dot rejects K < 32), so a 16-wide scale
+        # block runs one 32-wide tile; block_end, not the trip count, keeps the extra
+        # lanes out of this block's scale.
+        block_end = tl.minimum(K, scale_block_idx * SCALE_BLOCK_SIZE + SCALE_BLOCK_SIZE)
         block_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k_in_block in range(0, SCALE_BLOCK_SIZE, BLOCK_K):
             offs_k = (
                 scale_block_idx * SCALE_BLOCK_SIZE + k_in_block + tl.arange(0, BLOCK_K)
             )
-            k_mask = offs_k < K
+            k_mask = offs_k < block_end
             a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
             b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
             a = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
@@ -507,13 +511,16 @@ def scaled_gemm(
             f"bias must be (N,)=({N},), got {tuple(bias.shape)}"
         )
     if n_scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
-        # it becomes BLOCK_K below: tl.arange needs a power of two, tl.dot needs >= 16;
-        # unchecked, both fail inside Triton pointing at unrelated lines
+        # block_size is the scale-block width; it also drives BLOCK_K below, where
+        # tl.arange needs a power of two. Unchecked, it fails inside Triton pointing
+        # at an unrelated line.
         raise ValueError(
             f"block_size must be a power of two >= 16 when it tiles K, got {block_size}"
         )
     if n_scale_blocks > 1:
-        SCALE_BLOCK_SIZE, BLOCK_K = block_size, block_size
+        # fp8/int8 tl.dot rejects K < 32, so a 16-wide scale block runs a 32-wide
+        # BLOCK_K masked back to its width in the kernel (block_end).
+        SCALE_BLOCK_SIZE, BLOCK_K = block_size, max(32, block_size)
     else:
         SCALE_BLOCK_SIZE, BLOCK_K = K, min(128, triton.next_power_of_2(K))
     c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
