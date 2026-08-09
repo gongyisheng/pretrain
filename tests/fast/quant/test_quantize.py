@@ -314,6 +314,15 @@ def test_dequantize_operand_partial_block_uses_given_block_size():
     assert torch.allclose(deq, _manual_dequant(x, -1, 32, **_fp8_kw()), atol=1e-6)
 
 
+def test_dequantize_operand_rejects_a_contraction_outside_the_last_two_dims():
+    # contract_dim is rank-relative, so 0 on a 3D operand is dim -3 -- outside what the
+    # tiling helpers split. It must raise, not tile the wrong axis at a plausible shape.
+    xq = torch.ones(3, 3, 4, dtype=torch.int8)
+    scale = torch.arange(1.0, 13.0).reshape(1, 3, 4)
+    with pytest.raises(ValueError, match="dim must be -2 or -1"):
+        dequantize_operand(xq, scale, 0, 0)
+
+
 # --- ragged contraction axis (wgrad): per-expert scales ---
 
 

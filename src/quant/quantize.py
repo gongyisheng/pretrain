@@ -80,12 +80,22 @@ def _compute_codes(xf: torch.Tensor, scale: torch.Tensor, fmt: str) -> torch.Ten
     return xq.clamp(-qmax, qmax).to(str_to_dtype(fmt))
 
 
+def _check_tile_dim(dim):
+    """The tiling helpers split one of the last two dims; anything else is a bug."""
+    if dim not in (-2, -1):
+        raise ValueError(f"dim must be -2 or -1, got {dim}")
+
+
 def _tile(a, dim, block_size):
     """View `dim` as (n_blocks, block_size), zero-padding it to a multiple.
 
     The tile axis lands at -1 for `dim == -1` and -2 for `dim == -2`. Both are free
     views on contiguous input -- splitting a dim never transposes.
     """
+    # `dim` is rank-relative, so a caller normalizing an absolute contraction axis can
+    # land outside the last two dims. Without this the -2 branch would silently claim
+    # it and mis-tile at the right shape.
+    _check_tile_dim(dim)
     length = a.shape[dim]
     n_blocks = (length + block_size - 1) // block_size
     pad = n_blocks * block_size - length
@@ -100,6 +110,7 @@ def _tile(a, dim, block_size):
 
 def _untile(a, dim, length):
     """Inverse of `_tile`: fold the tile axis back in and drop the padding."""
+    _check_tile_dim(dim)
     if dim == -1:
         return a.flatten(-2).narrow(-1, 0, length).contiguous()
     return a.flatten(-3, -2).narrow(-2, 0, length).contiguous()
