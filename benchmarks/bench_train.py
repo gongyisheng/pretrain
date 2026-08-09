@@ -46,6 +46,7 @@ def run_benchmark(
     cuda_profiler=False,
     enable_torch_compile=True,
     emit_nvtx=False,
+    extra_overrides=(),
 ):
     """Run a training throughput benchmark using the Trainer.
 
@@ -67,7 +68,7 @@ def run_benchmark(
         f"training.checkpoint_every={total_steps + 1}",
         "logging.log_every=1",
         f"training.enable_torch_compile={enable_torch_compile}",
-    ]
+    ] + list(extra_overrides)
 
     config = load_config(config_path, overrides=overrides)
     trainer = Trainer(config, wandb_enabled=False)
@@ -189,6 +190,15 @@ def main():
         "op (forward aten::X vs backward XBackward0) and input shapes.",
     )
     parser.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra config override, repeatable. Appended after the benchmark's own "
+        "overrides, so it wins. Avoid with --cuda-profiler: the profiler bracket "
+        "keys off the per-step log hook and assumes log_every=1.",
+    )
+    parser.add_argument(
         "--save", type=str, default=None, help="Save results JSON to this path"
     )
     args = parser.parse_args()
@@ -203,6 +213,7 @@ def main():
         cuda_profiler=args.cuda_profiler,
         enable_torch_compile=not args.disable_torch_compile,
         emit_nvtx=args.emit_nvtx,
+        extra_overrides=args.override,
     )
 
     if args.save:

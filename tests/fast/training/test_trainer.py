@@ -250,3 +250,36 @@ def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
         )
         trainer.train()
         assert any(k.startswith("quant/") for metrics in logged for k in metrics)
+
+
+@fp8_only
+def test_quant_diagnostics_do_not_change_training(mock_memmap):
+    """The diagnostic pass runs its own fwd/bwd; the trained loss must not move.
+
+    Dropout is on so the training forward consumes RNG — without the diagnostic's
+    RNG restore its own forward advances the stream and the next step's loss moves.
+    Needs >2 steps: loss logging is deferred one step (losses[0] is always 0.0), so
+    a run of 2 only ever reports step 1's loss, which precedes every diagnostic.
+    """
+    losses = {}
+    for log_quant_metrics in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed_data(mock_memmap, tmp)
+            cfg = _tiny_fp8_config(tmp)
+            cfg.model.dropout_embd = 0.1
+            cfg.training.max_steps = 4
+            cfg.logging.log_quant_metrics = log_quant_metrics
+            cfg.logging.log_every = 1
+            trainer = Trainer(cfg, wandb_enabled=False)
+            logged = []
+            trainer.logger.register_on_log_hook(
+                lambda step, metrics: logged.append(metrics)
+            )
+            trainer.train()
+            losses[log_quant_metrics] = [
+                m["train/loss"] for m in logged if "train/loss" in m
+            ]
+    # guard the comparison: 4 entries, and the post-diagnostic ones are real losses
+    assert len(losses[False]) == cfg.training.max_steps
+    assert all(loss > 0 for loss in losses[False][2:])
+    assert losses[True] == losses[False]
