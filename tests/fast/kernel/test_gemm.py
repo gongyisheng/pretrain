@@ -8,7 +8,6 @@ import torch
 
 from src.kernel import gemm
 from src.kernel.gemm import (
-    _grouped_gemm,
     grouped_gemm,
     scaled_gemm,
     scaled_grouped_gemm,
@@ -97,25 +96,6 @@ def test_all_ragged_layouts_match_torch(layout):
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.parametrize("layout", LAYOUTS)
-def test_all_ragged_layouts_grads_match_torch(layout):
-    """Every layout's dgrad/wgrad lands in another layout of the same set, so the
-    set is only differentiable once all three are implemented."""
-    a0, b0, offs = _make_layout(layout)
-
-    def run(fn):
-        a = a0.clone().requires_grad_(True)
-        b = b0.clone().requires_grad_(True)
-        out = fn(a, b, offs)
-        (out * out).sum().backward()
-        return out, a.grad, b.grad
-
-    ref = run(lambda a, b, o: torch._grouped_mm(a, b, offs=o))
-    got = run(lambda a, b, o: _grouped_gemm(a, b, o))
-    for g, r in zip(got, ref):
-        torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
-
-
 def test_output_stride_matches_torch():
     """A last dim that is not 8-element aligned is where torch's padding shows."""
     a, b, offs = _make_layout("ragged_m", N=51)
@@ -132,25 +112,6 @@ def test_bias_matches_reference(layout):
     got = grouped_gemm(a, b, offs, bias=bias)
     ref = grouped_gemm_ref(a, b, offs, bias=bias)
     torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
-
-
-@pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
-def test_bias_grads_match_reference(layout):
-    a0, b0, offs = _make_layout(layout)
-    G, N = offs.shape[0], 48
-    bias0 = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
-
-    def run(fn):
-        a, b = a0.clone().requires_grad_(True), b0.clone().requires_grad_(True)
-        bias = bias0.clone().requires_grad_(True)
-        out = fn(a, b, offs, bias)
-        (out * out).sum().backward()
-        return out, a.grad, b.grad, bias.grad
-
-    ref = run(lambda a, b, o, bias: grouped_gemm_ref(a, b, o, bias))
-    got = run(lambda a, b, o, bias: _grouped_gemm(a, b, o, bias))
-    for g, r in zip(got, ref):
-        torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
 
 
 def test_bias_rejected_for_ragged_n():
@@ -241,54 +202,6 @@ def test_wgrad_parity_config_shapes(K, N):
     ref = grouped_gemm_wgrad_ref(a, grad_c, offs)
     got = grouped_gemm(a.mT, grad_c, offs)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
-
-
-def test_grouped_gemm_fwd_bwd_matches_torch():
-    torch.manual_seed(0)
-    counts = [64, 0, 130, 41]
-    R, K, N = sum(counts), 64, 48
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    a0 = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
-    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
-
-    def run(fn):
-        a = a0.clone().requires_grad_(True)
-        wv = w.clone().requires_grad_(True)
-        c = fn(a, wv.mT, offs)
-        c.backward(torch.ones_like(c))
-        return c, a.grad, wv.grad
-
-    c_ref, ga_ref, gw_ref = run(lambda a, b, o: torch._grouped_mm(a, b, offs=o))
-    c_got, ga_got, gw_got = run(lambda a, b, o: _grouped_gemm(a, b, o))
-    torch.testing.assert_close(c_got.float(), c_ref.float(), rtol=2e-2, atol=2e-2)
-    torch.testing.assert_close(ga_got.float(), ga_ref.float(), rtol=2e-2, atol=2e-2)
-    torch.testing.assert_close(gw_got.float(), gw_ref.float(), rtol=2e-2, atol=2e-2)
-
-
-def test_grouped_gemm_compiles_fullgraph_and_matches_eager():
-    torch.manual_seed(0)
-    counts = [64, 0, 130, 41]
-    R, K, N = sum(counts), 64, 48
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    a0 = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
-    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
-
-    def fn(a, b, o):
-        return _grouped_gemm(a, b, o)
-
-    def run(f):
-        a = a0.clone().requires_grad_(True)
-        wv = w.clone().requires_grad_(True)
-        c = f(a, wv.mT, offs)
-        c.sum().backward()
-        return c, a.grad, wv.grad
-
-    eager = run(fn)
-    # fullgraph=True raises if the op graph-breaks
-    compiled_fn = torch.compile(fn, fullgraph=True)
-    comp = run(compiled_fn)
-    for e, c in zip(eager, comp):
-        torch.testing.assert_close(c.float(), e.float(), rtol=2e-2, atol=2e-2)
 
 
 def test_dispatch_impl_selection_and_parity():

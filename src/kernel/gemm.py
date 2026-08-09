@@ -233,42 +233,6 @@ def _grouped_gemm(
     return c
 
 
-def _grouped_gemm_setup_context(ctx, inputs, output):
-    a, b, offs, _bias = inputs
-    ctx.save_for_backward(a, b, offs)
-    ctx.bias_needs_grad = ctx.needs_input_grad[3]
-
-
-def _grouped_gemm_backward(ctx, grad_c):
-    # each layout's dgrad/wgrad lands in another layout of the same set, so one
-    # formula serves all three
-    a, b, offs = ctx.saved_tensors
-    grad_bias = None
-    if ctx.bias_needs_grad:
-        # bias is broadcast over the output's row dim, so its grad sums that dim.
-        # Both branches accumulate in fp32: over thousands of rows a bf16
-        # accumulator drifts percent-level.
-        if grad_c.ndim == 3:
-            grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
-        else:
-            # a segmented column-sum IS the ragged-K layout with a row of ones on the
-            # left -- reuses the kernel's fp32 accumulator and reads grad_c once,
-            # where index_add_ would need an fp32 copy of it
-            ones = grad_c.new_ones(1, grad_c.shape[0])
-            grad_bias = _grouped_gemm(ones, grad_c, offs).squeeze(1)
-    return (
-        _grouped_gemm(grad_c, b.mT, offs),
-        _grouped_gemm(a.mT, grad_c, offs),
-        None,
-        grad_bias,
-    )
-
-
-_grouped_gemm.register_autograd(
-    _grouped_gemm_backward, setup_context=_grouped_gemm_setup_context
-)
-
-
 def grouped_gemm(
     a: torch.Tensor,
     b: torch.Tensor,

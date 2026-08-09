@@ -168,7 +168,7 @@ def _moe_model():
 
 @fp8_only
 def test_moe_experts_get_quantized_expert_mm():
-    from src.kernel.gemm import grouped_gemm
+    from src.layers.mlp import grouped_gemm_fn
 
     m = _moe_model()
     apply_quantization(
@@ -184,7 +184,7 @@ def test_moe_experts_get_quantized_expert_mm():
     # routed experts stay Parameters (no module swap)
     assert isinstance(m.mlp.expert_gate_up, torch.nn.Parameter)
     # expert_mm was replaced with a quantized callable
-    assert m.mlp.expert_mm is not grouped_gemm
+    assert m.mlp.expert_mm is not grouped_gemm_fn
 
 
 @fp8_only
@@ -207,7 +207,7 @@ def test_router_gate_stays_fp32_linear():
 
 @fp8_only
 def test_moe_expert_mm_default_when_excluded():
-    from src.kernel.gemm import grouped_gemm
+    from src.layers.mlp import grouped_gemm_fn
 
     m = _moe_model()
     apply_quantization(
@@ -221,7 +221,7 @@ def test_moe_expert_mm_default_when_excluded():
             }
         ),
     )
-    assert m.mlp.expert_mm is grouped_gemm
+    assert m.mlp.expert_mm is grouped_gemm_fn
 
 
 # --- int8-family config + converter (migrated from the old test_int8.py; int8

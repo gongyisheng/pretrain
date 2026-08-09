@@ -5,6 +5,47 @@ from src.kernel.gemm import grouped_gemm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
+class GroupedGemmFn(torch.autograd.Function):
+    """Autograd for the forward-only bf16 grouped GEMM. Each layout's dgrad/wgrad
+    lands in another layout of the same set, so one formula serves all three. Kept
+    here, not in the kernel, so the kernel stays forward-only -- mirrors how
+    ScaledGroupedGemmFn wraps the scaled grouped GEMM in the quant layer.
+    """
+
+    @staticmethod
+    def forward(ctx, a, b, bias, offs):
+        y = grouped_gemm(a, b, offs, bias=bias)
+        ctx.save_for_backward(a, b, offs)
+        ctx.bias_needs_grad = ctx.needs_input_grad[2]
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_c):
+        a, b, offs = ctx.saved_tensors
+        grad_bias = None
+        if ctx.bias_needs_grad:
+            # bias is broadcast over the output's row dim, so its grad sums that dim,
+            # in fp32: over thousands of rows a bf16 accumulator drifts percent-level.
+            if grad_c.ndim == 3:
+                grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
+            else:
+                # a segmented column-sum IS the ragged-K layout with a row of ones on
+                # the left -- reuses the kernel's fp32 accumulator and reads grad_c
+                # once, where index_add_ would need an fp32 copy of it
+                ones = grad_c.new_ones(1, grad_c.shape[0])
+                grad_bias = grouped_gemm(ones, grad_c, offs).squeeze(1)
+        return (
+            grouped_gemm(grad_c, b.mT, offs),
+            grouped_gemm(a.mT, grad_c, offs),
+            grad_bias,
+            None,
+        )
+
+
+def grouped_gemm_fn(a, b, offs, bias=None, projection=None):
+    return GroupedGemmFn.apply(a, b, bias, offs)
+
+
 def grouped_mlp(
     x: torch.Tensor,
     w_in: torch.Tensor,
@@ -14,7 +55,7 @@ def grouped_mlp(
     gated: bool,
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
-    expert_mm=grouped_gemm,
+    expert_mm=grouped_gemm_fn,
 ) -> torch.Tensor:
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
@@ -381,7 +422,7 @@ class SparseMoEBlock(nn.Module):
 
         # Pluggable expert GEMM seam (a, b, offs, projection)
         # quant converter swaps in a quantized callable
-        self.expert_mm = grouped_gemm
+        self.expert_mm = grouped_gemm_fn
 
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)

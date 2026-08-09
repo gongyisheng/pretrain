@@ -192,7 +192,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         return grad_a, grad_b, grad_bias, None, None
 
 
-def quantized_expert_mm(cfg: QuantizationConfig):
+def scaled_grouped_gemm_fn(cfg: QuantizationConfig):
 
     def expert_mm(a, b, offs, bias=None, projection=None):
         return ScaledGroupedGemmFn.apply(a, b, bias, offs, cfg)
@@ -208,5 +208,5 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
-        q.expert_mm = quantized_expert_mm(quantization_config)
+        q.expert_mm = scaled_grouped_gemm_fn(quantization_config)
         return q
