@@ -9,7 +9,18 @@ from torch._library.triton import triton_op, wrap_triton
 # Config + helpers
 # ---------------------------------------------------------------------------
 
-_CFG = [
+
+@functools.lru_cache(maxsize=None)
+def _num_sms(device: torch.device | None = None) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count
+
+
+# ---------------------------------------------------------------------------
+# Grouped GEMM (bf16 ragged MoE): ragged over M, N, or K
+# ---------------------------------------------------------------------------
+
+
+_GROUPED_CFG = [
     (32, 64, 64, 4, 3),
     (64, 32, 32, 4, 3),
     (64, 64, 32, 4, 3),
@@ -24,29 +35,20 @@ _CFG = [
     (64, 256, 32, 8, 3),
     (64, 256, 64, 8, 4),
     (128, 256, 64, 8, 3),
+    (256, 128, 64, 8, 3),
 ]
 
-_CONFIGS = [
+_GROUPED_CONFIGS = [
     triton.Config(
         {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk},
         num_warps=w,
         num_stages=s,
     )
-    for (bm, bn, bk, w, s) in _CFG
+    for (bm, bn, bk, w, s) in _GROUPED_CFG
 ]
 
 
-@functools.lru_cache(maxsize=None)
-def _num_sms(device: torch.device | None = None) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count
-
-
-# ---------------------------------------------------------------------------
-# Triton kernels
-# ---------------------------------------------------------------------------
-
-
-@triton.autotune(configs=_CONFIGS, key=["M", "N", "K", "A_IS_2D", "B_IS_2D"])
+@triton.autotune(configs=_GROUPED_CONFIGS, key=["M", "N", "K", "A_IS_2D", "B_IS_2D"])
 @triton.jit
 def _grouped_gemm_kernel(
     a_ptr,
@@ -171,11 +173,6 @@ def _grouped_gemm_kernel(
             )
             global_tile_idx += NUM_SMS
         group_tile_start += group_tile_count
-
-
-# ---------------------------------------------------------------------------
-# Torch wrappers / ops
-# ---------------------------------------------------------------------------
 
 
 @triton_op("jit_kernel::grouped_gemm", mutates_args={})
@@ -362,25 +359,13 @@ _SCALED_CFG = [
     (64, 256, 8, 3),
     (256, 64, 8, 3),
     (128, 256, 8, 4),
+    (128, 128, 4, 3),
+    (128, 128, 4, 4),
+    (256, 128, 8, 3),
 ]
 _SCALED_CONFIGS = [
     triton.Config({"BLOCK_M": bm, "BLOCK_N": bn}, num_warps=w, num_stages=s)
     for (bm, bn, w, s) in _SCALED_CFG
-]
-
-# _CONFIGS plus BLOCK_K=128 entries: _CONFIGS tops out at 64, which would cost the
-# forward its 128-wide reduction on the K=512-1408 MoE shapes. Kept separate so the
-# bf16 grouped GEMM's tuning space does not change.
-_SCALED_GROUPED_CONFIGS = _CONFIGS + [
-    triton.Config(
-        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": 128}, num_warps=w, num_stages=s
-    )
-    for (bm, bn, w, s) in [
-        (64, 64, 4, 3),
-        (128, 64, 8, 4),
-        (64, 128, 8, 4),
-        (128, 128, 8, 3),
-    ]
 ]
 
 
@@ -560,6 +545,21 @@ def scaled_gemm(
 # ---------------------------------------------------------------------------
 # Scaled grouped GEMM (quantized ragged MoE): fp8 / int8 with block scaling
 # ---------------------------------------------------------------------------
+
+
+_SCALED_GROUPED_CONFIGS = _GROUPED_CONFIGS + [
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=w, num_stages=s
+    )
+    for (bm, bn, bk, w, s) in [
+        (64, 64, 128, 4, 3),
+        (128, 64, 128, 8, 4),
+        (64, 128, 128, 8, 4),
+        (128, 128, 128, 8, 3),
+        (128, 128, 32, 8, 3),
+        (128, 128, 64, 8, 4),
+    ]
+]
 
 
 @triton.autotune(
