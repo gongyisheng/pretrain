@@ -74,6 +74,18 @@ Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated ui
 1. Run related tests before and after changes to confirm nothing breaks.
 2. For perf-sensitive changes, run `benchmarks/bench_train.py` before/after to guard against regressions.
 
+### Hardware
+
+The machine is not fixed: it may be CPU-only, single-GPU, or multi-GPU, with different
+models and VRAM per machine. Run `nvidia-smi` before any GPU work — training, tests,
+benchmarks — to see what is actually present and which devices are free, then pin a free
+one with `CUDA_VISIBLE_DEVICES=<idx>`. Training itself always runs on one device (no
+DDP), so a second GPU is for isolating a concurrent run, not for scaling one.
+
+Any GPU-specific number below (memory ceilings, `-n` choices, timings) was measured on
+one 16 GB RTX 5060 Ti. Treat it as a starting point and re-measure on the machine in
+front of you rather than assuming it holds.
+
 ### Running tests in parallel
 
 `pyproject.toml` sets `addopts = "-n 6 --dist loadfile"`, so every `pytest` invocation is already parallel. Two things bound how far that can be pushed, and they pull in opposite directions:
@@ -81,7 +93,7 @@ Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated ui
 - **`--dist loadfile` pins a whole file to one worker**, so workers past a directory's *file count* have nothing to claim and just pay a torch import and a CUDA context. Three dirs are a single file (`kernel`, `model`, `e2e`); the largest is seven (`quant`, then `layers` at six).
 - **`--dist load` splits per test** and beats `loadfile` wherever a directory has few slow tests, but each worker holds its own ~0.5 GiB CUDA context. Twelve of them plus a large allocation exhausts a 16 GB card — the whole suite under `-n 12 --dist load` OOMs in `tests/fast/utils/test_metric_utils.py`, which alone wants 3 GiB.
 
-Measured per directory (one RTX 5060 Ti), best in bold:
+Measured per directory (one 16 GB RTX 5060 Ti), best in bold — re-check on other hardware:
 
 | dir | files | `-n 6 --dist loadfile` | `-n 12 --dist load` | peak GPU at `-n 12` |
 |---|---|---|---|---|
