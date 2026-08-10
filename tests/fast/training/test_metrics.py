@@ -262,7 +262,8 @@ def test_weight_norms_prefixed_in_log_dict():
 
 
 def test_grad_svd_metrics_prefixed_in_log_dict():
-    tracker, _ = _tracker(_cfg(log_every=1, log_grad_svd_metrics=True))
+    """Flag unset → on by default."""
+    tracker, _ = _tracker(_cfg(log_every=1))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
@@ -271,7 +272,7 @@ def test_grad_svd_metrics_prefixed_in_log_dict():
     assert not any(k.startswith("grad/srank/bias") for k in d)  # 1D params skipped
 
 
-def test_grad_svd_metrics_absent_when_disabled():
+def test_grad_svd_metrics_not_logged_when_flag_off():
     tracker, _ = _tracker(_cfg(log_every=1, log_grad_svd_metrics=False))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
