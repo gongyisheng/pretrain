@@ -258,7 +258,7 @@ class MetricsCollector:
                 d[f"weight/norm/{name}"] = norm
 
         # Per-2D-weight spectral metrics (srank/pr)
-        if self.config.logging.log_optimizer_svd_metrics:
+        if self.config.logging.log_layer_weight_svd_metrics:
             for name, m in metric_utils.compute_layer_svd_metrics(model).items():
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val

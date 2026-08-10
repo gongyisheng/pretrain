@@ -494,10 +494,10 @@ class LoggingConfig:
     log_every: int = 10
     log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
     log_layer_weight_norms: bool = True  # log per-parameter weight norms to W&B
-    log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
-    log_optimizer_svd_metrics: bool = (
+    log_layer_weight_svd_metrics: bool = (
         True  # log per-2D-weight srank/pr; costly, SVD per weight
     )
+    log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
     log_quant_metrics: bool = (
         False  # per-(operand,layer) quant health to W&B; hooks only when True
     )
