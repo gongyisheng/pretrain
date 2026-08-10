@@ -14,27 +14,20 @@ from src.quant.utils import (
 )
 
 
-class _ScaleBlocks(NamedTuple):
-    """Row -> scale-block mapping for an axis that is ragged over groups.
+def _scale_block_map(offs, n_rows, block_size) -> tuple[torch.Tensor, int]:
+    """Map each row to its scale block for an axis that is ragged over groups.
 
     Rows are sorted by group and cut by the cumulative end-offsets `offs`, so a
     scale block must never span two groups: pooling amax across groups is what
-    lets one hot expert set the scale for a cold one. `row_blocks` is int64
-    because it indexes torch reductions; `n_blocks` is a Python int so the scale
-    buffer's shape stays static under torch.compile.
-    """
-
-    row_blocks: torch.Tensor  # (n_rows,) int64, scale row for each row
-    n_blocks: int  # static upper bound on the scale buffer's height
-
-
-def _scale_block_map(offs, n_rows, block_size) -> _ScaleBlocks:
-    """Scale blocks for a ragged axis, restarting the tiling at each group.
-
-    `block_size` 0 (row/tensorwise) gives one block per group. A positive one
-    (blockwise) re-tiles `block_size` rows inside each group, so group sizes that are
-    not multiples of `block_size` cost a short trailing block rather than a
+    lets one hot expert set the scale for a cold one. `block_size` 0
+    (row/tensorwise) gives one block per group. A positive one (blockwise)
+    re-tiles `block_size` rows inside each group, so group sizes that are not
+    multiples of `block_size` cost a short trailing block rather than a
     straddling one.
+
+    Returns `(row_blocks, n_blocks)`: `row_blocks` is an int64 `(n_rows,)` tensor
+    indexing torch reductions; `n_blocks` is a Python int so the scale buffer's
+    shape stays static under torch.compile.
     """
     n_groups = offs.shape[0]
     rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
@@ -43,7 +36,7 @@ def _scale_block_map(offs, n_rows, block_size) -> _ScaleBlocks:
     # clamping only keeps the gathers below in bounds if one ever did.
     group = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
     if not block_size:
-        return _ScaleBlocks(group.long(), n_groups)
+        return group.long(), n_groups
     starts = torch.cat([offs.new_zeros(1), offs[:-1]])
     counts = offs - starts
     per_group = torch.div(counts + block_size - 1, block_size, rounding_mode="floor")
@@ -52,7 +45,7 @@ def _scale_block_map(offs, n_rows, block_size) -> _ScaleBlocks:
     row_blocks = first_block[group].long() + local.long()
     # sum_g ceil(m_g/bs) <= floor(M/bs) + n_groups for every offs, so this bound
     # is static even though the per-group counts are not.
-    return _ScaleBlocks(row_blocks, n_rows // block_size + n_groups)
+    return row_blocks, n_rows // block_size + n_groups
 
 
 def _compute_scale(
@@ -122,16 +115,16 @@ def _tile_amax(a, dim, block_size):
     return _tile(a, dim, block_size).amax(dim=-1 if dim == -1 else -2)
 
 
-def _segment_amax(a, dim, blocks):
-    """Per-block amax along a segmented `dim`, giving `blocks.n_blocks` there.
+def _segment_amax(a, dim, row_blocks, n_blocks):
+    """Per-block amax along a segmented `dim`, giving `n_blocks` there.
 
     include_self with a zeros buffer is safe because `a` is abs(): an empty block
     keeps 0 and clamps to EPS in _compute_scale.
     """
     shape = list(a.shape)
-    shape[dim] = blocks.n_blocks
+    shape[dim] = n_blocks
     return a.new_zeros(shape).index_reduce_(
-        dim % a.ndim, blocks.row_blocks, a, "amax", include_self=True
+        dim % a.ndim, row_blocks, a, "amax", include_self=True
     )
 
 
@@ -165,9 +158,9 @@ def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=Non
     _check_dims(x, contract_dim, ragged_dim, offs)
     granularity, block_size = scaling["granularity"], scaling["block_size"]
     scale_dtype = scaling.get("scale_dtype")
-    blocks = None
+    row_blocks = n_blocks = None
     if offs is not None:
-        blocks = _scale_block_map(
+        row_blocks, n_blocks = _scale_block_map(
             offs,
             x.shape[ragged_dim],
             block_size if ragged_dim == contract_dim else 0,
@@ -210,16 +203,16 @@ def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=Non
     if contract_tiled:
         amax = _tile_amax(amax, contract_dim, width)
     if outer_segmented:
-        amax = _segment_amax(amax, outer_dim, blocks)
+        amax = _segment_amax(amax, outer_dim, row_blocks, n_blocks)
     if ragged_dim == contract_dim:
-        amax = _segment_amax(amax, contract_dim, blocks)
+        amax = _segment_amax(amax, contract_dim, row_blocks, n_blocks)
     scale = _compute_scale(amax, fmt, scale_dtype)
 
     div = scale
     if ragged_dim == contract_dim:
-        div = div.index_select(contract_dim, blocks.row_blocks)
+        div = div.index_select(contract_dim, row_blocks)
     elif outer_segmented:
-        div = div.index_select(outer_dim, blocks.row_blocks)
+        div = div.index_select(outer_dim, row_blocks)
     if contract_tiled:
         tile_axis = -1 if contract_dim == -1 else -2
         codes = _untile(
@@ -235,7 +228,7 @@ def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=Non
     # the invariant: outer restored to full length, contract left at n_blocks
     if granularity == "tensorwise":
         if outer_segmented:
-            scale = scale.index_select(outer_dim, blocks.row_blocks)
+            scale = scale.index_select(outer_dim, row_blocks)
         else:
             shape = list(scale.shape)
             shape[outer_dim] = x.shape[outer_dim]
@@ -248,8 +241,8 @@ def dequantize_operand(xq, scale, contract_dim, scaling, *, offs=None, ragged_di
     block_size = scaling["block_size"]
     qf, sf = xq.float(), scale.float()
     if ragged_dim == contract_dim and offs is not None:
-        blocks = _scale_block_map(offs, xq.shape[contract_dim], block_size)
-        return (qf * sf.index_select(contract_dim, blocks.row_blocks)).contiguous()
+        row_blocks, _ = _scale_block_map(offs, xq.shape[contract_dim], block_size)
+        return (qf * sf.index_select(contract_dim, row_blocks)).contiguous()
     length = xq.shape[contract_dim]
     return _untile(
         _tile(qf, contract_dim, block_size or length)
