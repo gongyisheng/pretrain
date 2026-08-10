@@ -252,6 +252,24 @@ def test_layer_grad_norms_prefixed_in_log_dict():
     assert "grad_norm/total" in d  # the scalar total stays
 
 
+def test_layer_weight_norms_prefixed_in_log_dict():
+    tracker, _ = _tracker(_cfg(log_every=1, log_layer_weight_norms=True))
+    model, opt, scaler = _linear_setup()
+    tracker.train_begin()
+    _do_step(tracker, model, opt, scaler, step=0)
+    d = tracker.log_train(step=1, model=model, optimizer=opt)
+    assert "weight/norm/weight" in d and "weight/norm/bias" in d
+
+
+def test_layer_weight_norms_absent_when_disabled():
+    tracker, _ = _tracker(_cfg(log_every=1, log_layer_weight_norms=False))
+    model, opt, scaler = _linear_setup()
+    tracker.train_begin()
+    _do_step(tracker, model, opt, scaler, step=0)
+    d = tracker.log_train(step=1, model=model, optimizer=opt)
+    assert not any(k.startswith("weight/norm/") for k in d)
+
+
 # ---------------------------------------------------------------------------
 # Eval: accumulate then finalize
 # ---------------------------------------------------------------------------

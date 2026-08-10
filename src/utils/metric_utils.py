@@ -33,6 +33,19 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
     return norms
 
 
+def compute_layer_weight_norms(model: torch.nn.Module) -> dict[str, float]:
+    """
+    Per-parameter L2 weight norms, keyed by parameter name.
+    """
+    norms: dict[str, float] = {}
+    for name, param in model.named_parameters():
+        if not param.is_floating_point():
+            continue
+        name = name.removeprefix("_orig_mod.")
+        norms[name] = param.detach().norm(2.0).item()
+    return norms
+
+
 # ---------------------------------------------------------------------------
 # MoE load balance (MaxVio, arXiv:2408.15664)
 # ---------------------------------------------------------------------------

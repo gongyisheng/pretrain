@@ -252,6 +252,11 @@ class MetricsCollector:
             for name, norm in metric_utils.compute_layer_grad_norms(model).items():
                 d[f"grad_norm/{name}"] = norm
 
+        # Per-parameter weight norms (plus the whole-model total)
+        if self.config.logging.log_layer_weight_norms:
+            for name, norm in metric_utils.compute_layer_weight_norms(model).items():
+                d[f"weight/norm/{name}"] = norm
+
         # Per-2D-weight spectral metrics (srank/pr)
         if self.config.logging.log_optimizer_svd_metrics:
             for name, m in metric_utils.compute_layer_svd_metrics(model).items():

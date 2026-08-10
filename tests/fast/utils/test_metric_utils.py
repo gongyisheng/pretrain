@@ -309,6 +309,39 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
 
 
 # ---------------------------------------------------------------------------
+# Per-parameter weight norms (raw, un-prefixed keys)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
+def test_layer_weight_norms_plain_model(arch_id, device):
+    """One key per float parameter; keys are raw names (no prefix)."""
+    model_cfg = _CFG_FACTORIES[arch_id]("sdpa")
+    model = build_model(_FakeTrainConfig(model_cfg))
+    result = metric_utils.compute_layer_weight_norms(model)
+    assert set(result) == {
+        n for n, p in model.named_parameters() if p.is_floating_point()
+    }
+    for k, v in result.items():
+        assert v >= 0 and math.isfinite(v), f"{k}={v}"
+
+
+def test_layer_weight_norms_match_l2():
+    """Each entry is ||p||_2."""
+    model = torch.nn.Linear(4, 3)
+    result = metric_utils.compute_layer_weight_norms(model)
+    assert result["weight"] == pytest.approx(model.weight.norm().item())
+    assert result["bias"] == pytest.approx(model.bias.norm().item())
+
+
+def test_layer_weight_norms_compiled_model_strips_prefix():
+    """Must work after torch.compile (which prepends _orig_mod.)."""
+    compiled = torch.compile(torch.nn.Linear(4, 3), backend="eager")
+    result = metric_utils.compute_layer_weight_norms(compiled)
+    assert set(result) == {"weight", "bias"}
+
+
+# ---------------------------------------------------------------------------
 # Per-2D-weight spectral metrics (SVD)
 # ---------------------------------------------------------------------------
 
