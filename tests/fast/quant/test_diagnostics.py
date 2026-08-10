@@ -232,9 +232,9 @@ def test_diagnostics_restore_grads_when_the_forward_raises():
 
 
 def test_ragged_blockwise_metrics_use_the_per_expert_scale_blocks():
-    """counts=[6, 0, 5]: a wgrad operand's scale rows tile each expert, so the metrics
-    must rebuild that mapping -- indexing it as a global tiling reports invented
-    error, and one expert here holds no tokens at all."""
+    """counts=[6, 0, 5]: a wgrad operand's scale rows tile each expert, so
+    dequantize_operand must index that per-expert mapping -- indexing it as a global
+    tiling reports invented error, and one expert here holds no tokens at all."""
     from src.quant.quantize import QuantizationSnapshot, quantize_operand
 
     torch.manual_seed(0)

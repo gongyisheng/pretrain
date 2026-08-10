@@ -63,6 +63,15 @@ def quantized_grouped_gemm(
             b, -2, b_fmt, scaling, offs=b_offs, ragged_dim=b_ragged_dim
         )
         if enable_snapshot:
+            # `offs` here is the real offs, not `b_offs` -- deliberately, even though
+            # b_ragged_dim is None in the forward/dgrad case (B stacked (E,K,N)), which
+            # looks like it violates the given-together rule _check_dims enforces on
+            # quantize_operand. It doesn't: dequantize_operand only branches on
+            # ragged_dim, so None still takes the dense per-expert path; but
+            # compute_quantization_metrics branches on whether offs is None to decide
+            # global vs. per-expert reduction. Swapping this to b_offs "to match" would
+            # silently drop the MoE weight metrics to a global reduction whenever
+            # b_ragged_dim is None.
             b_snap = QuantizationSnapshot(
                 b, bq, sb, -2, scaling, offs, b_ragged_dim, b_fmt
             )

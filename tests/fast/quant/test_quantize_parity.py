@@ -15,13 +15,6 @@ from src.quant.utils import is_int8s, str_to_dtype, str_to_emax, str_to_qmax
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
 
 
-def _call(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
-    """Adapter onto the API under test. Task 3 re-points this and nothing else."""
-    return quantize_operand(
-        x, contract_dim, fmt, scaling, offs=offs, ragged_dim=ragged_dim
-    )
-
-
 def _segments(n, offs, is_ragged):
     """[(lo, hi)] along one axis: the group bounds when ragged, else the whole axis."""
     if not is_ragged:
@@ -34,7 +27,7 @@ def _axis_blocks(n, offs, is_ragged, block_size, padded_height=None):
     """(block id per index, number of blocks) for one axis.
 
     Blocks are numbered in order and restart at every segment boundary -- the same
-    convention `ragged_scale_blocks` builds, and the one its own tests in
+    convention `_scale_block_map` builds, and the one its own tests in
     test_quantize.py pin. `padded_height` reproduces the implementation's static
     upper bound, whose unused rows hold the scale of amax 0.
 
@@ -100,7 +93,7 @@ def _ref_quantize(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
     else:
         o_ids, n_ob = list(range(n_outer)), n_outer
 
-    amax = torch.zeros(B, n_ob, n_cb)
+    amax = torch.zeros(B, n_ob, n_cb, device=x.device)
     for b in range(B):
         for i in range(n_outer):
             for j in range(n_contract):
@@ -153,9 +146,11 @@ CASES = [
     ("A_dense", (24, 32), -1, None),
     ("B_dense", (32, 16), -2, None),
     ("B_experts", (3, 32, 16), -2, None),
+    ("A_experts", (3, 24, 32), -1, None),
     ("A_ragged_outer", (24, 32), -1, -2),
     ("A_ragged_last", (32, 24), -1, -1),
     ("B_ragged_first", (24, 16), -2, -2),
+    ("B_ragged_outer", (16, 24), -2, -1),
 ]
 SCALINGS = [
     {"granularity": "tensorwise", "block_size": 0},
@@ -171,7 +166,7 @@ COUNTS = [8, 0, 10, 6]  # sums to 24; the empty group is the degenerate case
 @pytest.mark.parametrize(
     "label,shape,contract_dim,ragged_dim",
     CASES,
-    ids=[getattr(c, "values", c)[0] for c in CASES],
+    ids=[c[0] for c in CASES],
 )
 def test_matches_enumeration_reference(
     label, shape, contract_dim, ragged_dim, scaling, fmt
@@ -182,7 +177,9 @@ def test_matches_enumeration_reference(
     x = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
     offs = None if ragged_dim is None else _offs(COUNTS)
 
-    codes, scale = _call(x, contract_dim, fmt, scaling, offs, ragged_dim)
+    codes, scale = quantize_operand(
+        x, contract_dim, fmt, scaling, offs=offs, ragged_dim=ragged_dim
+    )
     ref_codes, ref_scale = _ref_quantize(
         x, contract_dim, fmt, scaling, offs, ragged_dim
     )

@@ -32,28 +32,28 @@ def _offs(counts):
     return torch.tensor(counts).cumsum(0).to(torch.int32)
 
 
-def test_ragged_scale_blocks_one_block_per_group():
+def test_scale_block_map_one_block_per_group():
     # block_size 0 — what row/tensorwise normalize to — is one block per group
     row_blocks, n_blocks = _scale_block_map(_offs([3, 4, 3]), 10, 0)
     assert row_blocks.tolist() == [0, 0, 0, 1, 1, 1, 1, 2, 2, 2]
     assert n_blocks == 3
 
 
-def test_ragged_scale_blocks_blockwise_retiles_inside_each_group():
+def test_scale_block_map_blockwise_retiles_inside_each_group():
     # bs=4 with group sizes 3,4,3: every group starts a fresh block, so no block
     # spans a boundary even though 3 and 4 are not multiples of each other.
     row_blocks, _ = _scale_block_map(_offs([3, 4, 3]), 10, 4)
     assert row_blocks.tolist() == [0, 0, 0, 1, 1, 1, 1, 2, 2, 2]
 
 
-def test_ragged_scale_blocks_blockwise_multiple_blocks_and_empty_group():
+def test_scale_block_map_blockwise_multiple_blocks_and_empty_group():
     # counts 5,0,4 with bs=2 -> group 0 gets 3 blocks, group 1 none, group 2 two.
     row_blocks, n_blocks = _scale_block_map(_offs([5, 0, 4]), 9, 2)
     assert row_blocks.tolist() == [0, 0, 1, 1, 2, 3, 3, 4, 4]
     assert n_blocks == 9 // 2 + 3
 
 
-def test_ragged_scale_blocks_never_crosses_a_group_boundary():
+def test_scale_block_map_never_crosses_a_group_boundary():
     counts = [5, 0, 130, 41, 1]
     offs = _offs(counts)
     n_rows = sum(counts)
@@ -70,7 +70,7 @@ def test_ragged_scale_blocks_never_crosses_a_group_boundary():
     "counts,bs",
     [([5, 0, 130, 41, 1], 32), ([300, 5, 120, 0, 44, 210], 128), ([1, 1, 1], 16)],
 )
-def test_ragged_scale_blocks_n_blocks_is_a_valid_upper_bound(counts, bs):
+def test_scale_block_map_n_blocks_is_a_valid_upper_bound(counts, bs):
     row_blocks, n_blocks = _scale_block_map(_offs(counts), sum(counts), bs)
     assert int(row_blocks.max()) < n_blocks
 

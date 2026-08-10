@@ -158,8 +158,13 @@ def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=Non
     _check_dims(x, contract_dim, ragged_dim, offs)
     granularity, block_size = scaling["granularity"], scaling["block_size"]
     scale_dtype = scaling.get("scale_dtype")
+    outer_dim = -1 if contract_dim == -2 else -2
+    # only tensorwise pools the outer axis into a tile, so only there can a ragged
+    # outer axis fold it down to one row per group -- rowwise/blockwise leave it at
+    # full length and must not be re-indexed.
+    outer_segmented = granularity == "tensorwise" and ragged_dim == outer_dim
     row_blocks = n_blocks = None
-    if offs is not None:
+    if offs is not None and (outer_segmented or ragged_dim == contract_dim):
         row_blocks, n_blocks = _scale_block_map(
             offs,
             x.shape[ragged_dim],
@@ -167,18 +172,13 @@ def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=Non
         )
 
     xf = x.float()
-    outer_dim = -1 if contract_dim == -2 else -2
-    width = block_size or x.shape[contract_dim]
+    width = block_size
     # A segmented contraction gets one scale entry per row from the ragged map, and
     # block_size 0 puts a single block over the whole axis (config.py normalizes every
     # non-blockwise granularity to it). Either way the scale already lines up with the
     # operand along the contraction, so tiling it would reshape and copy the operand
     # only to undo itself.
     contract_tiled = bool(block_size) and ragged_dim != contract_dim
-    # only tensorwise pools the outer axis into a tile, so only there can a ragged
-    # outer axis fold it down to one row per group -- rowwise/blockwise leave it at
-    # full length and must not be re-indexed.
-    outer_segmented = granularity == "tensorwise" and ragged_dim == outer_dim
 
     # The axes a plain amax collapses to one block: the contraction unless it is tiled
     # or segmented, and the outer axis only where tensorwise pools it and it is not
