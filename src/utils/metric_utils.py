@@ -107,7 +107,7 @@ def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
     return {"srank": srank.mean().item(), "pr": pr.mean().item()}
 
 
-def compute_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
+def compute_weight_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
     """Spectral metrics (srank/pr) per 2D/3D weight, keyed by param name (rope/embeddings skipped)."""
     metrics: dict[str, dict[str, float]] = {}
     for name, param in model.named_parameters():
@@ -117,6 +117,23 @@ def compute_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
         if name.startswith("rope.") or "emb" in name:
             continue
         metrics[name] = _svd_metrics(param.detach())
+    return metrics
+
+
+def compute_grad_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
+    """Spectral metrics (srank/pr) per 2D/3D weight gradient (rope/embeddings skipped).
+
+    Params with no grad are skipped. Under gradient accumulation `.grad` is the
+    accumulated sum the optimizer steps on.
+    """
+    metrics: dict[str, dict[str, float]] = {}
+    for name, param in model.named_parameters():
+        if param.grad is None or param.ndim not in (2, 3):
+            continue
+        name = name.removeprefix("_orig_mod.")
+        if name.startswith("rope.") or "emb" in name:
+            continue
+        metrics[name] = _svd_metrics(param.grad)
     return metrics
 
 

@@ -252,6 +252,12 @@ class MetricsCollector:
             for name, norm in metric_utils.compute_grad_norms(model).items():
                 d[f"grad/norm/{name}"] = norm
 
+        # Per-2D/3D-gradient spectral metrics (srank/pr), same live-grad window
+        if self.config.logging.log_grad_svd_metrics:
+            for name, m in metric_utils.compute_grad_svd_metrics(model).items():
+                for metric, val in m.items():
+                    d[f"grad/{metric}/{name}"] = val
+
         # Per-parameter weight norms
         if self.config.logging.log_weight_norms:
             for name, norm in metric_utils.compute_weight_norms(model).items():
@@ -259,7 +265,7 @@ class MetricsCollector:
 
         # Per-2D-weight spectral metrics (srank/pr)
         if self.config.logging.log_weight_svd_metrics:
-            for name, m in metric_utils.compute_svd_metrics(model).items():
+            for name, m in metric_utils.compute_weight_svd_metrics(model).items():
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val
 

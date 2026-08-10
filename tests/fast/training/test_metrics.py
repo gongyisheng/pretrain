@@ -261,6 +261,25 @@ def test_weight_norms_prefixed_in_log_dict():
     assert "weight/norm/weight" in d and "weight/norm/bias" in d
 
 
+def test_grad_svd_metrics_prefixed_in_log_dict():
+    tracker, _ = _tracker(_cfg(log_every=1, log_grad_svd_metrics=True))
+    model, opt, scaler = _linear_setup()
+    tracker.train_begin()
+    _do_step(tracker, model, opt, scaler, step=0)
+    d = tracker.log_train(step=1, model=model, optimizer=opt)
+    assert "grad/srank/weight" in d and "grad/pr/weight" in d
+    assert not any(k.startswith("grad/srank/bias") for k in d)  # 1D params skipped
+
+
+def test_grad_svd_metrics_absent_when_disabled():
+    tracker, _ = _tracker(_cfg(log_every=1, log_grad_svd_metrics=False))
+    model, opt, scaler = _linear_setup()
+    tracker.train_begin()
+    _do_step(tracker, model, opt, scaler, step=0)
+    d = tracker.log_train(step=1, model=model, optimizer=opt)
+    assert not any(k.startswith("grad/srank/") or k.startswith("grad/pr/") for k in d)
+
+
 def test_weight_norms_absent_when_disabled():
     tracker, _ = _tracker(_cfg(log_every=1, log_weight_norms=False))
     model, opt, scaler = _linear_setup()

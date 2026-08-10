@@ -419,7 +419,7 @@ def test_svd_metrics_3d_zero_tensor():
 def test_svd_metrics_includes_moe_experts():
     """3D stacked expert weights are covered (regression: previously skipped)."""
     model = build_model(_FakeTrainConfig(_qwen3_moe_cfg("sdpa")))
-    result = metric_utils.compute_svd_metrics(model)
+    result = metric_utils.compute_weight_svd_metrics(model)
     expert_keys = [k for k in result if "expert_" in k]
     assert expert_keys, "expected MoE expert weights in SVD metrics"
     assert any(k.endswith("expert_gate_up") for k in expert_keys)
@@ -431,7 +431,7 @@ def test_svd_metrics_keys_and_bounds(arch_id):
     """One entry per 2D/3D weight (no rope/embedding); metrics within bounds."""
     model_cfg = _CFG_FACTORIES[arch_id]("sdpa")
     model = build_model(_FakeTrainConfig(model_cfg))
-    result = metric_utils.compute_svd_metrics(model)
+    result = metric_utils.compute_weight_svd_metrics(model)
     assert set(result) == _expected_svd_keys(model)
     assert not any("emb" in k or k.startswith("rope.") for k in result)
 
@@ -444,11 +444,48 @@ def test_svd_metrics_keys_and_bounds(arch_id):
         assert 1.0 - 1e-4 <= m["pr"] <= n + 1e-4
 
 
+def test_grad_svd_metrics_match_weight_metrics_of_the_grads():
+    """Each entry is _svd_metrics of that parameter's .grad."""
+    model_cfg = _qwen3_cfg("sdpa")
+    model = build_model(_FakeTrainConfig(model_cfg))
+    _populate_grads(model, model_cfg.vocab_size, "sdpa")
+    result = metric_utils.compute_grad_svd_metrics(model)
+    assert set(result) == _expected_svd_keys(model)
+    grads = {n: p.grad for n, p in model.named_parameters()}
+    for name, m in result.items():
+        assert m == metric_utils._svd_metrics(grads[name])
+
+
+def test_grad_svd_metrics_skips_params_without_grad():
+    """No backward pass yet → nothing to report."""
+    model = build_model(_FakeTrainConfig(_qwen3_cfg("sdpa")))
+    assert metric_utils.compute_grad_svd_metrics(model) == {}
+
+
+def test_grad_svd_metrics_includes_moe_experts():
+    """3D stacked expert grads are covered, averaged over experts."""
+    model_cfg = _qwen3_moe_cfg("sdpa")
+    model = build_model(_FakeTrainConfig(model_cfg))
+    _populate_grads(model, model_cfg.vocab_size, "sdpa")
+    result = metric_utils.compute_grad_svd_metrics(model)
+    assert any(k.endswith("expert_gate_up") for k in result)
+    assert any(k.endswith("expert_down") for k in result)
+
+
+def test_grad_svd_metrics_rank_one_grad_is_minimal():
+    """A rank-1 gradient reports srank≈pr≈1."""
+    model = torch.nn.Linear(3, 5, bias=False)
+    model.weight.grad = torch.outer(torch.arange(1.0, 6.0), torch.arange(1.0, 4.0))
+    m = metric_utils.compute_grad_svd_metrics(model)["weight"]
+    assert m["srank"] == pytest.approx(1.0, abs=1e-4)
+    assert m["pr"] == pytest.approx(1.0, abs=1e-4)
+
+
 def test_svd_metrics_compiled_model_strips_prefix():
     """Works after torch.compile (which prepends _orig_mod.)."""
     model = build_model(_FakeTrainConfig(_qwen3_cfg("sdpa")))
     compiled = torch.compile(model, backend="eager")
-    result = metric_utils.compute_svd_metrics(compiled)
+    result = metric_utils.compute_weight_svd_metrics(compiled)
     assert set(result) == _expected_svd_keys(compiled)
     assert all(not k.startswith("_orig_mod.") for k in result)
 
