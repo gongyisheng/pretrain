@@ -168,6 +168,7 @@ def _quantize_tensorwise(xf, contract_dim, fmt, scale_dtype, offs, ragged_dim):
         # (-2, -1), never (-1, -2): inductor compiles the two orders to markedly
         # different kernels, and this is the hot path.
         amax = xf.abs().amax((-2, -1), keepdim=True)
+        row_blocks = None
     else:
         # Collapse the axis that is not ragged first, then segment the ragged one, so
         # the index_reduce_ runs over a single row/column instead of the full tensor.
@@ -178,15 +179,13 @@ def _quantize_tensorwise(xf, contract_dim, fmt, scale_dtype, offs, ragged_dim):
         )
     scale = _compute_scale(amax, fmt, scale_dtype)
 
+    # one selection, on whichever axis is ragged
+    div = scale if row_blocks is None else scale.index_select(ragged_dim, row_blocks)
+    codes = _compute_codes(xf, div, fmt)
+
     # the invariant: outer restored to full length, contract left at n_blocks
     if ragged_dim == outer_dim:
-        # the outer axis folded to one row per group -- gather it back, and that same
-        # full-length scale is what divides the codes
-        scale = scale.index_select(outer_dim, row_blocks)
-        return _compute_codes(xf, scale, fmt), scale
-    # the outer axis was never split, so its one scale just broadcasts back over it
-    div = scale if offs is None else scale.index_select(contract_dim, row_blocks)
-    codes = _compute_codes(xf, div, fmt)
+        return codes, div  # the gather already restored the outer axis
     shape = list(scale.shape)
     shape[outer_dim] = xf.shape[outer_dim]
     return codes, scale.expand(shape)
