@@ -35,7 +35,7 @@ The bf16 pair is the full-precision reference (`quant.enabled: false`): it ancho
 - FP8 block: explicit `dtype` map (std: weight/act `fp8_e4m3` + grad `fp8_e5m2`; alle4m3: all operands `fp8_e4m3`), `scaling.granularity: tensorwise`, `exclude: [lm_head]`. Only eligible `nn.Linear` GEMM operands are cast to FP8 on the fly; RoPE, RMSNorm, qk_norm, attention, SwiGLU, residuals, embeddings, lm_head, cross-entropy, and optimizer state stay bf16/fp32. hp master weights preserved. (cuBLAS rejects e5m2×e5m2, so e4m3 weight/act is required either way.)
 - Muon hyperparams at defaults: `momentum=0.95`, `nesterov=true`, `ns_steps=5`, shared `eps=1e-8`.
 - All runs: seq_len=1024, batch=16, grad_accum=16 (eff. batch=256, ~262K tok/step), 50K steps (~13B tokens), bf16 mixed precision, cosine schedule with 1500 warmup, seed=42, OpenWebText.
-- `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`, `log_layer_weight_svd_metrics: true`.
+- `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`, `log_weight_svd_metrics: true`.
 
 Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 6000, SM 12.0) the FP8 GEMMs use Blackwell's cuBLASLt path.
 

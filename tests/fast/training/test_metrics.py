@@ -243,7 +243,7 @@ def test_non_finite_loss_not_guarded_here():
 
 
 def test_layer_grad_norms_prefixed_in_log_dict():
-    tracker, _ = _tracker(_cfg(log_every=1, log_layer_grad_norms=True))
+    tracker, _ = _tracker(_cfg(log_every=1, log_grad_norms=True))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
@@ -253,7 +253,7 @@ def test_layer_grad_norms_prefixed_in_log_dict():
 
 
 def test_layer_weight_norms_prefixed_in_log_dict():
-    tracker, _ = _tracker(_cfg(log_every=1, log_layer_weight_norms=True))
+    tracker, _ = _tracker(_cfg(log_every=1, log_weight_norms=True))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
@@ -262,7 +262,7 @@ def test_layer_weight_norms_prefixed_in_log_dict():
 
 
 def test_layer_weight_norms_absent_when_disabled():
-    tracker, _ = _tracker(_cfg(log_every=1, log_layer_weight_norms=False))
+    tracker, _ = _tracker(_cfg(log_every=1, log_weight_norms=False))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
