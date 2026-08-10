@@ -189,15 +189,17 @@ def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=Non
 
     # The axes a plain amax collapses to one block: the contraction unless it is tiled
     # or segmented, and the outer axis only where tensorwise pools it and it is not
-    # segmented.
-    dense_dims = []
-    if not contract_tiled and ragged_dim != contract_dim:
-        dense_dims.append(contract_dim)
-    if granularity == "tensorwise" and not outer_segmented:
-        dense_dims.append(outer_dim)
-    # ascending: inductor compiles amax((-1,-2)) to a markedly slower kernel than
-    # amax((-2,-1)), and this is the hot path for tensorwise and rowwise.
-    dense_dims.sort()
+    # segmented. Built by walking (-2, -1) rather than appending and sorting: the order
+    # matters (inductor compiles amax((-1,-2)) to a markedly slower kernel than
+    # amax((-2,-1)), and this is the hot path for tensorwise and rowwise), and
+    # list.sort() is untraceable once a dim is a SymInt.
+    reduce_contract = not contract_tiled and ragged_dim != contract_dim
+    reduce_outer = granularity == "tensorwise" and not outer_segmented
+    dense_dims = [
+        dim
+        for dim in (-2, -1)
+        if (reduce_contract if dim == contract_dim else reduce_outer)
+    ]
 
     amax = xf.abs()
     if dense_dims:

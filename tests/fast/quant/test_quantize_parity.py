@@ -203,3 +203,29 @@ def test_expert_stack_matches_per_expert_quantize(scaling):
         codes.view(torch.uint8), torch.stack([q for q, _ in per]).view(torch.uint8)
     )
     assert torch.equal(scale, torch.stack([s for _, s in per]))
+
+
+@pytest.mark.parametrize("scaling", SCALINGS, ids=lambda s: s["granularity"])
+def test_ragged_last_dim_is_the_transpose_of_ragged_first(scaling):
+    """Quantizing the transposed view == transposing the quantization.
+
+    This is what would let a caller whose operand already arrives transposed quantize
+    it where it stands instead of flipping it in and back out again. `moe.py`'s wgrad
+    is that caller and deliberately does not: reducing along the strided axis of the
+    view costs more than the transposed kernel read it would save (measured 1.2x-2.8x
+    on the quantize path). The equivalence is pinned here regardless -- it is the
+    property `ragged_dim` has to have.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(24, 16, device="cuda", dtype=torch.bfloat16)
+    offs = _offs(COUNTS)
+    codes, scale = quantize_operand(
+        x, -2, "fp8_e4m3", scaling, offs=offs, ragged_dim=-2
+    )
+    codes_t, scale_t = quantize_operand(
+        x.mT, -1, "fp8_e4m3", scaling, offs=offs, ragged_dim=-1
+    )
+    assert torch.equal(
+        codes_t.view(torch.uint8), codes.mT.contiguous().view(torch.uint8)
+    )
+    assert torch.equal(scale_t, scale.mT.contiguous())
