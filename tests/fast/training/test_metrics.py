@@ -106,7 +106,7 @@ def test_log_train_assembles_and_dispatches_on_cadence():
     d = tracker.log_train(step=2, model=model, optimizer=opt)
     assert d is not None
     assert d["train/loss"] == 2.0
-    assert d["grad_norm/total"] == 0.5
+    assert d["grad/norm/total"] == 0.5
     assert d["optim/lr"] == pytest.approx(3e-4)  # read from optimizer
     assert "perf/tokens_per_sec" in d and "perf/step_time_ms" in d
     assert "train/perplexity" in d  # pretrain
@@ -238,21 +238,21 @@ def test_non_finite_loss_not_guarded_here():
 
 
 # ---------------------------------------------------------------------------
-# Per-layer grad norms get the grad_norm/ prefix in the dict
+# Per-layer grad norms get the grad/norm/ prefix in the dict
 # ---------------------------------------------------------------------------
 
 
-def test_layer_grad_norms_prefixed_in_log_dict():
+def test_grad_norms_prefixed_in_log_dict():
     tracker, _ = _tracker(_cfg(log_every=1, log_grad_norms=True))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
     d = tracker.log_train(step=1, model=model, optimizer=opt)
-    assert "grad_norm/weight" in d and "grad_norm/bias" in d
-    assert "grad_norm/total" in d  # the scalar total stays
+    assert "grad/norm/weight" in d and "grad/norm/bias" in d
+    assert "grad/norm/total" in d  # the scalar total stays
 
 
-def test_layer_weight_norms_prefixed_in_log_dict():
+def test_weight_norms_prefixed_in_log_dict():
     tracker, _ = _tracker(_cfg(log_every=1, log_weight_norms=True))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
@@ -261,7 +261,7 @@ def test_layer_weight_norms_prefixed_in_log_dict():
     assert "weight/norm/weight" in d and "weight/norm/bias" in d
 
 
-def test_layer_weight_norms_absent_when_disabled():
+def test_weight_norms_absent_when_disabled():
     tracker, _ = _tracker(_cfg(log_every=1, log_weight_norms=False))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()

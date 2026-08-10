@@ -15,11 +15,11 @@ from src.quant.constants import EPS
 from src.utils.config import TrainConfig
 
 # ---------------------------------------------------------------------------
-# Gradient norms
+# Tensor norms
 # ---------------------------------------------------------------------------
 
 
-def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
+def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
     """
     Per-parameter L2 gradient norms, keyed by parameter name.
     """
@@ -33,20 +33,17 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
     return norms
 
 
-def compute_layer_weight_norms(model: torch.nn.Module) -> dict[str, float]:
+def compute_weight_norms(model: torch.nn.Module) -> dict[str, float]:
     """
     Per-parameter L2 weight norms, keyed by parameter name. Stacked 3D expert
-    weights `(E, out, in)` report the mean per-expert norm, so the value stays
-    comparable to a dense layer's instead of scaling with sqrt(E).
+    weights are one norm over all experts, matching the grad-norm convention.
     """
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if not param.is_floating_point():
             continue
         name = name.removeprefix("_orig_mod.")
-        w = param.detach()
-        norm = w.flatten(1).norm(2.0, dim=-1).mean() if w.ndim == 3 else w.norm(2.0)
-        norms[name] = norm.item()
+        norms[name] = param.detach().norm(2.0).item()
     return norms
 
 
@@ -151,7 +148,7 @@ def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
     }
 
 
-def compute_layer_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
+def compute_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
     """Spectral metrics (srank/pr/esd_alpha) per 2D/3D weight, keyed by param name (rope/embeddings skipped)."""
     metrics: dict[str, dict[str, float]] = {}
     for name, param in model.named_parameters():

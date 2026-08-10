@@ -212,7 +212,7 @@ class MetricsCollector:
             "perf/tokens_per_sec": tokens_per_sec,
             "perf/step_time_ms": step_time_ms,
             # grad norm
-            "grad_norm/total": self._last_grad_norm,
+            "grad/norm/total": self._last_grad_norm,
         }
 
         # MoE aux loss (cached as a float in on_train_step)
@@ -249,17 +249,17 @@ class MetricsCollector:
 
         # Per-layer gradient norms (grads still live: zero_grad runs next step)
         if self.config.logging.log_grad_norms:
-            for name, norm in metric_utils.compute_layer_grad_norms(model).items():
-                d[f"grad_norm/{name}"] = norm
+            for name, norm in metric_utils.compute_grad_norms(model).items():
+                d[f"grad/norm/{name}"] = norm
 
-        # Per-parameter weight norms (plus the whole-model total)
+        # Per-parameter weight norms
         if self.config.logging.log_weight_norms:
-            for name, norm in metric_utils.compute_layer_weight_norms(model).items():
+            for name, norm in metric_utils.compute_weight_norms(model).items():
                 d[f"weight/norm/{name}"] = norm
 
         # Per-2D-weight spectral metrics (srank/pr)
         if self.config.logging.log_weight_svd_metrics:
-            for name, m in metric_utils.compute_layer_svd_metrics(model).items():
+            for name, m in metric_utils.compute_svd_metrics(model).items():
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val
 

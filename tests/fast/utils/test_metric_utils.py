@@ -5,7 +5,6 @@ tests assert directly on returned values with no logger or tracker involved.
 """
 
 import math
-import statistics
 
 import pytest
 import torch
@@ -276,22 +275,22 @@ def test_variance_norm_none_before_first_step():
 
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
-def test_layer_grad_norms_plain_model(arch_id, impl, device):
+def test_grad_norms_plain_model(arch_id, impl, device):
     """One key per parameter with a grad; keys are raw names (no prefix)."""
     skip_if_unsupported(impl, device)
     model_cfg = _CFG_FACTORIES[arch_id](impl)
     model = build_model(_FakeTrainConfig(model_cfg))
     _populate_grads(model, model_cfg.vocab_size, impl)
-    result = metric_utils.compute_layer_grad_norms(model)
+    result = metric_utils.compute_grad_norms(model)
     assert set(result) == _expected_grad_keys(model)
-    assert all(not k.startswith("grad_norm/") for k in result)
+    assert all(not k.startswith("grad/norm/") for k in result)
     for k, v in result.items():
         assert v >= 0 and math.isfinite(v), f"{k}={v}"
 
 
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
-def test_layer_grad_norms_compiled_model(arch_id, impl, device):
+def test_grad_norms_compiled_model(arch_id, impl, device):
     """Must work after torch.compile (which prepends _orig_mod.)."""
     skip_if_unsupported(impl, device)
     model_cfg = _CFG_FACTORIES[arch_id](impl)
@@ -304,7 +303,7 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
     else:
         compiled = torch.compile(model, backend="eager")
     _populate_grads(compiled, model_cfg.vocab_size, impl)
-    result = metric_utils.compute_layer_grad_norms(compiled)
+    result = metric_utils.compute_grad_norms(compiled)
     assert set(result) == _expected_grad_keys(compiled)
     assert all(not k.startswith("_orig_mod.") for k in result)
 
@@ -315,11 +314,11 @@ def test_layer_grad_norms_compiled_model(arch_id, impl, device):
 
 
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
-def test_layer_weight_norms_plain_model(arch_id, device):
+def test_weight_norms_plain_model(arch_id, device):
     """One key per float parameter; keys are raw names (no prefix)."""
     model_cfg = _CFG_FACTORIES[arch_id]("sdpa")
     model = build_model(_FakeTrainConfig(model_cfg))
-    result = metric_utils.compute_layer_weight_norms(model)
+    result = metric_utils.compute_weight_norms(model)
     assert set(result) == {
         n for n, p in model.named_parameters() if p.is_floating_point()
     }
@@ -327,29 +326,27 @@ def test_layer_weight_norms_plain_model(arch_id, device):
         assert v >= 0 and math.isfinite(v), f"{k}={v}"
 
 
-def test_layer_weight_norms_match_l2():
+def test_weight_norms_match_l2():
     """Each entry is ||p||_2."""
     model = torch.nn.Linear(4, 3)
-    result = metric_utils.compute_layer_weight_norms(model)
+    result = metric_utils.compute_weight_norms(model)
     assert result["weight"] == pytest.approx(model.weight.norm().item())
     assert result["bias"] == pytest.approx(model.bias.norm().item())
 
 
-def test_layer_weight_norms_3d_is_mean_per_expert():
-    """Stacked expert weights report mean_e ||W_e||, not the flat norm over all experts."""
+def test_weight_norms_3d_is_global_over_experts():
+    """Stacked expert weights report one norm over all experts, not a per-expert stat."""
     model = torch.nn.Module()
     model.expert_gate_up = torch.nn.Parameter(torch.randn(4, 6, 3))
-    result = metric_utils.compute_layer_weight_norms(model)
     w = model.expert_gate_up.detach()
-    per_expert = [w[e].norm().item() for e in range(4)]
-    assert result["expert_gate_up"] == pytest.approx(statistics.mean(per_expert))
-    assert result["expert_gate_up"] != pytest.approx(w.norm().item())
+    result = metric_utils.compute_weight_norms(model)
+    assert result["expert_gate_up"] == pytest.approx(w.norm().item())
 
 
-def test_layer_weight_norms_compiled_model_strips_prefix():
+def test_weight_norms_compiled_model_strips_prefix():
     """Must work after torch.compile (which prepends _orig_mod.)."""
     compiled = torch.compile(torch.nn.Linear(4, 3), backend="eager")
-    result = metric_utils.compute_layer_weight_norms(compiled)
+    result = metric_utils.compute_weight_norms(compiled)
     assert set(result) == {"weight", "bias"}
 
 
@@ -477,10 +474,10 @@ def test_svd_metrics_3d_zero_tensor():
     }
 
 
-def test_layer_svd_metrics_includes_moe_experts():
+def test_svd_metrics_includes_moe_experts():
     """3D stacked expert weights are covered (regression: previously skipped)."""
     model = build_model(_FakeTrainConfig(_qwen3_moe_cfg("sdpa")))
-    result = metric_utils.compute_layer_svd_metrics(model)
+    result = metric_utils.compute_svd_metrics(model)
     expert_keys = [k for k in result if "expert_" in k]
     assert expert_keys, "expected MoE expert weights in SVD metrics"
     assert any(k.endswith("expert_gate_up") for k in expert_keys)
@@ -488,11 +485,11 @@ def test_layer_svd_metrics_includes_moe_experts():
 
 
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
-def test_layer_svd_metrics_keys_and_bounds(arch_id):
+def test_svd_metrics_keys_and_bounds(arch_id):
     """One entry per 2D/3D weight (no rope/embedding); metrics within bounds."""
     model_cfg = _CFG_FACTORIES[arch_id]("sdpa")
     model = build_model(_FakeTrainConfig(model_cfg))
-    result = metric_utils.compute_layer_svd_metrics(model)
+    result = metric_utils.compute_svd_metrics(model)
     assert set(result) == _expected_svd_keys(model)
     assert not any("emb" in k or k.startswith("rope.") for k in result)
 
@@ -507,11 +504,11 @@ def test_layer_svd_metrics_keys_and_bounds(arch_id):
         assert math.isnan(m["esd_alpha"]) or m["esd_alpha"] > 1.0
 
 
-def test_layer_svd_metrics_compiled_model_strips_prefix():
+def test_svd_metrics_compiled_model_strips_prefix():
     """Works after torch.compile (which prepends _orig_mod.)."""
     model = build_model(_FakeTrainConfig(_qwen3_cfg("sdpa")))
     compiled = torch.compile(model, backend="eager")
-    result = metric_utils.compute_layer_svd_metrics(compiled)
+    result = metric_utils.compute_svd_metrics(compiled)
     assert set(result) == _expected_svd_keys(compiled)
     assert all(not k.startswith("_orig_mod.") for k in result)
 
