@@ -35,14 +35,18 @@ def compute_layer_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 
 def compute_layer_weight_norms(model: torch.nn.Module) -> dict[str, float]:
     """
-    Per-parameter L2 weight norms, keyed by parameter name.
+    Per-parameter L2 weight norms, keyed by parameter name. Stacked 3D expert
+    weights `(E, out, in)` report the mean per-expert norm, so the value stays
+    comparable to a dense layer's instead of scaling with sqrt(E).
     """
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if not param.is_floating_point():
             continue
         name = name.removeprefix("_orig_mod.")
-        norms[name] = param.detach().norm(2.0).item()
+        w = param.detach()
+        norm = w.flatten(1).norm(2.0, dim=-1).mean() if w.ndim == 3 else w.norm(2.0)
+        norms[name] = norm.item()
     return norms
 
 

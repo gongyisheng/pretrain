@@ -5,6 +5,7 @@ tests assert directly on returned values with no logger or tracker involved.
 """
 
 import math
+import statistics
 
 import pytest
 import torch
@@ -332,6 +333,17 @@ def test_layer_weight_norms_match_l2():
     result = metric_utils.compute_layer_weight_norms(model)
     assert result["weight"] == pytest.approx(model.weight.norm().item())
     assert result["bias"] == pytest.approx(model.bias.norm().item())
+
+
+def test_layer_weight_norms_3d_is_mean_per_expert():
+    """Stacked expert weights report mean_e ||W_e||, not the flat norm over all experts."""
+    model = torch.nn.Module()
+    model.expert_gate_up = torch.nn.Parameter(torch.randn(4, 6, 3))
+    result = metric_utils.compute_layer_weight_norms(model)
+    w = model.expert_gate_up.detach()
+    per_expert = [w[e].norm().item() for e in range(4)]
+    assert result["expert_gate_up"] == pytest.approx(statistics.mean(per_expert))
+    assert result["expert_gate_up"] != pytest.approx(w.norm().item())
 
 
 def test_layer_weight_norms_compiled_model_strips_prefix():
