@@ -10,30 +10,9 @@ from src.quant.quantize import (
     QuantizationSnapshot,
     dequantize_operand,
     quantize_operand,
-    ragged_scale_blocks,
 )
 from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
-
-
-def _quantize_b(b, granularity, block_size, fmt, scale_dtype, ragged):
-    """Quantize the right operand along its contraction axis (dim -2).
-
-    A 3D b is quantized per expert, so no scale spans two of them; a 2D b shares the
-    ragged mapping with the left operand.
-    """
-    if b.ndim == 2:
-        return quantize_operand(
-            b, 0, granularity, block_size, fmt, scale_dtype=scale_dtype, ragged=ragged
-        )
-    per_expert = [
-        quantize_operand(b[g], 0, granularity, block_size, fmt, scale_dtype=scale_dtype)
-        for g in range(b.shape[0])
-    ]
-    return (
-        torch.stack([q for q, _ in per_expert]),
-        torch.stack([s for _, s in per_expert]),
-    )
 
 
 def quantized_grouped_gemm(
@@ -50,9 +29,7 @@ def quantized_grouped_gemm(
     `bias` is an optional (E,N) tensor broadcast over the output's row dim. It is
     never quantized -- it rides the epilogue, past the scales.
     """
-    granularity = scaling["granularity"]
-    block_size = scaling.get("block_size", 0)
-    scale_dtype = scaling.get("scale_dtype")
+    block_size = scaling["block_size"]
     same_family = (is_fp8(a_fmt) and is_fp8(b_fmt)) or (
         is_int8s(a_fmt) and is_int8s(b_fmt)
     )
@@ -60,46 +37,34 @@ def quantized_grouped_gemm(
         raise NotImplementedError("the ragged-N layout (3D x 2D) is not supported")
     ragged_k = b.ndim == 2
 
-    # ragged K: the contraction is ragged, so both operands need the mapping, and A
-    # is quantized in the (ragged,K) orientation — only there is the reduction ragged
-    # — then transposed back below with its scale. ragged M: the contraction is dense,
-    # so only tensorwise has an amax wide enough to span groups (rowwise/blockwise are
-    # already per row).
+    # ragged K: the contraction is ragged, so both operands carry the mapping, and A is
+    # quantized in the (ragged,K) orientation -- only there is the reduction ragged --
+    # then transposed back below with its scale. ragged M: the contraction is dense, so
+    # the mapping reaches A alone, where only tensorwise has a tile wide enough to span
+    # groups.
     src_a = a.mT if ragged_k else a
-    contract_a = 0 if ragged_k else -1
-    contract_b = 0 if ragged_k else 1
-    ragged = (
-        ragged_scale_blocks(offs, src_a.shape[0], block_size)
-        if ragged_k or granularity == "tensorwise"
-        else None
-    )
-    # the mapping only reaches the contraction axis — and so B, and the dequantized
-    # fallback — when the contraction is the ragged one
-    contract_ragged = ragged if ragged_k else None
+    contract_a = -2 if ragged_k else -1
+    a_ragged_dim = -2
+    # B carries the mapping only when the contraction is the ragged axis
+    b_ragged_dim, b_offs = (-2, offs) if ragged_k else (None, None)
 
     a_snap = b_snap = None
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
-            src_a,
-            contract_a,
-            granularity,
-            block_size,
-            a_fmt,
-            scale_dtype=scale_dtype,
-            ragged=ragged,
+            src_a, contract_a, a_fmt, scaling, offs=offs, ragged_dim=a_ragged_dim
         )
         if enable_snapshot:
             a_snap = QuantizationSnapshot(
-                src_a, aq, sa, contract_a, block_size, offs, a_fmt
+                src_a, aq, sa, contract_a, scaling, offs, a_ragged_dim, a_fmt
             )
     if is_quantized(b_fmt):
-        bq, sb = _quantize_b(
-            b, granularity, block_size, b_fmt, scale_dtype, contract_ragged
+        bq, sb = quantize_operand(
+            b, -2, b_fmt, scaling, offs=b_offs, ragged_dim=b_ragged_dim
         )
         if enable_snapshot:
             b_snap = QuantizationSnapshot(
-                b, bq, sb, contract_b, block_size, offs, b_fmt
+                b, bq, sb, -2, scaling, offs, b_ragged_dim, b_fmt
             )
 
     if same_family and a.is_cuda:
@@ -117,11 +82,11 @@ def quantized_grouped_gemm(
 
     if aq is not None:
         src_a = dequantize_operand(
-            aq, sa, contract_a, block_size, ragged=contract_ragged
+            aq, sa, contract_a, scaling, offs=offs, ragged_dim=a_ragged_dim
         ).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(
-            bq, sb, contract_b, block_size, ragged=contract_ragged
+            bq, sb, -2, scaling, offs=b_offs, ragged_dim=b_ragged_dim
         ).to(b.dtype)
     y = grouped_gemm(
         (src_a.mT if ragged_k else src_a).to(out_dtype),

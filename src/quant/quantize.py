@@ -14,7 +14,7 @@ from src.quant.utils import (
 )
 
 
-class RaggedScaleBlocks(NamedTuple):
+class _ScaleBlocks(NamedTuple):
     """Row -> scale-block mapping for an axis that is ragged over groups.
 
     Rows are sorted by group and cut by the cumulative end-offsets `offs`, so a
@@ -28,7 +28,7 @@ class RaggedScaleBlocks(NamedTuple):
     n_blocks: int  # static upper bound on the scale buffer's height
 
 
-def ragged_scale_blocks(offs, n_rows, block_size) -> RaggedScaleBlocks:
+def _scale_block_map(offs, n_rows, block_size) -> _ScaleBlocks:
     """Scale blocks for a ragged axis, restarting the tiling at each group.
 
     `block_size` 0 (row/tensorwise) gives one block per group. A positive one
@@ -43,7 +43,7 @@ def ragged_scale_blocks(offs, n_rows, block_size) -> RaggedScaleBlocks:
     # clamping only keeps the gathers below in bounds if one ever did.
     group = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
     if not block_size:
-        return RaggedScaleBlocks(group.long(), n_groups)
+        return _ScaleBlocks(group.long(), n_groups)
     starts = torch.cat([offs.new_zeros(1), offs[:-1]])
     counts = offs - starts
     per_group = torch.div(counts + block_size - 1, block_size, rounding_mode="floor")
@@ -52,7 +52,7 @@ def ragged_scale_blocks(offs, n_rows, block_size) -> RaggedScaleBlocks:
     row_blocks = first_block[group].long() + local.long()
     # sum_g ceil(m_g/bs) <= floor(M/bs) + n_groups for every offs, so this bound
     # is static even though the per-group counts are not.
-    return RaggedScaleBlocks(row_blocks, n_rows // block_size + n_groups)
+    return _ScaleBlocks(row_blocks, n_rows // block_size + n_groups)
 
 
 def _compute_scale(
@@ -92,9 +92,10 @@ def _tile(a, dim, block_size):
     The tile axis lands at -1 for `dim == -1` and -2 for `dim == -2`. Both are free
     views on contiguous input -- splitting a dim never transposes.
     """
-    # `dim` is rank-relative, so a caller normalizing an absolute contraction axis can
-    # land outside the last two dims. Without this the -2 branch would silently claim
-    # it and mis-tile at the right shape.
+    # `dequantize_operand` takes its contraction axis straight from a caller (or a
+    # snapshot) without a `_check_dims` of its own, so an out-of-domain dim reaches
+    # here. Without this the -2 branch would silently claim it and mis-tile at the
+    # right shape.
     _check_tile_dim(dim)
     length = a.shape[dim]
     n_blocks = (length + block_size - 1) // block_size
@@ -134,16 +135,44 @@ def _segment_amax(a, dim, blocks):
     )
 
 
-def _quantize(
-    x, contract_dim, fmt, granularity, block_size, scale_dtype, blocks, ragged_dim
-):
-    """Tile x into scale groups, amax each, divide. One path for every case.
+def _check_dims(x, contract_dim, ragged_dim, offs):
+    if contract_dim not in (-2, -1):
+        raise ValueError(f"contract_dim must be -2 or -1, got {contract_dim}")
+    if (offs is None) != (ragged_dim is None):
+        raise ValueError("offs and ragged_dim must be given together")
+    if ragged_dim is None:
+        return
+    if ragged_dim not in (-2, -1):
+        raise ValueError(f"ragged_dim must be -2 or -1, got {ragged_dim}")
+    if x.ndim != 2:
+        raise ValueError(f"a ragged axis needs a 2D operand, got {x.ndim}D")
 
-    `contract_dim` and `ragged_dim` each name one of the last two dims; leading dims
-    are batch and are never pooled into a scale group. Segmenting an axis only matters
-    where a tile spans more than one element along it -- which is why rowwise and
-    blockwise ignore a ragged axis that is not the contraction.
+
+def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=None):
+    """Quantize `x` into scale groups tiled along `contract_dim`.
+
+    `contract_dim` and `ragged_dim` each name one of the last two dims (-2 or -1), so a
+    2D weight and a 3D expert stack are the same call; leading dims are batch and are
+    never pooled into a scale group. `offs` marks `ragged_dim` as ragged over groups and
+    keeps every scale inside one group -- which only changes the result where a scale
+    tile spans more than one element along that axis, so rowwise and blockwise ignore a
+    ragged axis that is not the contraction.
+
+    Returns codes in `fmt`'s dtype and an fp32 dequant scale whose outer axis is at full
+    length and whose contract axis is the number of scale blocks -- the layout
+    `scaled_gemm` reads.
     """
+    _check_dims(x, contract_dim, ragged_dim, offs)
+    granularity, block_size = scaling["granularity"], scaling["block_size"]
+    scale_dtype = scaling.get("scale_dtype")
+    blocks = None
+    if offs is not None:
+        blocks = _scale_block_map(
+            offs,
+            x.shape[ragged_dim],
+            block_size if ragged_dim == contract_dim else 0,
+        )
+
     xf = x.float()
     outer_dim = -1 if contract_dim == -2 else -2
     width = block_size or x.shape[contract_dim]
@@ -193,46 +222,19 @@ def _quantize(
     return codes.contiguous(), scale.contiguous()
 
 
-def quantize_operand(
-    x,
-    contract_dim,
-    granularity,
-    block_size,
-    fmt,
-    *,
-    scale_dtype=None,
-    ragged=None,
-):
-    """Quantize 2D operand x for scaled_gemm along contract_dim (-1: A, 0: B).
-
-    `ragged` (a RaggedScaleBlocks) marks the row axis as ragged over groups and keeps
-    every scale inside one group.
-    """
-    # this signature's ragged axis is always the row axis, i.e. -2: the contraction
-    # when contract_dim is 0, the outer axis otherwise
-    return _quantize(
-        x,
-        -2 if contract_dim == 0 else -1,
-        fmt,
-        granularity,
-        block_size,
-        scale_dtype,
-        ragged,
-        None if ragged is None else -2,
-    )
-
-
-def dequantize_operand(xq, scale, contract_dim, block_size, ragged=None):
-    # contract_dim is positive for the stacked-expert layouts (dim 1 of an (E,K,N)
-    # slab), so normalize onto the {-2, -1} the tiling helpers take.
-    dim = contract_dim if contract_dim < 0 else contract_dim - xq.ndim
+def dequantize_operand(xq, scale, contract_dim, scaling, *, offs=None, ragged_dim=None):
+    """Invert `quantize_operand` in fp32, given the layout it was called with."""
+    block_size = scaling["block_size"]
     qf, sf = xq.float(), scale.float()
-    if ragged is not None and contract_dim == 0:
-        return (qf * sf.index_select(dim, ragged.row_blocks)).contiguous()
-    length = xq.shape[dim]
-    width = block_size or length  # 0: the one block spans the whole contraction
+    if ragged_dim == contract_dim and offs is not None:
+        blocks = _scale_block_map(offs, xq.shape[contract_dim], block_size)
+        return (qf * sf.index_select(contract_dim, blocks.row_blocks)).contiguous()
+    length = xq.shape[contract_dim]
     return _untile(
-        _tile(qf, dim, width) * sf.unsqueeze(-1 if dim == -1 else -2), dim, length
+        _tile(qf, contract_dim, block_size or length)
+        * sf.unsqueeze(-1 if contract_dim == -1 else -2),
+        contract_dim,
+        length,
     )
 
 
@@ -249,6 +251,7 @@ class QuantizationSnapshot(NamedTuple):
     quantized_tensor: torch.Tensor  # low-precision codes
     scale: torch.Tensor  # fp32 dequant scale
     contract_dim: int
-    block_size: int  # 0: one scale block spans the whole contraction
+    scaling: dict  # QuantizationConfig.scaling, as quantize_operand took it
     offs: torch.Tensor | None = None  # set by grouped GEMMs, marks an expert axis
+    ragged_dim: int | None = None  # which axis `offs` segments, if any
     fmt: str = ""  # the element format the codes are in, for qmax

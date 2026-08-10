@@ -22,10 +22,7 @@ import torch
 sys.path.insert(0, ".")
 
 from src.kernel.gemm import scaled_grouped_gemm
-from src.quant.quantize import (
-    quantize_operand,
-    ragged_scale_blocks,
-)
+from src.quant.quantize import quantize_operand
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
 M_FIXED = 8 * 1024 * 8
@@ -49,8 +46,11 @@ DEFAULT_OUT = "benchmarks/results/scaled_grouped_gemm.png"
 _IMPL_COLOR = {"bf16": "#eb6834", "triton": "#2a78d6"}
 
 
-def _kw(scheme):
-    return dict(fmt="fp8_e4m3") if scheme == "fp8_rowwise" else dict(fmt="int8")
+def _fmt(scheme):
+    return "fp8_e4m3" if scheme == "fp8_rowwise" else "int8"
+
+
+_ROWWISE = {"granularity": "rowwise", "block_size": 0, "scale_dtype": None}
 
 
 def _make(E, M, K, N, seed=0):
@@ -65,15 +65,11 @@ def _make(E, M, K, N, seed=0):
 
 def _quant(a, b, scheme):
     """Quantize A (M,K) and per-expert B (E,K,N) rowwise; return aq,bq,sa,sb,bs."""
-    kw = _kw(scheme)
+    fmt = _fmt(scheme)
     bs = 0  # rowwise: one scale block per contraction segment
-    aq, sa = quantize_operand(a, -1, "rowwise", 0, **kw)
-    bq_list, sb_list = [], []
-    for g in range(b.shape[0]):
-        bqg, sbg = quantize_operand(b[g], 0, "rowwise", 0, **kw)
-        bq_list.append(bqg)
-        sb_list.append(sbg)
-    return aq, torch.stack(bq_list), sa, torch.stack(sb_list), bs
+    aq, sa = quantize_operand(a, -1, fmt, _ROWWISE)
+    bq, sb = quantize_operand(b, -2, fmt, _ROWWISE)  # (E,K,N) in one call
+    return aq, bq, sa, sb, bs
 
 
 def _time(fn, iters=50):
@@ -119,10 +115,9 @@ def _bench_wgrad_point(E, K, N, scheme):
     g = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16) * 0.1
     ref = torch._grouped_mm(a.mT, g, offs=offs).float()
 
-    kw = _kw(scheme)
-    blocks = ragged_scale_blocks(offs, a.shape[0], 0)
-    aq, sa = quantize_operand(a, 0, "rowwise", 0, ragged=blocks, **kw)
-    gq, sg = quantize_operand(g, 0, "rowwise", 0, ragged=blocks, **kw)
+    fmt = _fmt(scheme)
+    aq, sa = quantize_operand(a, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
+    gq, sg = quantize_operand(g, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
 
     def triton_fn():
         return scaled_grouped_gemm(aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0)

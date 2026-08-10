@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from src.quant.constants import EPS
-from src.quant.quantize import _quantize, ragged_scale_blocks
+from src.quant.quantize import quantize_operand
 from src.quant.utils import is_int8s, str_to_dtype, str_to_emax, str_to_qmax
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
@@ -17,22 +17,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only
 
 def _call(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
     """Adapter onto the API under test. Task 3 re-points this and nothing else."""
-    blocks = None
-    if offs is not None:
-        blocks = ragged_scale_blocks(
-            offs,
-            x.shape[ragged_dim],
-            scaling["block_size"] if ragged_dim == contract_dim else 0,
-        )
-    return _quantize(
-        x,
-        contract_dim,
-        fmt,
-        scaling["granularity"],
-        scaling["block_size"],
-        scaling.get("scale_dtype"),
-        blocks,
-        ragged_dim,
+    return quantize_operand(
+        x, contract_dim, fmt, scaling, offs=offs, ragged_dim=ragged_dim
     )
 
 
@@ -204,3 +190,16 @@ def test_matches_enumeration_reference(
     assert scale.shape == ref_scale.shape
     assert torch.equal(scale, ref_scale)
     assert torch.equal(codes.view(torch.uint8), ref_codes.view(torch.uint8))
+
+
+@pytest.mark.parametrize("scaling", SCALINGS, ids=lambda s: s["granularity"])
+def test_expert_stack_matches_per_expert_quantize(scaling):
+    """One rank-agnostic call on an (E,K,N) stack == moe.py's deleted per-expert loop."""
+    torch.manual_seed(0)
+    b = torch.randn(3, 32, 16, device="cuda", dtype=torch.bfloat16)
+    codes, scale = quantize_operand(b, -2, "fp8_e4m3", scaling)
+    per = [quantize_operand(b[g], -2, "fp8_e4m3", scaling) for g in range(b.shape[0])]
+    assert torch.equal(
+        codes.view(torch.uint8), torch.stack([q for q, _ in per]).view(torch.uint8)
+    )
+    assert torch.equal(scale, torch.stack([s for _, s in per]))

@@ -12,10 +12,7 @@ from src.kernel.gemm import (
     scaled_gemm,
     scaled_grouped_gemm,
 )
-from src.quant.quantize import (
-    quantize_operand,
-    ragged_scale_blocks,
-)
+from src.quant.quantize import quantize_operand
 from tests.fast.kernel._refs import (
     _dequant_a,
     _dequant_b_grouped,
@@ -35,18 +32,15 @@ FMT = {E4M3: "fp8_e4m3", E5M2: "fp8_e5m2"}
 INT_FMT = {127: "int8", 63: "int7", 31: "int6", 15: "int5", 7: "int4"}
 
 
-def _fp8_kw(dt, scale_dtype=None):
-    return dict(fmt=FMT[dt], scale_dtype=scale_dtype)
+def _scaling(gran, bs=0, scale_dtype=None):
+    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
 
 
-def _int_kw(qmax):
-    return dict(fmt=INT_FMT[qmax])
-
-
-def _run(a, b, gran, bs, a_kw, b_kw):
+def _run(a, b, gran, bs, a_fmt, b_fmt, scale_dtype=None):
     # the kernel takes the 0-sentinel width; the oracle's pad math takes a count
-    aq, sa = quantize_operand(a, -1, gran, bs, **a_kw)
-    bq, sb = quantize_operand(b, 0, gran, bs, **b_kw)
+    scaling = _scaling(gran, bs, scale_dtype)
+    aq, sa = quantize_operand(a, -1, a_fmt, scaling)
+    bq, sb = quantize_operand(b, -2, b_fmt, scaling)
     out = scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
     oracle = scaled_gemm_ref(aq, bq, sa, sb, bs or a.shape[1])
     return out, oracle
@@ -296,7 +290,7 @@ def test_fp8_e4m3_matches_oracle(gran, bs):
     torch.manual_seed(0)
     a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(256, 96, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(a, b, gran, bs, _fp8_kw(E4M3), _fp8_kw(E4M3))
+    out, oracle = _run(a, b, gran, bs, FMT[E4M3], FMT[E4M3])
     assert out.shape == (128, 96) and out.dtype == torch.float32
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
@@ -306,7 +300,7 @@ def test_fp8_e5m2_times_e5m2_ok():
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(a, b, "rowwise", 0, _fp8_kw(E5M2), _fp8_kw(E5M2))
+    out, oracle = _run(a, b, "rowwise", 0, FMT[E5M2], FMT[E5M2])
     assert torch.isfinite(out).all()
     assert (out - oracle).norm() / oracle.norm() < 0.05
 
@@ -315,7 +309,7 @@ def test_fp8_mixed_e5m2_e4m3():
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(a, b, "blockwise", 32, _fp8_kw(E5M2), _fp8_kw(E4M3))
+    out, oracle = _run(a, b, "blockwise", 32, FMT[E5M2], FMT[E4M3])
     assert (out - oracle).norm() / oracle.norm() < 0.05
 
 
@@ -324,8 +318,9 @@ def test_pow2_e8m0_blockwise_matches_oracle():
     torch.manual_seed(0)
     a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
-    kw = _fp8_kw(E4M3, scale_dtype="fp8_e8m0")
-    out, oracle = _run(a, b, "blockwise", 32, kw, kw)
+    out, oracle = _run(
+        a, b, "blockwise", 32, FMT[E4M3], FMT[E4M3], scale_dtype="fp8_e8m0"
+    )
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
 
@@ -334,7 +329,7 @@ def test_int_matches_oracle(qmax):
     torch.manual_seed(0)
     a = torch.randn(96, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(a, b, "rowwise", 0, _int_kw(qmax), _int_kw(qmax))
+    out, oracle = _run(a, b, "rowwise", 0, INT_FMT[qmax], INT_FMT[qmax])
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
 
@@ -352,8 +347,8 @@ def test_bias_matches_oracle(gran, bs):
     a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(256, 96, device="cuda", dtype=torch.bfloat16)
     bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, gran, bs, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, gran, bs, **_fp8_kw(E4M3))
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling(gran, bs))
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling(gran, bs))
     out = scaled_gemm(aq, bq, sa, sb, torch.float32, bs, bias=bias)
     oracle = scaled_gemm_ref(aq, bq, sa, sb, bs or a.shape[1]) + bias.float()
     assert (out - oracle).norm() / oracle.norm() < 0.02
@@ -364,8 +359,8 @@ def test_bias_none_unchanged():
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, "rowwise", 0, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, "rowwise", 0, **_fp8_kw(E4M3))
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("rowwise"))
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("rowwise"))
     torch.testing.assert_close(
         scaled_gemm(aq, bq, sa, sb, torch.float32, 0, bias=None),
         scaled_gemm(aq, bq, sa, sb, torch.float32, 0),
@@ -378,7 +373,7 @@ def test_nonmultiple_shapes_mask_correctly():
     torch.manual_seed(0)
     a = torch.randn(70, 100, device="cuda", dtype=torch.bfloat16)  # M,K odd
     b = torch.randn(100, 130, device="cuda", dtype=torch.bfloat16)  # N odd, K%32!=0
-    out, oracle = _run(a, b, "blockwise", 32, _fp8_kw(E4M3), _fp8_kw(E4M3))
+    out, oracle = _run(a, b, "blockwise", 32, FMT[E4M3], FMT[E4M3])
     assert out.shape == (70, 130)
     assert (out - oracle).norm() / oracle.norm() < 0.03
 
@@ -388,8 +383,8 @@ def test_output_dtype_respected(out_dtype):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, "rowwise", 0, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, "rowwise", 0, **_fp8_kw(E4M3))
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("rowwise"))
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("rowwise"))
     out = scaled_gemm(aq, bq, sa, sb, out_dtype, 0)  # rowwise -> one block over K
     assert out.dtype == out_dtype
 
@@ -411,8 +406,8 @@ def _valid_scaled_args(bs=_VBS):
     torch.manual_seed(0)
     a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, "blockwise", bs, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, "blockwise", bs, **_fp8_kw(E4M3))
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", bs))
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", bs))
     return aq, bq, sa, sb, torch.randn(_VN, device="cuda", dtype=torch.bfloat16)
 
 
@@ -471,8 +466,8 @@ def test_scaled_gemm_rejects_unusable_block_size(bs):
     """
     a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, "blockwise", bs, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, "blockwise", bs, **_fp8_kw(E4M3))
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", bs))
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", bs))
     with pytest.raises(ValueError):
         scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
 
@@ -483,8 +478,8 @@ def test_scaled_gemm_accepts_non_pow2_block_size_spanning_k():
     """
     a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, "blockwise", _VK + 44, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, "blockwise", _VK + 44, **_fp8_kw(E4M3))
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", _VK + 44))
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", _VK + 44))
     assert sa.shape[1] == 1
     assert torch.isfinite(scaled_gemm(aq, bq, sa, sb, torch.float32, _VK + 44)).all()
 
@@ -512,33 +507,35 @@ def _make_scaled_layout(layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0)
     torch.manual_seed(seed)
     E, R = len(counts), sum(counts)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    kw = dict(fmt=fmt)
+    scaling = _scaling(gran, bs)
 
     def rand(*shape):
         return torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 0.1
 
     if layout == "ragged_m":  # (R,K) x (E,K,N) -> (R,N)
-        aq, sa = quantize_operand(rand(R, K), -1, gran, bs, **kw)
-        per = [quantize_operand(rand(K, N), 0, gran, bs, **kw) for _ in range(E)]
-        bq = torch.stack([q for q, _ in per])
-        sb = torch.stack([s for _, s in per])
+        aq, sa = quantize_operand(rand(R, K), -1, fmt, scaling)
+        b = torch.stack([rand(K, N) for _ in range(E)])
+        bq, sb = quantize_operand(b, -2, fmt, scaling)
         return aq, bq, sa, sb, offs, bs
 
     if layout == "ragged_k":  # (M,R) x (R,N) -> (E,M,N)
-        blocks = ragged_scale_blocks(offs, R, bs)
-        aq, sa = quantize_operand(rand(R, M), 0, gran, bs, ragged=blocks, **kw)
-        bq, sb = quantize_operand(rand(R, N), 0, gran, bs, ragged=blocks, **kw)
+        aq, sa = quantize_operand(
+            rand(R, M), -2, fmt, scaling, offs=offs, ragged_dim=-2
+        )
+        bq, sb = quantize_operand(
+            rand(R, N), -2, fmt, scaling, offs=offs, ragged_dim=-2
+        )
         return aq.mT, bq, sa.mT, sb, offs, bs
 
     if layout == "ragged_n":  # (E,M,K) x (K,R) -> (M,R)
-        per = [quantize_operand(rand(M, K), -1, gran, bs, **kw) for _ in range(E)]
-        aq = torch.stack([q for q, _ in per])
-        sa = torch.stack([s for _, s in per])
+        a = torch.stack([rand(M, K) for _ in range(E)])
+        aq, sa = quantize_operand(a, -1, fmt, scaling)
         # b's ragged axis is its columns. A per-column scale cannot pool amax across
-        # groups by construction, so only tensorwise needs `ragged` -- reached here
+        # groups by construction, so only tensorwise needs `offs` -- reached here
         # through the existing row-ragged path on the transpose.
-        blocks = ragged_scale_blocks(offs, R, bs)
-        bqT, sbT = quantize_operand(rand(R, K), -1, gran, bs, ragged=blocks, **kw)
+        bqT, sbT = quantize_operand(
+            rand(R, K), -1, fmt, scaling, offs=offs, ragged_dim=-2
+        )
         return aq, bqT.mT, sa, sbT.mT, offs, bs
 
     raise ValueError(layout)
@@ -703,8 +700,8 @@ def test_compiles_fullgraph():
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, "blockwise", 32, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, "blockwise", 32, **_fp8_kw(E4M3))
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", 32))
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", 32))
     fn = torch.compile(
         lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
     )

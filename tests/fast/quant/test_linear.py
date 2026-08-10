@@ -14,15 +14,20 @@ from src.utils.config import (
     TrainingConfig,
 )
 
-_MXFP8_KW = dict(fmt="fp8_e4m3", scale_dtype="fp8_e8m0")
+_E4M3 = "fp8_e4m3"
 
 
-def _roundtrip(x, contract_dim, granularity, block_size, fmt, *, scale_dtype=None):
+def _scaling(gran, bs=0, scale_dtype=None):
+    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+
+
+_MXFP8 = _scaling("blockwise", 32, "fp8_e8m0")
+
+
+def _roundtrip(x, contract_dim, fmt, scaling):
     """dequant(quant(x)) — the operand the quantized GEMM actually multiplies."""
-    xq, scale = quantize_operand(
-        x, contract_dim, granularity, block_size, fmt, scale_dtype=scale_dtype
-    )
-    return dequantize_operand(xq, scale, contract_dim, block_size)
+    xq, scale = quantize_operand(x, contract_dim, fmt, scaling)
+    return dequantize_operand(xq, scale, contract_dim, scaling)
 
 
 def _fp8_capable():
@@ -64,8 +69,8 @@ def test_forward_matches_roundtrip_oracle():
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     out = q(x)
     ref = (
-        _roundtrip(x, -1, "tensorwise", 0, fmt="fp8_e4m3")
-        @ _roundtrip(lin.weight, -1, "tensorwise", 0, fmt="fp8_e4m3").t()
+        _roundtrip(x, -1, _E4M3, _scaling("tensorwise"))
+        @ _roundtrip(lin.weight, -1, _E4M3, _scaling("tensorwise")).t()
     )
     assert out.shape == (64, 96) and out.dtype == torch.bfloat16
     rel = (out.float() - ref.float()).norm() / ref.float().norm()
@@ -98,8 +103,8 @@ def test_rowwise_forward_and_backward():
     out = q(x)
     # rowwise oracle: per-row act, per-column weight (reduce over K)
     ref = (
-        _roundtrip(x, -1, "rowwise", 0, fmt="fp8_e4m3")
-        @ _roundtrip(lin.weight, -1, "rowwise", 0, fmt="fp8_e4m3").t()
+        _roundtrip(x, -1, _E4M3, _scaling("rowwise"))
+        @ _roundtrip(lin.weight, -1, _E4M3, _scaling("rowwise")).t()
     )
     rel = (out.float() - ref.float()).norm() / ref.float().norm()
     assert rel < 0.05
@@ -179,7 +184,9 @@ def test_gemm_passthrough_is_plain_matmul():
 def test_gemm_withholds_snapshots_unless_asked():
     """Training discards them; only the diagnostic replay opts in."""
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    out, a_snap, b_snap = quantized_gemm(a, b, "int8", "int8", torch.float32, {})
+    out, a_snap, b_snap = quantized_gemm(
+        a, b, "int8", "int8", torch.float32, _scaling("tensorwise")
+    )
     assert torch.isfinite(out).all()
     assert a_snap is None and b_snap is None
 
@@ -199,7 +206,7 @@ def test_gemm_applies_bias_in_the_fused_kernel():
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)
     bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
-    cfg = {"granularity": "rowwise", "block_size": 0}
+    cfg = _scaling("rowwise")
     with_bias, _, _ = quantized_gemm(
         a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg, bias=bias
     )
@@ -232,7 +239,7 @@ def test_quantized_linear_adds_bias_exactly_once():
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
     out, a_snap, b_snap = quantized_gemm(
-        a, b, fmt, "bf16", torch.float32, {}, enable_snapshot=True
+        a, b, fmt, "bf16", torch.float32, _scaling("tensorwise"), enable_snapshot=True
     )
     assert out.shape == (20, 40) and torch.isfinite(out).all()
     assert a_snap is not None and b_snap is None  # only a is a quantized format
@@ -244,10 +251,10 @@ def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")
     b = torch.randn(128, 96, device="cuda")
-    out, _, _ = quantized_gemm(
-        a, b, fmt, fmt, torch.float32, {"granularity": "rowwise"}
+    out, _, _ = quantized_gemm(a, b, fmt, fmt, torch.float32, _scaling("rowwise"))
+    ref = _roundtrip(a, -1, fmt, _scaling("rowwise")) @ _roundtrip(
+        b, -2, fmt, _scaling("rowwise")
     )
-    ref = _roundtrip(a, -1, "rowwise", 0, fmt) @ _roundtrip(b, 0, "rowwise", 0, fmt)
     assert (out - ref).norm() / ref.norm() < 0.02
 
 
@@ -265,8 +272,7 @@ def test_quant_linear_mxfp8_forward_matches_oracle():
     out = q(x)
     # forward blocks x along in-features (-1) and w along in-features (-1).
     ref = (
-        _roundtrip(x, -1, "blockwise", 32, **_MXFP8_KW)
-        @ _roundtrip(lin.weight, -1, "blockwise", 32, **_MXFP8_KW).t()
+        _roundtrip(x, -1, _E4M3, _MXFP8) @ _roundtrip(lin.weight, -1, _E4M3, _MXFP8).t()
     )
     assert out.shape == (256, 256) and out.dtype == torch.bfloat16
     rel = (out.float() - ref.float()).norm() / ref.float().norm()

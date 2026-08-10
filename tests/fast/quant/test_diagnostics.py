@@ -17,6 +17,11 @@ def _fp8_capable():
 
 fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
 
+
+def _scaling(gran, bs=0, scale_dtype=None):
+    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+
+
 GEMM_OPERANDS = (
     "fwd.act",
     "fwd.weight",
@@ -237,11 +242,11 @@ def test_ragged_blockwise_metrics_use_the_per_expert_scale_blocks():
     offs = torch.tensor(counts).cumsum(0).to(torch.int32)
     x = torch.randn(sum(counts), 8)
     x[:6] *= 50.0
-    blocks = diagnostics.ragged_scale_blocks(offs, x.shape[0], 4)
-    xq, scale = quantize_operand(x, 0, "blockwise", 4, "fp8_e4m3", ragged=blocks)
+    scaling = _scaling("blockwise", 4)
+    xq, scale = quantize_operand(x, -2, "fp8_e4m3", scaling, offs=offs, ragged_dim=-2)
 
     got = diagnostics._snapshot_metrics(
-        QuantizationSnapshot(x, xq, scale, 0, 4, offs, "fp8_e4m3")
+        QuantizationSnapshot(x, xq, scale, -2, scaling, offs, -2, "fp8_e4m3")
     )
     assert torch.isfinite(torch.stack(list(got.values()))).all()
     # fp8 blockwise reconstruction is good; a mis-indexed scale destroys SQNR

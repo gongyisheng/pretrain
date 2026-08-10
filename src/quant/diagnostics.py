@@ -6,7 +6,7 @@ import torch
 
 from src.quant.linear import QuantizedLinear, quantized_gemm
 from src.quant.moe import QuantizedSparseMoEBlock, quantized_grouped_gemm
-from src.quant.quantize import dequantize_operand, ragged_scale_blocks
+from src.quant.quantize import dequantize_operand
 from src.quant.utils import str_to_qmax
 from src.utils.metric_utils import compute_quantization_metrics
 
@@ -176,21 +176,14 @@ def _replay(record):
 
 
 def _snapshot_metrics(snapshot):
-    """Metrics for one quantized operand. A wgrad operand's scale rows tile each
-    expert, so rebuild that mapping -- indexing it as a global tiling reports
-    invented error.
-    """
-    ragged = None
-    if snapshot.offs is not None and snapshot.contract_dim == 0:
-        ragged = ragged_scale_blocks(
-            snapshot.offs, snapshot.quantized_tensor.shape[0], snapshot.block_size
-        )
+    """Metrics for one quantized operand."""
     dequantized = dequantize_operand(
         snapshot.quantized_tensor,
         snapshot.scale,
         snapshot.contract_dim,
-        snapshot.block_size,
-        ragged=ragged,
+        snapshot.scaling,
+        offs=snapshot.offs,
+        ragged_dim=snapshot.ragged_dim,
     )
     return compute_quantization_metrics(
         snapshot.source_tensor,

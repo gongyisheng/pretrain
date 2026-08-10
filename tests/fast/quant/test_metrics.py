@@ -5,6 +5,8 @@ from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.utils import str_to_qmax
 from src.utils.metric_utils import compute_quantization_metrics
 
+_TENSORWISE = {"granularity": "tensorwise", "block_size": 0, "scale_dtype": None}
+
 METRICS = ("sqnr", "underflow_rate", "clip_rate")
 SPREAD_METRICS = ("sqnr_min", "underflow_rate_max", "clip_rate_max")
 
@@ -92,9 +94,9 @@ def test_spread_excludes_empty_experts():
 def test_sqnr_positive_and_finite_over_a_real_round_trip(fmt):
     torch.manual_seed(0)
     x = torch.randn(64, 64)
-    q, scale = quantize_operand(x, -1, "tensorwise", 0, fmt)
+    q, scale = quantize_operand(x, -1, fmt, _TENSORWISE)
     m = compute_quantization_metrics(
-        x, dequantize_operand(q, scale, -1, 0), q, str_to_qmax(fmt)
+        x, dequantize_operand(q, scale, -1, _TENSORWISE), q, str_to_qmax(fmt)
     )
     assert torch.isfinite(m["sqnr"]) and m["sqnr"].item() > 10.0
 
@@ -104,9 +106,9 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
     x = torch.zeros(1, 256)
     x[0, 0] = 1000.0
     x[0, 1:] = 1e-3  # well below (1000/448) * 2^-9 for e4m3
-    q, scale = quantize_operand(x, -1, "tensorwise", 0, "fp8_e4m3")
+    q, scale = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
     m = compute_quantization_metrics(
-        x, dequantize_operand(q, scale, -1, 0), q, str_to_qmax("fp8_e4m3")
+        x, dequantize_operand(q, scale, -1, _TENSORWISE), q, str_to_qmax("fp8_e4m3")
     )
     assert m["underflow_rate"].item() > 0.9
 

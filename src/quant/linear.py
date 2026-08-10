@@ -28,9 +28,6 @@ def quantized_gemm(
     epilogue, so it never passes through the scales. Both paths add it before the
     downcast to `out_dtype`, matching what cuBLAS does for an unquantized addmm.
     """
-    granularity = scaling_cfg.get("granularity", "tensorwise")
-    block_size = scaling_cfg.get("block_size", 0)
-    scale_dtype = scaling_cfg.get("scale_dtype")
     same_family = (is_fp8(a_fmt) and is_fp8(b_fmt)) or (
         is_int8s(a_fmt) and is_int8s(b_fmt)
     )
@@ -38,26 +35,22 @@ def quantized_gemm(
     a_snap = b_snap = None
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
-        aq, sa = quantize_operand(
-            a, -1, granularity, block_size, a_fmt, scale_dtype=scale_dtype
-        )
+        aq, sa = quantize_operand(a, -1, a_fmt, scaling_cfg)
         if enable_snapshot:
-            a_snap = QuantizationSnapshot(a, aq, sa, -1, block_size, fmt=a_fmt)
+            a_snap = QuantizationSnapshot(a, aq, sa, -1, scaling_cfg, fmt=a_fmt)
     if is_quantized(b_fmt):
-        bq, sb = quantize_operand(
-            b, 0, granularity, block_size, b_fmt, scale_dtype=scale_dtype
-        )
+        bq, sb = quantize_operand(b, -2, b_fmt, scaling_cfg)
         if enable_snapshot:
-            b_snap = QuantizationSnapshot(b, bq, sb, 0, block_size, fmt=b_fmt)
+            b_snap = QuantizationSnapshot(b, bq, sb, -2, scaling_cfg, fmt=b_fmt)
 
     if same_family and a.is_cuda and b.is_cuda:
-        y = scaled_gemm(aq, bq, sa, sb, out_dtype, block_size, bias=bias)
+        y = scaled_gemm(aq, bq, sa, sb, out_dtype, scaling_cfg["block_size"], bias=bias)
         return y, a_snap, b_snap
 
     if aq is not None:
-        a = dequantize_operand(aq, sa, -1, block_size).to(a.dtype)
+        a = dequantize_operand(aq, sa, -1, scaling_cfg).to(a.dtype)
     if bq is not None:
-        b = dequantize_operand(bq, sb, 0, block_size).to(b.dtype)
+        b = dequantize_operand(bq, sb, -2, scaling_cfg).to(b.dtype)
     y = a @ b
     if bias is not None:
         y = y + bias

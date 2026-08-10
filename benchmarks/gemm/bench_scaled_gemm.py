@@ -170,16 +170,8 @@ def _make(M, K, N):
 _FMT = {E4M3: "fp8_e4m3", E5M2: "fp8_e5m2"}
 
 
-def _fp8_kw(dt):
-    return dict(fmt=_FMT[dt])
-
-
-def _int8_kw():
-    return dict(fmt="int8")
-
-
-def _mx_kw():
-    return dict(fmt="fp8_e4m3", scale_dtype="fp8_e8m0")
+def _scaling(gran, bs=0, scale_dtype=None):
+    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +181,9 @@ def _mx_kw():
 
 
 def _bench_fp8_tensorwise(a, b, ref):
-    aq, sa = quantize_operand(a, -1, "tensorwise", 0, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, "tensorwise", 0, **_fp8_kw(E4M3))
+    scaling = _scaling("tensorwise")
+    aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
     bs = 0  # one scale block per contraction segment
 
     def triton_fn():
@@ -225,8 +218,9 @@ def _bench_fp8_tensorwise(a, b, ref):
 
 
 def _bench_fp8_rowwise(a, b, ref):
-    aq, sa = quantize_operand(a, -1, "rowwise", 0, **_fp8_kw(E4M3))
-    bq, sb = quantize_operand(b, 0, "rowwise", 0, **_fp8_kw(E4M3))
+    scaling = _scaling("rowwise")
+    aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
     bs = 0  # one scale block per contraction segment
 
     def triton_fn():
@@ -266,8 +260,9 @@ def _bench_int8_rowwise(a, b, ref, M, K, N):
     if M <= 16 or K % 8 or N % 8:
         return None  # torch._int_mm's shape constraints aren't met — skip entirely
 
-    aq, sa = quantize_operand(a, -1, "rowwise", 0, **_int8_kw())
-    bq, sb = quantize_operand(b, 0, "rowwise", 0, **_int8_kw())
+    scaling = _scaling("rowwise")
+    aq, sa = quantize_operand(a, -1, "int8", scaling)
+    bq, sb = quantize_operand(b, -2, "int8", scaling)
     bs = 0  # one scale block per contraction segment
 
     def triton_fn():
@@ -298,8 +293,9 @@ def _bench_int8_rowwise(a, b, ref, M, K, N):
 
 
 def _bench_mxfp8(a, b, ref):
-    aq, sa = quantize_operand(a, -1, "blockwise", MXFP8_BLOCK, **_mx_kw())
-    bq, sb = quantize_operand(b, 0, "blockwise", MXFP8_BLOCK, **_mx_kw())
+    scaling = _scaling("blockwise", MXFP8_BLOCK, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
     bs = MXFP8_BLOCK
 
     def triton_fn():
