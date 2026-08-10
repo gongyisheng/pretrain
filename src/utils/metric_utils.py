@@ -87,40 +87,6 @@ def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def _esd_alpha_batched(energy: torch.Tensor) -> torch.Tensor:
-    """Power-law ESD tail exponent α (WeightWatcher) per (M, n) σ² spectrum row; NaN if <4 positive."""
-    M, n = energy.shape
-    eigs, _ = torch.sort(energy, dim=-1)  # ascending → positives are the top columns
-    pos = eigs > 0
-    nvalid = pos.sum(-1)  # (M,) positive count per row
-    tiny = torch.finfo(eigs.dtype).tiny
-    logs = torch.where(pos, eigs.clamp_min(tiny).log(), eigs.new_zeros(()))
-    idx = torch.arange(n, device=eigs.device)
-    start = n - nvalid  # (M,) first positive column per row
-    is_pos_i = idx.unsqueeze(0) >= start.unsqueeze(1)  # (M, n) column i is positive
-    nt = (n - idx).to(logs.dtype).expand(M, n)  # tail size for xmin = eigs[:, i]
-    # suffix[i] = Σ_{j>=i} logs[j]  (logs are 0 for non-positive, excluded columns)
-    suffix = torch.flip(torch.cumsum(torch.flip(logs, [-1]), -1), [-1])
-    alpha = 1.0 + nt / (suffix - nt * logs).clamp_min(1e-12)  # (M, n)
-    # KS distance per candidate xmin = eigs[:, i], over its tail j >= i.
-    log_ratio = logs.unsqueeze(1) - logs.unsqueeze(
-        2
-    )  # (M, i, j) = logs[:,j] - logs[:,i]
-    fit_cdf = 1.0 - torch.exp(-(alpha.unsqueeze(2) - 1.0) * log_ratio)
-    rank = (idx.view(1, 1, n) - idx.view(1, n, 1) + 1).to(logs.dtype)  # [i,j] = j-i+1
-    emp_cdf = rank / nt.unsqueeze(2)
-    tail = (idx.view(1, n, 1) <= idx.view(1, 1, n)) & is_pos_i.unsqueeze(
-        2
-    )  # j>=i, i positive
-    ks = torch.where(tail, (emp_cdf - fit_cdf).abs(), eigs.new_zeros(())).amax(
-        -1
-    )  # (M, n)
-    ks = torch.where((nt >= 2) & is_pos_i, ks, eigs.new_full((), float("inf")))
-    best = ks.argmin(-1)  # (M,)
-    out = alpha.gather(1, best.unsqueeze(1)).squeeze(1)
-    return torch.where(nvalid >= 4, out, eigs.new_full((), float("nan")))
-
-
 def _gram_energy(weight: torch.Tensor) -> torch.Tensor:
     """Descending σ² spectrum via eigvalsh of the smaller Gram matrix (= svdvals(W)², no full SVD)."""
     w = weight.float()
@@ -131,25 +97,18 @@ def _gram_energy(weight: torch.Tensor) -> torch.Tensor:
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """srank / pr / esd_alpha of a weight's σ² spectrum (averaged over experts if 3D)."""
+    """srank / pr of a weight's σ² spectrum (averaged over experts if 3D)."""
     energy = _gram_energy(weight)  # (..., k) descending σ²
     total = energy.sum(-1)
     if (total == 0).any():
-        return {"srank": 0.0, "pr": 0.0, "esd_alpha": 0.0}
+        return {"srank": 0.0, "pr": 0.0}
     srank = total / energy[..., 0]  # stable rank ‖W‖_F²/σ_max² (rank-1 collapse canary)
     pr = total.pow(2) / energy.pow(2).sum(-1)  # participation ratio (Σσ²)²/Σσ⁴
-    alphas = _esd_alpha_batched(energy.reshape(-1, energy.shape[-1]))
-    alphas = alphas[~torch.isnan(alphas)]
-    esd_alpha = alphas.mean().item() if alphas.numel() else float("nan")
-    return {
-        "srank": srank.mean().item(),
-        "pr": pr.mean().item(),
-        "esd_alpha": esd_alpha,
-    }
+    return {"srank": srank.mean().item(), "pr": pr.mean().item()}
 
 
 def compute_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
-    """Spectral metrics (srank/pr/esd_alpha) per 2D/3D weight, keyed by param name (rope/embeddings skipped)."""
+    """Spectral metrics (srank/pr) per 2D/3D weight, keyed by param name (rope/embeddings skipped)."""
     metrics: dict[str, dict[str, float]] = {}
     for name, param in model.named_parameters():
         if param.ndim not in (2, 3) or not param.is_floating_point():

@@ -141,91 +141,6 @@ def _check_dims(x, contract_dim, ragged_dim, offs):
         raise ValueError(f"a ragged axis needs a 2D operand, got {x.ndim}D")
 
 
-def _quantize_segmented_contraction(
-    xf, contract_dim, block_size, fmt, scale_dtype, offs
-):
-    """The contraction is ragged: one scale block per group (or per `block_size` rows
-    inside a group), so no scale pools amax across two experts.
-
-    Shared verbatim by rowwise and blockwise -- `block_size` 0 vs N is the only
-    difference between them here. The ragged map already gives one scale entry per row,
-    so the operand is never tiled: reshaping it would only undo itself.
-    """
-    row_blocks, n_blocks = _scale_block_map(offs, xf.shape[contract_dim], block_size)
-    amax = _segment_amax(xf.abs(), contract_dim, row_blocks, n_blocks)
-    scale = _compute_scale(amax, fmt, scale_dtype)
-    return _compute_codes(xf, scale.index_select(contract_dim, row_blocks), fmt), scale
-
-
-def _quantize_tensorwise(xf, contract_dim, fmt, scale_dtype, offs, ragged_dim):
-    """One scale per tensor -- the only granularity that pools the outer axis.
-
-    That is also why the scale-layout restore lives only here: every other granularity
-    leaves the outer axis at full length already.
-    """
-    outer_dim = -1 if contract_dim == -2 else -2
-    if offs is None:
-        # (-2, -1), never (-1, -2): inductor compiles the two orders to markedly
-        # different kernels, and this is the hot path.
-        amax = xf.abs().amax((-2, -1), keepdim=True)
-    else:
-        # Collapse the axis that is not ragged first, then segment the ragged one, so
-        # the index_reduce_ runs over a single row/column instead of the full tensor.
-        dense_dim = -1 if ragged_dim == -2 else -2
-        row_blocks, n_blocks = _scale_block_map(offs, xf.shape[ragged_dim], 0)
-        amax = _segment_amax(
-            xf.abs().amax(dense_dim, keepdim=True), ragged_dim, row_blocks, n_blocks
-        )
-    scale = _compute_scale(amax, fmt, scale_dtype)
-
-    # the invariant: outer restored to full length, contract left at n_blocks
-    if ragged_dim == outer_dim:
-        # the outer axis folded to one row per group -- gather it back, and that same
-        # full-length scale is what divides the codes
-        scale = scale.index_select(outer_dim, row_blocks)
-        return _compute_codes(xf, scale, fmt), scale
-    # the outer axis was never split, so its one scale just broadcasts back over it
-    div = scale if offs is None else scale.index_select(contract_dim, row_blocks)
-    codes = _compute_codes(xf, div, fmt)
-    shape = list(scale.shape)
-    shape[outer_dim] = xf.shape[outer_dim]
-    return codes, scale.expand(shape)
-
-
-def _quantize_rowwise(xf, contract_dim, fmt, scale_dtype, offs, ragged_dim):
-    """One scale per row: a single block spans the whole contraction."""
-    if ragged_dim == contract_dim:
-        return _quantize_segmented_contraction(
-            xf, contract_dim, 0, fmt, scale_dtype, offs
-        )
-    # a ragged outer axis cannot change a per-row scale, so it is ignored
-    scale = _compute_scale(xf.abs().amax(contract_dim, keepdim=True), fmt, scale_dtype)
-    return _compute_codes(xf, scale, fmt), scale
-
-
-def _quantize_blockwise(
-    xf, contract_dim, block_size, fmt, scale_dtype, offs, ragged_dim
-):
-    """One scale per `block_size` elements along the contraction."""
-    if ragged_dim == contract_dim:
-        return _quantize_segmented_contraction(
-            xf, contract_dim, block_size, fmt, scale_dtype, offs
-        )
-    # a ragged outer axis cannot change a within-row scale, so it is ignored
-    scale = _compute_scale(
-        _tile_amax(xf.abs(), contract_dim, block_size), fmt, scale_dtype
-    )
-    tile_axis = -1 if contract_dim == -1 else -2
-    codes = _untile(
-        _compute_codes(
-            _tile(xf, contract_dim, block_size), scale.unsqueeze(tile_axis), fmt
-        ),
-        contract_dim,
-        xf.shape[contract_dim],
-    )
-    return codes, scale
-
-
 def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=None):
     """Quantize `x` into scale groups tiled along `contract_dim`.
 
@@ -243,21 +158,81 @@ def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=Non
     _check_dims(x, contract_dim, ragged_dim, offs)
     granularity, block_size = scaling["granularity"], scaling["block_size"]
     scale_dtype = scaling.get("scale_dtype")
+    outer_dim = -1 if contract_dim == -2 else -2
+    # only tensorwise pools the outer axis into a tile, so only there can a ragged
+    # outer axis fold it down to one row per group -- rowwise/blockwise leave it at
+    # full length and must not be re-indexed.
+    outer_segmented = granularity == "tensorwise" and ragged_dim == outer_dim
+    row_blocks = n_blocks = None
+    if offs is not None and (outer_segmented or ragged_dim == contract_dim):
+        row_blocks, n_blocks = _scale_block_map(
+            offs,
+            x.shape[ragged_dim],
+            block_size if ragged_dim == contract_dim else 0,
+        )
+
     xf = x.float()
-    if granularity == "tensorwise":
-        codes, scale = _quantize_tensorwise(
-            xf, contract_dim, fmt, scale_dtype, offs, ragged_dim
-        )
-    elif granularity == "rowwise":
-        codes, scale = _quantize_rowwise(
-            xf, contract_dim, fmt, scale_dtype, offs, ragged_dim
-        )
-    elif granularity == "blockwise":
-        codes, scale = _quantize_blockwise(
-            xf, contract_dim, block_size, fmt, scale_dtype, offs, ragged_dim
+    width = block_size
+    # A segmented contraction gets one scale entry per row from the ragged map, and
+    # block_size 0 puts a single block over the whole axis (config.py normalizes every
+    # non-blockwise granularity to it). Either way the scale already lines up with the
+    # operand along the contraction, so tiling it would reshape and copy the operand
+    # only to undo itself.
+    contract_tiled = bool(block_size) and ragged_dim != contract_dim
+
+    # The axes a plain amax collapses to one block: the contraction unless it is tiled
+    # or segmented, and the outer axis only where tensorwise pools it and it is not
+    # segmented. Built by walking (-2, -1) rather than appending and sorting: the order
+    # matters (inductor compiles amax((-1,-2)) to a markedly slower kernel than
+    # amax((-2,-1)), and this is the hot path for tensorwise and rowwise), and
+    # list.sort() is untraceable once a dim is a SymInt.
+    reduce_contract = not contract_tiled and ragged_dim != contract_dim
+    reduce_outer = granularity == "tensorwise" and not outer_segmented
+    dense_dims = [
+        dim
+        for dim in (-2, -1)
+        if (reduce_contract if dim == contract_dim else reduce_outer)
+    ]
+
+    amax = xf.abs()
+    if dense_dims:
+        # One pass over both, so the tiling and the segmented index_reduce_ -- the
+        # expensive steps -- see an already-collapsed tensor. amax is exact and
+        # commutative, so reducing in this order and in one call is free.
+        amax = amax.amax(dense_dims, keepdim=True)
+    if contract_tiled:
+        amax = _tile_amax(amax, contract_dim, width)
+    if outer_segmented:
+        amax = _segment_amax(amax, outer_dim, row_blocks, n_blocks)
+    if ragged_dim == contract_dim:
+        amax = _segment_amax(amax, contract_dim, row_blocks, n_blocks)
+    scale = _compute_scale(amax, fmt, scale_dtype)
+
+    div = scale
+    if ragged_dim == contract_dim:
+        div = div.index_select(contract_dim, row_blocks)
+    elif outer_segmented:
+        div = div.index_select(outer_dim, row_blocks)
+    if contract_tiled:
+        tile_axis = -1 if contract_dim == -1 else -2
+        codes = _untile(
+            _compute_codes(
+                _tile(xf, contract_dim, width), div.unsqueeze(tile_axis), fmt
+            ),
+            contract_dim,
+            x.shape[contract_dim],
         )
     else:
-        raise ValueError(f"unknown granularity: {granularity!r}")
+        codes = _compute_codes(xf, div, fmt)
+
+    # the invariant: outer restored to full length, contract left at n_blocks
+    if granularity == "tensorwise":
+        if outer_segmented:
+            scale = scale.index_select(outer_dim, row_blocks)
+        else:
+            shape = list(scale.shape)
+            shape[outer_dim] = x.shape[outer_dim]
+            scale = scale.expand(shape)
     return codes.contiguous(), scale.contiguous()
 
 

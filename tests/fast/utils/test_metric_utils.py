@@ -375,8 +375,6 @@ def test_svd_metrics_orthogonal_is_full_rank():
     m = metric_utils._svd_metrics(q)
     assert m["srank"] == pytest.approx(8.0, rel=1e-4)
     assert m["pr"] == pytest.approx(8.0, rel=1e-4)
-    # Identical eigenvalues → degenerate (infinite) power-law exponent.
-    assert m["esd_alpha"] > 1.0
 
 
 def test_svd_metrics_rank_one_is_minimal():
@@ -385,59 +383,11 @@ def test_svd_metrics_rank_one_is_minimal():
     m = metric_utils._svd_metrics(w)
     assert m["srank"] == pytest.approx(1.0, abs=1e-4)
     assert m["pr"] == pytest.approx(1.0, abs=1e-4)
-    # Single positive eigenvalue → too few points to fit → NaN.
-    assert math.isnan(m["esd_alpha"])
 
 
 def test_svd_metrics_zero_matrix():
     """All-zero weight (no positive σ) → every metric 0."""
-    assert metric_utils._svd_metrics(torch.zeros(4, 4)) == {
-        "srank": 0.0,
-        "pr": 0.0,
-        "esd_alpha": 0.0,
-    }
-
-
-def test_esd_alpha_recovers_synthetic_exponent():
-    """Eigenvalues drawn from p(λ)∝λ^-α → fitted α close to the true exponent."""
-    torch.manual_seed(0)
-    true_alpha = 3.0
-    xmin = 1.0
-    u = torch.rand(20000)
-    eigs = xmin * (1.0 - u).pow(-1.0 / (true_alpha - 1.0))  # inverse-CDF sampling
-    fitted = metric_utils._esd_alpha_batched(eigs.reshape(1, -1))[0].item()
-    assert fitted == pytest.approx(true_alpha, abs=0.15)
-
-
-def test_esd_alpha_too_few_eigs_is_nan():
-    alpha = metric_utils._esd_alpha_batched(torch.tensor([[1.0, 2.0, 3.0]]))[0]
-    assert math.isnan(alpha.item())
-
-
-def test_esd_alpha_batched_rows_independent():
-    """Rows are processed independently (no cross-row leakage), and a row with
-    fewer than four positive eigenvalues returns NaN."""
-    torch.manual_seed(0)
-    rows = [
-        torch.rand(64).pow(3),  # heavy-tailed
-        torch.rand(64),  # bulk
-        torch.tensor([0.0, 0.0, 5.0, 4.0, 3.0, 2.0] + [0.0] * 58),  # 4 positives
-        torch.tensor([0.0, 0.0, 7.0, 1.0] + [0.0] * 60),  # 2 positives → NaN
-        torch.zeros(64),  # all zero → NaN
-    ]
-    batched = metric_utils._esd_alpha_batched(torch.stack(rows))
-    assert not torch.isnan(batched[:3]).any()  # ≥4 positives → finite
-    assert torch.isnan(batched[3:]).all()  # <4 positives → NaN
-    # each row is identical run alone vs. in the batch (no cross-row contamination)
-    for i, row in enumerate(rows[:3]):
-        alone = metric_utils._esd_alpha_batched(row.reshape(1, -1))[0].item()
-        assert alone == pytest.approx(batched[i].item(), rel=1e-6, abs=1e-6)
-
-
-def test_svd_metrics_reports_esd_alpha():
-    torch.manual_seed(0)
-    m = metric_utils._svd_metrics(torch.randn(64, 48))
-    assert "esd_alpha" in m and m["esd_alpha"] > 1.0
+    assert metric_utils._svd_metrics(torch.zeros(4, 4)) == {"srank": 0.0, "pr": 0.0}
 
 
 def test_svd_metrics_3d_averages_over_experts():
@@ -448,10 +398,8 @@ def test_svd_metrics_3d_averages_over_experts():
     per_expert = [metric_utils._svd_metrics(w[e]) for e in range(w.size(0))]
     mean_srank = sum(d["srank"] for d in per_expert) / w.size(0)
     mean_pr = sum(d["pr"] for d in per_expert) / w.size(0)
-    mean_alpha = sum(d["esd_alpha"] for d in per_expert) / w.size(0)
     assert batched["srank"] == pytest.approx(mean_srank, rel=1e-5)
     assert batched["pr"] == pytest.approx(mean_pr, rel=1e-5)
-    assert batched["esd_alpha"] == pytest.approx(mean_alpha, rel=1e-5)
 
 
 def test_svd_metrics_3d_rank_one_experts():
@@ -461,17 +409,11 @@ def test_svd_metrics_3d_rank_one_experts():
     m = metric_utils._svd_metrics(w)
     assert m["srank"] == pytest.approx(1.0, abs=1e-4)
     assert m["pr"] == pytest.approx(1.0, abs=1e-4)
-    # Every expert rank-1 → all NaN → averaged esd_alpha is NaN.
-    assert math.isnan(m["esd_alpha"])
 
 
 def test_svd_metrics_3d_zero_tensor():
     """Any all-zero expert (no positive σ) → every metric 0."""
-    assert metric_utils._svd_metrics(torch.zeros(3, 4, 4)) == {
-        "srank": 0.0,
-        "pr": 0.0,
-        "esd_alpha": 0.0,
-    }
+    assert metric_utils._svd_metrics(torch.zeros(3, 4, 4)) == {"srank": 0.0, "pr": 0.0}
 
 
 def test_svd_metrics_includes_moe_experts():
@@ -500,8 +442,6 @@ def test_svd_metrics_keys_and_bounds(arch_id):
         n = min(shapes[name][-2:])
         assert 1.0 - 1e-4 <= m["srank"] <= n + 1e-4
         assert 1.0 - 1e-4 <= m["pr"] <= n + 1e-4
-        # Power-law exponent: NaN if too few eigenvalues, else α > 1.
-        assert math.isnan(m["esd_alpha"]) or m["esd_alpha"] > 1.0
 
 
 def test_svd_metrics_compiled_model_strips_prefix():
