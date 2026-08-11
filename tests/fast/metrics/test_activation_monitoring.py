@@ -310,8 +310,8 @@ def test_log_train_emits_norm_keys_without_mutating_the_model():
     logged = collector.log_train(
         step=1, model=model, optimizer=torch.optim.SGD(model.parameters(), lr=0.1)
     )
-    assert "activation/norm/0" in logged
-    assert logged["activation/norm/0"] > 0
+    assert "train-act/norm/0" in logged
+    assert logged["train-act/norm/0"] > 0
     assert model[0].act_stats.count.item() == before  # read-only
 
 
@@ -321,7 +321,7 @@ def test_log_train_omits_norm_keys_when_disabled():
     logged = collector.log_train(
         step=1, model=model, optimizer=torch.optim.SGD(model.parameters(), lr=0.1)
     )
-    assert not [k for k in logged if k.startswith("activation/norm/")]
+    assert not [k for k in logged if k.startswith("train-act/norm/")]
 
 
 def test_buffers_follow_the_model_not_the_ambient_default_device():

@@ -296,13 +296,15 @@ class MetricsCollector:
 
         # Per-site activation RMS and per-operand quantization health, both over the
         # window opened by train_step_begin, which also owns resetting them --
-        # nothing here mutates the model.
+        # nothing here mutates the model. The `train-` prefix is applied here, not in
+        # the compute functions: log_eval reads the same accumulators as `val-`.
         if self.config.logging.log_activation_norms:
             for name, rms in metric_utils.compute_activation_norm(model).items():
-                d[f"activation/norm/{name}"] = rms
+                d[f"train-act/norm/{name}"] = rms
 
         if self.config.logging.log_quant_metrics:
-            d.update(metric_utils.compute_quantization_metrics(model))
+            for name, value in metric_utils.compute_quantization_metrics(model).items():
+                d[f"train-quant/{name}"] = value
 
         self.logger.log(d, step=step)
 

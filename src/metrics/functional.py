@@ -256,10 +256,12 @@ def _quantization_metrics(src_sq, err_sq, under, clip, numel, grouped):
 
 
 def compute_quantization_metrics(model: torch.nn.Module) -> dict[str, float]:
-    """Read a window's quantization accumulators as `quant/<metric>/<site>` floats.
+    """Read a window's quantization accumulators as `<metric>/<site>` floats.
 
-    Keyed off each accumulator's own `key`, not its module path: which GEMM and
-    operand it belongs to is not something a path can express.
+    Phase-agnostic, like `compute_activation_norm`: the caller prefixes
+    `train-quant/` or `val-quant/`, because only the caller knows which window it
+    just closed. Keyed off each accumulator's own `key`, not its module path: which
+    GEMM and operand it belongs to is not something a path can express.
 
     No per-site emptiness check: a passthrough operand is never given an accumulator
     in the first place, so every site found here recorded. Testing one would cost a
@@ -271,7 +273,7 @@ def compute_quantization_metrics(model: torch.nn.Module) -> dict[str, float]:
             continue
         sums = [getattr(module, name) for name in QuantizationStats.FIELDS]
         for name, value in _quantization_metrics(*sums, module.grouped).items():
-            metrics[f"quant/{name}/{module.key}"] = value
+            metrics[f"{name}/{module.key}"] = value
     if not metrics:
         return {}
     keys = list(metrics)

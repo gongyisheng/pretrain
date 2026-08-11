@@ -156,19 +156,21 @@ def test_log_train_reads_quant_metrics_off_the_model():
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
     d = tracker.log_train(step=1, model=model, optimizer=opt)
-    assert d["quant/sqnr/fwd.act/layer_0"] == pytest.approx(20.0)  # 20*log10(10/1)
-    assert tracker.logger.logs[-1][1]["quant/sqnr/fwd.act/layer_0"] == pytest.approx(
+    assert d["train-quant/sqnr/fwd.act/layer_0"] == pytest.approx(
         20.0
-    )
+    )  # 20*log10(10/1)
+    assert tracker.logger.logs[-1][1][
+        "train-quant/sqnr/fwd.act/layer_0"
+    ] == pytest.approx(20.0)
 
 
-def test_log_train_without_quant_metrics_has_no_quant_keys():
+def test_log_train_without_quant_metrics_has_no_train_quant_keys():
     tracker, _ = _tracker(_cfg(log_every=1))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
     d = tracker.log_train(step=1, model=model, optimizer=opt)
-    assert not any(k.startswith("quant/") for k in d)
+    assert not any(k.startswith("train-quant/") for k in d)
 
 
 # ---------------------------------------------------------------------------

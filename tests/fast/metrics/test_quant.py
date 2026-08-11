@@ -184,15 +184,13 @@ def test_reading_a_window_averages_operands_not_micro_batches():
     window = QuantizationStats("fwd.act/x", 1, device)
     for x in micro:
         _fold(window, x)
-    got = compute_quantization_metrics(_holder([window]))["quant/sqnr/fwd.act/x"]
+    got = compute_quantization_metrics(_holder([window]))["sqnr/fwd.act/x"]
 
     per_batch = []
     for x in micro:
         one = QuantizationStats("fwd.act/x", 1, device)
         _fold(one, x)
-        per_batch.append(
-            compute_quantization_metrics(_holder([one]))["quant/sqnr/fwd.act/x"]
-        )
+        per_batch.append(compute_quantization_metrics(_holder([one]))["sqnr/fwd.act/x"])
 
     assert min(per_batch) <= got <= max(per_batch)
 
@@ -213,7 +211,7 @@ def test_compute_reads_every_site_under_its_own_key():
     got = compute_quantization_metrics(_holder(sites))
     for i in range(3):
         for metric in METRICS:
-            assert f"quant/{metric}/fwd.act/layer{i}" in got
+            assert f"{metric}/fwd.act/layer{i}" in got
     assert all(isinstance(v, float) for v in got.values())
 
 
@@ -232,6 +230,6 @@ def test_each_operand_is_folded_under_its_own_element_format():
         stats = QuantizationStats(f"fwd.act/{fmt}", 1, x.device)
         _fold(stats, x, fmt=fmt)
         rates[fmt] = compute_quantization_metrics(_holder([stats]))[
-            f"quant/underflow_rate/fwd.act/{fmt}"
+            f"underflow_rate/fwd.act/{fmt}"
         ]
     assert rates["int4"] > rates["int8"]

@@ -192,13 +192,13 @@ def test_trainer_rejects_unknown_loss_fn(mock_memmap):
 
 
 # ---------------------------------------------------------------------------
-# quant metrics wiring: flag off -> no hooks, no quant/ keys (runs everywhere);
-# flag on -> quant/ keys dispatched (needs fp8-capable GPU, see fp8_only below).
+# quant metrics wiring: flag off -> no hooks, no train-quant/ keys (runs everywhere);
+# flag on -> train-quant/ keys dispatched (needs fp8-capable GPU, see fp8_only below).
 # ---------------------------------------------------------------------------
 
 
 def test_quant_metrics_disabled_by_default(mock_memmap):
-    """log_quant_metrics defaults to False: no diagnostic pass, no quant/ keys,
+    """log_quant_metrics defaults to False: no diagnostic pass, no train-quant/ keys,
     hot path unchanged."""
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
@@ -212,7 +212,9 @@ def test_quant_metrics_disabled_by_default(mock_memmap):
             lambda step, metrics: logged.append(metrics)
         )
         trainer.train()
-        assert not any(k.startswith("quant/") for metrics in logged for k in metrics)
+        assert not any(
+            k.startswith("train-quant/") for metrics in logged for k in metrics
+        )
 
 
 def _tiny_fp8_config(tmp_dir):
@@ -240,7 +242,7 @@ def _tiny_fp8_config(tmp_dir):
 
 @fp8_only
 def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
-    """log_quant_metrics=True with an fp8 quant recipe: at least one quant/
+    """log_quant_metrics=True with an fp8 quant recipe: at least one train-quant/
     key from the diagnostic pass reaches the logger."""
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
@@ -252,7 +254,7 @@ def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
             lambda step, metrics: logged.append(metrics)
         )
         trainer.train()
-        assert any(k.startswith("quant/") for metrics in logged for k in metrics)
+        assert any(k.startswith("train-quant/") for metrics in logged for k in metrics)
 
 
 @fp8_only
