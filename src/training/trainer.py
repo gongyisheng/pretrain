@@ -441,7 +441,7 @@ class Trainer:
 
     @torch.no_grad()
     def _evaluate(self):
-        self.metrics.eval_begin()
+        self.metrics.eval_begin(self.model)
         for i, batch in enumerate(self.val_loader):
             if (
                 self.config.training.eval_steps > 0
@@ -465,12 +465,18 @@ class Trainer:
                 eot_token_id=self.eot_token_id,
             )
 
+        # Shut the val window before the train-accuracy pass, whose forwards would
+        # otherwise fold into it.
+        self.metrics.eval_end()
+
         train_avg_acc = None
         if self.config.task == "sft" and self.config.training.eval_train:
             train_avg_acc = self._evaluate_train_acc()
 
         # Assembly + dispatch + the printed summary line all live in MetricsCollector.
-        self.metrics.log_eval(step=self.step, train_avg_acc=train_avg_acc)
+        self.metrics.log_eval(
+            step=self.step, model=self.model, train_avg_acc=train_avg_acc
+        )
 
         if self.config.task == "pretrain":
             self._generate_sample()

@@ -11,8 +11,11 @@ import math
 import pytest
 import torch
 
+from src.metrics.activation import set_activation_monitoring_status
 from src.metrics.collector import MetricsCollector
+from src.metrics.convert import apply_activation_monitoring
 from src.metrics.quant import QuantizationStats
+from src.metrics.quant import set_quantization_monitoring_status
 from src.model import build_model
 from src.utils.config import ModelConfig, TrainConfig
 
@@ -32,6 +35,13 @@ class FakeLogger:
 
     def finish(self):
         pass
+
+
+@pytest.fixture(autouse=True)
+def _disarm_monitoring():
+    yield
+    set_activation_monitoring_status(False)
+    set_quantization_monitoring_status(False)
 
 
 def _cfg(task="pretrain", log_every=2, **logging):
@@ -810,3 +820,131 @@ def test_print_model_summary_moe(capsys):
     tracker.print_model_summary()
     out = capsys.readouterr().out
     assert "total params" in out and "active non-embedding" in out
+
+
+# ---------------------------------------------------------------------------
+# val-side activation / quantization windows
+# ---------------------------------------------------------------------------
+
+
+def _act_model():
+    """One Linear under a container, so its metric key is a real path ("0")."""
+    model = torch.nn.Sequential(torch.nn.Linear(8, 4))
+    apply_activation_monitoring(model)
+    return model
+
+
+def _one_eval_step(tracker):
+    """The minimum on_eval_step needs so log_eval has a batch to divide by."""
+    tracker.on_eval_step(
+        loss=2.0, logits=torch.randn(1, 2, 256), labels=torch.tensor([[1, 2]])
+    )
+
+
+def test_eval_begin_resets_and_arms_the_activation_window():
+    tracker, _ = _tracker(_cfg(log_activation_norms=True))
+    model = _act_model()
+    model[0].act_stats.energy += 5.0
+    model[0].act_stats.count += 2.0
+
+    tracker.eval_begin(model)
+    assert model[0].act_stats.count.item() == 0.0  # reset
+
+    model(torch.randn(4, 8))
+    assert model[0].act_stats.count.item() == 4 * 8  # armed
+
+
+def test_eval_begin_leaves_the_window_shut_when_disabled():
+    tracker, _ = _tracker(_cfg(log_activation_norms=False))
+    model = _act_model()
+    tracker.eval_begin(model)
+    model(torch.randn(4, 8))
+    assert model[0].act_stats.count.item() == 0.0
+
+
+def test_eval_end_disarms_the_window():
+    tracker, _ = _tracker(_cfg(log_activation_norms=True))
+    model = _act_model()
+    tracker.eval_begin(model)
+    model(torch.randn(4, 8))
+    tracker.eval_end()
+    before = model[0].act_stats.count.item()
+    model(torch.randn(7, 8))
+    assert model[0].act_stats.count.item() == before
+
+
+def test_forwards_after_eval_end_do_not_join_the_val_window():
+    """Mirrors _evaluate's order: on SFT the train-accuracy pass runs between the val
+    loop and log_eval, so the window has to be shut before it, not at the read."""
+    tracker, _ = _tracker(_cfg(task="sft", log_activation_norms=True))
+    model = _act_model()
+    tracker.eval_begin(model)
+    model(torch.randn(4, 8))  # the val loop
+    tracker.eval_end()
+    model(torch.randn(16, 8))  # the train-accuracy pass
+    assert model[0].act_stats.count.item() == 4 * 8
+
+
+def test_log_eval_emits_val_act_keys():
+    tracker, _ = _tracker(_cfg(log_activation_norms=True))
+    model = _act_model()
+    tracker.eval_begin(model)
+    model(torch.randn(4, 8))
+    tracker.eval_end()
+    _one_eval_step(tracker)
+    d = tracker.log_eval(step=1, model=model)
+    assert d["val-act/norm/0"] > 0
+    assert tracker.logger.logs[-1][1]["val-act/norm/0"] > 0
+
+
+def test_log_eval_omits_val_act_keys_when_disabled():
+    tracker, _ = _tracker(_cfg(log_activation_norms=False))
+    model = _act_model()
+    tracker.eval_begin(model)
+    model(torch.randn(4, 8))
+    tracker.eval_end()
+    _one_eval_step(tracker)
+    d = tracker.log_eval(step=1, model=model)
+    assert not [k for k in d if k.startswith("val-act/")]
+
+
+def test_log_eval_emits_val_quant_keys():
+    """Quant accumulators are filled after eval_begin, which resets them."""
+    tracker, _ = _tracker(_cfg(log_quant_metrics=True))
+    model = torch.nn.Linear(8, 4)
+    site = QuantizationStats("fwd.act/layer_0", 1, torch.randn(1).device)
+    model.add_module("_quant_stats", torch.nn.ModuleList([site]))
+
+    tracker.eval_begin(model)
+    site.src_sq += 100.0
+    site.err_sq += 1.0
+    site.numel += 32.0
+    tracker.eval_end()
+    _one_eval_step(tracker)
+    d = tracker.log_eval(step=1, model=model)
+    assert d["val-quant/sqnr/fwd.act/layer_0"] == pytest.approx(20.0)
+
+
+def test_log_eval_omits_val_quant_keys_when_disabled():
+    tracker, _ = _tracker(_cfg(log_quant_metrics=False))
+    model = torch.nn.Linear(8, 4)
+    site = QuantizationStats("fwd.act/layer_0", 1, torch.randn(1).device)
+    site.src_sq += 100.0
+    site.err_sq += 1.0
+    site.numel += 32.0
+    model.add_module("_quant_stats", torch.nn.ModuleList([site]))
+
+    tracker.eval_begin(model)
+    tracker.eval_end()
+    _one_eval_step(tracker)
+    d = tracker.log_eval(step=1, model=model)
+    assert not [k for k in d if k.startswith("val-quant/")]
+
+
+def test_log_eval_without_a_model_emits_no_window_keys():
+    """The eight legacy call sites pass no model; nothing to read, nothing to key."""
+    tracker, _ = _tracker(_cfg(log_activation_norms=True, log_quant_metrics=True))
+    tracker.eval_begin()
+    _one_eval_step(tracker)
+    d = tracker.log_eval(step=1)
+    assert not [k for k in d if k.startswith(("val-act/", "val-quant/"))]

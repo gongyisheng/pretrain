@@ -257,6 +257,27 @@ def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
         assert any(k.startswith("train-quant/") for metrics in logged for k in metrics)
 
 
+def test_activation_norms_reach_both_train_and_val_keys(mock_memmap):
+    """One run, both windows: the train window opens on a log step, the val window
+    on every eval."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        cfg = _tiny_config(tmp)
+        cfg.logging.log_activation_norms = True
+        cfg.logging.log_every = 1
+        cfg.training.eval_every = 1
+
+        trainer = Trainer(cfg, wandb_enabled=False)
+        logged = []
+        trainer.logger.register_on_log_hook(
+            lambda step, metrics: logged.append(metrics)
+        )
+        trainer.train()
+
+        assert any(k.startswith("train-act/norm/") for m in logged for k in m)
+        assert any(k.startswith("val-act/norm/") for m in logged for k in m)
+
+
 @fp8_only
 def test_quant_diagnostics_do_not_change_training(mock_memmap):
     """The diagnostic pass runs its own fwd/bwd; the trained loss must not move.
