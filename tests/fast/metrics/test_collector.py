@@ -14,8 +14,8 @@ import torch
 from src.metrics.activation import set_activation_monitoring_status
 from src.metrics.collector import MetricsCollector
 from src.metrics.convert import apply_activation_monitoring
-from src.metrics.quant import QuantizationStats
-from src.metrics.quant import set_quantization_monitoring_status
+from src.metrics.functional import compute_activation_norm
+from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
 from src.model import build_model
 from src.utils.config import ModelConfig, TrainConfig
 
@@ -948,3 +948,92 @@ def test_log_eval_without_a_model_emits_no_window_keys():
     _one_eval_step(tracker)
     d = tracker.log_eval(step=1)
     assert not [k for k in d if k.startswith(("val-act/", "val-quant/"))]
+
+
+# ---------------------------------------------------------------------------
+# train-side activation window: train_step_begin arms it, log_train reads it
+# ---------------------------------------------------------------------------
+
+
+def test_records_only_on_the_step_whose_metrics_are_logged():
+    """Same gate as snapshot_pre_step: accumulate during the step whose update is
+    about to be logged, so the window is exactly one optimizer step."""
+    collector, _ = _tracker(_cfg(log_every=2, log_activation_norms=True))
+    model = _act_model()
+    for step in (0, 1):
+        collector.train_step_begin(model, step)
+        model(torch.randn(4, 8))
+    # step 1 is the pre-log step ((1 + 1) % 2 == 0); step 0 must not contribute
+    assert model[0].act_stats.count.item() == 4 * 8
+
+
+def test_window_is_re_derived_every_step_so_a_leak_self_heals():
+    """No context manager guards the window, so arming must be idempotent: an
+    exception mid-step cannot leave recording on past the next step's arm call."""
+    collector, _ = _tracker(_cfg(log_every=2, log_activation_norms=True))
+    model = _act_model()
+    collector.train_step_begin(model, 1)  # armed
+    model(torch.randn(4, 8))
+    collector.train_step_begin(model, 2)  # (2 + 1) % 2 != 0 -> disarmed
+    model(torch.randn(4, 8))
+    assert model[0].act_stats.count.item() == 4 * 8
+
+
+def test_disabled_flag_records_nothing():
+    collector, _ = _tracker(_cfg(log_every=1, log_activation_norms=False))
+    model = _act_model()
+    collector.train_step_begin(model, 0)
+    model(torch.randn(4, 8))
+    assert compute_activation_norm(model) == {}
+
+
+def test_arming_resets_so_each_window_starts_clean():
+    """train_step_begin owns the whole window: it resets as it arms, so log_train
+    never has to mutate the model and a window can't inherit the previous one."""
+    collector, _ = _tracker(_cfg(log_every=1, log_activation_norms=True))
+    model = _act_model()
+    collector.train_step_begin(model, 0)
+    model(torch.randn(4, 8))
+    collector.train_step_begin(model, 1)  # next window
+    model(torch.randn(7, 8))
+    assert model[0].act_stats.count.item() == 7 * 8
+
+
+def test_forwards_between_windows_are_discarded_not_logged():
+    """Eval runs after log_train, before the next arm, with recording still on.
+    Those forwards accumulate but must never reach a log: the reset at the next
+    arm drops them."""
+    collector, _ = _tracker(_cfg(log_every=1, log_activation_norms=True))
+    model = _act_model()
+    collector.train_step_begin(model, 0)
+    model(torch.randn(4, 8))
+    collector.log_train(
+        step=1, model=model, optimizer=torch.optim.SGD(model.parameters(), lr=0.1)
+    )
+    model(torch.randn(9, 8))  # stands in for the eval loop
+    collector.train_step_begin(model, 1)
+    model(torch.randn(4, 8))
+    assert model[0].act_stats.count.item() == 4 * 8
+
+
+def test_log_train_emits_norm_keys_without_mutating_the_model():
+    collector, _ = _tracker(_cfg(log_every=1, log_activation_norms=True))
+    model = _act_model()
+    collector.train_step_begin(model, 0)
+    model(torch.randn(4, 8))
+    before = model[0].act_stats.count.item()
+    logged = collector.log_train(
+        step=1, model=model, optimizer=torch.optim.SGD(model.parameters(), lr=0.1)
+    )
+    assert "train-act/norm/0" in logged
+    assert logged["train-act/norm/0"] > 0
+    assert model[0].act_stats.count.item() == before  # read-only
+
+
+def test_log_train_omits_norm_keys_when_disabled():
+    collector, _ = _tracker(_cfg(log_every=1, log_activation_norms=False))
+    model = _act_model()
+    logged = collector.log_train(
+        step=1, model=model, optimizer=torch.optim.SGD(model.parameters(), lr=0.1)
+    )
+    assert not [k for k in logged if k.startswith("train-act/norm/")]
