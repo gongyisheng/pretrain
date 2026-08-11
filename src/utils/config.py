@@ -494,11 +494,11 @@ class LoggingConfig:
     log_every: int = 10
     log_grad_norms: bool = True
     log_weight_norms: bool = True
+    log_activation_norms: bool = True
     log_grad_svd_metrics: bool = True
     log_weight_svd_metrics: bool = True
     log_optimizer_step_norms: bool = True
-    log_quant_metrics: bool = False
-    log_activation_norms: bool = False
+    log_quant_metrics: bool = True
 
 
 @dataclass
