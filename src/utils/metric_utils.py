@@ -33,6 +33,31 @@ def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
     return norms
 
 
+def compute_activation_norm(model: torch.nn.Module) -> dict[str, float]:
+    """Per-site activation RMS (sqrt(energy / count)), keyed `<module path>.<site>`.
+
+    RMS, not L2: the window spans a whole optimizer step, so an L2 would scale with
+    sqrt(batch x seq x gradient_accumulation_steps) and shift between runs whose
+    batch schedule differs but whose model does not.
+    """
+    # deferred: src.training.metrics imports this module at its top
+    from src.training.metrics import ActivationStats
+
+    norms: dict[str, float] = {}
+    for name, module in model.named_modules():
+        if not isinstance(module, ActivationStats):
+            continue
+        count = module.count.item()
+        if count == 0:
+            continue
+        # the stats live on a child; the site belongs to its parent module
+        name = name.removeprefix("_orig_mod.")
+        parent = name.rsplit(".", 1)[0] if "." in name else ""
+        key = f"{parent}.{module.site}" if parent else module.site
+        norms[key] = math.sqrt(module.energy.item() / count)
+    return norms
+
+
 def compute_weight_norms(model: torch.nn.Module) -> dict[str, float]:
     """
     Per-parameter L2 weight norms, keyed by parameter name. Stacked 3D expert
@@ -121,11 +146,7 @@ def compute_weight_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, fl
 
 
 def compute_grad_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
-    """Spectral metrics (srank/pr) per 2D/3D weight gradient (rope/embeddings skipped).
-
-    Params with no grad are skipped. Under gradient accumulation `.grad` is the
-    accumulated sum the optimizer steps on.
-    """
+    """Spectral metrics (srank/pr) per 2D/3D weight gradient (rope/embeddings skipped)."""
     metrics: dict[str, dict[str, float]] = {}
     for name, param in model.named_parameters():
         if param.grad is None or param.ndim not in (2, 3):

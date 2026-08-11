@@ -19,7 +19,11 @@ from src.data.tokenizer import load_tokenizer
 from src.quant.convert import apply_quantization
 from src.quant.diagnostics import collect_quantization_diagnostics
 from src.training.optimizer import build_optimizer, build_scheduler
-from src.training.metrics import MetricsCollector, TokenizerMetricsCollector
+from src.training.metrics import (
+    MetricsCollector,
+    TokenizerMetricsCollector,
+    apply_activation_monitoring,
+)
 from src.training.loss import LOSS_REGISTRY, compute_loss, compute_loss_chunked
 from src.utils.config import TrainConfig
 from src.utils.metric_utils import count_correct
@@ -180,6 +184,9 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
+        if config.logging.log_activation_norms:
+            apply_activation_monitoring(self.model)
+
         # the quant diagnostic pass must not run inside a compiled region
         self._eager_model = self.model
         if config.training.enable_torch_compile:
@@ -234,9 +241,9 @@ class Trainer:
         )
         while self.step < stop_at:
             self.optimizer.zero_grad(set_to_none=True)
+            self.metrics.train_step_begin(self.model, self.step)
 
-            # Read previous step's loss NOW (GPU has been computing since we launched it)
-            # This overlaps the .item() sync with the current step's data prefetch
+            # Read previous step's loss
             if prev_loss_tensor is not None:
                 accum_loss = prev_loss_tensor.item()
 

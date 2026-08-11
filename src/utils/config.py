@@ -498,6 +498,7 @@ class LoggingConfig:
     log_weight_svd_metrics: bool = True
     log_optimizer_step_norms: bool = True
     log_quant_metrics: bool = False
+    log_activation_norms: bool = False
 
 
 @dataclass

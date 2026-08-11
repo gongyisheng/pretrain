@@ -9,6 +9,62 @@ from src.utils.config import TrainConfig
 from src.utils.tracking_utils import WandbLogger
 
 
+_RECORDING = [False]
+
+
+class ActivationStats(torch.nn.Module):
+    """One site's running (energy, count) over a window; RMS is sqrt(energy / count)."""
+
+    def __init__(self, site: str, device: torch.device):
+        super().__init__()
+        self.site = site
+        for name in ("energy", "count"):
+            self.register_buffer(
+                name,
+                torch.zeros((), dtype=torch.float32, device=device),
+                persistent=False,
+            )
+
+    def record(self, tensor: torch.Tensor) -> None:
+        """Fold one tensor in, accumulating in fp32 whatever the forward's dtype."""
+        values = tensor.detach()
+        self.energy.add_(values.pow(2).sum(dtype=torch.float32))
+        self.count.add_(values.numel())
+
+    def reset(self) -> None:
+        self.energy.zero_()
+        self.count.zero_()
+
+
+def _linear_input_hook(module, args):
+    if _RECORDING[0]:
+        module.act_stats.record(args[0])
+
+
+def apply_activation_monitoring(model) -> None:
+    """Attach an ActivationStats child and hook to every Linear; call before torch.compile."""
+    # list(): adding children mutates the tree modules() is walking
+    for module in list(getattr(model, "_orig_mod", model).modules()):
+        if isinstance(module, torch.nn.Linear):
+            # device from the weight; a bare torch.zeros(()) takes the process default
+            module.add_module(
+                "act_stats", ActivationStats("input", module.weight.device)
+            )
+            module.register_forward_pre_hook(_linear_input_hook)
+
+
+def set_activation_monitoring_status(enabled: bool) -> None:
+    """Arm or disarm accumulation; a window must span a whole optimizer step."""
+    _RECORDING[0] = enabled
+
+
+def reset_activation_stats(model) -> None:
+    """Zero every accumulator."""
+    for module in getattr(model, "_orig_mod", model).modules():
+        if isinstance(module, ActivationStats):
+            module.reset()
+
+
 class MetricsCollector:
     """Tracks and assembles training/eval metrics, then dispatches to W&B."""
 
@@ -117,20 +173,20 @@ class MetricsCollector:
         self._moe_expert_load = None
 
     def snapshot_pre_step(self, model: torch.nn.Module, step: int) -> None:
-        """Cache θ before optimizer.step() so on_train_step can compute ||Δθ||.
-
-        Only snapshots on the step whose update will be logged next
-        (``(step + 1) % log_every == 0``): the step-norm logged at a cadence
-        boundary reflects only that final pre-log update, so snapshotting +
-        diffing on every step would clone the whole model and sync per-param
-        for a value that is then overwritten and discarded. No-op when
-        config.logging.log_optimizer_step_norms is False.
-        """
         log_every = self.config.logging.log_every
         if self.config.logging.log_optimizer_step_norms and (step + 1) % log_every == 0:
             self._param_snapshot = metric_utils.snapshot_params(model)
         else:
             self._param_snapshot = None
+
+    def train_step_begin(self, model: torch.nn.Module, step: int) -> None:
+        log_every = self.config.logging.log_every
+        log_activation_flag = self.config.logging.log_activation_norms
+        is_recording = log_activation_flag and (step + 1) % log_every == 0
+
+        if is_recording:
+            reset_activation_stats(model)
+        set_activation_monitoring_status(is_recording)
 
     def on_train_step(
         self,
@@ -268,6 +324,12 @@ class MetricsCollector:
             for name, m in metric_utils.compute_weight_svd_metrics(model).items():
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val
+
+        # Per-site activation RMS over the window opened by train_step_begin,
+        # which also owns resetting it -- nothing here mutates the model.
+        if self.config.logging.log_activation_norms:
+            for name, rms in metric_utils.compute_activation_norm(model).items():
+                d[f"activation/norm/{name}"] = rms
 
         if quant_metrics:
             d.update(quant_metrics)
