@@ -16,9 +16,8 @@ _RECORDING = [False]
 class ActivationStats(torch.nn.Module):
     """One site's running (energy, count) over a window; RMS is sqrt(energy / count)."""
 
-    def __init__(self, site: str, device: torch.device):
+    def __init__(self, device: torch.device):
         super().__init__()
-        self.site = site
         for name in ("energy", "count"):
             self.register_buffer(
                 name,

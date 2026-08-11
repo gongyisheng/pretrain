@@ -32,9 +32,7 @@ def apply_activation_monitoring(model) -> None:
     for module in list(getattr(model, "_orig_mod", model).modules()):
         if isinstance(module, torch.nn.Linear):
             # device from the weight; a bare torch.zeros(()) takes the process default
-            module.add_module(
-                "act_stats", ActivationStats("input", module.weight.device)
-            )
+            module.add_module("act_stats", ActivationStats(module.weight.device))
             module.register_forward_pre_hook(linear_input_hook)
 
 

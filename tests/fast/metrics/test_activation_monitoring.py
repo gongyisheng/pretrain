@@ -106,6 +106,13 @@ def _rms(t):
     return t.double().pow(2).mean().sqrt().item()
 
 
+def _linear_model():
+    """One Linear under a container, so its key is a real module path ("0")."""
+    model = torch.nn.Sequential(torch.nn.Linear(D_MODEL, 8))
+    apply_activation_monitoring(model)
+    return model
+
+
 # ---------------------------------------------------------------------------
 # Scope
 # ---------------------------------------------------------------------------
@@ -113,24 +120,21 @@ def _rms(t):
 
 def test_nothing_recorded_without_scope():
     """Training must be unaffected unless a scope is open."""
-    model = torch.nn.Linear(D_MODEL, 8)
-    apply_activation_monitoring(model)
+    model = _linear_model()
     model(torch.randn(4, D_MODEL))
     assert compute_activation_norm(model) == {}
 
 
 def test_scope_records_linear_input():
-    model = torch.nn.Linear(D_MODEL, 8)
-    apply_activation_monitoring(model)
+    model = _linear_model()
     x = torch.randn(4, D_MODEL)
     set_activation_monitoring_status(True)
     model(x)
-    assert compute_activation_norm(model)["input"] == pytest.approx(_rms(x), rel=1e-5)
+    assert compute_activation_norm(model)["0"] == pytest.approx(_rms(x), rel=1e-5)
 
 
 def test_reset_clears_accumulators():
-    model = torch.nn.Linear(D_MODEL, 8)
-    apply_activation_monitoring(model)
+    model = _linear_model()
     set_activation_monitoring_status(True)
     model(torch.randn(4, D_MODEL))
     reset_activation_stats(model)
@@ -145,27 +149,26 @@ def test_reset_clears_accumulators():
 def test_accumulates_exactly_across_micro_batches():
     """The reason to accumulate sums and not averaged metrics: N micro-batches must
     give the RMS of their concatenation, not the mean of their RMSs."""
-    model = torch.nn.Linear(D_MODEL, 8)
-    apply_activation_monitoring(model)
+    model = _linear_model()
     micro = [torch.randn(4, D_MODEL) * scale for scale in (0.1, 1.0, 10.0)]
     set_activation_monitoring_status(True)
     for x in micro:
         model(x)
     expected = _rms(torch.cat(micro))
-    assert compute_activation_norm(model)["input"] == pytest.approx(expected, rel=1e-5)
+    assert compute_activation_norm(model)["0"] == pytest.approx(expected, rel=1e-5)
     # and it is genuinely different from averaging per-micro-batch RMS
     assert expected != pytest.approx(sum(_rms(x) for x in micro) / len(micro), rel=1e-3)
 
 
 def test_accumulates_in_fp32_from_bf16_forward():
     """A bf16 sum over millions of elements would drift; the accumulator is fp32."""
-    model = torch.nn.Linear(D_MODEL, 8).to(torch.bfloat16)
+    model = torch.nn.Sequential(torch.nn.Linear(D_MODEL, 8)).to(torch.bfloat16)
     apply_activation_monitoring(model)
     x = torch.randn(256, D_MODEL, dtype=torch.bfloat16)
     set_activation_monitoring_status(True)
     model(x)
-    assert model.act_stats.energy.dtype == torch.float32
-    got = compute_activation_norm(model)["input"]
+    assert model[0].act_stats.energy.dtype == torch.float32
+    got = compute_activation_norm(model)["0"]
     assert got == pytest.approx(_rms(x), rel=1e-2)
     assert math.isfinite(got)
 
@@ -185,9 +188,9 @@ def test_sites_are_exactly_the_linear_inputs():
     _run_block(block)
     names = set(compute_activation_norm(block))
     assert names == {
-        f"{n}.input" for n, m in block.named_modules() if isinstance(m, torch.nn.Linear)
+        n for n, m in block.named_modules() if isinstance(m, torch.nn.Linear)
     }
-    assert "mlp.down_proj.input" in names
+    assert "mlp.down_proj" in names
 
 
 def test_embedding_is_not_a_site_but_tied_lm_head_is():
@@ -200,7 +203,7 @@ def test_embedding_is_not_a_site_but_tied_lm_head_is():
     apply_activation_monitoring(model)
     set_activation_monitoring_status(True)
     model.lm_head(model.token_emb(torch.randint(0, 32, (2, 8))))
-    assert set(compute_activation_norm(model)) == {"lm_head.input"}
+    assert set(compute_activation_norm(model)) == {"lm_head"}
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +240,6 @@ def test_compiled_model_records_and_does_not_thrash_recompiles(device):
 # ---------------------------------------------------------------------------
 
 
-def _linear_model():
-    model = torch.nn.Linear(D_MODEL, 8)
-    apply_activation_monitoring(model)
-    return model
-
-
 def test_records_only_on_the_step_whose_metrics_are_logged():
     """Same gate as snapshot_pre_step: accumulate during the step whose update is
     about to be logged, so the window is exactly one optimizer step."""
@@ -252,7 +249,7 @@ def test_records_only_on_the_step_whose_metrics_are_logged():
         collector.train_step_begin(model, step)
         model(torch.randn(4, D_MODEL))
     # step 1 is the pre-log step ((1 + 1) % 2 == 0); step 0 must not contribute
-    assert model.act_stats.count.item() == 4 * D_MODEL
+    assert model[0].act_stats.count.item() == 4 * D_MODEL
 
 
 def test_window_is_re_derived_every_step_so_a_leak_self_heals():
@@ -264,7 +261,7 @@ def test_window_is_re_derived_every_step_so_a_leak_self_heals():
     model(torch.randn(4, D_MODEL))
     collector.train_step_begin(model, 2)  # (2 + 1) % 2 != 0 -> disarmed
     model(torch.randn(4, D_MODEL))
-    assert model.act_stats.count.item() == 4 * D_MODEL
+    assert model[0].act_stats.count.item() == 4 * D_MODEL
 
 
 def test_disabled_flag_records_nothing():
@@ -284,7 +281,7 @@ def test_arming_resets_so_each_window_starts_clean():
     model(torch.randn(4, D_MODEL))
     collector.train_step_begin(model, 1)  # next window
     model(torch.randn(7, D_MODEL))
-    assert model.act_stats.count.item() == 7 * D_MODEL
+    assert model[0].act_stats.count.item() == 7 * D_MODEL
 
 
 def test_forwards_between_windows_are_discarded_not_logged():
@@ -301,7 +298,7 @@ def test_forwards_between_windows_are_discarded_not_logged():
     model(torch.randn(9, D_MODEL))  # stands in for the eval loop
     collector.train_step_begin(model, 1)
     model(torch.randn(4, D_MODEL))
-    assert model.act_stats.count.item() == 4 * D_MODEL
+    assert model[0].act_stats.count.item() == 4 * D_MODEL
 
 
 def test_log_train_emits_norm_keys_without_mutating_the_model():
@@ -309,13 +306,13 @@ def test_log_train_emits_norm_keys_without_mutating_the_model():
     model = _linear_model()
     collector.train_step_begin(model, 0)
     model(torch.randn(4, D_MODEL))
-    before = model.act_stats.count.item()
+    before = model[0].act_stats.count.item()
     logged = collector.log_train(
         step=1, model=model, optimizer=torch.optim.SGD(model.parameters(), lr=0.1)
     )
-    assert "activation/norm/input" in logged
-    assert logged["activation/norm/input"] > 0
-    assert model.act_stats.count.item() == before  # read-only
+    assert "activation/norm/0" in logged
+    assert logged["activation/norm/0"] > 0
+    assert model[0].act_stats.count.item() == before  # read-only
 
 
 def test_log_train_omits_norm_keys_when_disabled():

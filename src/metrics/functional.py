@@ -36,7 +36,7 @@ def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 
 
 def compute_activation_norm(model: torch.nn.Module) -> dict[str, float]:
-    """Per-site activation RMS (sqrt(energy / count)), keyed `<module path>.<site>`.
+    """Per-site activation RMS (sqrt(energy / count)), keyed by the Linear's path.
 
     RMS, not L2: the window spans a whole optimizer step, so an L2 would scale with
     sqrt(batch x seq x gradient_accumulation_steps) and shift between runs whose
@@ -49,11 +49,9 @@ def compute_activation_norm(model: torch.nn.Module) -> dict[str, float]:
         count = module.count.item()
         if count == 0:
             continue
-        # the stats live on a child; the site belongs to its parent module
+        # the accumulator is a child of the Linear whose input it measures
         name = name.removeprefix("_orig_mod.")
-        parent = name.rsplit(".", 1)[0] if "." in name else ""
-        key = f"{parent}.{module.site}" if parent else module.site
-        norms[key] = math.sqrt(module.energy.item() / count)
+        norms[name.rsplit(".", 1)[0]] = math.sqrt(module.energy.item() / count)
     return norms
 
 
