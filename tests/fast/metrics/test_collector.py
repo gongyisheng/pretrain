@@ -11,11 +11,10 @@ import math
 import pytest
 import torch
 
-from src.metrics.activation import set_activation_monitoring_status
 from src.metrics.collector import MetricsCollector
 from src.metrics.convert import apply_activation_monitoring
 from src.metrics.functional import compute_activation_norm
-from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
+from src.metrics.quant import QuantizationStats
 from src.model import build_model
 from src.utils.config import ModelConfig, TrainConfig
 
@@ -35,13 +34,6 @@ class FakeLogger:
 
     def finish(self):
         pass
-
-
-@pytest.fixture(autouse=True)
-def _disarm_monitoring():
-    yield
-    set_activation_monitoring_status(False)
-    set_quantization_monitoring_status(False)
 
 
 def _cfg(task="pretrain", log_every=2, **logging):

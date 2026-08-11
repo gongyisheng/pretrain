@@ -19,14 +19,6 @@ from tests.fast.helpers import make_attn_mask
 D_MODEL = 64
 
 
-@pytest.fixture(autouse=True)
-def _disarm_recording():
-    """_RECORDING is module-global: without this, one failing test leaves recording
-    armed for every later test in the same xdist worker."""
-    yield
-    set_activation_monitoring_status(False)
-
-
 def _block_cfg(n_layers=1):
     return ModelConfig(
         d_model=D_MODEL,

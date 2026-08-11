@@ -22,14 +22,6 @@ from src.metrics.functional import compute_activation_norm
 D_MODEL = 64
 
 
-@pytest.fixture(autouse=True)
-def _disarm_recording():
-    """_RECORDING is module-global: without this, one failing test leaves recording
-    armed for every later test in the same xdist worker."""
-    yield
-    set_activation_monitoring_status(False)
-
-
 def _rms(t):
     return t.double().pow(2).mean().sqrt().item()
 
