@@ -218,7 +218,7 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _quantization_metrics(src_sq, err_sq, under, clip, numel, grouped):
+def _quantization_metrics(src_sq, err_sq, under, clip, numel, nonzero, grouped):
     """Reported metrics from one operand's accumulated sums, as 0-dim fp32 tensors.
 
     Empty experts are excluded: they have no error to report. Grouped operands also
@@ -234,8 +234,12 @@ def _quantization_metrics(src_sq, err_sq, under, clip, numel, grouped):
     )
     valid = (numel > 0).to(src_sq.dtype)
     n_valid = valid.sum().clamp_min(1.0)
-    underflow_rate = under / numel.clamp_min(1.0)
-    clip_rate = clip / numel.clamp_min(1.0)
+    # over the values that could underflow or clip: a source element that was already
+    # exactly zero can do neither, so dividing by numel would under-report by the
+    # operand's zero fraction -- large for grads (ignore_index) and relu activations.
+    informative = nonzero.clamp_min(1.0)
+    underflow_rate = under / informative
+    clip_rate = clip / informative
     metrics = {
         "sqnr": (sqnr * valid).sum() / n_valid,
         "underflow_rate": (underflow_rate * valid).sum() / n_valid,

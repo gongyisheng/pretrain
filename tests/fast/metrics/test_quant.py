@@ -56,6 +56,59 @@ def test_clip_rate_counts_codes_sitting_at_qmax():
     assert m["clip_rate"].item() == 0.5  # both tails count
 
 
+def test_underflow_rate_is_not_diluted_by_zeros_already_in_the_source():
+    """The rate is over values that could underflow at all. An exact zero in the
+    source can never round to zero, so padding with zeros must not move the rate.
+    Grads carry many exact zeros (ignore_index=-100), as do relu activations."""
+    x = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    deq = torch.tensor([[1.0, 0.0, 0.0, 4.0]])
+    plain = _metrics(x, deq, _codes(x, deq), 1e9)["underflow_rate"].item()
+
+    padded_x = torch.cat([x, torch.zeros(1, 12)], dim=1)
+    padded_deq = torch.cat([deq, torch.zeros(1, 12)], dim=1)
+    padded = _metrics(padded_x, padded_deq, _codes(padded_x, padded_deq), 1e9)
+    assert plain == pytest.approx(0.5)
+    assert padded["underflow_rate"].item() == pytest.approx(0.5)
+
+
+def test_clip_rate_is_not_diluted_by_zeros_already_in_the_source():
+    """Same denominator, same argument: a zero source cannot saturate either."""
+    x = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    codes = torch.tensor([[7.0, -7.0, 3.0, 4.0]])
+    plain = _metrics(x, x, codes, 7.0)["clip_rate"].item()
+
+    padded_x = torch.cat([x, torch.zeros(1, 12)], dim=1)
+    padded_codes = torch.cat([codes, torch.zeros(1, 12)], dim=1)
+    padded = _metrics(padded_x, padded_x, padded_codes, 7.0)
+    assert plain == pytest.approx(0.5)
+    assert padded["clip_rate"].item() == pytest.approx(0.5)
+
+
+def test_sqnr_is_already_immune_to_zeros_in_the_source():
+    """A ratio of two sums of squares: an exact zero contributes 0 to both, so the
+    zero fraction cancels. Guards against 'fixing' sqnr along with the rates."""
+    x = torch.tensor([[3.0, 4.0]])
+    deq = torch.tensor([[3.0, 3.0]])
+    plain = _metrics(x, deq, _codes(x, deq), 1e9)["sqnr"].item()
+
+    padded_x = torch.cat([x, torch.zeros(1, 6)], dim=1)
+    padded_deq = torch.cat([deq, torch.zeros(1, 6)], dim=1)
+    padded = _metrics(padded_x, padded_deq, _codes(padded_x, padded_deq), 1e9)
+    assert padded["sqnr"].item() == pytest.approx(plain)
+
+
+def test_an_all_zero_expert_stays_valid():
+    """numel, not nonzero, is the validity signal: an expert that received tokens
+    whose values happened to be all zero must not be dropped like an empty one."""
+    source = torch.zeros(3, 4, 8)  # 3 experts of stacked weights
+    source[0] = torch.randn(4, 8)
+    offs = torch.tensor([4, 8, 12])
+    sums = accumulate_quantization_sums(source, source, source, 1e9, offs=offs)
+    numel, nonzero = sums[4], sums[5]
+    assert (numel > 0).all()
+    assert nonzero[1].item() == 0.0 and nonzero[2].item() == 0.0
+
+
 def test_sqnr_matches_hand_computed_ratio():
     x = torch.tensor([[3.0, 4.0]])  # norm 5
     deq = torch.tensor([[3.0, 3.0]])  # error norm 1

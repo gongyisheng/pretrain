@@ -28,7 +28,7 @@ class QuantizationStats(torch.nn.Module):
     whichever experts hold the most tokens.
     """
 
-    FIELDS = ("src_sq", "err_sq", "under", "clip", "numel")
+    FIELDS = ("src_sq", "err_sq", "under", "clip", "numel", "nonzero")
 
     def __init__(self, key: str, n_groups: int, device: torch.device):
         super().__init__()
@@ -53,8 +53,12 @@ def accumulate_quantization_sums(
 ):
     """One operand's quantization-error partial sums, for folding into a window.
 
-    Returns `(src_sq, err_sq, under, clip, numel)`, each a 1D fp32 tensor: length 1
-    for a dense operand, length n_experts for a grouped one.
+    Returns `(src_sq, err_sq, under, clip, numel, nonzero)`, each a 1D fp32 tensor:
+    length 1 for a dense operand, length n_experts for a grouped one.
+
+    Two counts, two jobs: `numel` is every element, and stays the validity signal
+    that marks an expert as having received tokens at all; `nonzero` counts the
+    elements that could underflow or clip, which is what the rates divide by.
 
     `codes` are the low-precision values themselves: scales are positive, so
     `codes == 0` is exactly the operand rounding to zero, and `|codes| == qmax` is
@@ -75,20 +79,24 @@ def accumulate_quantization_sums(
     code_values = codes.float()  # fp8 has no abs/eq kernels of its own
     squares = source.square()
     err_squares = (source - dequantized).square()
-    underflows = ((source != 0) & (code_values == 0)).float()
+    nonzero_mask = source != 0
+    underflows = (nonzero_mask & (code_values == 0)).float()
     clips = (code_values.abs() == qmax).float()
+    nonzeros = nonzero_mask.float()
 
     if offs is None:
         src_sq = squares.sum().reshape(1)
         err_sq = err_squares.sum().reshape(1)
         under = underflows.sum().reshape(1)
         clip = clips.sum().reshape(1)
+        nonzero = nonzeros.sum().reshape(1)
         numel = torch.full_like(src_sq, source.numel())
     elif source.ndim == 3:  # stacked expert weights, expert on dim 0
         src_sq = squares.flatten(1).sum(1)
         err_sq = err_squares.flatten(1).sum(1)
         under = underflows.flatten(1).sum(1)
         clip = clips.flatten(1).sum(1)
+        nonzero = nonzeros.flatten(1).sum(1)
         numel = torch.full_like(src_sq, source[0].numel())
     else:  # dispatched rows, ragged along offs -- a row belongs to exactly one expert
         n_groups = offs.shape[0]
@@ -100,16 +108,17 @@ def accumulate_quantization_sums(
             per_row = t.flatten(1).sum(1)
             return per_row.new_zeros(n_groups).index_add_(0, ids, per_row)
 
-        src_sq, err_sq, under, clip = (
+        src_sq, err_sq, under, clip, nonzero = (
             by_expert(squares),
             by_expert(err_squares),
             by_expert(underflows),
             by_expert(clips),
+            by_expert(nonzeros),
         )
         starts = torch.cat([offs.new_zeros(1), offs[:-1]])
         numel = ((offs - starts) * source.shape[1]).to(src_sq.dtype)
 
-    return src_sq, err_sq, under, clip, numel
+    return src_sq, err_sq, under, clip, numel, nonzero
 
 
 def record_operand(
