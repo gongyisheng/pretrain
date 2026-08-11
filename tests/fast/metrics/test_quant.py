@@ -151,6 +151,18 @@ def test_spread_excludes_empty_experts():
     assert m["underflow_rate_max"].item() == 0.0
 
 
+def test_sqnr_min_ignores_an_all_zero_expert():
+    """numel > 0 keeps an all-zero expert valid (test_an_all_zero_expert_stays_valid),
+    but sqnr_min must still skip it: its sqnr is 0.0 with no error to report, and
+    must not sink sqnr_min next to a healthy sibling near 200+ dB."""
+    x = torch.zeros(2, 4, 8)
+    x[0] = torch.randn(4, 8)  # expert 0 healthy, expert 1 all-zero
+    offs = torch.tensor([4, 8])
+    m = _metrics(x, x, _codes(x, x), 1e9, offs=offs)
+    assert torch.isfinite(m["sqnr_min"])
+    assert m["sqnr_min"].item() > 100.0
+
+
 @pytest.mark.parametrize("fmt", ["fp8_e4m3", "fp8_e5m2", "int8"])
 def test_sqnr_positive_and_finite_over_a_real_round_trip(fmt):
     torch.manual_seed(0)
@@ -270,6 +282,29 @@ def test_compute_reads_every_site_under_its_own_key():
 
 def test_compute_on_no_sites_is_empty():
     assert compute_quantization_metrics(_holder([])) == {}
+
+
+def test_never_folded_site_produces_no_key():
+    """Reset but never folded -- e.g. a dgrad/wgrad operand during a no_grad eval
+    pass -- must report no key at all, not a spurious sqnr of 0.0."""
+    device = torch.randn(1).device
+    site = QuantizationStats("dgrad.grad/x", 1, device)
+    got = compute_quantization_metrics(_holder([site]))
+    assert got == {}
+    assert "sqnr/dgrad.grad/x" not in got
+
+
+def test_mixed_folded_and_unfolded_sites_only_report_the_folded_one():
+    """The production shape: one folded site alongside one that was reset for the
+    window but never folded (e.g. eval's backward operands)."""
+    device = torch.randn(1).device
+    folded = QuantizationStats("fwd.act/x", 1, device)
+    unfolded = QuantizationStats("dgrad.grad/x", 1, device)
+    _fold(folded, torch.randn(8, 32))
+    got = compute_quantization_metrics(_holder([folded, unfolded]))
+    for metric in METRICS:
+        assert f"{metric}/fwd.act/x" in got
+        assert f"{metric}/dgrad.grad/x" not in got
 
 
 def test_each_operand_is_folded_under_its_own_element_format():

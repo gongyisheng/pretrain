@@ -82,21 +82,21 @@ def accumulate_quantization_sums(
     nonzero_mask = source != 0
     underflows = (nonzero_mask & (code_values == 0)).float()
     clips = (code_values.abs() == qmax).float()
-    nonzeros = nonzero_mask.float()
 
     if offs is None:
         src_sq = squares.sum().reshape(1)
         err_sq = err_squares.sum().reshape(1)
         under = underflows.sum().reshape(1)
         clip = clips.sum().reshape(1)
-        nonzero = nonzeros.sum().reshape(1)
+        # bool mask reduced straight to fp32 -- no full-size float temporary needed
+        nonzero = nonzero_mask.sum(dtype=torch.float32).reshape(1)
         numel = torch.full_like(src_sq, source.numel())
     elif source.ndim == 3:  # stacked expert weights, expert on dim 0
         src_sq = squares.flatten(1).sum(1)
         err_sq = err_squares.flatten(1).sum(1)
         under = underflows.flatten(1).sum(1)
         clip = clips.flatten(1).sum(1)
-        nonzero = nonzeros.flatten(1).sum(1)
+        nonzero = nonzero_mask.flatten(1).sum(1, dtype=torch.float32)
         numel = torch.full_like(src_sq, source[0].numel())
     else:  # dispatched rows, ragged along offs -- a row belongs to exactly one expert
         n_groups = offs.shape[0]
@@ -113,7 +113,7 @@ def accumulate_quantization_sums(
             by_expert(err_squares),
             by_expert(underflows),
             by_expert(clips),
-            by_expert(nonzeros),
+            by_expert(nonzero_mask.float()),  # index_add_ needs a float tensor
         )
         starts = torch.cat([offs.new_zeros(1), offs[:-1]])
         numel = ((offs - starts) * source.shape[1]).to(src_sq.dtype)

@@ -250,9 +250,13 @@ def _quantization_metrics(src_sq, err_sq, under, clip, numel, nonzero, grouped):
     # min over a dB quantity, max over the rates: both are defined over the whole
     # range, unlike the max/min ratio a signed dB value would make meaningless
     keep = valid > 0
+    # sqnr needs signal to measure: an expert with numel > 0 but nonzero == 0 (it
+    # received tokens that were all exactly zero) has no error to report, and its
+    # sqnr of 0.0 would otherwise drag sqnr_min down next to healthy experts.
+    has_signal = nonzero > 0
     zeros = torch.zeros_like(underflow_rate)
     metrics["sqnr_min"] = torch.where(
-        keep, sqnr, torch.full_like(sqnr, float("inf"))
+        has_signal, sqnr, torch.full_like(sqnr, float("inf"))
     ).min()
     metrics["underflow_rate_max"] = torch.where(keep, underflow_rate, zeros).max()
     metrics["clip_rate_max"] = torch.where(keep, clip_rate, zeros).max()
@@ -267,21 +271,31 @@ def compute_quantization_metrics(model: torch.nn.Module) -> dict[str, float]:
     just closed. Keyed off each accumulator's own `key`, not its module path: which
     GEMM and operand it belongs to is not something a path can express.
 
-    No per-site emptiness check: a passthrough operand is never given an accumulator
-    in the first place, so every site found here recorded. Testing one would cost a
-    device sync per site, which is the whole point of the single stack-and-sync below.
+    A site whose accumulated numel is all zero was never folded this window --
+    e.g. a dgrad/wgrad operand during a no_grad eval pass -- and is dropped rather
+    than reported: its sqnr would read 0.0, the same value that means "noise equals
+    signal". The emptiness flag rides the same single stack-and-sync as the metric
+    values below, so this costs no extra device sync.
     """
     metrics = {}
+    has_data = {}
     for module in model.modules():
         if not isinstance(module, QuantizationStats):
             continue
         sums = [getattr(module, name) for name in QuantizationStats.FIELDS]
+        keep = (module.numel.sum() > 0).float()
         for name, value in _quantization_metrics(*sums, module.grouped).items():
-            metrics[f"{name}/{module.key}"] = value
+            key = f"{name}/{module.key}"
+            metrics[key] = value
+            has_data[key] = keep
     if not metrics:
         return {}
     keys = list(metrics)
-    return dict(zip(keys, torch.stack([metrics[k] for k in keys]).tolist()))  # one sync
+    combined = torch.stack(
+        [metrics[k] for k in keys] + [has_data[k] for k in keys]
+    ).tolist()  # one sync
+    n = len(keys)
+    return {k: v for k, v, keep in zip(keys, combined[:n], combined[n:]) if keep}
 
 
 # ---------------------------------------------------------------------------
