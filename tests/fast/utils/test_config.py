@@ -1265,7 +1265,8 @@ def test_quant_blockwise_fp32_scale_dtype_ok():
     assert q.scaling["scale_dtype"] == "fp32"
 
 
-def test_log_quant_metrics_defaults_false():
+def test_monitoring_flags_default_true():
     from src.utils.config import LoggingConfig
 
-    assert LoggingConfig().log_quant_metrics is False
+    assert LoggingConfig().log_quant_metrics is True
+    assert LoggingConfig().log_activation_norms is True

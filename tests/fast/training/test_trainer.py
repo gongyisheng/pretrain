@@ -197,9 +197,10 @@ def test_trainer_rejects_unknown_loss_fn(mock_memmap):
 # ---------------------------------------------------------------------------
 
 
-def test_quant_metrics_disabled_by_default(mock_memmap):
-    """log_quant_metrics defaults to False: no diagnostic pass, no train-quant/ keys,
-    hot path unchanged."""
+def test_quant_metrics_without_a_quant_recipe(mock_memmap):
+    """With no quantization recipe, the install pass finds no quantized sites, so
+    there is no accumulator to fold into and no train-quant/ key is dispatched --
+    independent of log_quant_metrics, which now defaults to True."""
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
         trainer = Trainer(_tiny_config(tmp), wandb_enabled=False)
