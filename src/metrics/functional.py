@@ -10,6 +10,8 @@ import statistics
 
 import torch
 
+from src.metrics.activation import ActivationStats
+from src.metrics.quant import QuantizationStats
 from src.model.transformer import TransformerLM
 from src.quant.constants import EPS
 from src.utils.config import TrainConfig
@@ -40,9 +42,6 @@ def compute_activation_norm(model: torch.nn.Module) -> dict[str, float]:
     sqrt(batch x seq x gradient_accumulation_steps) and shift between runs whose
     batch schedule differs but whose model does not.
     """
-    # deferred: src.training.metrics imports this module at its top
-    from src.training.metrics import ActivationStats
-
     norms: dict[str, float] = {}
     for name, module in model.named_modules():
         if not isinstance(module, ActivationStats):
@@ -221,66 +220,16 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def compute_quantization_metrics(
-    source_tensor, dequantized_tensor, codes, qmax, offs=None
-):
-    """Quant health against the dequantized round-trip, as 0-dim fp32 tensors.
+def _quantization_metrics(src_sq, err_sq, under, clip, numel, grouped):
+    """Reported metrics from one operand's accumulated sums, as 0-dim fp32 tensors.
 
-    `codes` are the low-precision values themselves: scales are positive, so
-    `codes == 0` is exactly the operand rounding to zero, and `|codes| == qmax` is
-    saturation -- the other tail of the same scale-selection failure.
-
-    With `offs` (cumulative end-offsets) the metrics are per expert, then averaged.
-    One grouped GEMM covers every expert and each is quantized against its own amax,
-    so reducing over the whole operand would let the experts holding the most tokens
-    set the number -- one cold, badly scaled expert has to show up. Stacked expert
-    weights carry the expert on dim 0; dispatched rows are ragged along `offs`. Empty
-    experts are excluded: they have no error to report. Grouped operands also report
-    the worst expert, because averaging over experts hides the single bad one that
-    per-expert scales exist to prevent.
+    Empty experts are excluded: they have no error to report. Grouped operands also
+    report the worst expert, because averaging over experts hides the single bad one
+    that per-expert scales exist to prevent.
 
     A former range_ratio (amax/median) was dropped: the median is a sort, per expert
     per operand, and it dominated the cost of a logged step.
     """
-    source = source_tensor.float()
-    dequantized = dequantized_tensor.float()
-    code_values = codes.float()  # fp8 has no abs/eq kernels of its own
-    squares = source.square()
-    err_squares = (source - dequantized).square()
-    underflows = ((source != 0) & (code_values == 0)).float()
-    clips = (code_values.abs() == qmax).float()
-
-    if offs is None:
-        src_sq = squares.sum().reshape(1)
-        err_sq = err_squares.sum().reshape(1)
-        under = underflows.sum().reshape(1)
-        clip = clips.sum().reshape(1)
-        numel = torch.full_like(src_sq, source.numel())
-    elif source.ndim == 3:  # stacked expert weights, expert on dim 0
-        src_sq = squares.flatten(1).sum(1)
-        err_sq = err_squares.flatten(1).sum(1)
-        under = underflows.flatten(1).sum(1)
-        clip = clips.flatten(1).sum(1)
-        numel = torch.full_like(src_sq, source[0].numel())
-    else:  # dispatched rows, ragged along offs -- a row belongs to exactly one expert
-        n_groups = offs.shape[0]
-        # right=True: row r belongs to the group whose end-offset first exceeds r
-        rows = torch.arange(source.shape[0], device=offs.device)
-        ids = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
-
-        def by_expert(t):
-            per_row = t.flatten(1).sum(1)
-            return per_row.new_zeros(n_groups).index_add_(0, ids, per_row)
-
-        src_sq, err_sq, under, clip = (
-            by_expert(squares),
-            by_expert(err_squares),
-            by_expert(underflows),
-            by_expert(clips),
-        )
-        starts = torch.cat([offs.new_zeros(1), offs[:-1]])
-        numel = ((offs - starts) * source.shape[1]).to(src_sq.dtype)
-
     # clamps match the pre-vectorized form, which clamped each norm before the ratio
     sqnr = 20.0 * torch.log10(
         src_sq.sqrt().clamp_min(EPS) / err_sq.sqrt().clamp_min(EPS)
@@ -294,7 +243,7 @@ def compute_quantization_metrics(
         "underflow_rate": (underflow_rate * valid).sum() / n_valid,
         "clip_rate": (clip_rate * valid).sum() / n_valid,
     }
-    if offs is None:
+    if not grouped:
         return metrics
     # min over a dB quantity, max over the rates: both are defined over the whole
     # range, unlike the max/min ratio a signed dB value would make meaningless
@@ -306,6 +255,29 @@ def compute_quantization_metrics(
     metrics["underflow_rate_max"] = torch.where(keep, underflow_rate, zeros).max()
     metrics["clip_rate_max"] = torch.where(keep, clip_rate, zeros).max()
     return metrics
+
+
+def compute_quantization_metrics(model: torch.nn.Module) -> dict[str, float]:
+    """Read a window's quantization accumulators as `quant/<metric>/<site>` floats.
+
+    Keyed off each accumulator's own `key`, not its module path: which GEMM and
+    operand it belongs to is not something a path can express.
+
+    No per-site emptiness check: a passthrough operand is never given an accumulator
+    in the first place, so every site found here recorded. Testing one would cost a
+    device sync per site, which is the whole point of the single stack-and-sync below.
+    """
+    metrics = {}
+    for module in model.modules():
+        if not isinstance(module, QuantizationStats):
+            continue
+        sums = [getattr(module, name) for name in QuantizationStats.FIELDS]
+        for name, value in _quantization_metrics(*sums, module.grouped).items():
+            metrics[f"quant/{name}/{module.key}"] = value
+    if not metrics:
+        return {}
+    keys = list(metrics)
+    return dict(zip(keys, torch.stack([metrics[k] for k in keys]).tolist()))  # one sync
 
 
 # ---------------------------------------------------------------------------

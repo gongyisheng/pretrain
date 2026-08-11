@@ -1,4 +1,4 @@
-"""Tests for src.utils.metric_utils — the pure metric-computation layer.
+"""Tests for src.metrics.functional — the pure metric-computation layer.
 
 These are stateless functions (numbers/tensors in, numbers/dicts out), so the
 tests assert directly on returned values with no logger or tracker involved.
@@ -12,7 +12,7 @@ import torch
 from src.model import build_model
 from src.model.transformer import TransformerLM
 from src.training.optimizer import AdamWOptimizer, LionOptimizer
-from src.utils import metric_utils
+from src.metrics import functional as metric_utils
 from src.utils.config import ModelConfig, TrainConfig
 from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 

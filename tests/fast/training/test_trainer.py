@@ -203,7 +203,10 @@ def test_quant_metrics_disabled_by_default(mock_memmap):
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
         trainer = Trainer(_tiny_config(tmp), wandb_enabled=False)
-        assert trainer._diagnostic_batch is None  # never pulled: the flag is off
+        # the install pass never ran, so no accumulator exists to fold into
+        assert not any(
+            type(m).__name__ == "QuantizationStats" for m in trainer.model.modules()
+        )
         logged = []
         trainer.logger.register_on_log_hook(
             lambda step, metrics: logged.append(metrics)

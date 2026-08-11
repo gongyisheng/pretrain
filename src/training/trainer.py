@@ -17,16 +17,15 @@ from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
 from src.quant.convert import apply_quantization
-from src.quant.diagnostics import collect_quantization_diagnostics
-from src.training.optimizer import build_optimizer, build_scheduler
-from src.training.metrics import (
-    MetricsCollector,
-    TokenizerMetricsCollector,
+from src.metrics.collector import MetricsCollector, TokenizerMetricsCollector
+from src.metrics.convert import (
     apply_activation_monitoring,
+    apply_quantization_monitoring,
 )
+from src.metrics.functional import count_correct
+from src.training.optimizer import build_optimizer, build_scheduler
 from src.training.loss import LOSS_REGISTRY, compute_loss, compute_loss_chunked
 from src.utils.config import TrainConfig
-from src.utils.metric_utils import count_correct
 from src.utils.tracking_utils import WandbLogger
 from src.utils.masking_utils import (
     build_causal_attention_mask,
@@ -156,10 +155,6 @@ class Trainer:
         apply_quantization(self.model, config)
         self.logger = WandbLogger(config, enabled=wandb_enabled)
         self.metrics = MetricsCollector(config, self.device, logger=self.logger)
-        # a fixed batch, pulled from the val loader on first use, so the quant series
-        # tracks the model's scales rather than the data and the train stream is
-        # untouched
-        self._diagnostic_batch = None
 
         # Optimizer & scheduler
         self.optimizer = build_optimizer(self.model, config)
@@ -186,9 +181,9 @@ class Trainer:
 
         if config.logging.log_activation_norms:
             apply_activation_monitoring(self.model)
+        if config.logging.log_quant_metrics:
+            apply_quantization_monitoring(self.model)
 
-        # the quant diagnostic pass must not run inside a compiled region
-        self._eager_model = self.model
         if config.training.enable_torch_compile:
             self.model = torch.compile(self.model)
 
@@ -391,7 +386,6 @@ class Trainer:
                 step=self.step,
                 model=self.model,
                 optimizer=self.optimizer,
-                quant_metrics=self._quant_diagnostics(self.step),
             )
             if log_dict is not None:
                 pbar.set_postfix(
@@ -444,35 +438,6 @@ class Trainer:
                 input_ids, position_ids=position_ids, attn_mask=attn_mask
             )
         return logits, labels, aux_loss
-
-    def _quant_diagnostics(self, step: int) -> dict[str, float]:
-        """Quant health for a logged step, from one eager fwd/bwd on a fixed batch.
-
-        Off cadence this is a modulo and nothing else.
-        """
-        logging = self.config.logging
-        if not logging.log_quant_metrics or step % logging.log_every != 0:
-            return {}
-        if self._diagnostic_batch is None:
-            self._diagnostic_batch = next(iter(self.val_loader))
-        batch = self._diagnostic_batch
-
-        def forward_loss(model):
-            logits, labels, aux_loss = self._forward_batch(batch, model=model)
-            with torch.amp.autocast(
-                self.device, dtype=self.amp_dtype, enabled=self.use_amp
-            ):
-                # the training loss, not the chunked eval one: that is no-grad, and
-                # the backward is what carries the grad operands into the capture
-                loss = compute_loss(
-                    logits,
-                    labels,
-                    self.config.training.loss_fn,
-                    label_smoothing=self.config.training.label_smoothing,
-                )
-            return loss if aux_loss is None else loss + aux_loss
-
-        return collect_quantization_diagnostics(self._eager_model, forward_loss)
 
     @torch.no_grad()
     def _evaluate(self):

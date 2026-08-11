@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import NamedTuple
-
 import torch
 import torch.nn.functional as F
 
@@ -274,22 +272,3 @@ def dequantize_operand(xq, scale, contract_dim, scaling, *, offs=None, ragged_di
         contract_dim,
         length,
     )
-
-
-class QuantizationSnapshot(NamedTuple):
-    """What one GEMM operand was quantized to, recorded for metrics.
-
-    Holds references to live tensors, not copies — read it during the GEMM that
-    produced it, not later. Carrying the layout alongside the data is what lets
-    `dequantize_operand` invert it without re-supplying (and possibly transposing)
-    the contraction axis.
-    """
-
-    source_tensor: torch.Tensor  # pre-quantization, in the compute dtype
-    quantized_tensor: torch.Tensor  # low-precision codes
-    scale: torch.Tensor  # fp32 dequant scale
-    contract_dim: int
-    scaling: dict  # QuantizationConfig.scaling, as quantize_operand took it
-    offs: torch.Tensor | None = None  # set by grouped GEMMs, marks an expert axis
-    ragged_dim: int | None = None  # which axis `offs` segments, if any
-    fmt: str = ""  # the element format the codes are in, for qmax

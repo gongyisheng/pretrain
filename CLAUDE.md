@@ -15,8 +15,9 @@ uv sync
 # Tests: always pass -n explicitly, and run the two trees separately (`uv run pytest`
 # over both at once can exhaust GPU memory -- tests/e2e does real 124M dry runs).
 uv run pytest tests/fast -n 6                        # whole fast tree
-uv run pytest tests/fast/kernel -n 12 --dist load    # kernel and quant are ~2x faster
-uv run pytest tests/fast/quant  -n 12 --dist load    # per-test than at -n 6
+uv run pytest tests/fast/kernel  -n 12 --dist load   # kernel, quant and metrics are
+uv run pytest tests/fast/quant   -n 12 --dist load   # faster per-test than at -n 6
+uv run pytest tests/fast/metrics -n 12 --dist load
 uv run pytest tests/e2e -n 0                         # e2e serially, one CUDA context
 uv run pytest tests/fast/model/test_transformer.py -n 0 -k "test_forward"  # single test
 uv run pytest -n 0                                   # serial, for a debugger
@@ -89,20 +90,21 @@ front of you rather than assuming it holds.
 
 `pyproject.toml` sets `addopts = "-n 6 --dist loadfile"`, so every `pytest` invocation is already parallel. Two things bound how far that can be pushed, and they pull in opposite directions:
 
-- **`--dist loadfile` pins a whole file to one worker**, so workers past a directory's *file count* have nothing to claim and just pay a torch import and a CUDA context. Three dirs are a single file (`kernel`, `model`, `e2e`); the largest is seven (`quant`, then `layers` at six).
-- **`--dist load` splits per test** and beats `loadfile` wherever a directory has few slow tests, but each worker holds its own ~0.5 GiB CUDA context. Twelve of them plus a large allocation exhausts a 16 GB card — the whole suite under `-n 12 --dist load` OOMs in `tests/fast/utils/test_metric_utils.py`, which alone wants 3 GiB.
+- **`--dist loadfile` pins a whole file to one worker**, so workers past a directory's *file count* have nothing to claim and just pay a torch import and a CUDA context. Three dirs are a single file (`kernel`, `model`, `e2e`); the largest are `quant` and `layers` at six.
+- **`--dist load` splits per test** and beats `loadfile` wherever a directory has few slow tests, but each worker holds its own ~0.5 GiB CUDA context, so memory is what bounds `-n`. This used to cap the whole tree: `-n 12 --dist load` once OOM'd on a large SVD allocation in the weight-SVD tests. That no longer reproduces (dropping `esd_alpha` removed the allocation) — as of 2026-08-11 the whole tree runs at `-n 12 --dist load` in 148s peaking at 6.9 GB, against 162s at `-n 6 --dist loadfile`. Re-measure before assuming headroom on a smaller card.
 
 Measured per directory (one 16 GB RTX 5060 Ti), best in bold — re-check on other hardware:
 
 | dir | files | `-n 6 --dist loadfile` | `-n 12 --dist load` | peak GPU at `-n 12` |
 |---|---|---|---|---|
 | `kernel` | 1 | 99s | **46s** | 6.6 GB |
-| `quant` | 7 | 66s | **50s** | 7.1 GB |
+| `quant` | 6 | 66s | **50s** | 7.1 GB |
+| `metrics` | 4 | 36s | **25s** | 3.1 GB |
 | `layers` | 6 | **30s** | 61s | — |
-| `utils` | 3 | **36s** | 27s but 13.2 GB | 13.2 GB |
+| `utils` | 2 | **18s** | 17s | 1.8 GB |
 | `model` | 1 | **25s** | 26s | — |
 
-So: **`-n 12 --dist load` for `kernel` and `quant`, `-n 6 --dist loadfile` everywhere else.** No single `-n` is right for the whole tree, so `uv run pytest tests/fast -n 6` runs `kernel` and `quant` at roughly half speed — split those two out when iterating on them. `layers` is 2× *worse* per-test (many quick tests, dispatch overhead dominates); `utils` is faster per-test but leaves only 2 GB of headroom, so it stays on the default. Going past `-n 12` lost in every case measured. `.github/workflows/pr-test.yml` encodes this as `SPLIT_BY_TEST` / `SPLIT_BY_FILE`.
+So: **`-n 12 --dist load` for `kernel`, `quant` and `metrics`, `-n 6 --dist loadfile` everywhere else.** No single `-n` is right for the whole tree, so `uv run pytest tests/fast -n 6` runs those three at roughly half speed — split them out when iterating on them. `layers` is 2× *worse* per-test (many quick tests, dispatch overhead dominates); `utils` is a tie now that it is down to two files, so it stays on the default. Going past `-n 12` lost in every case measured. `.github/workflows/pr-test.yml` encodes this as `SPLIT_BY_TEST` / `SPLIT_BY_FILE`.
 
 ### Config defaults and validation
 

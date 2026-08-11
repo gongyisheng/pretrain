@@ -6,17 +6,14 @@ import torch
 
 from src.kernel.gemm import grouped_gemm, scaled_grouped_gemm
 from src.layers.mlp import SparseMoEBlock
-from src.quant.quantize import (
-    QuantizationSnapshot,
-    dequantize_operand,
-    quantize_operand,
-)
+from src.metrics.quant import record_operand
+from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import QuantizationConfig
 
 
 def quantized_grouped_gemm(
-    a, b, offs, a_fmt, b_fmt, out_dtype, scaling, bias=None, enable_snapshot=False
+    a, b, offs, a_fmt, b_fmt, out_dtype, scaling, bias=None, a_stats=None, b_stats=None
 ):
     """Quantized ragged grouped GEMM, layout picked from the operand ranks.
 
@@ -48,33 +45,45 @@ def quantized_grouped_gemm(
     # B carries the mapping only when the contraction is the ragged axis
     b_ragged_dim, b_offs = (-2, offs) if ragged_k else (None, None)
 
-    a_snap = b_snap = None
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
             src_a, contract_a, a_fmt, scaling, offs=offs, ragged_dim=a_ragged_dim
         )
-        if enable_snapshot:
-            a_snap = QuantizationSnapshot(
-                src_a, aq, sa, contract_a, scaling, offs, a_ragged_dim, a_fmt
-            )
+        record_operand(
+            a_stats,
+            src_a,
+            aq,
+            sa,
+            contract_a,
+            scaling,
+            a_fmt,
+            offs=offs,
+            ragged_dim=a_ragged_dim,
+        )
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(
             b, -2, b_fmt, scaling, offs=b_offs, ragged_dim=b_ragged_dim
         )
-        if enable_snapshot:
-            # `offs` here is the real offs, not `b_offs` -- deliberately, even though
-            # b_ragged_dim is None in the forward/dgrad case (B stacked (E,K,N)), which
-            # looks like it violates the given-together rule _check_dims enforces on
-            # quantize_operand. It doesn't: dequantize_operand only branches on
-            # ragged_dim, so None still takes the dense per-expert path; but
-            # compute_quantization_metrics branches on whether offs is None to decide
-            # global vs. per-expert reduction. Swapping this to b_offs "to match" would
-            # silently drop the MoE weight metrics to a global reduction whenever
-            # b_ragged_dim is None.
-            b_snap = QuantizationSnapshot(
-                b, bq, sb, -2, scaling, offs, b_ragged_dim, b_fmt
-            )
+        # `offs` here is the real offs, not `b_offs` -- deliberately, even though
+        # b_ragged_dim is None in the forward/dgrad case (B stacked (E,K,N)), which
+        # looks like it violates the given-together rule _check_dims enforces on
+        # quantize_operand. It doesn't: dequantize_operand only branches on
+        # ragged_dim, so None still takes the dense per-expert path; but the
+        # accumulated sums branch on whether offs is None to decide global vs.
+        # per-expert reduction. Swapping this to b_offs "to match" would silently drop
+        # the MoE weight metrics to a global reduction whenever b_ragged_dim is None.
+        record_operand(
+            b_stats,
+            b,
+            bq,
+            sb,
+            -2,
+            scaling,
+            b_fmt,
+            offs=offs,
+            ragged_dim=b_ragged_dim,
+        )
 
     if same_family and a.is_cuda:
         y = scaled_grouped_gemm(
@@ -87,7 +96,7 @@ def quantized_grouped_gemm(
             block_size,
             bias=bias,
         )
-        return y, a_snap, b_snap
+        return y
 
     if aq is not None:
         src_a = dequantize_operand(
@@ -103,14 +112,14 @@ def quantized_grouped_gemm(
         offs,
         bias=None if bias is None else bias.to(out_dtype),
     )
-    return y.to(out_dtype), a_snap, b_snap
+    return y.to(out_dtype)
 
 
 class ScaledGroupedGemmFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, bias, offs, cfg: QuantizationConfig):
+    def forward(ctx, a, b, bias, offs, cfg: QuantizationConfig, stats):
         out_dtype = a.dtype
-        y, _, _ = quantized_grouped_gemm(
+        y = quantized_grouped_gemm(
             a,
             b,
             offs,
@@ -119,9 +128,12 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             out_dtype,
             cfg.scaling,
             bias=bias,
+            a_stats=stats.get("fwd_act"),
+            b_stats=stats.get("fwd_weight"),
         )
         ctx.save_for_backward(a, b, offs)
         ctx.cfg = cfg
+        ctx.stats = stats
         ctx.bias_needs_grad = ctx.needs_input_grad[2]
         return y
 
@@ -129,9 +141,10 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
     def backward(ctx, grad_y):
         a, b, offs = ctx.saved_tensors
         cfg = ctx.cfg
+        stats = ctx.stats
         out_dtype = a.dtype
         # dgrad: grad_a = grad_y @ b^T
-        grad_a, _, _ = quantized_grouped_gemm(
+        grad_a = quantized_grouped_gemm(
             grad_y,
             b.transpose(-2, -1).contiguous(),
             offs,
@@ -139,10 +152,12 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["weight"],
             out_dtype,
             cfg.scaling,
+            a_stats=stats.get("dgrad_grad"),
+            b_stats=stats.get("dgrad_weight"),
         )
         # wgrad: grad_b[g] = a[g]^T @ grad_y[g] — the ragged token axis is the
         # contraction, i.e. the ragged-K layout
-        grad_b, _, _ = quantized_grouped_gemm(
+        grad_b = quantized_grouped_gemm(
             a.mT,
             grad_y,
             offs,
@@ -150,6 +165,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["grad_weight"],
             out_dtype,
             cfg.scaling,
+            a_stats=stats.get("wgrad_act"),
+            b_stats=stats.get("wgrad_grad"),
         )
         grad_bias = None
         if ctx.bias_needs_grad:
@@ -163,13 +180,22 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             acc = grad_y.new_zeros(offs.shape[0], grad_y.shape[1], dtype=torch.float32)
             acc.index_add_(0, group_of_row, grad_y.float())
             grad_bias = acc.to(grad_y.dtype)
-        return grad_a, grad_b, grad_bias, None, None
+        return grad_a, grad_b, grad_bias, None, None, None
 
 
-def scaled_grouped_gemm_fn(cfg: QuantizationConfig):
+def scaled_grouped_gemm_fn(cfg: QuantizationConfig, stats=None):
+    """Build the block's expert GEMM seam.
+
+    `stats` maps `<projection>.<gemm>.<operand>` to an accumulator. Rebinding this
+    closure with a populated map is how metric collection is installed -- routing
+    happens inside the block's forward, so no module hook can reach these operands.
+    """
+    stats = stats or {}
 
     def expert_mm(a, b, offs, bias=None, projection=None):
-        return ScaledGroupedGemmFn.apply(a, b, bias, offs, cfg)
+        return ScaledGroupedGemmFn.apply(
+            a, b, bias, offs, cfg, stats.get(projection, {})
+        )
 
     return expert_mm
 

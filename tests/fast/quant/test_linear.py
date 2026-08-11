@@ -2,6 +2,10 @@ import pytest
 import torch
 import torch.nn as nn
 
+from src.metrics.quant import (
+    QuantizationStats,
+    set_quantization_monitoring_status,
+)
 from src.model import build_model
 from src.quant.constants import _INT8_FORMATS
 from src.quant.linear import QuantizedLinear, quantized_gemm
@@ -176,26 +180,52 @@ int_gpu = pytest.mark.skipif(
 
 def test_gemm_passthrough_is_plain_matmul():
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    out, a_snap, b_snap = quantized_gemm(a, b, "bf16", "bf16", torch.float32, {})
+    out = quantized_gemm(a, b, "bf16", "bf16", torch.float32, {})
     assert torch.allclose(out, a @ b, atol=1e-4)
-    assert a_snap is None and b_snap is None  # nothing was quantized
 
 
-def test_gemm_withholds_snapshots_unless_asked():
-    """Training discards them; only the diagnostic replay opts in."""
+def test_gemm_records_nothing_without_stats():
+    """Training passes no accumulators, so the fold is skipped outright."""
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    out, a_snap, b_snap = quantized_gemm(
-        a, b, "int8", "int8", torch.float32, _scaling("tensorwise")
-    )
+    set_quantization_monitoring_status(True)
+    try:
+        out = quantized_gemm(
+            a, b, "int8", "int8", torch.float32, _scaling("tensorwise")
+        )
+    finally:
+        set_quantization_monitoring_status(False)
     assert torch.isfinite(out).all()
-    assert a_snap is None and b_snap is None
+
+
+def test_gemm_records_only_the_operands_whose_format_is_quantized():
+    """int x bf16: only `a` is a quantized format, so only its accumulator moves."""
+    a, b = torch.randn(20, 32), torch.randn(32, 40)
+    a_stats = QuantizationStats("fwd.act/x", 1, a.device)
+    b_stats = QuantizationStats("fwd.weight/x", 1, b.device)
+    set_quantization_monitoring_status(True)
+    try:
+        out = quantized_gemm(
+            a,
+            b,
+            "int8",
+            "bf16",
+            torch.float32,
+            _scaling("tensorwise"),
+            a_stats=a_stats,
+            b_stats=b_stats,
+        )
+    finally:
+        set_quantization_monitoring_status(False)
+    assert torch.isfinite(out).all()
+    assert a_stats.numel.item() == a.numel()
+    assert b_stats.numel.item() == 0
 
 
 def test_gemm_applies_bias_on_the_fallback_path():
     """bf16 x bf16 never reaches the kernel, so the unfused branch must add it too."""
     a, b = torch.randn(20, 32), torch.randn(32, 40)
     bias = torch.randn(40)
-    out, _, _ = quantized_gemm(a, b, "bf16", "bf16", torch.float32, {}, bias=bias)
+    out = quantized_gemm(a, b, "bf16", "bf16", torch.float32, {}, bias=bias)
     assert torch.allclose(out, a @ b + bias, atol=1e-4)
 
 
@@ -207,10 +237,10 @@ def test_gemm_applies_bias_in_the_fused_kernel():
     b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)
     bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
     cfg = _scaling("rowwise")
-    with_bias, _, _ = quantized_gemm(
+    with_bias = quantized_gemm(
         a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg, bias=bias
     )
-    without, _, _ = quantized_gemm(a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg)
+    without = quantized_gemm(a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg)
     torch.testing.assert_close(
         with_bias.float(), without.float() + bias.float(), rtol=2e-2, atol=2e-2
     )
@@ -238,11 +268,8 @@ def test_quantized_linear_adds_bias_exactly_once():
 @pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
-    out, a_snap, b_snap = quantized_gemm(
-        a, b, fmt, "bf16", torch.float32, _scaling("tensorwise"), enable_snapshot=True
-    )
+    out = quantized_gemm(a, b, fmt, "bf16", torch.float32, _scaling("tensorwise"))
     assert out.shape == (20, 40) and torch.isfinite(out).all()
-    assert a_snap is not None and b_snap is None  # only a is a quantized format
 
 
 @int_gpu
@@ -251,7 +278,7 @@ def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")
     b = torch.randn(128, 96, device="cuda")
-    out, _, _ = quantized_gemm(a, b, fmt, fmt, torch.float32, _scaling("rowwise"))
+    out = quantized_gemm(a, b, fmt, fmt, torch.float32, _scaling("rowwise"))
     ref = _roundtrip(a, -1, fmt, _scaling("rowwise")) @ _roundtrip(
         b, -2, fmt, _scaling("rowwise")
     )

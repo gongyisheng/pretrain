@@ -4,65 +4,17 @@ import time
 import torch
 from tokenizers import Tokenizer
 
-from src.utils import metric_utils
+from src.metrics import functional as metric_utils
+from src.metrics.activation import (
+    reset_activation_stats,
+    set_activation_monitoring_status,
+)
+from src.metrics.quant import (
+    reset_quantization_stats,
+    set_quantization_monitoring_status,
+)
 from src.utils.config import TrainConfig
 from src.utils.tracking_utils import WandbLogger
-
-
-_RECORDING = [False]
-
-
-class ActivationStats(torch.nn.Module):
-    """One site's running (energy, count) over a window; RMS is sqrt(energy / count)."""
-
-    def __init__(self, site: str, device: torch.device):
-        super().__init__()
-        self.site = site
-        for name in ("energy", "count"):
-            self.register_buffer(
-                name,
-                torch.zeros((), dtype=torch.float32, device=device),
-                persistent=False,
-            )
-
-    def record(self, tensor: torch.Tensor) -> None:
-        """Fold one tensor in, accumulating in fp32 whatever the forward's dtype."""
-        values = tensor.detach()
-        self.energy.add_(values.pow(2).sum(dtype=torch.float32))
-        self.count.add_(values.numel())
-
-    def reset(self) -> None:
-        self.energy.zero_()
-        self.count.zero_()
-
-
-def _linear_input_hook(module, args):
-    if _RECORDING[0]:
-        module.act_stats.record(args[0])
-
-
-def apply_activation_monitoring(model) -> None:
-    """Attach an ActivationStats child and hook to every Linear; call before torch.compile."""
-    # list(): adding children mutates the tree modules() is walking
-    for module in list(getattr(model, "_orig_mod", model).modules()):
-        if isinstance(module, torch.nn.Linear):
-            # device from the weight; a bare torch.zeros(()) takes the process default
-            module.add_module(
-                "act_stats", ActivationStats("input", module.weight.device)
-            )
-            module.register_forward_pre_hook(_linear_input_hook)
-
-
-def set_activation_monitoring_status(enabled: bool) -> None:
-    """Arm or disarm accumulation; a window must span a whole optimizer step."""
-    _RECORDING[0] = enabled
-
-
-def reset_activation_stats(model) -> None:
-    """Zero every accumulator."""
-    for module in getattr(model, "_orig_mod", model).modules():
-        if isinstance(module, ActivationStats):
-            module.reset()
 
 
 class MetricsCollector:
@@ -180,13 +132,31 @@ class MetricsCollector:
             self._param_snapshot = None
 
     def train_step_begin(self, model: torch.nn.Module, step: int) -> None:
-        log_every = self.config.logging.log_every
-        log_activation_flag = self.config.logging.log_activation_norms
-        is_recording = log_activation_flag and (step + 1) % log_every == 0
+        """Open (or leave shut) the accumulation window the next step will fill.
 
-        if is_recording:
-            reset_activation_stats(model)
-        set_activation_monitoring_status(is_recording)
+        Each feature arms independently: their flags are independent in the config, and
+        the quantization fold is far costlier than the activation one, so the cadences
+        are free to diverge.
+        """
+        logging = self.config.logging
+        is_log_step = (step + 1) % logging.log_every == 0
+
+        for enabled, reset, set_status in (
+            (
+                logging.log_activation_norms,
+                reset_activation_stats,
+                set_activation_monitoring_status,
+            ),
+            (
+                logging.log_quant_metrics,
+                reset_quantization_stats,
+                set_quantization_monitoring_status,
+            ),
+        ):
+            recording = enabled and is_log_step
+            if recording:
+                reset(model)
+            set_status(recording)
 
     def on_train_step(
         self,
@@ -234,7 +204,6 @@ class MetricsCollector:
         step: int,
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
-        quant_metrics: dict[str, float] | None = None,
     ) -> dict[str, float] | None:
         """On a log-cadence step: assemble the train log_dict, dispatch it to
         the logger, reset window counters, and return the dict (for the pbar).
@@ -325,14 +294,15 @@ class MetricsCollector:
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val
 
-        # Per-site activation RMS over the window opened by train_step_begin,
-        # which also owns resetting it -- nothing here mutates the model.
+        # Per-site activation RMS and per-operand quantization health, both over the
+        # window opened by train_step_begin, which also owns resetting them --
+        # nothing here mutates the model.
         if self.config.logging.log_activation_norms:
             for name, rms in metric_utils.compute_activation_norm(model).items():
                 d[f"activation/norm/{name}"] = rms
 
-        if quant_metrics:
-            d.update(quant_metrics)
+        if self.config.logging.log_quant_metrics:
+            d.update(metric_utils.compute_quantization_metrics(model))
 
         self.logger.log(d, step=step)
 

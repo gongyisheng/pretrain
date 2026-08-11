@@ -2,7 +2,6 @@ import pytest
 import torch
 
 from src.quant.constants import _INT8_FORMATS
-from src.quant.linear import quantized_gemm
 from src.quant.quantize import (
     quantize_operand,
     dequantize_operand,
@@ -476,20 +475,3 @@ def test_ragged_ignored_for_already_per_row_granularities(gran, bs):
     without = quantize_operand(x, -1, _E4M3, _scaling(gran, bs))
     assert torch.equal(with_ragged[0], without[0])
     assert torch.equal(with_ragged[1], without[1])
-
-
-def test_snapshot_carries_the_element_format_of_each_operand():
-    """Metrics need the format's qmax for clip_rate, and the snapshot is all they get."""
-    a = torch.randn(16, 32)
-    b = torch.randn(32, 8)
-    _, a_snap, b_snap = quantized_gemm(
-        a,
-        b,
-        "int8",
-        "int8",
-        torch.float32,
-        _scaling("tensorwise"),
-        enable_snapshot=True,
-    )
-    assert a_snap.fmt == "int8"
-    assert b_snap.fmt == "int8"

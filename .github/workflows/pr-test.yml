@@ -35,6 +35,7 @@ jobs:
       has_data: ${{ steps.detect.outputs.has_data }}
       has_kernel: ${{ steps.detect.outputs.has_kernel }}
       has_layers: ${{ steps.detect.outputs.has_layers }}
+      has_metrics: ${{ steps.detect.outputs.has_metrics }}
       has_model: ${{ steps.detect.outputs.has_model }}
       has_quant: ${{ steps.detect.outputs.has_quant }}
       has_training: ${{ steps.detect.outputs.has_training }}
@@ -50,6 +51,7 @@ jobs:
               core.setOutput('has_data', 'true');
               core.setOutput('has_kernel', 'true');
               core.setOutput('has_layers', 'true');
+              core.setOutput('has_metrics', 'true');
               core.setOutput('has_model', 'true');
               core.setOutput('has_quant', 'true');
               core.setOutput('has_training', 'true');
@@ -70,19 +72,29 @@ jobs:
             //   src/data      -> tests/fast/data
             //   src/kernel    -> tests/fast/kernel
             //   src/layers    -> tests/fast/layers
+            //   src/metrics   -> tests/fast/metrics
             //   src/model     -> tests/fast/model
             //   src/quant     -> tests/fast/quant
             //   src/utils     -> tests/fast/utils
             // has_quant also fires on src/kernel, since the quantized GEMM paths
             // call straight into those kernels.
+            // has_metrics and has_quant each fire on the other's subtree: the
+            // quantization fold is called from inside quantized_gemm, so
+            // src/metrics/quant.py is on the quant hot path, and src/metrics reads
+            // back through src/quant's dequantize and format helpers.
             // has_training (tests/fast/training + tests/e2e) is the integration
             // catch-all: any src/ change runs it, since the end-to-end training
             // path can break from a change anywhere in the stack.
             const has_data = matchAny([/^src\/data\//]);
             const has_kernel = matchAny([/^src\/kernel\//]);
             const has_layers = matchAny([/^src\/layers\//]);
+            const has_metrics = matchAny([/^src\/metrics\//, /^src\/quant\//]);
             const has_model = matchAny([/^src\/model\//]);
-            const has_quant = matchAny([/^src\/quant\//, /^src\/kernel\//]);
+            const has_quant = matchAny([
+              /^src\/quant\//,
+              /^src\/kernel\//,
+              /^src\/metrics\//,
+            ]);
             const has_utils = matchAny([/^src\/utils\//]);
             const has_training = matchAny([
               /^src\//,
@@ -92,12 +104,13 @@ jobs:
             core.setOutput('has_data', String(has_data));
             core.setOutput('has_kernel', String(has_kernel));
             core.setOutput('has_layers', String(has_layers));
+            core.setOutput('has_metrics', String(has_metrics));
             core.setOutput('has_model', String(has_model));
             core.setOutput('has_quant', String(has_quant));
             core.setOutput('has_training', String(has_training));
             core.setOutput('has_utils', String(has_utils));
 
-            core.info(`has_data=${has_data} has_kernel=${has_kernel} has_layers=${has_layers} has_model=${has_model} has_quant=${has_quant} has_training=${has_training} has_utils=${has_utils}`);
+            core.info(`has_data=${has_data} has_kernel=${has_kernel} has_layers=${has_layers} has_metrics=${has_metrics} has_model=${has_model} has_quant=${has_quant} has_training=${has_training} has_utils=${has_utils}`);
 
   lint:
     runs-on: [self-hosted]
@@ -219,6 +232,32 @@ jobs:
         run: |
           uv run python tests/ci/gpu_lock_exec.py -- \
             uv run pytest tests/fast/quant/ $SPLIT_BY_TEST
+
+  test-metrics:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_metrics == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - run: uv sync --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+
+      # No tokenizer/dataset restore: these tests use a fake tokenizer and never
+      # touch .bin files, so they need neither the HF download nor the C++ rebuild.
+      - name: Run metrics tests
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+        run: |
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/metrics/ $SPLIT_BY_TEST
 
   test-model:
     needs: [prepare]

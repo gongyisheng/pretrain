@@ -6,7 +6,7 @@ from tokenizers import Tokenizer
 
 from src.data.tokenizer import load_tokenizer
 from src.training.trainer import TokenizerTrainer
-from src.utils.metric_utils import compute_bytes_per_token
+from src.metrics.functional import compute_bytes_per_token
 from src.utils.config import (
     LoggingConfig,
     ModelConfig,
