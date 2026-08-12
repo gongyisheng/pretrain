@@ -10,7 +10,6 @@ across micro-batches but their operands are: sqnr is a log of a ratio of two sum
 import torch
 
 from src.quant.quantize import dequantize_operand
-from src.quant.utils import str_to_qmax
 
 
 # Read inside the compiled forward/backward, so flipping it specializes the graph.
@@ -28,7 +27,7 @@ class QuantizationStats(torch.nn.Module):
     whichever experts hold the most tokens.
     """
 
-    FIELDS = ("src_sq", "err_sq", "under", "clip", "numel", "nonzero")
+    FIELDS = ("src_sq", "err_sq", "under", "numel", "nonzero")
 
     def __init__(self, key: str, n_groups: int, device: torch.device):
         super().__init__()
@@ -48,21 +47,20 @@ class QuantizationStats(torch.nn.Module):
             getattr(self, name).zero_()
 
 
-def accumulate_quantization_sums(
-    source_tensor, codes, dequantized_tensor, qmax, offs=None
-):
+def accumulate_quantization_sums(source_tensor, codes, dequantized_tensor, offs=None):
     """One operand's quantization-error partial sums, for folding into a window.
 
-    Returns `(src_sq, err_sq, under, clip, numel, nonzero)`, each a 1D fp32 tensor:
+    Returns `(src_sq, err_sq, under, numel, nonzero)`, each a 1D fp32 tensor:
     length 1 for a dense operand, length n_experts for a grouped one.
 
     Two counts, two jobs: `numel` is every element, and stays the validity signal
     that marks an expert as having received tokens at all; `nonzero` counts the
-    elements that could underflow or clip, which is what the rates divide by.
+    elements that could underflow, which is what the rate divides by.
 
-    `codes` are the low-precision values themselves: scales are positive, so
-    `codes == 0` is exactly the operand rounding to zero, and `|codes| == qmax` is
-    saturation -- the other tail of the same scale-selection failure.
+    `codes` are the low-precision values themselves, and scales are positive, so
+    `codes == 0` is exactly the operand rounding to zero. There is no matching
+    saturation count: every scale lands amax at or below qmax by construction, so
+    the clamp in `_compute_codes` cannot bind for any amax fp32 can hold.
 
     With `offs` (cumulative end-offsets) the sums are per expert. One grouped GEMM
     covers every expert and each is quantized against its own amax, so reducing over
@@ -81,13 +79,11 @@ def accumulate_quantization_sums(
     err_squares = (source - dequantized).square()
     nonzero_mask = source != 0
     underflows = (nonzero_mask & (code_values == 0)).float()
-    clips = (code_values.abs() == qmax).float()
 
     if offs is None:
         src_sq = squares.sum().reshape(1)
         err_sq = err_squares.sum().reshape(1)
         under = underflows.sum().reshape(1)
-        clip = clips.sum().reshape(1)
         # bool mask reduced straight to fp32 -- no full-size float temporary needed
         nonzero = nonzero_mask.sum(dtype=torch.float32).reshape(1)
         numel = torch.full_like(src_sq, source.numel())
@@ -95,7 +91,6 @@ def accumulate_quantization_sums(
         src_sq = squares.flatten(1).sum(1)
         err_sq = err_squares.flatten(1).sum(1)
         under = underflows.flatten(1).sum(1)
-        clip = clips.flatten(1).sum(1)
         nonzero = nonzero_mask.flatten(1).sum(1, dtype=torch.float32)
         numel = torch.full_like(src_sq, source[0].numel())
     else:  # dispatched rows, ragged along offs -- a row belongs to exactly one expert
@@ -108,17 +103,16 @@ def accumulate_quantization_sums(
             per_row = t.flatten(1).sum(1)
             return per_row.new_zeros(n_groups).index_add_(0, ids, per_row)
 
-        src_sq, err_sq, under, clip, nonzero = (
+        src_sq, err_sq, under, nonzero = (
             by_expert(squares),
             by_expert(err_squares),
             by_expert(underflows),
-            by_expert(clips),
             by_expert(nonzero_mask.float()),  # index_add_ needs a float tensor
         )
         starts = torch.cat([offs.new_zeros(1), offs[:-1]])
         numel = ((offs - starts) * source.shape[1]).to(src_sq.dtype)
 
-    return src_sq, err_sq, under, clip, numel, nonzero
+    return src_sq, err_sq, under, numel, nonzero
 
 
 def record_operand(
@@ -128,7 +122,6 @@ def record_operand(
     scale,
     contract_dim,
     scaling,
-    fmt,
     offs=None,
     ragged_dim=None,
 ) -> None:
@@ -153,9 +146,7 @@ def record_operand(
     dequantized = dequantize_operand(
         codes, scale, contract_dim, scaling, offs=offs, ragged_dim=ragged_dim
     )
-    sums = accumulate_quantization_sums(
-        source, codes, dequantized, str_to_qmax(fmt), offs=offs
-    )
+    sums = accumulate_quantization_sums(source, codes, dequantized, offs=offs)
     for name, value in zip(stats.FIELDS, sums):
         getattr(stats, name).add_(value)
 

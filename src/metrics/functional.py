@@ -218,7 +218,7 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _quantization_metrics(src_sq, err_sq, under, clip, numel, nonzero, grouped):
+def _quantization_metrics(src_sq, err_sq, under, numel, nonzero, grouped):
     """Reported metrics from one operand's accumulated sums, as 0-dim fp32 tensors.
 
     Empty experts are excluded: they have no error to report. Grouped operands also
@@ -234,20 +234,18 @@ def _quantization_metrics(src_sq, err_sq, under, clip, numel, nonzero, grouped):
     )
     valid = (numel > 0).to(src_sq.dtype)
     n_valid = valid.sum().clamp_min(1.0)
-    # over the values that could underflow or clip: a source element that was already
-    # exactly zero can do neither, so dividing by numel would under-report by the
-    # operand's zero fraction -- large for grads (ignore_index) and relu activations.
+    # over the values that could underflow: a source element that was already exactly
+    # zero cannot, so dividing by numel would under-report by the operand's zero
+    # fraction -- large for grads (ignore_index) and relu activations.
     informative = nonzero.clamp_min(1.0)
     underflow_rate = under / informative
-    clip_rate = clip / informative
     metrics = {
         "sqnr": (sqnr * valid).sum() / n_valid,
         "underflow_rate": (underflow_rate * valid).sum() / n_valid,
-        "clip_rate": (clip_rate * valid).sum() / n_valid,
     }
     if not grouped:
         return metrics
-    # min over a dB quantity, max over the rates: both are defined over the whole
+    # min over a dB quantity, max over the rate: both are defined over the whole
     # range, unlike the max/min ratio a signed dB value would make meaningless
     keep = valid > 0
     # sqnr needs signal to measure: an expert with numel > 0 but nonzero == 0 (it
@@ -259,7 +257,6 @@ def _quantization_metrics(src_sq, err_sq, under, clip, numel, nonzero, grouped):
         has_signal, sqnr, torch.full_like(sqnr, float("inf"))
     ).min()
     metrics["underflow_rate_max"] = torch.where(keep, underflow_rate, zeros).max()
-    metrics["clip_rate_max"] = torch.where(keep, clip_rate, zeros).max()
     return metrics
 
 

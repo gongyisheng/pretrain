@@ -31,10 +31,10 @@ def quantized_gemm(
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(a, -1, a_fmt, scaling_cfg)
-        record_operand(a_stats, a, aq, sa, -1, scaling_cfg, a_fmt)
+        record_operand(a_stats, a, aq, sa, -1, scaling_cfg)
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(b, -2, b_fmt, scaling_cfg)
-        record_operand(b_stats, b, bq, sb, -2, scaling_cfg, b_fmt)
+        record_operand(b_stats, b, bq, sb, -2, scaling_cfg)
 
     if same_family and a.is_cuda and b.is_cuda:
         return scaled_gemm(

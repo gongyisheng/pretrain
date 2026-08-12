@@ -30,7 +30,6 @@ from src.quant.quantize import quantize_operand
 E4M3 = torch.float8_e4m3fn
 E5M2 = torch.float8_e5m2
 FP8_MAX = {E4M3: torch.finfo(E4M3).max, E5M2: torch.finfo(E5M2).max}
-EMAX = {E4M3: 8, E5M2: 15}  # E8M0 exponent target used by the mxfp8 recipe
 
 MXFP8_BLOCK = 32
 
@@ -73,7 +72,6 @@ _MX_EPS = 1e-30
 
 def _quantize_mxfp8_native(x, fp8_dtype, dim):
     """Blockwise mxfp8 quantization along `dim`; returns (x_fp8, E8M0 scale)."""
-    emax = EMAX[fp8_dtype]
     fp8_max = FP8_MAX[fp8_dtype]
     xf = x.movedim(dim, -1).contiguous()
     k = xf.shape[-1]
@@ -82,7 +80,9 @@ def _quantize_mxfp8_native(x, fp8_dtype, dim):
     )
     xb = xf.unflatten(-1, (k // MXFP8_BLOCK, MXFP8_BLOCK)).float()
     amax = xb.abs().amax(dim=-1)
-    exp = (torch.floor(torch.log2(amax.clamp_min(_MX_EPS))) - emax).clamp(
+    # matches src.quant.quantize._compute_scale: ceil against fp8_max, so amax/scale
+    # stays at or below fp8_max and the block maximum never saturates
+    exp = torch.ceil(torch.log2(amax.clamp_min(_MX_EPS) / fp8_max)).clamp(
         _MX_E8M0_EXP_MIN, _MX_E8M0_EXP_MAX
     )
     scale = torch.exp2(exp)

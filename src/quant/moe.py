@@ -57,7 +57,6 @@ def quantized_grouped_gemm(
             sa,
             contract_a,
             scaling,
-            a_fmt,
             offs=offs,
             ragged_dim=a_ragged_dim,
         )
@@ -80,7 +79,6 @@ def quantized_grouped_gemm(
             sb,
             -2,
             scaling,
-            b_fmt,
             offs=offs,
             ragged_dim=b_ragged_dim,
         )
