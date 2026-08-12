@@ -1,11 +1,3 @@
-"""Residual strategies for transformer blocks.
-
-`BaseResidual` defines the uniform interface; concrete strategies extend it.
-TransformerBlock constructs any residual subclass via the same factory call,
-so adding a new variant (gated residual, learned scalar, etc.) requires no
-changes in the block.
-"""
-
 import torch
 import torch.nn as nn
 
@@ -13,35 +5,14 @@ from src.layers.norm import LayerNorm, RMSNorm
 
 
 def _aggregate(V: torch.Tensor, K: torch.Tensor, w_proj: torch.Tensor) -> torch.Tensor:
-    """Fused: dot-product logits → softmax → weighted sum.
-
-    Norm is applied externally (via the optimized nn.RMSNorm/nn.LayerNorm
-    wrappers from src.layers.norm) — this function only fuses the
-    post-norm attention math. dynamic=True because N (number of stacked
-    prior blocks) grows across layers.
-    """
+    """Dot-product logits → softmax → weighted sum; norm is applied by the caller."""
     logits = (K * w_proj).sum(-1)  # (N, B, S)
     weights = logits.softmax(0)  # (N, B, S)
     return (weights.unsqueeze(-1) * V).sum(0)  # (B, S, D)
 
 
 class BaseResidual(nn.Module):
-    """Abstract base for residual strategies used by TransformerBlock.
-
-    Factory signature: (d_model, layer_idx, slot, **kwargs) — all three
-    required, no defaults.
-    Two-step API:
-      pre(x, ctx) -> h         # transform x into what the sublayer sees
-      forward(x, r, ctx)       # combine the base x with the sublayer's output r,
-                               # returning (new_x, new_ctx)
-    The sublayer call itself lives in TransformerBlock — residual only does
-    residual-specific work (pre-transform and combine).
-
-    Stores `d_model`, `layer_idx`, and `slot` as instance attributes so
-    subclasses can read them via `self.*` without re-declaring them.
-    `slot` ∈ {"attn", "mlp"} identifies which block slot this instance
-    occupies; some strategies (e.g. AttnResidual) use it to vary behavior.
-    """
+    """Abstract residual strategy: pre(x, ctx) -> h, then forward(x, r, ctx) -> (x, ctx)."""
 
     def __init__(self, d_model: int, layer_idx: int, slot: str, **kwargs):
         super().__init__()
@@ -58,9 +29,7 @@ class BaseResidual(nn.Module):
 
     @classmethod
     def compute_flops(cls, config, max_seq_len: int, layer_idx: int) -> int:
-        """Forward FLOPs per token for ONE residual slot. Default 0: the `x + r`
-        combine is an elementwise add, ignored under the PaLM/nanoGPT convention.
-        """
+        """Forward FLOPs per token for ONE residual slot; a plain add counts as 0."""
         return 0
 
     @classmethod
@@ -77,17 +46,7 @@ class StandardResidual(BaseResidual):
 
 
 class AttnResidual(BaseResidual):
-    """Block-level attention residual.
-
-    pre(x, ctx) computes h = aggregate(ctx + [x]) — a learned soft-attention
-    over all prior finalized blocks plus the current partial output —
-    which becomes the sublayer input.
-
-    forward(x, r, ctx) combines: at the "attn" slot of a block-boundary
-    layer (layer_idx % seal_block_size == 0), x is sealed into ctx and the
-    residual base resets to 0; otherwise out = x + r. The "mlp" slot never
-    seals.
-    """
+    """Block-level attention residual: learned soft-attention over prior sealed blocks."""
 
     def __init__(
         self,
@@ -118,12 +77,6 @@ class AttnResidual(BaseResidual):
 
     @classmethod
     def compute_flops(cls, config, max_seq_len: int, layer_idx: int) -> int:
-        """Per-slot aggregation cost: pre() norms and soft-attends over the N
-        stacked tensors (sealed prior blocks + current), so cost grows with
-        depth. N ≈ layer_idx // seal_block_size + 1; per N·d_model element this
-        is ~7 FLOPs (norm 3 + dot-product logits 2 + weighted sum 2; the softmax
-        over N is negligible).
-        """
         seal = config.residual_kwargs.get("seal_block_size", 1)
         n_ctx = layer_idx // seal + 1
         return 7 * n_ctx * config.d_model

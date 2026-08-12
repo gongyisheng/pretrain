@@ -1,32 +1,3 @@
-"""Activation functions used by FFN modules.
-
-Two function families, keyed by the same short activation name:
-
-- ``UNGATED_ACTIVATIONS``: unary ``x → act(x)`` — used by an ungated FFN as
-  ``act(up_proj(x))``.
-- ``GATED_ACTIVATIONS``: ``(gate, up) → act(gate) * up`` — used by a
-  gated (GLU-family) FFN. These are plain elementwise ops; fusion comes from
-  the whole-model ``torch.compile`` in the trainer, not a per-op decorator.
-
-Squared variants follow **Rule A**: the unary activation is squared; the
-gated form is ``squared_unary(gate) * up``. So ``silu2_glu`` is
-``silu(gate)² * up`` (SwiGLU²), not ``(silu(gate) * up)²``.
-
-Literature name mapping:
-
-    relu_glu        = ReGLU       (Shazeer 2020)
-    gelu_glu        = GeGLU
-    silu_glu        = SwiGLU
-    leaky_relu_glu  = LeakyReGLU
-    relu2_glu       = ReGLU²      (Primer-style squared, gated)
-    gelu2_glu       = GeGLU²
-    silu2_glu       = SwiGLU²
-    leaky_relu2_glu = LeakyReGLU²
-    bilinear        = Bilinear GLU (Shazeer 2020) — gated-only
-    bilinear2       = Squared Bilinear GLU — gated-only
-    powlu           = PowLU       (arXiv:2605.25704, May 2026; m=3.0) — gated-only
-"""
-
 import torch
 import torch.nn.functional as F
 

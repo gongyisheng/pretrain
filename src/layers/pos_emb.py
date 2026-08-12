@@ -1,14 +1,3 @@
-"""Positional embedding strategies.
-
-- LearnedPositionalEmbedding: classic GPT-2 absolute positional embedding —
-  an nn.Embedding lookup over positions 0..max_seq_len-1, added to the
-  token embedding. Always uses absolute position (0..S-1), never intra-doc
-  position_ids.
-- RoPE: rotary positional embedding (Su et al.) — applies a per-head
-  rotation to Q/K based on position_ids; injects position info inside
-  attention. Used by Qwen3 family.
-"""
-
 import torch
 import torch.nn as nn
 

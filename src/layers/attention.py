@@ -248,18 +248,7 @@ class GroupedQueryAttention(nn.Module):
 
 
 class MultiHeadLatentAttention(nn.Module):
-    """Multi-head Latent Attention (DeepSeek-V2/V3).
-
-    KV is compressed to a single ``kv_lora_rank`` latent (the only thing a KV
-    cache would store) and up-projected to per-head K/V. RoPE can't fold through
-    the latent up-projection, so position is carried by a *decoupled* rope part:
-    each head's Q/K is ``[nope ; rope]`` where the K rope part (``qk_rope_head_dim``)
-    is shared across heads and broadcast. Queries optionally share a ``q_lora_rank``
-    latent too (params/compute saving, not a cache saving).
-
-    Head dims are explicit; ``ModelConfig.__post_init__`` fills their defaults.
-    ``q_lora_rank=0`` disables query compression (a plain ``q_proj`` is used).
-    """
+    """Multi-head Latent Attention (DeepSeek-V2/V3): low-rank KV/Q with decoupled RoPE."""
 
     def __init__(
         self,

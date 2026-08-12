@@ -6,12 +6,6 @@ from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
 class GroupedGemmFn(torch.autograd.Function):
-    """Autograd for the forward-only bf16 grouped GEMM. Each layout's dgrad/wgrad
-    lands in another layout of the same set, so one formula serves all three. Kept
-    here, not in the kernel, so the kernel stays forward-only -- mirrors how
-    ScaledGroupedGemmFn wraps the scaled grouped GEMM in the quant layer.
-    """
-
     @staticmethod
     def forward(ctx, a, b, bias, offs):
         y = grouped_gemm(a, b, offs, bias=bias)
@@ -24,14 +18,9 @@ class GroupedGemmFn(torch.autograd.Function):
         a, b, offs = ctx.saved_tensors
         grad_bias = None
         if ctx.bias_needs_grad:
-            # bias is broadcast over the output's row dim, so its grad sums that dim,
-            # in fp32: over thousands of rows a bf16 accumulator drifts percent-level.
             if grad_c.ndim == 3:
                 grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
             else:
-                # a segmented column-sum IS the ragged-K layout with a row of ones on
-                # the left -- reuses the kernel's fp32 accumulator and reads grad_c
-                # once, where index_add_ would need an fp32 copy of it
                 ones = grad_c.new_ones(1, grad_c.shape[0])
                 grad_bias = grouped_gemm(ones, grad_c, offs).squeeze(1)
         return (
@@ -78,23 +67,7 @@ def grouped_mlp(
 
 
 class DenseMLPBlock(nn.Module):
-    """Configurable dense feed-forward block.
-
-    Two structural variants selected by `gated`:
-      - gated=False: down_proj(activation(up_proj(x)))
-      - gated=True (GLU family): down_proj(activation(gate, up)) where
-        (gate, up) = chunk(gate_up_proj(x), 2, dim=-1)
-
-    `activation` is one of ``"relu"`` / ``"gelu"`` / ``"silu"``. Combinations:
-        gated=True + activation="silu" → SwiGLU
-        gated=True + activation="gelu" → GeGLU
-        gated=True + activation="relu" → ReGLU
-
-    Bias defaults to False (modern LLM convention); pass `bias=True` for the
-    GPT-2 / classic Transformer convention.
-
-    Returns a tuple (out, None) to match the uniform MLP block contract.
-    """
+    """Dense feed-forward block, ungated or GLU-family (gated=True + silu = SwiGLU)."""
 
     def __init__(
         self,
@@ -157,13 +130,7 @@ class DenseMLPBlock(nn.Module):
 
 
 class ExpertBias(nn.Module):
-    """Auxiliary-loss-free load-balancing bias (arXiv:2408.15664).
-
-    A per-expert bias added to gating scores for top-k selection only (it never
-    enters the combine weights). It is not a learned parameter — `update` nudges
-    it toward uniform load with a fixed-rate sign rule. The buffer is fp32-pinned
-    via _apply so the small update steps survive bf16/fp16 model casts.
-    """
+    """Auxiliary-loss-free load-balancing bias (arXiv:2408.15664), top-k selection only."""
 
     def __init__(self, n_experts: int, update_rate: float = 0.001):
         super().__init__()
@@ -223,15 +190,7 @@ MOE_ROUTER_SCORE_FNS = {
 
 
 class MoERouter(nn.Module):
-    """MoE top-k router with fp32-pinned gate weight.
-
-    bf16/fp16 rounding of close-competing logits before softmax can flip top-k
-    picks, and low-precision storage can't accept sub-ULP gradient updates.
-    Gate weight stays fp32 via _apply; forward disables autocast around the GEMM.
-
-    With `expert_bias`, an independent `ExpertBias` submodule shifts the gating
-    scores for selection only (combine weights stay the original softmax probs).
-    """
+    """MoE top-k router with fp32-pinned gate weight."""
 
     def __init__(
         self,
@@ -299,24 +258,7 @@ class MoERouter(nn.Module):
 
 
 class SparseMoEBlock(nn.Module):
-    """Sparse Mixture-of-Experts MLP block (dropless dispatch).
-
-    Expert weights are stored as stacked (E, out, in) tensors. Tokens are sorted
-    by expert and run through a variable-group GEMM (`grouped_mlp` /
-    torch._grouped_mm) with no padding and no dropped tokens.
-
-    Per forward pass:
-      - Tokens are routed to top-k experts via MoERouter.
-      - Experts run via the path above; outputs are gathered back with routing weights.
-      - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
-
-    Mirrors DenseMLPBlock's gated/ungated split: by default `gated=True, activation="silu"`
-    (SwiGLU experts); set `gated=False` for ungated experts.
-
-    Note: aux_loss scale grows linearly with n_routed_experts_per_token (k). Under balanced
-    routing the expected value is approximately k. The block applies `aux_loss_coef` itself,
-    so the returned aux is already scaled — each layer may use a different coef.
-    """
+    """Sparse Mixture-of-Experts MLP block, returns (out, scaled aux_loss)"""
 
     def __init__(
         self,
