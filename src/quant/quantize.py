@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from src.quant.constants import EPS
 from src.quant.utils import (
     is_int8s,
-    str_to_emax,
     str_to_qmax,
     str_to_dtype,
 )
@@ -51,11 +50,9 @@ def _compute_scale(
 ) -> torch.Tensor:
     """fp32 dequant scale from per-block amax."""
     if scale_dtype == "fp8_e8m0":
-        e8m0_emax = str_to_emax("fp8_e8m0")
-        exp = (torch.floor(torch.log2(amax.clamp_min(EPS))) - str_to_emax(fmt)).clamp(
-            -e8m0_emax, e8m0_emax
-        )
-        return torch.exp2(exp)
+        # e8m0 is a bare 8-bit exponent: a power of two, biased to cover +-127.
+        exp = torch.ceil(torch.log2(amax.clamp_min(EPS) / str_to_qmax(fmt)))
+        return torch.exp2(exp.clamp(-127, 127))
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 

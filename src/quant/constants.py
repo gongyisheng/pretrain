@@ -82,12 +82,6 @@ _STR_TO_MIN_SUBNORMAL = {
     "int4": 0.5,
 }
 
-_STR_TO_EMAX = {
-    "fp8_e4m3": 8,
-    "fp8_e5m2": 15,
-    "fp8_e8m0": 127,
-}
-
 EPS = 1e-30
 
 # Operand formats only: fp8_e8m0 is a scale dtype, never an operand's.

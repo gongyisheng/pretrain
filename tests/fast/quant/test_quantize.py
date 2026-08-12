@@ -5,8 +5,6 @@ from src.quant.constants import _INT8_FORMATS
 from src.quant.quantize import (
     quantize_operand,
     dequantize_operand,
-    # private: the block-numbering convention below is what the parity reference in
-    # test_quantize_parity.py re-derives, so it stays pinned directly.
     _scale_block_map,
 )
 from src.quant.utils import str_to_qmax
@@ -213,26 +211,133 @@ def test_fp32_scale_never_clips(granularity):
     assert fq.abs().amax().item() == pytest.approx(x.abs().amax().item(), rel=1e-6)
 
 
-def test_e8m0_scale_clips_the_block_maximum():
-    # e8m0 floors the exponent, so the scale is up to 2x too small and codes above
-    # qmax saturate: 1.9 -> floor(log2 1.9) = 0 -> scale = 2^-8 -> 1.9/scale = 486 > 448,
-    # clamped back to 448 * 2^-8 = 1.75.
+def test_e8m0_scale_does_not_saturate_the_block_maximum():
+    # The exponent is picked against qmax, not emax, so amax/scale <= qmax always:
+    # 1.9 -> ceil(log2(1.9/448)) = -7 -> 1.9 / 2**-7 = 243.2, well inside e4m3.
     x = torch.full((1, 32), 1.9)
     xq, s = quantize_operand(x, -1, _E4M3, _MXFP8)
-    assert xq.float().abs().amax().item() == str_to_qmax(_E4M3)  # every code clipped
+    assert xq.float().abs().amax().item() < str_to_qmax(_E4M3)
+    # 243.2 rounds to the nearest e4m3 code, 240, so 1.9 comes back as 240 * 2**-7.
     fq = dequantize_operand(xq, s, -1, _MXFP8)
-    assert torch.allclose(fq, torch.full_like(fq, 1.75))
+    assert torch.allclose(fq, torch.full_like(fq, 1.875))
 
 
-def test_e8m0_clipping_loss_is_bounded_by_one_eighth():
-    # Worst case is a mantissa just under 2: qmax/2^emax = 1.75 of it survives, so no
-    # element loses more than (2 - 1.75) / 2 = 12.5% of its magnitude.
+def test_e8m0_block_maximum_roundtrips_within_half_an_ulp():
+    # With no clipping the peak of each block loses only e4m3 round-to-nearest:
+    # 3 mantissa bits, so at most half an ulp = 2**-4 relative.
     torch.manual_seed(0)
-    x = torch.randn(64, 256) * 3.0
-    fq = _roundtrip(x, -1, _E4M3, _MXFP8)
-    clipped = x.abs() > fq.abs()
-    loss = (x.abs() - fq.abs())[clipped] / x.abs()[clipped]
-    assert loss.max().item() <= 0.125
+    x = (torch.randn(64, 256) * 3.0).reshape(64, 8, 32)
+    fq = _roundtrip(x.reshape(64, 256), -1, _E4M3, _MXFP8).reshape(64, 8, 32)
+    idx = x.abs().argmax(-1, keepdim=True)
+    peak, got = x.gather(-1, idx).abs(), fq.gather(-1, idx).abs()
+    assert ((peak - got) / peak).max().item() <= 2**-4
+
+
+# --- scale values: what each scale group actually reduces ---
+
+
+def _block_amax(x, contract_dim, bs):
+    """Per-group amax along `contract_dim`, tiled with plain tensor ops.
+
+    Deliberately not built from `_tile`/`_scale_block_map`: this is the independent
+    side of the comparison, so it must not share the helpers under test. amax is an
+    exact reduction, so equality against the implementation is bitwise.
+    """
+    v = x if contract_dim == -1 else x.mT
+    K = v.shape[-1]
+    width = bs or K
+    n_blocks = (K + width - 1) // width
+    pad = n_blocks * width - K
+    if pad:
+        v = torch.nn.functional.pad(v, (0, pad))
+    amax = v.abs().reshape(*v.shape[:-1], n_blocks, width).amax(-1)
+    return amax if contract_dim == -1 else amax.mT
+
+
+@pytest.mark.parametrize("contract_dim", [-1, -2])
+@pytest.mark.parametrize("bs", [0, 32, 40])  # 0 is rowwise; 40 leaves a short block
+def test_scale_reduces_exactly_its_own_block(contract_dim, bs):
+    torch.manual_seed(0)
+    x = torch.randn(64, 96) if contract_dim == -1 else torch.randn(96, 64)
+    gran = "rowwise" if bs == 0 else "blockwise"
+    _, s = quantize_operand(x, contract_dim, _E4M3, _scaling(gran, bs))
+    assert torch.equal(s, _block_amax(x, contract_dim, bs) / str_to_qmax(_E4M3))
+
+
+@pytest.mark.parametrize("contract_dim", [-1, -2])
+def test_e8m0_scale_lands_block_amax_in_the_top_binade(contract_dim):
+    # 2**ceil(log2(amax/qmax)) puts amax/scale in (qmax/2, qmax]: never above, so no
+    # code clips, and never a full binade below, so no range is wasted.
+    torch.manual_seed(0)
+    x = (torch.randn(64, 96) if contract_dim == -1 else torch.randn(96, 64)) * 7.0
+    _, s = quantize_operand(x, contract_dim, _E4M3, _MXFP8)
+    qmax = str_to_qmax(_E4M3)
+    ratio = _block_amax(x, contract_dim, 32) / s
+    assert (ratio <= qmax).all() and (ratio > qmax / 2).all()
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
+)
+def test_expert_stack_scale_matches_per_expert_quantize(gran, bs):
+    # One rank-agnostic call on an (E,K,N) slab must agree with quantizing expert by
+    # expert — the scale layout for a 3D operand is only exercised here.
+    torch.manual_seed(0)
+    b = torch.randn(3, 96, 32)
+    codes, scale = quantize_operand(b, -2, _E4M3, _scaling(gran, bs))
+    per = [quantize_operand(b[g], -2, _E4M3, _scaling(gran, bs)) for g in range(3)]
+    assert torch.equal(
+        codes.view(torch.uint8), torch.stack([q for q, _ in per]).view(torch.uint8)
+    )
+    assert torch.equal(scale, torch.stack([s for _, s in per]))
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 4)]
+)
+def test_ragged_scale_blocks_match_independent_per_group_quantize(gran, bs):
+    # Codes are pinned by test_ragged_quantize_matches_independent_per_group_quantize;
+    # this pins the scales they were divided by, which is where cross-group pooling
+    # would actually show up.
+    torch.manual_seed(0)
+    counts = [6, 0, 5]
+    x = torch.randn(sum(counts), 8)
+    x[:6] *= 50.0
+    offs, scaling = _offs(counts), _scaling(gran, bs)
+    _, scale = quantize_operand(x, -2, _E4M3, scaling, offs=offs, ragged_dim=-2)
+    row_blocks, _ = _scale_block_map(offs, sum(counts), bs)
+    lo = 0
+    for hi in offs.tolist():
+        if hi > lo:
+            _, expected = quantize_operand(x[lo:hi], -2, _E4M3, scaling)
+            assert torch.equal(scale[row_blocks[lo:hi].unique()], expected)
+        lo = hi
+
+
+@pytest.mark.parametrize(
+    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 4)]
+)
+def test_ragged_last_dim_is_the_transpose_of_ragged_first(gran, bs):
+    """Quantizing the transposed view == transposing the quantization.
+
+    This is what would let a caller whose operand already arrives transposed quantize
+    it where it stands instead of flipping it in and back out again. `moe.py`'s wgrad
+    is that caller and deliberately does not: reducing along the strided axis of the
+    view costs more than the transposed kernel read it would save (measured 1.2x-2.8x
+    on the quantize path). The equivalence is pinned here regardless -- it is the
+    property `ragged_dim` has to have.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(24, 16)
+    offs, scaling = _offs([8, 0, 10, 6]), _scaling(gran, bs)
+    codes, scale = quantize_operand(x, -2, _E4M3, scaling, offs=offs, ragged_dim=-2)
+    codes_t, scale_t = quantize_operand(
+        x.mT, -1, _E4M3, scaling, offs=offs, ragged_dim=-1
+    )
+    assert torch.equal(
+        codes_t.view(torch.uint8), codes.mT.contiguous().view(torch.uint8)
+    )
+    assert torch.equal(scale_t, scale.mT.contiguous())
 
 
 # --- dequantize_operand ---

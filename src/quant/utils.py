@@ -10,7 +10,6 @@ from src.quant.constants import (
     _FP8_FORMATS,
     _INT8_FORMATS,
     _STR_TO_DTYPE,
-    _STR_TO_EMAX,
     _STR_TO_QMAX,
 )
 from src.utils.config import QuantizationConfig
@@ -22,10 +21,6 @@ def str_to_dtype(fmt: str) -> torch.dtype:
 
 def str_to_qmax(fmt: str) -> float:
     return _STR_TO_QMAX[fmt]
-
-
-def str_to_emax(fmt: str) -> int:
-    return _STR_TO_EMAX[fmt]
 
 
 def is_fp8(fmt: str) -> bool:
