@@ -21,10 +21,6 @@ permissions:
   contents: read
 
 env:
-  # Two xdist splits, each measured faster on the dirs that use it. Per test
-  # suits dirs with a few slow tests; per file suits dirs with many quick ones,
-  # where per-test dispatch costs more than it saves, and dirs holding a test
-  # big enough that twelve CUDA contexts alongside it would exhaust the card.
   SPLIT_BY_TEST: -n 12 --dist load
   SPLIT_BY_FILE: -n 6 --dist loadfile
 
@@ -147,10 +143,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      # `--reinstall-package pretrain` forces rebuild of the C++ `_bpe_engine`
-      # extension. The .so is built into the source tree, which actions/checkout
-      # wipes each run; uv's cache-keys see unchanged .cpp/.h and would otherwise
-      # skip the rebuild, leaving the .so missing.
+      # forces rebuild of the C++ `_bpe_engine` extension
       - run: uv sync --frozen --reinstall-package pretrain
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
@@ -320,11 +313,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      # `--reinstall-package pretrain` forces rebuild of the C++ `_bpe_engine`
-      # extension. The training tests import `src.data.bpe`, whose .so is built
-      # into the source tree that actions/checkout wipes each run; uv's cache-keys
-      # see unchanged .cpp/.h and would otherwise skip the rebuild, leaving the
-      # .so missing and collection failing on import.
+      # forces rebuild of the C++ `_bpe_engine` extension
       - run: uv sync --frozen --reinstall-package pretrain
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
