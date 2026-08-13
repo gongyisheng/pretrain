@@ -21,19 +21,19 @@ def _num_sms(device: torch.device | None = None) -> int:
 
 
 _GROUPED_CFG = [
-    (32, 64, 64, 4, 3),
     (64, 32, 32, 4, 3),
     (64, 64, 32, 4, 3),
-    (64, 64, 64, 4, 4),
-    (128, 64, 32, 4, 4),
-    (128, 64, 64, 8, 4),
-    (32, 128, 64, 4, 3),
     (64, 128, 32, 4, 3),
-    (64, 128, 64, 8, 4),
-    (128, 128, 32, 8, 4),
-    (128, 128, 64, 8, 3),
     (64, 256, 32, 8, 3),
+    (128, 64, 32, 4, 4),
+    (128, 128, 32, 8, 4),
+    (32, 64, 64, 4, 3),
+    (32, 128, 64, 4, 3),
+    (64, 64, 64, 4, 4),
+    (64, 128, 64, 8, 4),
     (64, 256, 64, 8, 4),
+    (128, 64, 64, 8, 4),
+    (128, 128, 64, 8, 3),
     (128, 256, 64, 8, 3),
     (256, 128, 64, 8, 3),
 ]
@@ -316,24 +316,40 @@ def grouped_gemm(
 # ---------------------------------------------------------------------------
 
 _SCALED_CFG = [
-    (64, 64, 4, 3),
-    (128, 64, 4, 4),
-    (64, 128, 4, 3),
-    (128, 128, 8, 4),
-    (64, 256, 8, 3),
-    (256, 64, 8, 3),
-    (128, 256, 8, 4),
-    (128, 128, 4, 3),
-    (128, 128, 4, 4),
-    (256, 128, 8, 3),
+    (32, 128, 32, 4, 4),
+    (64, 128, 32, 4, 3),
+    (128, 128, 32, 4, 3),
+    (128, 128, 32, 8, 4),
+    (64, 64, 64, 4, 3),
+    (128, 128, 64, 4, 3),
+    (128, 128, 64, 4, 4),
+    (128, 256, 64, 8, 4),
+    (256, 128, 64, 8, 3),
+    (64, 128, 128, 4, 3),
+    (128, 128, 128, 8, 3),
 ]
 _SCALED_CONFIGS = [
-    triton.Config({"BLOCK_M": bm, "BLOCK_N": bn}, num_warps=w, num_stages=s)
-    for (bm, bn, w, s) in _SCALED_CFG
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk},
+        num_warps=w,
+        num_stages=s,
+    )
+    for (bm, bn, bk, w, s) in _SCALED_CFG
 ]
 
 
-@triton.autotune(configs=_SCALED_CONFIGS, key=["N", "K", "SCALE_BLOCK_SIZE"])
+def _early_prune_scaled_configs(configs, named_args, **kwargs):
+    scale_block = kwargs.get("SCALE_BLOCK_SIZE", named_args.get("SCALE_BLOCK_SIZE"))
+    if not scale_block:
+        return configs
+    return [c for c in configs if c.kwargs["BLOCK_K"] <= max(32, scale_block)]
+
+
+@triton.autotune(
+    configs=_SCALED_CONFIGS,
+    key=["M", "N", "K", "SCALE_BLOCK_SIZE"],
+    prune_configs_by={"early_config_prune": _early_prune_scaled_configs},
+)
 @triton.jit
 def _scaled_gemm_kernel(
     a_ptr,
@@ -421,10 +437,11 @@ def scaled_gemm(
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
 
-    `block_size` 0 means one scale block spanning the whole contraction. The branch
-    below tests `n_scale_blocks` rather than that sentinel because a blockwise width
-    >= K also collapses to one block, and would otherwise set a BLOCK_K that
-    tl.arange cannot take.
+    `block_size` 0 means one scale block spanning the whole contraction.
+    `SCALE_BLOCK_SIZE` below is derived from `n_scale_blocks` rather than from that
+    sentinel because a blockwise width >= K also collapses to one block, and would
+    otherwise leave the kernel restarting its accumulator on a boundary K never
+    reaches.
 
     `bias` is an optional (N,) tensor broadcast over the rows, added to the fp32
     accumulator in the epilogue so it never passes through the scales.
@@ -460,18 +477,14 @@ def scaled_gemm(
             f"bias must be (N,)=({N},), got {tuple(bias.shape)}"
         )
     if n_scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
-        # block_size is the scale-block width; it also drives BLOCK_K below, where
-        # tl.arange needs a power of two. Unchecked, it fails inside Triton pointing
-        # at an unrelated line.
+        # block_size is the scale-block width, and BLOCK_K -- always a power of two --
+        # tiles it. A width that is not one leaves every scale block ending on a
+        # masked partial tile, and a width under 16 cannot fill even the narrowest
+        # tile fp8/int8 tl.dot accepts.
         raise ValueError(
             f"block_size must be a power of two >= 16 when it tiles K, got {block_size}"
         )
-    if n_scale_blocks > 1:
-        # fp8/int8 tl.dot rejects K < 32, so a 16-wide scale block runs a 32-wide
-        # BLOCK_K masked back to its width in the kernel (block_end).
-        SCALE_BLOCK_SIZE, BLOCK_K = block_size, max(32, block_size)
-    else:
-        SCALE_BLOCK_SIZE, BLOCK_K = K, min(128, triton.next_power_of_2(K))
+    SCALE_BLOCK_SIZE = block_size if n_scale_blocks > 1 else K
     c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
 
     def grid(meta):
@@ -501,7 +514,6 @@ def scaled_gemm(
         0 if bias is None else bias.stride(0),
         SCALE_BLOCK_SIZE=SCALE_BLOCK_SIZE,
         HAS_BIAS=bias is not None,
-        BLOCK_K=BLOCK_K,
     )
     return c
 
@@ -511,24 +523,50 @@ def scaled_gemm(
 # ---------------------------------------------------------------------------
 
 
-_SCALED_GROUPED_CONFIGS = _GROUPED_CONFIGS + [
+_SCALED_GROUPED_CFG = [
+    (64, 32, 32, 4, 3),
+    (64, 64, 32, 4, 3),
+    (64, 128, 32, 4, 3),
+    (64, 256, 32, 8, 3),
+    (128, 64, 32, 4, 4),
+    (128, 128, 32, 8, 2),
+    (128, 128, 32, 8, 3),
+    (128, 128, 32, 8, 4),
+    (32, 64, 64, 4, 3),
+    (32, 128, 64, 4, 3),
+    (64, 64, 64, 4, 4),
+    (64, 128, 64, 8, 4),
+    (64, 256, 64, 8, 4),
+    (128, 64, 64, 8, 4),
+    (128, 128, 64, 8, 3),
+    (128, 128, 64, 8, 4),
+    (128, 256, 64, 8, 3),
+    (256, 128, 64, 8, 3),
+    (64, 64, 128, 4, 3),
+    (64, 128, 128, 8, 4),
+    (128, 64, 128, 8, 4),
+    (128, 128, 128, 8, 3),
+]
+
+_SCALED_GROUPED_CONFIGS = [
     triton.Config(
         {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=w, num_stages=s
     )
-    for (bm, bn, bk, w, s) in [
-        (64, 64, 128, 4, 3),
-        (128, 64, 128, 8, 4),
-        (64, 128, 128, 8, 4),
-        (128, 128, 128, 8, 3),
-        (128, 128, 32, 8, 3),
-        (128, 128, 64, 8, 4),
-    ]
+    for (bm, bn, bk, w, s) in _SCALED_GROUPED_CFG
 ]
+
+
+def _early_prune_scaled_grouped_configs(configs, named_args, **kwargs):
+    scale_block = kwargs.get("SCALE_BLOCK_SIZE", named_args.get("SCALE_BLOCK_SIZE"))
+    if not scale_block:
+        return configs
+    return [c for c in configs if c.kwargs["BLOCK_K"] <= max(32, scale_block)]
 
 
 @triton.autotune(
     configs=_SCALED_GROUPED_CONFIGS,
     key=["M", "N", "K", "A_IS_2D", "B_IS_2D", "SCALE_BLOCK_SIZE"],
+    prune_configs_by={"early_config_prune": _early_prune_scaled_grouped_configs},
 )
 @triton.jit
 def _scaled_grouped_gemm_kernel(

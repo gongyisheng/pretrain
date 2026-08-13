@@ -460,9 +460,11 @@ def test_scaled_gemm_rejects_malformed_inputs(case):
 
 @pytest.mark.parametrize("bs", [8, 96])
 def test_scaled_gemm_rejects_unusable_block_size(bs):
-    """block_size becomes BLOCK_K, which tl.arange needs a power of two and tl.dot
-    needs >= 16. It comes straight from the scaling config, and unchecked it fails
-    deep inside Triton's compiler pointing at a line unrelated to the cause.
+    """block_size is the scale-block width that the autotuned BLOCK_K tiles, so a
+    width that is not a power of two leaves every block ending on a masked partial
+    tile, and one under 16 cannot fill even the narrowest tile fp8/int8 tl.dot
+    accepts. It comes straight from the scaling config, and unchecked it fails deep
+    inside Triton's compiler pointing at a line unrelated to the cause.
     """
     a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
@@ -474,7 +476,8 @@ def test_scaled_gemm_rejects_unusable_block_size(bs):
 
 def test_scaled_gemm_accepts_non_pow2_block_size_spanning_k():
     """Guards the check above against over-rejecting: a block_size >= K collapses to
-    a single scale block, where it never becomes BLOCK_K and so needs no power of two.
+    a single scale block, which no BLOCK_K ever has to tile, so it needs no power of
+    two.
     """
     a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
@@ -706,3 +709,33 @@ def test_compiles_fullgraph():
         lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
     )
     assert torch.isfinite(fn()).all()
+
+
+@pytest.mark.parametrize(
+    "prune,configs",
+    [
+        (gemm._early_prune_scaled_configs, gemm._SCALED_CONFIGS),
+        (gemm._early_prune_scaled_grouped_configs, gemm._SCALED_GROUPED_CONFIGS),
+    ],
+    ids=["scaled", "scaled_grouped"],
+)
+def test_early_prune_caps_block_k_at_the_scale_block(prune, configs):
+    """A BLOCK_K wider than one scale block only ever runs masked-off lanes, so the
+    pruner drops it -- but must never prune the list empty, which Triton reports as
+    an unrelated autotune failure. The floor is 32, the narrowest fp8/int8 tl.dot.
+    Each scaled kernel owns a pruner, so this runs against both.
+    """
+    for scale_block in (16, 32, 128, 4096):
+        kept = prune(list(configs), {"SCALE_BLOCK_SIZE": scale_block})
+        assert kept, f"pruned empty at scale_block={scale_block}"
+        assert all(c.kwargs["BLOCK_K"] <= max(32, scale_block) for c in kept)
+        # only the overshooting configs go, never a legal one
+        assert {id(c) for c in kept} == {
+            id(c) for c in configs if c.kwargs["BLOCK_K"] <= max(32, scale_block)
+        }
+
+    # 0 means one block spanning the whole contraction segment, which leaves BLOCK_K
+    # free -- capping it at the floor would hide every wide config. Only
+    # scaled_grouped_gemm passes it, its contraction being ragged with no single
+    # width to resolve it to; both pruners handle it, so both are held to it.
+    assert prune(list(configs), {"SCALE_BLOCK_SIZE": 0}) == list(configs)
