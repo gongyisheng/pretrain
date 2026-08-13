@@ -6,7 +6,7 @@ import importlib
 import pytest
 import torch
 
-from src.kernel import gemm
+from src.kernel.triton import gemm
 from src.kernel.gemm import (
     grouped_gemm,
     scaled_gemm,
