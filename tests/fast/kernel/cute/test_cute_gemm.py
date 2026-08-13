@@ -51,6 +51,10 @@ def test_compile_cache_reused():
     n_after_first = len(cute_gemm._COMPILED)
 
     aq2, bq2, sa2, sb2 = _operands(256, 128, 128, seed=1)  # different M, same K/N
-    cute_gemm.scaled_gemm_mxfp8(aq2, bq2, sa2, sb2, torch.float32)
+    got = cute_gemm.scaled_gemm_mxfp8(aq2, bq2, sa2, sb2, torch.float32)
 
     assert len(cute_gemm._COMPILED) == n_after_first, "M must not trigger a recompile"
+    # a cached kernel with M baked static would satisfy the count check above while
+    # returning garbage here, so assert the reused kernel is actually correct
+    want = scaled_gemm_ref(aq2, bq2, sa2, sb2, 32)
+    assert (got - want).norm() / want.norm() < 0.02

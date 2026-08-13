@@ -41,7 +41,7 @@ THREADS = 256
 _COMPILED: dict[tuple, object] = {}
 
 
-def _make_tiled_mma() -> cute.TiledMma:
+def _make_mxfp8_tiled_mma() -> cute.TiledMma:
     """The sm120 block-scaled tiled MMA: 8 warps over a (128, 32, 32) tile.
 
     The atom layout and permutation mirror the C++ collective builder
@@ -56,7 +56,7 @@ def _make_tiled_mma() -> cute.TiledMma:
     return cute.make_tiled_mma(op, (4, 2, 1), permutation_mnk=permutation)
 
 
-def _partition_sf(sf: cute.Tensor, tiled_mma: cute.TiledMma, tidx, is_a: bool):
+def _partition_mxfp8_sf(sf: cute.Tensor, tiled_mma: cute.TiledMma, tidx, is_a: bool):
     """This thread's slice of a scale-factor tile, as the MMA wants to read it.
 
     `partition_fragment_SFA`/`SFB` build the register fragment but drop the source
@@ -80,7 +80,7 @@ def _tiled_copy(dtype, thr_shape, thr_stride, val_shape) -> cute.TiledCopy:
 
 
 @cute.kernel
-def _gemm_kernel(
+def _scaled_gemm_mxfp8_kernel(
     mA: cute.Tensor,
     mB: cute.Tensor,
     mSFA: cute.Tensor,
@@ -128,8 +128,8 @@ def _gemm_kernel(
     tCgD = thr_mma.partition_C(gD)
     tCrA = tiled_mma.make_fragment_A(tCsA)
     tCrB = tiled_mma.make_fragment_B(tCsB)
-    tCsSFA = _partition_sf(sSFA, tiled_mma, tidx, True)
-    tCsSFB = _partition_sf(sSFB, tiled_mma, tidx, False)
+    tCsSFA = _partition_mxfp8_sf(sSFA, tiled_mma, tidx, True)
+    tCsSFB = _partition_mxfp8_sf(sSFB, tiled_mma, tidx, False)
     tCrSFA = cute.make_fragment_like(tCsSFA)
     tCrSFB = cute.make_fragment_like(tCsSFB)
 
@@ -163,14 +163,14 @@ def _gemm_kernel(
 
 
 @cute.jit
-def _gemm_host(
+def _scaled_gemm_mxfp8_host(
     mA: cute.Tensor,
     mB: cute.Tensor,
     sfa: cute.Tensor,
     sfb: cute.Tensor,
     mD: cute.Tensor,
 ):
-    tiled_mma = _make_tiled_mma()
+    tiled_mma = _make_mxfp8_tiled_mma()
     M, K = mA.shape
     N = mB.shape[0]
     n_scale_blocks = K // SCALE_VEC
@@ -191,7 +191,7 @@ def _gemm_host(
         blockscaled_layout.sm120_make_smem_layout_sfb(tiled_mma, tile, SCALE_VEC, 1),
         mode=[0, 1],
     )
-    _gemm_kernel(
+    _scaled_gemm_mxfp8_kernel(
         mA, mB, mSFA, mSFB, mD, tiled_mma, sfa_smem_layout, sfb_smem_layout
     ).launch(
         grid=[cute.ceil_div(M, TILE_M), cute.ceil_div(N, TILE_N), 1],
@@ -252,7 +252,7 @@ def scaled_gemm_mxfp8(
     key = (K, N, aq.dtype, bq.dtype, out_dtype)
     compiled = _COMPILED.get(key)
     if compiled is None:
-        compiled = cute.compile(_gemm_host, *args)
+        compiled = cute.compile(_scaled_gemm_mxfp8_host, *args)
         _COMPILED[key] = compiled
     compiled(*args)
     return out
