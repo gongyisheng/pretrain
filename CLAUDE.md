@@ -105,14 +105,14 @@ front of you rather than assuming it holds.
 
 `pyproject.toml` sets `addopts = "-n 6 --dist loadfile"`, so every `pytest` invocation is already parallel. Two things bound how far that can be pushed, and they pull in opposite directions:
 
-- **`--dist loadfile` pins a whole file to one worker**, so workers past a directory's *file count* have nothing to claim and just pay a torch import and a CUDA context. Three dirs are a single file (`kernel`, `model`, `e2e`); the largest are `quant` and `layers` at six.
+- **`--dist loadfile` pins a whole file to one worker**, so workers past a directory's *file count* have nothing to claim and just pay a torch import and a CUDA context. Two dirs are a single file (`model`, `e2e`); the largest are `quant` and `layers` at six.
 - **`--dist load` splits per test** and beats `loadfile` wherever a directory has few slow tests, but each worker holds its own ~0.5 GiB CUDA context, so memory is what bounds `-n`. This used to cap the whole tree: `-n 12 --dist load` once OOM'd on a large SVD allocation in the weight-SVD tests. That no longer reproduces (dropping `esd_alpha` removed the allocation) — as of 2026-08-11 the whole tree runs at `-n 12 --dist load` in 148s peaking at 6.9 GB, against 162s at `-n 6 --dist loadfile`. Re-measure before assuming headroom on a smaller card.
 
 Measured per directory (one 16 GB RTX 5060 Ti), best in bold — re-check on other hardware:
 
 | dir | files | `-n 6 --dist loadfile` | `-n 12 --dist load` | peak GPU at `-n 12` |
 |---|---|---|---|---|
-| `kernel` | 1 | 99s | **46s** | 6.6 GB |
+| `kernel` | 2 | 99s | **46s** | 6.6 GB |
 | `quant` | 6 | 66s | **50s** | 7.1 GB |
 | `metrics` | 4 | 36s | **25s** | 3.1 GB |
 | `layers` | 6 | **30s** | 61s | — |
