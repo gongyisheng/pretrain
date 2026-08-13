@@ -38,7 +38,14 @@ def quantized_gemm(
 
     if same_family and a.is_cuda and b.is_cuda:
         return scaled_gemm(
-            aq, bq, sa, sb, out_dtype, scaling_cfg["block_size"], bias=bias
+            aq,
+            bq,
+            sa,
+            sb,
+            out_dtype,
+            scaling_cfg["block_size"],
+            bias=bias,
+            scale_dtype=scaling_cfg.get("scale_dtype"),
         )
 
     if aq is not None:

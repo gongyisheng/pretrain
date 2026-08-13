@@ -425,6 +425,118 @@ def _scaled_gemm_kernel(
     )
 
 
+_SCALED_MXFP8_CFG = [
+    (64, 64, 64, 4, 3),
+    (64, 128, 64, 4, 3),
+    (64, 128, 128, 4, 3),
+    (64, 256, 64, 4, 3),
+    (128, 128, 64, 4, 3),
+    (128, 128, 64, 8, 4),
+    (128, 256, 64, 8, 4),
+    (256, 128, 64, 8, 3),
+]
+_SCALED_MXFP8_CONFIGS = [
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk},
+        num_warps=w,
+        num_stages=s,
+    )
+    for (bm, bn, bk, w, s) in _SCALED_MXFP8_CFG
+]
+
+# tl.dot_scaled names its operand format; the e8m0 scale width is fixed at 32
+_MXFP8_FORMAT = {torch.float8_e4m3fn: "e4m3", torch.float8_e5m2: "e5m2"}
+_MXFP8_BLOCK_SIZE = 32
+
+
+@triton.autotune(configs=_SCALED_MXFP8_CONFIGS, key=["M", "N", "K"])
+@triton.jit
+def _scaled_gemm_mxfp8_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sa_ptr,
+    sb_ptr,
+    bias_ptr,
+    M,
+    N,
+    K,
+    n_scale_blocks,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_sam,
+    stride_sak,
+    stride_sbk,
+    stride_sbn,
+    stride_biasn,
+    A_FORMAT: tl.constexpr,
+    B_FORMAT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """C[m,n] = Σ_k sa[m,k/32] · sb[k/32,n] · aq[m,k] · bq[k,n] + bias[n], mxfp8 only.
+
+    The scales never reach the accumulator here: `tl.dot_scaled` lowers to
+    `mma.sync...kind::mxf8f6f4.block_scale` (SASS `QMMA.SF`), which applies the e8m0
+    factors per 32-element group inside the MMA. That is why there is no scale-block
+    loop -- and why this runs on the faster of the two fp8 tensor-core paths, ~2.4x
+    the epilogue-scaling kernel next door on the same shapes.
+
+    `sa`/`sb` are the e8m0 exponent bytes viewed as uint8. `sb` is read transposed
+    through its strides -- the instruction wants B's scales indexed (N, K/32) while
+    `quantize_operand` produces (K/32, N) -- which costs nothing on a tensor this small.
+    """
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_sk = tl.arange(0, BLOCK_K // 32)
+    m_mask = offs_m < M
+    n_mask = offs_n < N
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        k_mask = offs_k < K
+        a = tl.load(
+            a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak,
+            mask=m_mask[:, None] & k_mask[None, :],
+            other=0.0,
+        )
+        b = tl.load(
+            b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn,
+            mask=k_mask[:, None] & n_mask[None, :],
+            other=0.0,
+        )
+        # a masked-off scale rides along with a zeroed operand, so its value is moot
+        sk = k0 // 32 + offs_sk
+        sk_mask = sk < n_scale_blocks
+        sa = tl.load(
+            sa_ptr + offs_m[:, None] * stride_sam + sk[None, :] * stride_sak,
+            mask=m_mask[:, None] & sk_mask[None, :],
+            other=0,
+        )
+        sb = tl.load(
+            sb_ptr + offs_n[:, None] * stride_sbn + sk[None, :] * stride_sbk,
+            mask=n_mask[:, None] & sk_mask[None, :],
+            other=0,
+        )
+        acc = tl.dot_scaled(a, sa, A_FORMAT, b, sb, B_FORMAT, acc=acc)
+    if HAS_BIAS:
+        acc += tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)[
+            None, :
+        ]
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(
+        c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=m_mask[:, None] & n_mask[None, :]
+    )
+
+
 @triton_op("jit_kernel::scaled_gemm", mutates_args={})
 def scaled_gemm(
     aq: torch.Tensor,
@@ -434,8 +546,14 @@ def scaled_gemm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    scale_dtype: str | None = None,
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
+
+    `scale_dtype` "fp8_e8m0" with `block_size` 32 and fp8 operands is mxfp8, the one
+    combination the hardware scales inside the MMA: it routes to
+    `_scaled_gemm_mxfp8_kernel`. Everything else -- every other width, fp32 scales, int8 --
+    keeps the epilogue-scaling kernel, which is where those recipes are fastest anyway.
 
     `block_size` 0 means one scale block spanning the whole contraction.
     `SCALE_BLOCK_SIZE` below is derived from `n_scale_blocks` rather than from that
@@ -489,6 +607,44 @@ def scaled_gemm(
 
     def grid(meta):
         return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
+
+    if (
+        scale_dtype == "fp8_e8m0"
+        and block_size == _MXFP8_BLOCK_SIZE
+        and aq.dtype in _MXFP8_FORMAT
+        and bq.dtype in _MXFP8_FORMAT
+    ):
+        # e8m0 holds a bare exponent, so `_compute_scale` already produced exact powers
+        # of two and this cast is lossless; the kernel wants those bytes, not floats.
+        sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
+        sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
+        wrap_triton(_scaled_gemm_mxfp8_kernel)[grid](
+            aq,
+            bq,
+            c,
+            sa8,
+            sb8,
+            bias,
+            M,
+            N,
+            K,
+            n_scale_blocks,
+            aq.stride(0),
+            aq.stride(1),
+            bq.stride(0),
+            bq.stride(1),
+            c.stride(0),
+            c.stride(1),
+            sa8.stride(0),
+            sa8.stride(1),
+            sb8.stride(0),
+            sb8.stride(1),
+            0 if bias is None else bias.stride(0),
+            A_FORMAT=_MXFP8_FORMAT[aq.dtype],
+            B_FORMAT=_MXFP8_FORMAT[bq.dtype],
+            HAS_BIAS=bias is not None,
+        )
+        return c
 
     wrap_triton(_scaled_gemm_kernel)[grid](
         aq,
@@ -756,6 +912,180 @@ def _scaled_grouped_gemm_kernel(
         group_tile_start += group_tile_count
 
 
+_SCALED_GROUPED_MXFP8_CFG = [
+    (bm, bn, bk, w, s) for (bm, bn, bk, w, s) in _SCALED_GROUPED_CFG if bk >= 64
+]
+_SCALED_GROUPED_MXFP8_CONFIGS = [
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=w, num_stages=s
+    )
+    for (bm, bn, bk, w, s) in _SCALED_GROUPED_MXFP8_CFG
+]
+
+
+@triton.autotune(
+    configs=_SCALED_GROUPED_MXFP8_CONFIGS,
+    key=["M", "N", "K", "A_IS_2D", "B_IS_2D"],
+)
+@triton.jit
+def _scaled_grouped_gemm_mxfp8_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sa_ptr,
+    sb_ptr,
+    bias_ptr,
+    offs_ptr,
+    G,
+    M,
+    N,
+    K,
+    stride_ag,
+    stride_am,
+    stride_ak,
+    stride_bg,
+    stride_bk,
+    stride_bn,
+    stride_cg,
+    stride_cm,
+    stride_cn,
+    stride_sag,
+    stride_sam,
+    stride_sak,
+    stride_sbg,
+    stride_sbk,
+    stride_sbn,
+    stride_biasg,
+    stride_biasn,
+    NUM_SMS: tl.constexpr,
+    A_IS_2D: tl.constexpr,
+    B_IS_2D: tl.constexpr,
+    A_FORMAT: tl.constexpr,
+    B_FORMAT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Ragged scaled grouped GEMM, mxfp8 only: same layout model as the kernel below,
+    but the e8m0 scales go into the MMA (`QMMA.SF`) instead of the accumulator.
+
+    The scale-block index is `scale_block_start + k0 // 32 + i` for the i-th 32-wide
+    group of the tile. `scale_block_start` is 0 whenever the contraction is dense, and
+    otherwise carries across the group loop exactly as it does next door -- a ragged
+    contraction re-tiles its scale blocks inside each group, so group g's blocks begin
+    where g-1's ended. BLOCK_K is a multiple of 32, so a tile's 32-wide groups never
+    straddle a scale block.
+    """
+    M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
+    N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
+    K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
+
+    global_tile_idx = tl.program_id(0)
+    group_tile_start = 0
+    m_end = 0
+    n_end = 0
+    k_end = 0
+    scale_block_end = 0
+    offs_sk = tl.arange(0, BLOCK_K // 32)
+    for g in range(G):
+        if M_VARY:
+            m_start = m_end
+            m_end = tl.load(offs_ptr + g)
+            m_size = m_end - m_start
+        else:
+            m_start = 0
+            m_size = M
+        if N_VARY:
+            n_start = n_end
+            n_end = tl.load(offs_ptr + g)
+            n_size = n_end - n_start
+        else:
+            n_start = 0
+            n_size = N
+        if K_VARY:
+            k_start = k_end
+            k_end = tl.load(offs_ptr + g)
+            k_size = k_end - k_start
+            scale_block_start = scale_block_end
+            scale_block_end = scale_block_start + tl.cdiv(k_size, 32)
+        else:
+            k_start = 0
+            k_size = K
+            scale_block_start = 0
+            scale_block_end = tl.cdiv(K, 32)
+
+        num_n_tiles = tl.cdiv(n_size, BLOCK_N)
+        num_m_tiles = tl.cdiv(m_size, BLOCK_M)
+        group_tile_count = num_m_tiles * num_n_tiles
+        while global_tile_idx < group_tile_start + group_tile_count:
+            group_tile_idx = global_tile_idx - group_tile_start
+            tile_m = group_tile_idx // num_n_tiles
+            tile_n = group_tile_idx % num_n_tiles
+            offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            m_mask = offs_m < m_size
+            n_mask = offs_n < n_size
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for k0 in range(0, k_size, BLOCK_K):
+                offs_k = k0 + tl.arange(0, BLOCK_K)
+                k_mask = offs_k < k_size
+                a = tl.load(
+                    a_ptr
+                    + (0 if A_IS_2D else g * stride_ag)
+                    + (m_start + offs_m)[:, None] * stride_am
+                    + (k_start + offs_k)[None, :] * stride_ak,
+                    mask=m_mask[:, None] & k_mask[None, :],
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr
+                    + (0 if B_IS_2D else g * stride_bg)
+                    + (k_start + offs_k)[:, None] * stride_bk
+                    + (n_start + offs_n)[None, :] * stride_bn,
+                    mask=k_mask[:, None] & n_mask[None, :],
+                    other=0.0,
+                )
+                sbi = scale_block_start + k0 // 32 + offs_sk
+                sk_mask = sbi < scale_block_end
+                sa = tl.load(
+                    sa_ptr
+                    + (0 if A_IS_2D else g * stride_sag)
+                    + (m_start + offs_m)[:, None] * stride_sam
+                    + sbi[None, :] * stride_sak,
+                    mask=m_mask[:, None] & sk_mask[None, :],
+                    other=0,
+                )
+                sb = tl.load(
+                    sb_ptr
+                    + (0 if B_IS_2D else g * stride_sbg)
+                    + (n_start + offs_n)[:, None] * stride_sbn
+                    + sbi[None, :] * stride_sbk,
+                    mask=n_mask[:, None] & sk_mask[None, :],
+                    other=0,
+                )
+                acc = tl.dot_scaled(a, sa, A_FORMAT, b, sb, B_FORMAT, acc=acc)
+            if HAS_BIAS:
+                acc += tl.load(
+                    bias_ptr + g * stride_biasg + (n_start + offs_n) * stride_biasn,
+                    mask=n_mask,
+                    other=0.0,
+                )[None, :]
+            c_ptrs = (
+                c_ptr
+                + (g * stride_cg if K_VARY else 0)
+                + (m_start + offs_m)[:, None] * stride_cm
+                + (n_start + offs_n)[None, :] * stride_cn
+            )
+            tl.store(
+                c_ptrs,
+                acc.to(c_ptr.dtype.element_ty),
+                mask=m_mask[:, None] & n_mask[None, :],
+            )
+            global_tile_idx += NUM_SMS
+        group_tile_start += group_tile_count
+
+
 @triton_op("jit_kernel::scaled_grouped_gemm", mutates_args={})
 def scaled_grouped_gemm(
     aq: torch.Tensor,
@@ -766,8 +1096,13 @@ def scaled_grouped_gemm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    scale_dtype: str | None = None,
 ) -> torch.Tensor:
     """Ragged scaled grouped GEMM, layout picked from the operand ranks.
+
+    `scale_dtype` "fp8_e8m0" with `block_size` 32 and fp8 operands routes to
+    `_scaled_grouped_gemm_mxfp8_kernel`, which lets the MMA apply the scales. Every
+    other combination keeps the epilogue-scaling kernel -- see `scaled_gemm`.
 
     Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
         (M,K) x (E,K,N) -> (M,N)    ragged M
@@ -800,6 +1135,53 @@ def scaled_grouped_gemm(
 
     c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
+
+    if (
+        scale_dtype == "fp8_e8m0"
+        and block_size == _MXFP8_BLOCK_SIZE
+        and aq.dtype in _MXFP8_FORMAT
+        and bq.dtype in _MXFP8_FORMAT
+    ):
+        sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
+        sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
+        wrap_triton(_scaled_grouped_gemm_mxfp8_kernel)[(num_sms,)](
+            aq,
+            bq,
+            c,
+            sa8,
+            sb8,
+            bias,
+            offs,
+            E,
+            M,
+            N,
+            K,
+            0 if a_is_2d else aq.stride(0),
+            aq.stride(-2),
+            aq.stride(-1),
+            0 if b_is_2d else bq.stride(0),
+            bq.stride(-2),
+            bq.stride(-1),
+            c.stride(0) if c.ndim == 3 else 0,
+            c.stride(-2),
+            c.stride(-1),
+            0 if a_is_2d else sa8.stride(0),
+            sa8.stride(-2),
+            sa8.stride(-1),
+            0 if b_is_2d else sb8.stride(0),
+            sb8.stride(-2),
+            sb8.stride(-1),
+            0 if bias is None else bias.stride(0),
+            0 if bias is None else bias.stride(1),
+            NUM_SMS=num_sms,
+            A_IS_2D=a_is_2d,
+            B_IS_2D=b_is_2d,
+            A_FORMAT=_MXFP8_FORMAT[aq.dtype],
+            B_FORMAT=_MXFP8_FORMAT[bq.dtype],
+            HAS_BIAS=bias is not None,
+        )
+        return c
+
     wrap_triton(_scaled_grouped_gemm_kernel)[(num_sms,)](
         aq,
         bq,

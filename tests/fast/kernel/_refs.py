@@ -27,10 +27,6 @@ def grouped_gemm_ref(a, b, offs, bias=None):
     return _add_bias(torch._grouped_mm(a, b, offs=offs), offs, bias)
 
 
-def grouped_gemm_wgrad_ref(a, grad_c, offs):
-    return torch._grouped_mm(a.mT, grad_c, offs=offs)
-
-
 def _dequant_a(q, scale, bs):
     """Dequant A-operand (M, K) with per-K-block scale (M, nkb) along the last axis."""
     qf = q.float()
@@ -70,11 +66,6 @@ def scaled_gemm_ref(aq, bq, sa, sb, ebs):
         )
         return out.float()
     return _dequant_a(aq, sa, ebs) @ _dequant_b(bq, sb, ebs)
-
-
-def _dequant_b_grouped(bq, sb, bs):
-    """Dequant per-expert B (E, K, N) with per-K-block scale (E, nkb, N)."""
-    return torch.stack([_dequant_b(bq[g], sb[g], bs) for g in range(bq.shape[0])])
 
 
 def _dequant_ragged(xq, scale, offs, bs):

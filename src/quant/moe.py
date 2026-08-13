@@ -93,6 +93,7 @@ def quantized_grouped_gemm(
             out_dtype,
             block_size,
             bias=bias,
+            scale_dtype=scaling.get("scale_dtype"),
         )
         return y
 
