@@ -66,7 +66,7 @@ def test_scaled_gemm_mxfp8_matches_oracle(shape):
         (256, 512, 128),
         (128, 256, 256),
         (384, 128, 128),
-        (192, 160, 128),  # short K tile
+        (192, 160, 128),  # short K tile, and a partial M tile (192 = 128 + 64)
         (129, 128, 130),  # partial M and N tiles
     ],
 )
@@ -115,6 +115,9 @@ def test_compile_cache_reused():
     aq, bq, sa, sb = _operands(128, 128, 128)
     cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
     n_after_first = len(cute_gemm._COMPILED)
+    # cache key mirrors scaled_gemm_mxfp8's: (K, N, a_dtype, b_dtype, out_dtype)
+    key = (128, 128, aq.dtype, bq.dtype, torch.float32)
+    compiled_after_first = cute_gemm._COMPILED[key]
 
     aq2, bq2, sa2, sb2 = _operands(256, 128, 128, seed=1)  # different M, same K/N
     got = cute_gemm.scaled_gemm_mxfp8(aq2, bq2, sa2, sb2, torch.float32)
@@ -123,6 +126,12 @@ def test_compile_cache_reused():
     # passing while every call silently re-JITs -- the exact cost the cache prevents
     assert n_after_first >= 1, "the first call must have cached a compiled kernel"
     assert len(cute_gemm._COMPILED) == n_after_first, "M must not trigger a recompile"
+    # a mutation that stores into _COMPILED but never looks up would keep the length
+    # check above green while re-JITting on every call -- catch that by requiring the
+    # second call to have left the *same* compiled object in place, not an equal one
+    assert cute_gemm._COMPILED[key] is compiled_after_first, (
+        "the second call must reuse the cached compiled kernel, not recompile it"
+    )
     # a cached kernel with M baked static would satisfy the count check above while
     # returning garbage here, so assert the reused kernel is actually correct
     want = scaled_gemm_ref(aq2, bq2, sa2, sb2, 32)
