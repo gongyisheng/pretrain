@@ -63,10 +63,17 @@ def _partition_mxfp8_sf(sf: cute.Tensor, tiled_mma: cute.TiledMma, tidx, is_a: b
     view, and the mainloop needs both, so the partitioning is restated here.
     """
     thrfrg = blackwell_helpers.thrfrg_SFA if is_a else blackwell_helpers.thrfrg_SFB
+    # `thrfrg_*` wants a domain in A/B *element* coordinates, not scale-block ones --
+    # which is why a 128x4 tile of scales is legal here: the smem layout spans all 128
+    # k-elements per scale with a stride-0 mode, so 32 k's read back the same byte.
     thr = cute.make_tensor(sf.iterator, thrfrg(sf.layout, tiled_mma))
     vmnk = tiled_mma.thr_layout_vmnk.get_flat_coord(tidx)
+    # this thread's (V, M, K) coordinate for A, (V, N, K) for B -- vmnk is (V, M, N, K)
     coord = (vmnk[0], (vmnk[1], vmnk[3])) if is_a else (vmnk[0], (vmnk[2], vmnk[3]))
     part = cute.group_modes(cute.flatten(thr[coord, (None, None)]), 0, 2)
+    # B alone needs its N modes regrouped: the tiled MMA's tile is (128, 32, 32), so the
+    # CTA's 128-wide N spans 4 of them where its M spans exactly 1, and B's flattened
+    # fragment carries one mode more than A's -- ((32,1),(2,4),4) against ((32,1),2,4).
     return part if is_a else cute.group_modes(part, 1, 3)
 
 
