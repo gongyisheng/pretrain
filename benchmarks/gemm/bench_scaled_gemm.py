@@ -299,7 +299,7 @@ def _bench_mxfp8(a, b, ref):
     bs = MXFP8_BLOCK
 
     def triton_fn():
-        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs)
+        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs, scale_dtype="fp8_e8m0")
 
     triton_out = triton_fn()
     triton_ms = _time(triton_fn)
@@ -308,9 +308,29 @@ def _bench_mxfp8(a, b, ref):
     native_ms = native_relerr = None
     if _MX_SUPPORTED:
         try:
+            # hoisted out of the timed region so this measures the GEMM, not the
+            # quantize+swizzle, which is what the Triton arm above also excludes
+            a_fp8, a_scale = _quantize_mxfp8_native(a, E4M3, dim=-1)
+            b_fp8, b_scale = _quantize_mxfp8_native(b, E4M3, dim=0)
+            a_blk = _to_blocked_native(a_scale)
+            b_blk = _to_blocked_native(b_scale.t().contiguous())
+            a_arg = a_fp8.contiguous()
+            b_arg = b_fp8.t().contiguous().t()  # (K, N) stored column-major
+            st = F.ScalingType.BlockWise1x32
+            sw = F.SwizzleType.SWIZZLE_32_4_4
 
             def native_fn():
-                return _native_mx_gemm(a, b, torch.bfloat16)
+                return F.scaled_mm(
+                    a_arg,
+                    b_arg,
+                    a_blk,
+                    st,
+                    b_blk,
+                    st,
+                    swizzle_a=sw,
+                    swizzle_b=sw,
+                    output_dtype=torch.bfloat16,
+                )
 
             native_out = native_fn()
             native_ms = _time(native_fn)
