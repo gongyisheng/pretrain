@@ -461,8 +461,10 @@ def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
     The bound is fp32-rounding tight (measured 2e-8..4e-8) on purpose. The oracle
     comparison in `test_scaled_gemm_mx_matches_oracle` allows 2e-2, which is ~5e5x
     looser than reality: it would still pass if `QMMA.SF` were applying the scales at
-    reduced precision, or if the scale operand were subtly misaligned in a way that
-    only shifted results within the quantization noise. This is the assertion that
+    reduced precision. It would not hide a misaligned scale operand, though: an e8m0
+    scale is a power of two, so landing one on the wrong row, column or k-tile is at
+    least a factor-2 error and never sits inside the quantization noise -- that part
+    the loose oracle bound already catches on its own. This is the assertion that
     pins the instruction's arithmetic.
     """
     M, K, N = shape
