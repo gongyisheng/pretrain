@@ -111,30 +111,6 @@ def _to_blocked_native(scale_2d):
     return blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
 
 
-def _native_mx_gemm(a, b, out_dtype):
-    """`a @ b` via `F.scaled_mm` mxfp8 (BlockWise1x32, E8M0); e4m3 only, K
-    auto-padded to a multiple of 32. Requires compute capability >= (10, 0)."""
-    pad = (-a.shape[-1]) % MXFP8_BLOCK
-    if pad:
-        a = F.pad(a, (0, pad))
-        b = F.pad(b, (0, 0, 0, pad))
-    a_fp8, a_scale = _quantize_mxfp8_native(a, E4M3, dim=-1)
-    b_fp8, b_scale = _quantize_mxfp8_native(b, E4M3, dim=0)
-    st = F.ScalingType.BlockWise1x32
-    sw = F.SwizzleType.SWIZZLE_32_4_4
-    return F.scaled_mm(
-        a_fp8.contiguous(),
-        b_fp8.t().contiguous().t(),  # (K, N) stored column-major
-        _to_blocked_native(a_scale),
-        st,
-        _to_blocked_native(b_scale.t().contiguous()),
-        st,
-        swizzle_a=sw,
-        swizzle_b=sw,
-        output_dtype=out_dtype,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -310,8 +286,13 @@ def _bench_mxfp8(a, b, ref):
         try:
             # hoisted out of the timed region so this measures the GEMM, not the
             # quantize+swizzle, which is what the Triton arm above also excludes
-            a_fp8, a_scale = _quantize_mxfp8_native(a, E4M3, dim=-1)
-            b_fp8, b_scale = _quantize_mxfp8_native(b, E4M3, dim=0)
+            a_native, b_native = a, b
+            pad = (-a_native.shape[-1]) % MXFP8_BLOCK
+            if pad:  # K auto-padded to a multiple of 32, as mxfp8 quantization requires
+                a_native = F.pad(a_native, (0, pad))
+                b_native = F.pad(b_native, (0, 0, 0, pad))
+            a_fp8, a_scale = _quantize_mxfp8_native(a_native, E4M3, dim=-1)
+            b_fp8, b_scale = _quantize_mxfp8_native(b_native, E4M3, dim=0)
             a_blk = _to_blocked_native(a_scale)
             b_blk = _to_blocked_native(b_scale.t().contiguous())
             a_arg = a_fp8.contiguous()
