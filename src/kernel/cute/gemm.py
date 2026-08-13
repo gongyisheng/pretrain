@@ -17,7 +17,10 @@ establish a correct CuTe mainloop for the feed path to be built on.
 
 Scale factors are held in shared memory in the cuBLASLt-compatible 32x4x4 swizzle
 (`sm120_make_smem_layout_sfa`/`sfb`), the layout the MMA's scale-factor fragment
-partitioning reads back.
+partitioning reads back. That compatibility is about the *smem* layout only: the
+kernel consumes scales in `quantize_operand`'s native `(M, K//32)` layout straight
+from the host and performs the 32x4x4 swizzle itself while staging into shared
+memory, so no pre-swizzled global input is required.
 """
 
 from __future__ import annotations
@@ -37,6 +40,10 @@ from cutlass.cutlass_dsl import Float8E8M0FNU, Float32
 TILE_M = 128
 TILE_N = 128
 TILE_K = 128
+assert TILE_M == TILE_N == 128 and TILE_K == 128, (
+    "the SF write view, the SFB mode regroup and copy_a's layout are derived "
+    "for a 128^3 tile"
+)
 SCALE_VEC = 32
 # scale factors per row (column) per K tile
 TILE_SF = TILE_K // SCALE_VEC
@@ -50,6 +57,9 @@ _COMPILED: dict[tuple, object] = {}
 
 # the two fp8 formats the block-scaled MMA takes; either may sit in either operand
 FP8_FORMATS = frozenset({torch.float8_e4m3fn, torch.float8_e5m2})
+
+# dtypes the epilogue's store can write; anything else reaches `cute.compile` unchecked
+OUT_DTYPES = frozenset({torch.float32, torch.float16, torch.bfloat16})
 
 
 class _MmaMXF8Op(cute_warp.MmaMXF8Op):
@@ -345,6 +355,7 @@ def scaled_gemm_mxfp8(
         f"scale shapes {tuple(sa.shape)} / {tuple(sb.shape)} do not match "
         f"({M}, {K // SCALE_VEC}) / ({K // SCALE_VEC}, {N})"
     )
+    assert out_dtype in OUT_DTYPES, f"unsupported out_dtype {out_dtype}"
 
     out = torch.empty(M, N, device=aq.device, dtype=out_dtype)
     sa8 = sa.to(torch.float8_e8m0fnu).contiguous()
