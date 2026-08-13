@@ -58,13 +58,14 @@ def scaled_gemm_ref(aq, bq, sa, sb, ebs):
         if aq.dtype == torch.int8:
             acc = torch._int_mm(aq, bq)  # int32 (M, N)
             return acc.float() * sa.float() * sb.float()
-        # fp8 rowwise/tensorwise: cuBLAS scaled matmul (col-major second operand).
-        # Row-wise scaling only emits bf16/fp16, so take bf16 and widen to fp32.
+        # fp8: unit scales, so cuBLAS accumulates raw codes and the scales come out
+        # after as in the int8 branch -- CUDA 13 dropped row-wise fp8 on sm120.
+        one = torch.ones((1, 1), device=aq.device)
         b_cm = bq.t().contiguous().t()
-        out = torch._scaled_mm(
-            aq, b_cm, scale_a=sa.float(), scale_b=sb.float(), out_dtype=torch.bfloat16
+        acc = torch._scaled_mm(
+            aq, b_cm, scale_a=one, scale_b=one, out_dtype=torch.float32
         )
-        return out.float()
+        return acc * sa.float() * sb.float()
     return _dequant_a(aq, sa, ebs) @ _dequant_b(bq, sb, ebs)
 
 

@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Pretraining experiments — different architectures, datasets, hyperparameters"
 requires-python = ">=3.12"
 dependencies = [
-    "torch>=2.10",
+    "torch>=2.10,<2.11",
     "tokenizers>=0.22",
     "regex>=2024.0",
     "datasets>=4.5",
@@ -20,15 +20,13 @@ dependencies = [
     "numpy>=2.4",
     "pyarrow>=17.0",
     "triton>=3.6",
+    "nvidia-cutlass-dsl[cu13]>=4.7",
+    "cuda-python>=13.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-# 16 min -> 2 min. Six workers, not `auto`: every worker holds its own CUDA
-# context on the one GPU, and past this the whole suite OOMs on its largest
-# allocation. `--dist load` is faster per directory but OOMs for the same
-# reason; CI opts into it for the directories where it measured safe.
 addopts = "-n 6 --dist loadfile"
 
 [dependency-groups]
@@ -40,6 +38,14 @@ dev = [
     "pre-commit>=4.0",
     "matplotlib>=3.9",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
 
 [tool.uv]
 # Rebuild the editable install (and therefore the C++ `_bpe_engine` extension)
