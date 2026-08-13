@@ -79,7 +79,7 @@ class Trainer:
         self.pad_token_id = self.eot_token_id
 
         # Model
-        self.model = build_model(config).to(self.device)
+        self.eager_model = build_model(config).to(self.device)
 
         # Data
         if not os.path.isdir(config.data.data_dir):
@@ -152,12 +152,12 @@ class Trainer:
 
         # Quantization: swap eligible nn.Linear modules to QuantizedLinear
         # (before torch.compile).
-        apply_quantization(self.model, config)
+        apply_quantization(self.eager_model, config)
         self.logger = WandbLogger(config, enabled=wandb_enabled)
         self.metrics = MetricsCollector(config, self.device, logger=self.logger)
 
         # Optimizer & scheduler
-        self.optimizer = build_optimizer(self.model, config)
+        self.optimizer = build_optimizer(self.eager_model, config)
         self.scheduler = build_scheduler(self.optimizer, config)
 
         # Mixed precision
@@ -180,12 +180,14 @@ class Trainer:
         inductor_config.assert_indirect_indexing = False
 
         if config.logging.log_activation_norms:
-            apply_activation_monitoring(self.model)
+            apply_activation_monitoring(self.eager_model)
         if config.logging.log_quant_metrics:
-            apply_quantization_monitoring(self.model)
+            apply_quantization_monitoring(self.eager_model)
 
         if config.training.enable_torch_compile:
-            self.model = torch.compile(self.model)
+            self.model = torch.compile(self.eager_model)
+        else:
+            self.model = self.eager_model
 
         self.metrics.print_model_summary()
 
@@ -508,31 +510,25 @@ class Trainer:
         """
         if self.tokenizer is None:
             return
-        # <|endoftext|> (token 0) acts as BOS, prompting the model to start a new document
-        idx = torch.zeros((1, 1), dtype=torch.long, device=self.device)
-        for _ in range(max_new_tokens):
-            # truncate context to max_seq_len if generation grows long
-            idx_cond = idx[:, -self.config.max_seq_len :]
-            B, S = idx_cond.shape
-            pos_ids = torch.arange(S, device=self.device).unsqueeze(0).expand(B, S)
-            attn_mask = build_causal_attention_mask(
-                B,
-                S,
-                self.device,
-                attn_implementation=self.config.model.attn_implementation,
-            )
+        B, S = 1, max_new_tokens + 1
+        idx = torch.zeros((B, S), dtype=torch.long, device=self.device)
+        idx[0, 0] = self.eot_token_id
+        pos_ids = torch.arange(S, device=self.device).unsqueeze(0)
+        attn_mask = build_causal_attention_mask(
+            B,
+            S,
+            self.device,
+            attn_implementation=self.config.model.attn_implementation,
+        )
+        for pos in range(S - 1):
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                logits, _ = self.model(
-                    idx_cond, position_ids=pos_ids, attn_mask=attn_mask
+                logits, _ = self.eager_model(
+                    idx, position_ids=pos_ids, attn_mask=attn_mask
                 )
-            logits = logits[:, -1, :]  # take last token's logits
-            probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(
-                probs, num_samples=1
-            )  # sample from distribution
-            idx = torch.cat([idx, next_token], dim=1)
+            probs = F.softmax(logits[:, pos, :], dim=-1)
+            idx[0, pos + 1] = torch.multinomial(probs, num_samples=1)
         token_ids = idx[0].tolist()
         generated_text = self.tokenizer.decode(token_ids)
         self.logger.log_text("val-sample/generations", generated_text, step=self.step)
