@@ -80,10 +80,22 @@ Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated ui
 ### Hardware
 
 The machine is not fixed: it may be CPU-only, single-GPU, or multi-GPU, with different
-models and VRAM per machine. Run `nvidia-smi` before any GPU work — training, tests,
-benchmarks — to see what is actually present and which devices are free, then pin a free
-one with `CUDA_VISIBLE_DEVICES=<idx>`. Training itself always runs on one device (no
-DDP), so a second GPU is for isolating a concurrent run, not for scaling one.
+models and VRAM per machine. **Always run `nvidia-smi` before starting any GPU work** —
+training, tests, benchmarks — to see what is actually present and which devices are free,
+then pin a free one with `CUDA_VISIBLE_DEVICES=<idx>`. Never assume the hardware from a
+previous session or from the numbers in this file. Training itself always runs on one
+device (no DDP), so a second GPU is for isolating a concurrent run, not for scaling one.
+
+The usual environments are one of:
+
+| Setup | VRAM | Notes |
+|---|---|---|
+| 2× RTX 5060 Ti | 16 GB each | two devices — pin one, leave the other free for a concurrent run |
+| RTX 5090 | 32 GB | single device |
+| RTX 6000 Pro Blackwell | 96 GB | single device, much larger batch/parallelism headroom |
+
+All are Blackwell (sm120), but VRAM differs by 6× across them, so batch sizes, pytest
+`-n`, and memory ceilings tuned on one do not transfer to another.
 
 Any GPU-specific number below (memory ceilings, `-n` choices, timings) was measured on
 one 16 GB RTX 5060 Ti. Treat it as a starting point and re-measure on the machine in
