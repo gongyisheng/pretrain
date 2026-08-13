@@ -7,7 +7,6 @@ import torch
 from src.quant.quantize import quantize_operand
 from tests.fast.kernel._refs import scaled_gemm_ref
 
-E4M3 = torch.float8_e4m3fn
 MX = {"granularity": "blockwise", "block_size": 32, "scale_dtype": "fp8_e8m0"}
 
 pytestmark = pytest.mark.skipif(
@@ -112,4 +111,53 @@ def test_compile_cache_reused():
     # a cached kernel with M baked static would satisfy the count check above while
     # returning garbage here, so assert the reused kernel is actually correct
     want = scaled_gemm_ref(aq2, bq2, sa2, sb2, 32)
+    assert (got - want).norm() / want.norm() < 0.02
+
+
+def _operands_fmt(M, K, N, a_fmt, b_fmt, seed=0):
+    torch.manual_seed(seed)
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16) * 0.1
+    aq, sa = quantize_operand(a, -1, a_fmt, MX)
+    bq, sb = quantize_operand(b, -2, b_fmt, MX)
+    return aq, bq, sa, sb
+
+
+@pytest.mark.parametrize(
+    "a_fmt,b_fmt",
+    [("fp8_e4m3", "fp8_e4m3"), ("fp8_e4m3", "fp8_e5m2"), ("fp8_e5m2", "fp8_e4m3")],
+)
+def test_scaled_gemm_mxfp8_dtype_combinations(a_fmt, b_fmt):
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands_fmt(128, 128, 128, a_fmt, b_fmt)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
+    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+    assert (got - want).norm() / want.norm() < 0.02
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_scaled_gemm_mxfp8_preserves_out_dtype(out_dtype):
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, out_dtype)
+    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+
+    assert got.dtype == out_dtype
+    # fp16/bf16 out costs precision on top of the mxfp8 quantization, so this bar is
+    # looser than the fp32 case above
+    assert (got.float() - want.float()).norm() / want.float().norm() < 0.05
+
+
+@pytest.mark.parametrize("shape", [(64, 64, 64), (192, 160, 128), (129, 128, 130)])
+def test_scaled_gemm_mxfp8_ragged_shapes(shape):
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    M, K, N = shape
+    aq, bq, sa, sb = _operands(M, K, N)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
+    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+
+    assert got.shape == (M, N)
     assert (got - want).norm() / want.norm() < 0.02
