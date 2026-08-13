@@ -3,6 +3,7 @@
 import argparse
 import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
 
 import sys
 sys.path.insert(0, ".")
