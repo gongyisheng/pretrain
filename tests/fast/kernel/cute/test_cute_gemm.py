@@ -60,11 +60,26 @@ def test_scaled_gemm_mxfp8_matches_oracle(shape):
     assert (got - want).norm() / want.norm() < 0.02
 
 
-@pytest.mark.parametrize("shape", [(256, 512, 128), (128, 256, 256), (384, 128, 128)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (256, 512, 128),
+        (128, 256, 256),
+        (384, 128, 128),
+        (192, 160, 128),  # short K tile
+        (129, 128, 130),  # partial M and N tiles
+    ],
+)
 def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
     """Applying the e8m0 scales inside the MMA must be as exact as dequantizing first.
 
-    The bound is fp32-rounding tight (measured 1.1e-7..2.9e-7) on purpose. It sits an
+    The last two shapes are predicated: one leaves a short K tile, the other partial M
+    and N tiles. Predication is part of the scale feed -- each scale tensor is masked
+    against its own extent, since a ragged M or N makes the scale loads partial too --
+    so it belongs under the tight bound rather than only under the 2e-2 oracle checks,
+    where per-block magnitudes barely differ and a misfed scale has somewhere to hide.
+
+    The bound is fp32-rounding tight (measured 1.0e-7..2.9e-7) on purpose. It sits an
     order of magnitude above the Triton test's 2e-8 because these operands span 2^15
     of per-block magnitude, and summing terms of such different size costs fp32
     precision -- that spread is the point, since it denies a misplaced scale anywhere
@@ -74,7 +89,7 @@ def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
     `test_scaled_gemm_mxfp8_matches_oracle` is precision, not placement. Verified by
     mutation: rounding the result path through bf16 -- standing in for scales or
     accumulation applied at less than fp32 -- passes every 2e-2 assertion in this file
-    and fails all three shapes here. Placement is caught either way, because an e8m0
+    and fails every shape here. Placement is caught either way, because an e8m0
     scale is a power of two, so landing one on the wrong row, column or k-tile is at
     least a factor-2 error and never sits inside the quantization noise.
 
@@ -136,11 +151,22 @@ def test_scaled_gemm_mxfp8_dtype_combinations(a_fmt, b_fmt):
     assert (got - want).norm() / want.norm() < 0.02
 
 
-@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_scaled_gemm_mxfp8_preserves_out_dtype(out_dtype):
+@pytest.mark.parametrize(
+    "shape,out_dtype",
+    [
+        ((128, 128, 128), torch.float32),
+        ((128, 128, 128), torch.float16),
+        ((128, 128, 128), torch.bfloat16),
+        # crossing the two axes: the store converts and predicates in the same pass,
+        # and it has to mask per element, since an odd N splits the C fragment's
+        # column pair -- on an aligned shape that mask is always true
+        ((129, 160, 130), torch.bfloat16),
+    ],
+)
+def test_scaled_gemm_mxfp8_preserves_out_dtype(shape, out_dtype):
     from src.kernel.cute.gemm import scaled_gemm_mxfp8
 
-    aq, bq, sa, sb = _operands(128, 128, 128)
+    aq, bq, sa, sb = _operands(*shape)
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, out_dtype)
     want = scaled_gemm_ref(aq, bq, sa, sb, 32)
 
@@ -150,7 +176,17 @@ def test_scaled_gemm_mxfp8_preserves_out_dtype(out_dtype):
     assert (got.float() - want.float()).norm() / want.float().norm() < 0.05
 
 
-@pytest.mark.parametrize("shape", [(64, 64, 64), (192, 160, 128), (129, 128, 130)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (64, 64, 64),
+        (192, 160, 128),
+        (129, 128, 130),
+        # N=33 is the only shape here with M aligned, and the only one narrow enough to
+        # drive B's copy down to one byte per thread -- a different thread layout
+        (256, 128, 33),
+    ],
+)
 def test_scaled_gemm_mxfp8_ragged_shapes(shape):
     from src.kernel.cute.gemm import scaled_gemm_mxfp8
 
