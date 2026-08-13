@@ -1,1 +1,1 @@
-"""Custom compute kernels (Triton) used by the model/training layers."""
+"""Custom compute kernels (Triton and CuTe DSL) used by the model/training layers."""
