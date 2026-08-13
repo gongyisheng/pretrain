@@ -1722,7 +1722,7 @@ requires-dist = [
     { name = "cuda-python", specifier = ">=13.0" },
     { name = "datasets", specifier = ">=4.5" },
     { name = "numpy", specifier = ">=2.4" },
-    { name = "nvidia-cutlass-dsl", extras = ["cu13"], specifier = ">=4.7" },
+    { name = "nvidia-cutlass-dsl", extras = ["cu13"], specifier = ">=4.7,<4.8" },
     { name = "pyarrow", specifier = ">=17.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "regex", specifier = ">=2024.0" },

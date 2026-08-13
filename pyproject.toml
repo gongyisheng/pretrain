@@ -20,7 +20,7 @@ dependencies = [
     "numpy>=2.4",
     "pyarrow>=17.0",
     "triton>=3.6",
-    "nvidia-cutlass-dsl[cu13]>=4.7",
+    "nvidia-cutlass-dsl[cu13]>=4.7,<4.8",
     "cuda-python>=13.0",
 ]
 
