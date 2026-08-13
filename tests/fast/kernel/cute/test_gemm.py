@@ -40,3 +40,17 @@ def test_scaled_gemm_mxfp8_matches_oracle(shape):
     # in tests/fast/kernel/triton/test_gemm.py::test_scaled_gemm_mx_matches_oracle.
     # Elementwise tolerances give spurious failures on block-quantized outputs.
     assert (got - want).norm() / want.norm() < 0.02
+
+
+def test_compile_cache_reused():
+    """M is dynamic in the compiled kernel, so a batch-size change must not recompile."""
+    from src.kernel.cute import gemm as cute_gemm
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
+    n_after_first = len(cute_gemm._COMPILED)
+
+    aq2, bq2, sa2, sb2 = _operands(256, 128, 128, seed=1)  # different M, same K/N
+    cute_gemm.scaled_gemm_mxfp8(aq2, bq2, sa2, sb2, torch.float32)
+
+    assert len(cute_gemm._COMPILED) == n_after_first, "M must not trigger a recompile"
