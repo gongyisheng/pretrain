@@ -12,15 +12,18 @@ Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML)
 # Install
 uv sync
 
-# Tests: always pass -n explicitly, and run the two trees separately (`uv run pytest`
+# Tests: always pass -n explicitly -- default to -n 6 unless a case below says
+# otherwise; never run without -n. Run the two trees separately (`uv run pytest`
 # over both at once can exhaust GPU memory -- tests/e2e does real 124M dry runs).
 uv run pytest tests/fast -n 6                        # whole fast tree
+uv run pytest tests/fast/layers -n 6                 # -n 6 is the default for any subset
+uv run pytest tests/fast/quant/test_moe.py -n 6      # including a single file
 uv run pytest tests/fast/kernel  -n 12 --dist load   # kernel, quant and metrics are
 uv run pytest tests/fast/quant   -n 12 --dist load   # faster per-test than at -n 6
 uv run pytest tests/fast/metrics -n 12 --dist load
-uv run pytest tests/e2e -n 0                         # e2e serially, one CUDA context
-uv run pytest tests/fast/model/test_transformer.py -n 0 -k "test_forward"  # single test
-uv run pytest -n 0                                   # serial, for a debugger
+# -n 0 only for e2e (one CUDA context) and for a debugger -- not as a general default
+uv run pytest tests/e2e -n 0
+uv run pytest tests/fast/model/test_transformer.py -n 0 -k "test_forward"
 
 # Lint
 uv run ruff check src/ tests/
@@ -104,7 +107,7 @@ Measured per directory (one 16 GB RTX 5060 Ti), best in bold — re-check on oth
 | `utils` | 2 | **18s** | 17s | 1.8 GB |
 | `model` | 1 | **25s** | 26s | — |
 
-So: **`-n 12 --dist load` for `kernel`, `quant` and `metrics`, `-n 6 --dist loadfile` everywhere else.** No single `-n` is right for the whole tree, so `uv run pytest tests/fast -n 6` runs those three at roughly half speed — split them out when iterating on them. `layers` is 2× *worse* per-test (many quick tests, dispatch overhead dominates); `utils` is a tie now that it is down to two files, so it stays on the default. Going past `-n 12` lost in every case measured. `.github/workflows/pr-test.yml` encodes this as `SPLIT_BY_TEST` / `SPLIT_BY_FILE`.
+So: **`-n 12 --dist load` for `kernel`, `quant` and `metrics`, `-n 6 --dist loadfile` everywhere else — and `-n 6` whenever unsure, including single files.** No single `-n` is right for the whole tree, so `uv run pytest tests/fast -n 6` runs those three at roughly half speed — split them out when iterating on them. `layers` is 2× *worse* per-test (many quick tests, dispatch overhead dominates); `utils` is a tie now that it is down to two files, so it stays on the default. Going past `-n 12` lost in every case measured. `.github/workflows/pr-test.yml` encodes this as `SPLIT_BY_TEST` / `SPLIT_BY_FILE`.
 
 ### Config defaults and validation
 
