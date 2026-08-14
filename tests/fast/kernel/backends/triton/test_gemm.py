@@ -983,11 +983,38 @@ def test_quantize_operand_2d_compiles_fullgraph():
     assert scale.shape == (256, 16)
 
 
+def _prune_scaled_configs(configs, named_args):
+    scale_block = named_args["SCALE_BLOCK_SIZE"]
+    return gemm._early_prune_scaled_configs(
+        configs,
+        named_args,
+        scale_block,
+        False,
+        None,
+        False,
+    )
+
+
+def _prune_scaled_grouped_configs(configs, named_args):
+    scale_block = named_args["SCALE_BLOCK_SIZE"]
+    return gemm._early_prune_scaled_grouped_configs(
+        configs,
+        named_args,
+        36,
+        True,
+        False,
+        scale_block,
+        False,
+        None,
+        False,
+    )
+
+
 @pytest.mark.parametrize(
     "prune,configs",
     [
-        (gemm._early_prune_scaled_configs, gemm._SCALED_CONFIGS),
-        (gemm._early_prune_scaled_grouped_configs, gemm._SCALED_GROUPED_CONFIGS),
+        (_prune_scaled_configs, gemm._SCALED_CONFIGS),
+        (_prune_scaled_grouped_configs, gemm._SCALED_GROUPED_CONFIGS),
     ],
     ids=["scaled", "scaled_grouped"],
 )
