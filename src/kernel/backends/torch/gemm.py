@@ -37,22 +37,51 @@ def grouped_gemm_eligibility(args, kwargs) -> SupportResult:
     a, b, offs, bias = args
     if bias is not None and bias.dtype != a.dtype:
         return SupportResult(False, "bias dtype must match operand dtype")
+    if bias is not None and bias.device != a.device:
+        return SupportResult(False, "bias must be on the same CUDA device as operands")
     if bias is not None:
         return SupportResult(False, "torch grouped GEMM does not support bias")
     if a.device.type != "cuda" or b.device.type != "cuda":
         return SupportResult(False, "torch grouped GEMM requires CUDA operands")
-    if a.device != b.device or offs.device != a.device:
-        return SupportResult(False, "operands and offsets must share one device")
+    if a.device != b.device:
+        return SupportResult(False, "operands must be on the same CUDA device")
+    if offs.device != a.device:
+        return SupportResult(False, "offsets must be on the same CUDA device")
+    if torch.cuda.get_device_capability(a.device) < (8, 0):
+        return SupportResult(False, "torch grouped GEMM requires SM80 or newer")
     if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
         return SupportResult(False, "torch grouped GEMM requires bf16 operands")
-    if offs.dtype != torch.int32:
-        return SupportResult(False, "torch grouped GEMM requires int32 offsets")
+    if offs.dtype != torch.int32 or offs.ndim != 1 or not offs.is_contiguous():
+        return SupportResult(
+            False, "torch grouped GEMM requires contiguous 1D int32 offsets"
+        )
+    if offs.numel() == 0:
+        return SupportResult(False, "torch grouped GEMM requires at least one offset")
     if a.ndim not in (2, 3) or b.ndim not in (2, 3):
         return SupportResult(False, "grouped GEMM operands must be 2D or 3D")
     if a.ndim == 3 and b.ndim == 3:
         return SupportResult(False, "3D x 3D has no ragged dimension")
     if not _is_aligned(a) or not _is_aligned(b):
         return SupportResult(False, "torch grouped GEMM requires 16-byte strides")
+    if a.ndim == 2 and b.ndim == 3:
+        if a.shape[1] != b.shape[1]:
+            return SupportResult(
+                False, "grouped GEMM contraction dimensions must match"
+            )
+        if b.shape[0] != offs.numel():
+            return SupportResult(False, "group count must match the offset count")
+    elif a.ndim == 2 and b.ndim == 2:
+        if a.shape[1] != b.shape[0]:
+            return SupportResult(
+                False, "grouped GEMM contraction dimensions must match"
+            )
+    else:
+        if a.shape[2] != b.shape[0]:
+            return SupportResult(
+                False, "grouped GEMM contraction dimensions must match"
+            )
+        if a.shape[0] != offs.numel():
+            return SupportResult(False, "group count must match the offset count")
     return SupportResult(True)
 
 
@@ -109,6 +138,8 @@ def _scaled_common_eligibility(
         return SupportResult(False, "torch scaled GEMM requires contiguous scales")
     if out_dtype not in (torch.bfloat16, torch.float16):
         return SupportResult(False, "torch scaled GEMM output must be bf16 or fp16")
+    if bias is not None and bias.device != aq.device:
+        return SupportResult(False, "bias must be on the same CUDA device as operands")
     if bias is not None and bias.dtype != out_dtype:
         return SupportResult(False, "bias dtype must match output dtype")
     if bias is not None and (bias.shape != (bq.shape[1],) or not bias.is_contiguous()):
@@ -209,6 +240,8 @@ def scaled_grouped_gemm_eligibility(args, kwargs) -> SupportResult:
         )
     if out_dtype not in (torch.bfloat16, torch.float16):
         return SupportResult(False, "torch scaled grouped output must be bf16 or fp16")
+    if bias is not None and bias.device != aq.device:
+        return SupportResult(False, "bias must be on the same CUDA device as operands")
     if bias is not None:
         return SupportResult(False, "torch scaled grouped GEMM does not support bias")
     capability = torch.cuda.get_device_capability(aq.device)

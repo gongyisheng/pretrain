@@ -214,3 +214,84 @@ def test_torch_scaled_grouped_eligibility_rejects_unaligned_dimensions():
 
     assert not support.supported
     assert support.reason is not None and "multiples of 16" in support.reason
+
+
+@cuda_only
+@pytest.mark.parametrize("layout", ["ragged_m", "ragged_k", "ragged_n"])
+def test_forced_torch_grouped_gemm_rejects_rank_specific_contraction_mismatch(
+    layout,
+):
+    offs = torch.tensor([32, 64], device="cuda", dtype=torch.int32)
+    if layout == "ragged_m":
+        a = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+        b = torch.randn(2, 32, 48, device="cuda", dtype=torch.bfloat16)
+    elif layout == "ragged_k":
+        a = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+        b = torch.randn(32, 48, device="cuda", dtype=torch.bfloat16)
+    else:
+        a = torch.randn(2, 32, 64, device="cuda", dtype=torch.bfloat16)
+        b = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+
+    with pytest.raises(KernelSelectionError, match="torch.*contraction"):
+        grouped_gemm(a, b, offs, backend="torch")
+
+
+@cuda_only
+def test_forced_torch_grouped_gemm_rejects_group_offset_count_mismatch():
+    a = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(2, 64, 48, device="cuda", dtype=torch.bfloat16)
+    offs = torch.tensor([64], device="cuda", dtype=torch.int32)
+
+    with pytest.raises(KernelSelectionError, match="torch.*group count.*offset"):
+        grouped_gemm(a, b, offs, backend="torch")
+
+
+@cuda_only
+@pytest.mark.parametrize("offset_layout", ["rank", "noncontiguous"])
+def test_forced_torch_grouped_gemm_rejects_malformed_offsets(offset_layout):
+    a = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(2, 64, 48, device="cuda", dtype=torch.bfloat16)
+    base = torch.tensor([32, 0, 64, 0], device="cuda", dtype=torch.int32)
+    offs = base[::2]
+    if offset_layout == "rank":
+        offs = offs[None, :]
+
+    with pytest.raises(KernelSelectionError, match="torch.*contiguous 1D int32"):
+        grouped_gemm(a, b, offs, backend="torch")
+
+
+@cuda_only
+def test_forced_torch_grouped_gemm_rejects_cross_device_offsets():
+    a = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(2, 64, 48, device="cuda", dtype=torch.bfloat16)
+    offs = torch.tensor([32, 64], device="cpu", dtype=torch.int32)
+
+    with pytest.raises(KernelSelectionError, match="torch.*same CUDA device"):
+        grouped_gemm(a, b, offs, backend="torch")
+
+
+@cuda_only
+def test_torch_grouped_eligibility_rejects_pre_sm80(monkeypatch):
+    from src.kernel.backends.torch.gemm import grouped_gemm_eligibility
+
+    a = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(2, 64, 48, device="cuda", dtype=torch.bfloat16)
+    offs = torch.tensor([32, 64], device="cuda", dtype=torch.int32)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (7, 5))
+
+    support = grouped_gemm_eligibility((a, b, offs, None), {})
+
+    assert not support.supported
+    assert support.reason is not None and "SM80" in support.reason
+
+
+@cuda_only
+def test_forced_torch_scaled_gemm_rejects_cpu_bias():
+    aq = torch.randn(64, 64, device="cuda").to(torch.float8_e4m3fn)
+    bq = torch.randn(64, 48, device="cuda").to(torch.float8_e4m3fn)
+    sa = torch.ones(64, 1, device="cuda")
+    sb = torch.ones(1, 48, device="cuda")
+    bias = torch.ones(48, device="cpu", dtype=torch.bfloat16)
+
+    with pytest.raises(KernelSelectionError, match="bias.*same CUDA device"):
+        scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 0, bias=bias, backend="torch")
