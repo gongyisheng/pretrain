@@ -109,7 +109,7 @@ def test_compile_cache_reused():
     aq, bq, sa, sb = _operands(128, 128, 128)
     cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
     n_after_first = len(cute_gemm._COMPILED)
-    key = (128, 128, aq.dtype, bq.dtype, torch.float32)
+    key = ("cpasync", 128, 128, aq.dtype, bq.dtype, torch.float32)
     compiled_after_first = cute_gemm._COMPILED[key]
 
     aq2, bq2, sa2, sb2 = _operands(256, 128, 128, seed=1)  # different M, same K/N
@@ -124,6 +124,26 @@ def test_compile_cache_reused():
     # Correctness confirms M is truly dynamic in the reused artifact.
     want = scaled_gemm_ref(aq2, bq2.t(), sa2, sb2.t(), 32)
     assert (got - want).norm() / want.norm() < 0.02
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_rejects_unknown_schedule():
+    """Reject a schedule name before trying to dispatch an unsupported kernel."""
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    with pytest.raises(AssertionError, match="unsupported schedule"):
+        scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule="unknown")
+
+
+@requires_sm120
+def test_compile_cache_separates_schedules():
+    """Make the selected execution schedule part of the compiled-artifact identity."""
+    from src.kernel.cute import gemm as cute_gemm
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule="cpasync")
+    assert any(key[0] == "cpasync" for key in cute_gemm._COMPILED)
 
 
 def _operands_fmt(M, K, N, a_fmt, b_fmt, seed=0):
@@ -242,19 +262,25 @@ def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
     assert (got.float() - want.float()).norm() / want.float().norm() < 1e-3
 
 
-def test_bench_scaled_gemm_contains_qwen3_training_shapes():
+def test_scaled_gemm_scheme_matrix():
     import importlib
 
     bench = importlib.import_module("benchmarks.gemm.bench_scaled_gemm")
-    rows = bench._qwen3_training_shapes(16384)
-    got = {
-        (r["projection"], r["role"], r["M"], r["K"], r["N"], r["count"]) for r in rows
-    }
-    assert ("mlp_gate_up", "forward", 16384, 512, 3072, 1) in got
-    assert ("mlp_gate_up", "dgrad", 16384, 3072, 512, 1) in got
-    assert ("mlp_gate_up", "wgrad", 3072, 16384, 512, 1) in got
-    assert ("attn_kv", "forward", 16384, 512, 256, 2) in got
-    assert len(rows) == 12
+    configs = bench._scheme_configs()
+    got = {(c["dtype"], c["granularity"], c["block_size"], c["label"]) for c in configs}
+    assert len(configs) == 20
+    assert ("fp8", "blockwise1d", 32, "mxfp8") in got
+    assert ("int8", "blockwise1d", 32, "int8_blockwise1d_32") in got
+    assert ("fp8", "blockwise2d", 128, "fp8_blockwise2d_128") in got
+    assert ("int8", "tensorwise", None, "int8_tensorwise") in got
+
+
+def test_scaled_gemm_benchmark_has_no_qwen_mode():
+    import importlib
+
+    bench = importlib.import_module("benchmarks.gemm.bench_scaled_gemm")
+    assert not hasattr(bench, "_qwen3_training_shapes")
+    assert not hasattr(bench, "_aggregate_qwen3")
 
 
 def test_cute_benchmark_was_consolidated():

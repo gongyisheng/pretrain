@@ -1,6 +1,6 @@
 """Scaled GEMM latency: Triton `scaled_gemm` vs the native torch ops it replaces.
 
-Sweeps fp8 tensorwise, fp8 rowwise, int8 rowwise, and mxfp8 (block-32) scaling
+Sweeps FP8/INT8 tensorwise, rowwise, blockwise-1D, and blockwise-2D scaling
 across three linear shapes from a 51M Qwen3-style config (d_model=512,
 intermediate=1536) at two token counts M in {4096, 16384}. The mxfp8 sweep
 compares CuTe, Triton, and native calls. Native calls
@@ -47,50 +47,47 @@ SHAPES = [
     ("mlp_down", INTERMEDIATE, D_MODEL),
 ]
 
-QWEN3_51M_TOKENS = 16 * 1024
-QWEN3_51M_LINEARS = [
-    ("attn_qo", 2, 512, 512),
-    ("attn_kv", 2, 512, 256),
-    ("mlp_gate_up", 1, 512, 3072),
-    ("mlp_down", 1, 1536, 512),
-]
+BLOCK_SIZES = (16, 32, 64, 128)
 
 
-def _qwen3_training_shapes(tokens):
-    rows = []
-    for projection, count, k_in, n_out in QWEN3_51M_LINEARS:
-        rows.extend(
+def _scheme_configs():
+    configs = []
+    for dtype in ("fp8", "int8"):
+        configs.extend(
             [
-                dict(
-                    projection=projection,
-                    role="forward",
-                    M=tokens,
-                    K=k_in,
-                    N=n_out,
-                    count=count,
-                ),
-                dict(
-                    projection=projection,
-                    role="dgrad",
-                    M=tokens,
-                    K=n_out,
-                    N=k_in,
-                    count=count,
-                ),
-                dict(
-                    projection=projection,
-                    role="wgrad",
-                    M=n_out,
-                    K=tokens,
-                    N=k_in,
-                    count=count,
-                ),
+                {
+                    "dtype": dtype,
+                    "granularity": "tensorwise",
+                    "block_size": None,
+                    "label": f"{dtype}_tensorwise",
+                },
+                {
+                    "dtype": dtype,
+                    "granularity": "rowwise",
+                    "block_size": None,
+                    "label": f"{dtype}_rowwise",
+                },
             ]
         )
-    return rows
+        for granularity in ("blockwise1d", "blockwise2d"):
+            for block_size in BLOCK_SIZES:
+                label = (
+                    "mxfp8"
+                    if (dtype, granularity, block_size) == ("fp8", "blockwise1d", 32)
+                    else f"{dtype}_{granularity}_{block_size}"
+                )
+                configs.append(
+                    {
+                        "dtype": dtype,
+                        "granularity": granularity,
+                        "block_size": block_size,
+                        "label": label,
+                    }
+                )
+    return configs
 
 
-SCHEMES = ["fp8_tensorwise", "fp8_rowwise", "int8_rowwise", "mxfp8"]
+SCHEMES = [config["label"] for config in _scheme_configs()]
 
 DEFAULT_OUT = "benchmarks/results/scaled_gemm.png"
 
@@ -166,125 +163,7 @@ def _scaling(gran, bs=0, scale_dtype=None):
     }
 
 
-# ---------------------------------------------------------------------------
-# Per-scheme benchmarks: {triton_ms, native_ms, triton_relerr, native_relerr}
-# native_* are None (printed as n/a) when the native call is unsupported.
-# ---------------------------------------------------------------------------
-
-
-def _bench_fp8_tensorwise(a, b, ref):
-    scaling = _scaling("tensorwise")
-    aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
-    bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
-    bs = 0  # one scale block per contraction segment
-
-    def triton_fn():
-        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs)
-
-    triton_out = triton_fn()
-    triton_ms = _time(triton_fn)
-    triton_relerr = _relerr(triton_out, ref)
-
-    native_ms = native_relerr = None
-    try:
-        sa_n = sa.reshape(-1)[:1].contiguous()
-        sb_n = sb.reshape(-1)[:1].contiguous()
-        bq_col = _colmajor(bq)
-
-        def native_fn():
-            return torch._scaled_mm(
-                aq.contiguous(), bq_col, sa_n, sb_n, out_dtype=torch.bfloat16
-            )
-
-        native_out = native_fn()
-        native_ms = _time(native_fn)
-        native_relerr = _relerr(native_out, ref)
-    except Exception:
-        pass
-    return dict(
-        triton_ms=triton_ms,
-        native_ms=native_ms,
-        triton_relerr=triton_relerr,
-        native_relerr=native_relerr,
-    )
-
-
-def _bench_fp8_rowwise(a, b, ref):
-    scaling = _scaling("rowwise")
-    aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
-    bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
-    bs = 0  # one scale block per contraction segment
-
-    def triton_fn():
-        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs)
-
-    triton_out = triton_fn()
-    triton_ms = _time(triton_fn)
-    triton_relerr = _relerr(triton_out, ref)
-
-    native_ms = native_relerr = None
-    try:
-        bq_col = _colmajor(bq)
-
-        def native_fn():
-            return torch._scaled_mm(
-                aq.contiguous(),
-                bq_col,
-                sa.contiguous(),
-                sb.contiguous(),
-                out_dtype=torch.bfloat16,
-            )
-
-        native_out = native_fn()
-        native_ms = _time(native_fn)
-        native_relerr = _relerr(native_out, ref)
-    except Exception:
-        pass
-    return dict(
-        triton_ms=triton_ms,
-        native_ms=native_ms,
-        triton_relerr=triton_relerr,
-        native_relerr=native_relerr,
-    )
-
-
-def _bench_int8_rowwise(a, b, ref, M, K, N):
-    if M <= 16 or K % 8 or N % 8:
-        return None  # torch._int_mm's shape constraints aren't met — skip entirely
-
-    scaling = _scaling("rowwise")
-    aq, sa = quantize_operand(a, -1, "int8", scaling)
-    bq, sb = quantize_operand(b, -2, "int8", scaling)
-    bs = 0  # one scale block per contraction segment
-
-    def triton_fn():
-        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs)
-
-    triton_out = triton_fn()
-    triton_ms = _time(triton_fn)
-    triton_relerr = _relerr(triton_out, ref)
-
-    native_ms = native_relerr = None
-    try:
-        aqc, bqc = aq.contiguous(), bq.contiguous()
-
-        def native_fn():
-            return (torch._int_mm(aqc, bqc).float() * sa * sb).to(torch.bfloat16)
-
-        native_out = native_fn()
-        native_ms = _time(native_fn)
-        native_relerr = _relerr(native_out, ref)
-    except Exception:
-        pass
-    return dict(
-        triton_ms=triton_ms,
-        native_ms=native_ms,
-        triton_relerr=triton_relerr,
-        native_relerr=native_relerr,
-    )
-
-
-def _bench_mxfp8(a, b, ref):
+def _bench_mxfp8(a, b, ref, cute_schedule="cpasync"):
     scaling = _scaling("blockwise", MXFP8_BLOCK, "fp8_e8m0")
     aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
     bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
@@ -311,7 +190,12 @@ def _bench_mxfp8(a, b, ref):
 
         def cute_fn():
             return scaled_gemm_mxfp8(
-                aq.contiguous(), bq_cute, sa_e8, sb_e8, torch.bfloat16
+                aq.contiguous(),
+                bq_cute,
+                sa_e8,
+                sb_e8,
+                torch.bfloat16,
+                schedule=cute_schedule,
             )
 
         cute_out = cute_fn()
@@ -352,82 +236,107 @@ def _bench_mxfp8(a, b, ref):
     )
 
 
-def _aggregate_qwen3(rows):
-    total_flops = sum(2 * r["M"] * r["K"] * r["N"] * r["count"] for r in rows)
-    out = {"flops": total_flops}
-    for impl in ("cute", "triton", "native"):
-        missing = [r for r in rows if r.get(f"{impl}_ms") is None]
-        if missing:
-            raise RuntimeError(f"{impl} is unavailable for {len(missing)} Qwen3 rows")
-        out[f"{impl}_ms"] = sum(r[f"{impl}_ms"] * r["count"] for r in rows)
-        out[f"{impl}_tflops"] = total_flops / out[f"{impl}_ms"] / 1e9
-    out["cute_native_ratio"] = out["cute_tflops"] / out["native_tflops"]
-    return out
-
-
-def _bench_blockwise_2d(a, b, ref, tile):
-    """Square tile vs the 1D block of the same contract extent, fp32 scales.
-
-    Both arms take the epilogue kernel, so the difference is purely what the outer-axis
-    pooling costs -- and the tile sweep shows what the K extent costs.
-    """
-    scaling_2d = {
-        "granularity": "blockwise",
-        "block_shape": (tile, tile),
-        "scale_dtype": "fp32",
+def _bench_scheme(a, b, ref, config, cute_schedule):
+    """Benchmark one quantization contract with preparation outside timed closures."""
+    result = {
+        "dtype": config["dtype"],
+        "granularity": config["granularity"],
+        "block_size": config["block_size"],
+        "scheme": config["label"],
+        "cute_ms": None,
+        "triton_ms": None,
+        "native_ms": None,
+        "cute_relerr": None,
+        "triton_relerr": None,
+        "native_relerr": None,
     }
-    scaling_1d = {
-        "granularity": "blockwise",
-        "block_shape": (1, tile),
-        "scale_dtype": "fp32",
-    }
+    if config["label"] == "mxfp8":
+        result.update(_bench_mxfp8(a, b, ref, cute_schedule))
+        if result["cute_ms"] is not None and result["native_ms"] is not None:
+            result["cute_native_ratio"] = result["native_ms"] / result["cute_ms"]
+        return result
 
-    def arm(scaling):
-        aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
-        bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
+    block_size = config["block_size"] or 0
+    if config["granularity"] == "tensorwise":
+        scaling = _scaling("tensorwise")
+    elif config["granularity"] == "rowwise":
+        scaling = _scaling("rowwise")
+    else:
+        shape = (
+            (1, block_size)
+            if config["granularity"] == "blockwise1d"
+            else (block_size, block_size)
+        )
+        scaling = {
+            "granularity": "blockwise",
+            "block_shape": shape,
+            "scale_dtype": "fp32",
+        }
+    fmt = _FMT[E4M3] if config["dtype"] == "fp8" else "int8"
+    aq, sa = quantize_operand(a, -1, fmt, scaling)
+    bq, sb = quantize_operand(b, -2, fmt, scaling)
 
-        def fn():
-            return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, tile)
+    def triton_fn():
+        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, block_size)
 
-        return _time(fn), _relerr(fn(), ref)
+    triton_out = triton_fn()
+    result["triton_ms"] = _time(triton_fn)
+    result["triton_relerr"] = _relerr(triton_out, ref)
+    try:
+        if config["dtype"] == "fp8" and config["granularity"] in {
+            "tensorwise",
+            "rowwise",
+        }:
+            bq_col = _colmajor(bq)
+            sa_n = (
+                sa.reshape(-1)[:1].contiguous()
+                if config["granularity"] == "tensorwise"
+                else sa.contiguous()
+            )
+            sb_n = (
+                sb.reshape(-1)[:1].contiguous()
+                if config["granularity"] == "tensorwise"
+                else sb.contiguous()
+            )
 
-    ms_2d, relerr_2d = arm(scaling_2d)
-    ms_1d, relerr_1d = arm(scaling_1d)
-    return dict(
-        tile=tile,
-        ms_2d=ms_2d,
-        ms_1d=ms_1d,
-        relerr_2d=relerr_2d,
-        relerr_1d=relerr_1d,
-    )
+            def native_fn():
+                return torch._scaled_mm(
+                    aq.contiguous(), bq_col, sa_n, sb_n, out_dtype=torch.bfloat16
+                )
+
+        elif config["dtype"] == "int8" and config["granularity"] in {
+            "tensorwise",
+            "rowwise",
+        }:
+            aqc, bqc = aq.contiguous(), bq.contiguous()
+
+            def native_fn():
+                return (torch._int_mm(aqc, bqc).float() * sa * sb).to(torch.bfloat16)
+
+        else:
+            return result
+        native_out = native_fn()
+        result["native_ms"] = _time(native_fn)
+        result["native_relerr"] = _relerr(native_out, ref)
+    except Exception:
+        pass
+    return result
 
 
-def _bench_blockwise_2d_sweep(name, M, K, N):
-    """Run the 2D-vs-1D tile sweep for one shape, returning per-tile result rows."""
+def _bench_shape(name, M, K, N, cute_schedule):
+    """Return all 20 matrix rows for one (name, M, K, N) shape."""
     a, b = _make(M, K, N)
     ref = a.float() @ b.float()
     return [
-        {"shape": name, "M": M, "K": K, "N": N, **_bench_blockwise_2d(a, b, ref, tile)}
-        for tile in (16, 32, 64, 128)
+        {
+            "shape": name,
+            "M": M,
+            "K": K,
+            "N": N,
+            **_bench_scheme(a, b, ref, config, cute_schedule),
+        }
+        for config in _scheme_configs()
     ]
-
-
-def _bench_shape(name, M, K, N):
-    """Return a list of per-scheme result rows for one (name, M, K, N) shape."""
-    a, b = _make(M, K, N)
-    ref = a.float() @ b.float()
-    rows = []
-    for scheme, fn in [
-        ("fp8_tensorwise", lambda: _bench_fp8_tensorwise(a, b, ref)),
-        ("fp8_rowwise", lambda: _bench_fp8_rowwise(a, b, ref)),
-        ("int8_rowwise", lambda: _bench_int8_rowwise(a, b, ref, M, K, N)),
-        ("mxfp8", lambda: _bench_mxfp8(a, b, ref)),
-    ]:
-        res = fn()
-        if res is None:
-            continue  # shape skipped for this scheme (e.g. int8 constraints)
-        rows.append({"shape": name, "M": M, "K": K, "N": N, "scheme": scheme, **res})
-    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -509,71 +418,19 @@ def _fmt(v, prec=3):
     return f"{v:.{prec}f}" if v is not None else "n/a"
 
 
-def _bench_qwen3_training():
-    rows = []
-    for shape in _qwen3_training_shapes(QWEN3_51M_TOKENS):
-        a, b = _make(shape["M"], shape["K"], shape["N"])
-        ref = a.float() @ b.float()
-        rows.append({**shape, **_bench_mxfp8(a, b, ref)})
-    return rows
-
-
-def _print_qwen3_row(row):
-    print(
-        f"{row['projection']:12s} {row['role']:7s} {row['count']:>5d} "
-        f"{row['M']:>7d} {row['K']:>7d} {row['N']:>7d} "
-        f"{_fmt(row['cute_ms']):>10s} {_fmt(row['triton_ms']):>10s} "
-        f"{_fmt(row['native_ms']):>10s}"
-    )
-
-
-def _enforce_qwen3_threshold(rows, aggregate, min_cute_native_ratio):
-    failed = False
-    if aggregate["cute_native_ratio"] < min_cute_native_ratio:
-        print(
-            "weighted cute/native ratio "
-            f"{aggregate['cute_native_ratio']:.3f} is below {min_cute_native_ratio:.3f}"
-        )
-        for row in rows:
-            _print_qwen3_row(row)
-        failed = True
-    for row in rows:
-        if row["projection"].startswith("mlp"):
-            row_ratio = row["native_ms"] / row["cute_ms"]
-            if row_ratio < 0.75:
-                print(
-                    f"dominant MLP row below 0.75: {row['projection']} {row['role']} "
-                    f"{row_ratio:.3f}"
-                )
-                _print_qwen3_row(row)
-                failed = True
-    if failed:
-        raise SystemExit(1)
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--out", default=DEFAULT_OUT, help="path to write the latency chart"
     )
     ap.add_argument("--no-plot", action="store_true", help="skip writing the chart")
+    ap.add_argument("--json-out", help="write matrix rows as JSON")
     ap.add_argument(
-        "--qwen3-training",
-        action="store_true",
-        help="benchmark Qwen3-51M forward, dgrad, and wgrad MXFP8 linears",
-    )
-    ap.add_argument("--json-out", help="write Qwen3 rows and aggregate as JSON")
-    ap.add_argument(
-        "--min-cute-native-ratio",
-        type=float,
-        help="fail when weighted CuTe/native throughput is below this ratio",
+        "--cute-schedule",
+        default="cpasync",
+        help="CuTe MXFP8 execution schedule",
     )
     args = ap.parse_args()
-
-    if (
-        args.json_out or args.min_cute_native_ratio is not None
-    ) and not args.qwen3_training:
-        ap.error("--json-out and --min-cute-native-ratio require --qwen3-training")
 
     assert torch.cuda.is_available(), "CUDA required"
     device = torch.cuda.get_device_name(0)
@@ -581,31 +438,6 @@ def main():
     print(
         f"d_model={D_MODEL} intermediate={INTERMEDIATE} mx_supported={_MX_SUPPORTED}\n"
     )
-
-    if args.qwen3_training:
-        hdr = (
-            f"{'projection':12s} {'role':7s} {'count':>5s} {'M':>7s} {'K':>7s} {'N':>7s} "
-            f"{'cute_ms':>10s} {'triton_ms':>10s} {'native_ms':>10s}"
-        )
-        print(hdr)
-        rows = _bench_qwen3_training()
-        for row in rows:
-            _print_qwen3_row(row)
-        aggregate = _aggregate_qwen3(rows)
-        print(
-            "\nweighted aggregate "
-            f"cute={aggregate['cute_tflops']:.1f} TFLOP/s "
-            f"triton={aggregate['triton_tflops']:.1f} TFLOP/s "
-            f"native={aggregate['native_tflops']:.1f} TFLOP/s "
-            f"cute/native={aggregate['cute_native_ratio']:.3f}"
-        )
-        if args.json_out:
-            with open(args.json_out, "w") as output_file:
-                json.dump({"rows": rows, "aggregate": aggregate}, output_file, indent=2)
-            print(f"wrote {args.json_out}")
-        if args.min_cute_native_ratio is not None:
-            _enforce_qwen3_threshold(rows, aggregate, args.min_cute_native_ratio)
-        return
 
     hdr = (
         f"{'shape':12s} {'M':>7s} {'scheme':16s} {'cute_ms':>10s} {'triton_ms':>10s} "
@@ -616,7 +448,7 @@ def main():
     results = []
     for name, K, N in SHAPES:
         for M in M_LIST:
-            rows = _bench_shape(name, M, K, N)
+            rows = _bench_shape(name, M, K, N, args.cute_schedule)
             for r in rows:
                 print(
                     f"{r['shape']:12s} {r['M']:>7d} {r['scheme']:16s} "
@@ -626,24 +458,14 @@ def main():
                 )
                 results.append(r)
 
+    if args.json_out:
+        with open(args.json_out, "w") as output_file:
+            json.dump({"rows": results}, output_file, indent=2)
+        print(f"wrote {args.json_out}")
+
     if not args.no_plot:
         plot(results, args.out, device=device)
         print(f"\nwrote {args.out}")
-
-    print("\n2D blockwise (square tile) vs 1D at the same contract extent, fp32 scales")
-    tile_hdr = (
-        f"{'shape':12s} {'M':>7s} {'tile':>6s} {'ms_2d':>10s} {'ms_1d':>10s} "
-        f"{'relerr_2d':>12s} {'relerr_1d':>12s}"
-    )
-    print(tile_hdr)
-    for name, K, N in SHAPES:
-        for M in M_LIST:
-            for r in _bench_blockwise_2d_sweep(name, M, K, N):
-                print(
-                    f"{r['shape']:12s} {r['M']:>7d} {r['tile']:>6d} "
-                    f"{_fmt(r['ms_2d']):>10s} {_fmt(r['ms_1d']):>10s} "
-                    f"{_fmt(r['relerr_2d'], 4):>12s} {_fmt(r['relerr_1d'], 4):>12s}"
-                )
 
 
 if __name__ == "__main__":

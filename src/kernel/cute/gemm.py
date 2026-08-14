@@ -52,8 +52,10 @@ assert SMEM_BYTES <= 99 * 1024, (
     f"lower STAGES or shrink the tile (TILE_K halves it fastest)"
 )
 
-# M stays dynamic; dimensions and dtypes baked into the artifact form the cache key.
+# M stays dynamic; schedule, dimensions, and dtypes baked into the artifact form the
+# cache key.
 _COMPILED: dict[tuple, object] = {}
+_SCHEDULES = frozenset({"cpasync"})
 
 FP8_FORMATS = frozenset({torch.float8_e4m3fn, torch.float8_e5m2})
 OUT_DTYPES = frozenset({torch.float32, torch.float16, torch.bfloat16})
@@ -356,6 +358,7 @@ def scaled_gemm_mxfp8(
     sa: torch.Tensor,
     sb: torch.Tensor,
     out_dtype: torch.dtype,
+    schedule: str = "cpasync",
 ) -> torch.Tensor:
     """Compute `(M,K) x (N,K)^T` with E4M3/E5M2 data and E8M0 block scales.
 
@@ -376,6 +379,7 @@ def scaled_gemm_mxfp8(
         f"({M}, {K // SCALE_VEC}) / ({N}, {K // SCALE_VEC})"
     )
     assert out_dtype in OUT_DTYPES, f"unsupported out_dtype {out_dtype}"
+    assert schedule in _SCHEDULES, f"unsupported schedule {schedule}"
 
     out = torch.empty(M, N, device=aq.device, dtype=out_dtype)
     sa8 = sa.to(torch.float8_e8m0fnu).contiguous()
@@ -404,7 +408,7 @@ def scaled_gemm_mxfp8(
             mode=0, stride_order=out.dim_order(), divisibility=1
         ),
     )
-    key = (K, N, aq.dtype, bq.dtype, out_dtype)
+    key = (schedule, K, N, aq.dtype, bq.dtype, out_dtype)
     compiled = _COMPILED.get(key)
     if compiled is None:
         compiled = cute.compile(_scaled_gemm_mxfp8_host, *args)
