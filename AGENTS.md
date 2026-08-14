@@ -47,6 +47,8 @@ Reusable building blocks live in `src/layers/`; `TransformerLM` is in `src/model
 
 Run relevant tests before and after layer/model changes. For performance-sensitive work, benchmark with `benchmarks/bench_train.py` before and after.
 
+Files under `docs/superpowers/` are local working artifacts and must never be committed. Keep the directory ignored; if any file there is already tracked, remove it from Git tracking while preserving the local file.
+
 ### GPU work
 
 Always run `nvidia-smi` before GPU tests, training, or benchmarks, then pin a free device with `CUDA_VISIBLE_DEVICES=<idx>`. Do not assume GPU count or VRAM. Training is single-device; another GPU only isolates concurrent runs.
