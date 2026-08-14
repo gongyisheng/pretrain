@@ -425,3 +425,24 @@ def test_compiled_quant_linear_blockwise_fwd_bwd():
     assert out.shape == (64, 128) and torch.isfinite(out).all()
     assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
     assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+@fp8_only
+def test_quantized_linear_forward_backward_with_square_tiles():
+    """End to end: the module runs and produces finite grads at a 2D block shape."""
+    cfg = QuantizationConfig(
+        enabled=True,
+        dtype={"recipe": "fp8"},
+        scaling={
+            "granularity": "blockwise",
+            "block_shape": (32, 32),
+            "scale_dtype": "fp32",
+        },
+    )
+    layer = QuantizedLinear.from_module(nn.Linear(128, 64), cfg)
+    x = torch.randn(16, 128, requires_grad=True)
+    y = layer(x)
+    y.sum().backward()
+    assert y.shape == (16, 64)
+    assert torch.isfinite(x.grad).all()
+    assert torch.isfinite(layer.weight.grad).all()

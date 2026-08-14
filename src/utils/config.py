@@ -368,14 +368,20 @@ class QuantizationConfig:
                     f"ints (outer, contract), got {block_shape!r}"
                 )
             outer, contract = block_shape
-            if outer != 1:
+            if outer != 1 and outer != contract:
                 raise ValueError(
-                    f"quant block_shape outer extent must be 1, got {outer}"
+                    "quant block_shape must be 1D (1, N) or a square tile (N, N), "
+                    f"got {block_shape!r}"
                 )
             if contract <= 0 or contract % 16 != 0:
                 raise ValueError(
                     "quant block_shape contract extent must be a positive multiple "
                     f"of 16, got {contract}"
+                )
+            if scale_dtype == "fp8_e8m0" and contract % 32 != 0:
+                raise ValueError(
+                    "quant scale_dtype 'fp8_e8m0' needs a contract extent that is a "
+                    f"multiple of 32, the mx scale vector, got {contract}"
                 )
             self.scaling["block_shape"] = (outer, contract)
         else:

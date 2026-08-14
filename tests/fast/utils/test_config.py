@@ -931,9 +931,9 @@ def test_quant_mxfp8_scaling_recipe_explicit_keys_win():
     q = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3"},
-        scaling={"recipe": "mxfp8", "block_shape": (1, 16)},
+        scaling={"recipe": "mxfp8", "block_shape": (1, 64)},
     )
-    assert q.scaling["block_shape"] == (1, 16)  # explicit overrides recipe default
+    assert q.scaling["block_shape"] == (1, 64)  # explicit overrides recipe default
 
 
 def test_quant_unknown_scaling_recipe_raises():
@@ -1283,3 +1283,43 @@ def test_monitoring_flags_default_true():
 
     assert LoggingConfig().log_quant_metrics is True
     assert LoggingConfig().log_activation_norms is True
+
+
+@pytest.mark.parametrize("tile", [16, 32, 64])
+def test_quant_block_shape_accepts_square(tile):
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"recipe": "fp8"},
+        scaling={
+            "granularity": "blockwise",
+            "block_shape": (tile, tile),
+            "scale_dtype": "fp32",
+        },
+    )
+    assert q.scaling["block_shape"] == (tile, tile)
+
+
+def test_quant_block_shape_rejects_non_square():
+    with pytest.raises(ValueError, match="square"):
+        QuantizationConfig(
+            enabled=True,
+            dtype={"recipe": "fp8"},
+            scaling={
+                "granularity": "blockwise",
+                "block_shape": (16, 128),
+                "scale_dtype": "fp32",
+            },
+        )
+
+
+def test_quant_e8m0_requires_contract_extent_multiple_of_32():
+    with pytest.raises(ValueError, match="32"):
+        QuantizationConfig(
+            enabled=True,
+            dtype={"recipe": "mxfp8"},
+            scaling={
+                "granularity": "blockwise",
+                "block_shape": (16, 16),
+                "scale_dtype": "fp8_e8m0",
+            },
+        )
