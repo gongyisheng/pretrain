@@ -6,13 +6,12 @@ BuildMode = Literal["eager", "jit", "aot"]
 
 
 @dataclass(frozen=True, slots=True)
-class SupportResult:
-    supported: bool
+class CheckResult:
+    ok: bool
     reason: str | None = None
 
 
-AvailabilityFn = Callable[[], SupportResult]
-EligibilityFn = Callable[[tuple[Any, ...], Mapping[str, Any]], SupportResult]
+CanImplementFn = Callable[[tuple[Any, ...], Mapping[str, Any]], CheckResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,8 +20,7 @@ class KernelSpec:
     backend: str
     fn: Callable[..., Any]
     priority: int
-    availability: AvailabilityFn
-    eligibility: EligibilityFn
+    can_implement: CanImplementFn
     build: BuildMode
     autograd: bool
 

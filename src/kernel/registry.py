@@ -2,9 +2,8 @@ from collections.abc import Callable
 from typing import Any
 
 from src.kernel.spec import (
-    AvailabilityFn,
     BuildMode,
-    EligibilityFn,
+    CanImplementFn,
     KernelSpec,
 )
 
@@ -32,8 +31,7 @@ def register_kernel(
     op: str,
     backend: str,
     priority: int,
-    availability: AvailabilityFn,
-    eligibility: EligibilityFn,
+    can_implement: CanImplementFn,
     build: BuildMode,
     autograd: bool,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -44,8 +42,7 @@ def register_kernel(
                 backend=backend,
                 fn=fn,
                 priority=priority,
-                availability=availability,
-                eligibility=eligibility,
+                can_implement=can_implement,
                 build=build,
                 autograd=autograd,
             )

@@ -6,7 +6,7 @@ import triton.language as tl
 from torch._library.triton import triton_op, wrap_triton
 
 from src.kernel.registry import register_kernel
-from src.kernel.spec import SupportResult
+from src.kernel.spec import CheckResult
 
 # ---------------------------------------------------------------------------
 # Config + helpers
@@ -16,10 +16,6 @@ from src.kernel.spec import SupportResult
 @functools.lru_cache(maxsize=None)
 def _num_sms(device: torch.device | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
-
-
-def _always_available() -> SupportResult:
-    return SupportResult(True)
 
 
 # ---------------------------------------------------------------------------
@@ -244,22 +240,21 @@ def grouped_gemm_eligibility(args, kwargs):
     a, b, offs = args[:3]
     bias = args[3] if len(args) > 3 else kwargs.get("bias")
     if bias is not None and bias.dtype != a.dtype:
-        return SupportResult(False, "bias dtype must match operand dtype")
+        return CheckResult(False, "bias dtype must match operand dtype")
     if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
-        return SupportResult(False, "requires bf16 CUDA operands")
+        return CheckResult(False, "requires bf16 CUDA operands")
     if not (a.is_cuda and b.is_cuda and offs.is_cuda):
-        return SupportResult(False, "requires CUDA tensors")
+        return CheckResult(False, "requires CUDA tensors")
     if torch.cuda.get_device_capability(a.device)[0] in (9, 10):
-        return SupportResult(False, "unsupported CUDA compute capability")
-    return SupportResult(True)
+        return CheckResult(False, "unsupported CUDA compute capability")
+    return CheckResult(True)
 
 
 @register_kernel(
     op="gemm.grouped",
     backend="triton",
     priority=100,
-    availability=_always_available,
-    eligibility=grouped_gemm_eligibility,
+    can_implement=grouped_gemm_eligibility,
     build="jit",
     autograd=False,
 )
@@ -542,35 +537,34 @@ def scaled_gemm_eligibility(args, kwargs):
     bias = args[6] if len(args) > 6 else kwargs.get("bias")
     tensors = (aq, bq, sa, sb) + (() if bias is None else (bias,))
     if not all(tensor.is_cuda for tensor in tensors):
-        return SupportResult(False, "requires CUDA tensors")
+        return CheckResult(False, "requires CUDA tensors")
     quantized_dtypes = {torch.int8, torch.float8_e4m3fn, torch.float8_e5m2}
     if aq.dtype not in quantized_dtypes or bq.dtype not in quantized_dtypes:
-        return SupportResult(False, "requires int8 or fp8 operands")
+        return CheckResult(False, "requires int8 or fp8 operands")
     if aq.dtype.is_floating_point != bq.dtype.is_floating_point:
-        return SupportResult(False, "requires operands from the same dtype family")
+        return CheckResult(False, "requires operands from the same dtype family")
     if aq.ndim != 2 or bq.ndim != 2 or sa.ndim != 2 or sb.ndim != 2:
-        return SupportResult(False, "requires 2-D operands and scales")
+        return CheckResult(False, "requires 2-D operands and scales")
     if aq.shape[1] != bq.shape[0]:
-        return SupportResult(False, "contraction dimensions do not match")
+        return CheckResult(False, "contraction dimensions do not match")
     nblocks = sa.shape[1]
     expected = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
     if nblocks != expected or sa.shape[0] != aq.shape[0]:
-        return SupportResult(False, "invalid A scale layout")
+        return CheckResult(False, "invalid A scale layout")
     if sb.shape != (nblocks, bq.shape[1]):
-        return SupportResult(False, "invalid B scale layout")
+        return CheckResult(False, "invalid B scale layout")
     if nblocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
-        return SupportResult(False, "block_size must be a power of two >= 16")
+        return CheckResult(False, "block_size must be a power of two >= 16")
     if out_dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        return SupportResult(False, "unsupported output dtype")
-    return SupportResult(True)
+        return CheckResult(False, "unsupported output dtype")
+    return CheckResult(True)
 
 
 @register_kernel(
     op="gemm.scaled",
     backend="triton",
     priority=100,
-    availability=_always_available,
-    eligibility=scaled_gemm_eligibility,
+    can_implement=scaled_gemm_eligibility,
     build="jit",
     autograd=False,
 )
@@ -1155,26 +1149,26 @@ def scaled_grouped_gemm_eligibility(args, kwargs):
     bias = args[7] if len(args) > 7 else kwargs.get("bias")
     tensors = (aq, bq, sa, sb, offs) + (() if bias is None else (bias,))
     if not all(tensor.is_cuda for tensor in tensors):
-        return SupportResult(False, "requires CUDA tensors")
+        return CheckResult(False, "requires CUDA tensors")
     quantized_dtypes = {torch.int8, torch.float8_e4m3fn, torch.float8_e5m2}
     if aq.dtype not in quantized_dtypes or bq.dtype not in quantized_dtypes:
-        return SupportResult(False, "requires int8 or fp8 operands")
+        return CheckResult(False, "requires int8 or fp8 operands")
     if aq.dtype.is_floating_point != bq.dtype.is_floating_point:
-        return SupportResult(False, "requires operands from the same dtype family")
+        return CheckResult(False, "requires operands from the same dtype family")
     if aq.ndim not in (2, 3) or bq.ndim not in (2, 3):
-        return SupportResult(False, "requires 2-D or 3-D operands")
+        return CheckResult(False, "requires 2-D or 3-D operands")
     if aq.ndim == 3 and bq.ndim == 3:
-        return SupportResult(False, "3D x 3D has no ragged dimension")
+        return CheckResult(False, "3D x 3D has no ragged dimension")
     if offs.ndim != 1 or offs.dtype != torch.int32:
-        return SupportResult(False, "offs must be 1-D int32")
+        return CheckResult(False, "offs must be 1-D int32")
     if aq.shape[-1] != bq.shape[-2]:
-        return SupportResult(False, "contraction dimensions do not match")
+        return CheckResult(False, "contraction dimensions do not match")
     if block_size < 0:
-        return SupportResult(False, "block_size must be non-negative")
+        return CheckResult(False, "block_size must be non-negative")
     if aq.ndim == 3 and aq.shape[0] != offs.shape[0]:
-        return SupportResult(False, "A group count does not match offs")
+        return CheckResult(False, "A group count does not match offs")
     if bq.ndim == 3 and bq.shape[0] != offs.shape[0]:
-        return SupportResult(False, "B group count does not match offs")
+        return CheckResult(False, "B group count does not match offs")
 
     if aq.ndim == 2 and bq.ndim == 3:
         nblocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
@@ -1198,22 +1192,21 @@ def scaled_grouped_gemm_eligibility(args, kwargs):
             bq.shape[1],
         )
     if not valid_scales:
-        return SupportResult(False, "invalid scale layout")
+        return CheckResult(False, "invalid scale layout")
     if bias is not None and aq.ndim == 3:
-        return SupportResult(False, "bias is not supported for the ragged-N layout")
+        return CheckResult(False, "bias is not supported for the ragged-N layout")
     if bias is not None and bias.shape != (offs.shape[0], bq.shape[-1]):
-        return SupportResult(False, "invalid bias layout")
+        return CheckResult(False, "invalid bias layout")
     if out_dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        return SupportResult(False, "unsupported output dtype")
-    return SupportResult(True)
+        return CheckResult(False, "unsupported output dtype")
+    return CheckResult(True)
 
 
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="triton",
     priority=100,
-    availability=_always_available,
-    eligibility=scaled_grouped_gemm_eligibility,
+    can_implement=scaled_grouped_gemm_eligibility,
     build="jit",
     autograd=False,
 )

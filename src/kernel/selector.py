@@ -4,19 +4,16 @@ from typing import Any
 import torch
 
 from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry
-from src.kernel.spec import KernelSpec, SupportResult
+from src.kernel.spec import CheckResult, KernelSpec
 
 
 class KernelSelectionError(RuntimeError):
     pass
 
 
-def _support(
+def _check(
     spec: KernelSpec, args: tuple[Any, ...], kwargs: Mapping[str, Any]
-) -> SupportResult:
-    availability = spec.availability()
-    if not availability.supported:
-        return availability
+) -> CheckResult:
     tensor_requires_grad = any(
         isinstance(value, torch.Tensor) and value.requires_grad for value in args
     ) or any(
@@ -24,22 +21,22 @@ def _support(
         for value in kwargs.values()
     )
     if not spec.autograd and torch.is_grad_enabled() and tensor_requires_grad:
-        return SupportResult(
+        return CheckResult(
             False,
             "backend does not support ordinary autograd for a grad-enabled call "
             "with tensor inputs requiring grad",
         )
-    return spec.eligibility(args, kwargs)
+    return spec.can_implement(args, kwargs)
 
 
-def _require_supported(
+def _require_implementation(
     spec: KernelSpec, args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> None:
-    support = _support(spec, args, kwargs)
-    if not support.supported:
+    result = _check(spec, args, kwargs)
+    if not result.ok:
         raise KernelSelectionError(
-            f"operation {spec.op!r} backend {spec.backend!r} is unavailable or "
-            f"ineligible: {support.reason}"
+            f"operation {spec.op!r} backend {spec.backend!r} cannot implement "
+            f"this call: {result.reason}"
         )
 
 
@@ -62,15 +59,15 @@ def select_kernel(
                 f"operation {op!r} has no backend {backend!r}; registered: {registered}"
             )
         spec = matches[0]
-        _require_supported(spec, args, kwargs)
+        _require_implementation(spec, args, kwargs)
         return spec
 
     rejected: list[str] = []
     for spec in sorted(specs, key=lambda item: item.priority, reverse=True):
-        support = _support(spec, args, kwargs)
-        if support.supported:
+        result = _check(spec, args, kwargs)
+        if result.ok:
             return spec
-        rejected.append(f"{spec.backend}: {support.reason}")
+        rejected.append(f"{spec.backend}: {result.reason}")
     raise KernelSelectionError(
         f"no eligible kernel for operation {op!r}; " + "; ".join(rejected)
     )

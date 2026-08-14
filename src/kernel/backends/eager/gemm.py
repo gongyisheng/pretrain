@@ -1,25 +1,21 @@
 import torch
 
 from src.kernel.registry import register_kernel
-from src.kernel.spec import SupportResult
+from src.kernel.spec import CheckResult
 
 
-def _always_available() -> SupportResult:
-    return SupportResult(True)
-
-
-def _always_eligible(args, kwargs) -> SupportResult:
+def _always_eligible(args, kwargs) -> CheckResult:
     del args, kwargs
-    return SupportResult(True)
+    return CheckResult(True)
 
 
-def grouped_gemm_eligibility(args, kwargs) -> SupportResult:
+def grouped_gemm_eligibility(args, kwargs) -> CheckResult:
     del kwargs
     a = args[0]
     bias = args[3]
     if bias is not None and bias.dtype != a.dtype:
-        return SupportResult(False, "bias dtype must match operand dtype")
-    return SupportResult(True)
+        return CheckResult(False, "bias dtype must match operand dtype")
+    return CheckResult(True)
 
 
 def _bounds(offs):
@@ -31,8 +27,7 @@ def _bounds(offs):
     op="gemm.grouped",
     backend="eager",
     priority=-1000,
-    availability=_always_available,
-    eligibility=grouped_gemm_eligibility,
+    can_implement=grouped_gemm_eligibility,
     build="eager",
     autograd=True,
 )
@@ -79,8 +74,7 @@ def _dequant_b(q, scale, block_size):
     op="gemm.scaled",
     backend="eager",
     priority=-1000,
-    availability=_always_available,
-    eligibility=_always_eligible,
+    can_implement=_always_eligible,
     build="eager",
     autograd=True,
 )
@@ -105,8 +99,7 @@ def scaled_gemm(
     op="gemm.scaled_grouped",
     backend="eager",
     priority=-1000,
-    availability=_always_available,
-    eligibility=_always_eligible,
+    can_implement=_always_eligible,
     build="eager",
     autograd=True,
 )
