@@ -446,3 +446,20 @@ def test_quantized_linear_forward_backward_with_square_tiles():
     assert y.shape == (16, 64)
     assert torch.isfinite(x.grad).all()
     assert torch.isfinite(layer.weight.grad).all()
+
+
+@fp8_only
+@pytest.mark.parametrize("scale_dtype", ["fp32", "fp8_e8m0"])
+def test_quantized_gemm_2d_matches_fp32_dequant_reference(scale_dtype):
+    """The real kernel path against an fp32 oracle, both scale dtypes."""
+    tile = 32
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (tile, tile),
+        "scale_dtype": scale_dtype,
+    }
+    a = torch.randn(256, 512, device="cuda")
+    b = torch.randn(512, 128, device="cuda")
+    out = quantized_gemm(a, b, _E4M3, _E4M3, torch.float32, scaling)
+    ref = _roundtrip(a, -1, _E4M3, scaling) @ _roundtrip(b, -2, _E4M3, scaling)
+    torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)

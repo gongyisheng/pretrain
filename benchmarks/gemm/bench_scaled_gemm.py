@@ -330,6 +330,53 @@ def _bench_mxfp8(a, b, ref):
     )
 
 
+def _bench_blockwise_2d(a, b, ref, tile):
+    """Square tile vs the 1D block of the same contract extent, fp32 scales.
+
+    Both arms take the epilogue kernel, so the difference is purely what the outer-axis
+    pooling costs -- and the tile sweep shows what the K extent costs.
+    """
+    scaling_2d = {
+        "granularity": "blockwise",
+        "block_shape": (tile, tile),
+        "scale_dtype": "fp32",
+    }
+    scaling_1d = {
+        "granularity": "blockwise",
+        "block_shape": (1, tile),
+        "scale_dtype": "fp32",
+    }
+
+    def arm(scaling):
+        aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
+        bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
+
+        def fn():
+            return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, tile)
+
+        return _time(fn), _relerr(fn(), ref)
+
+    ms_2d, relerr_2d = arm(scaling_2d)
+    ms_1d, relerr_1d = arm(scaling_1d)
+    return dict(
+        tile=tile,
+        ms_2d=ms_2d,
+        ms_1d=ms_1d,
+        relerr_2d=relerr_2d,
+        relerr_1d=relerr_1d,
+    )
+
+
+def _bench_blockwise_2d_sweep(name, M, K, N):
+    """Run the 2D-vs-1D tile sweep for one shape, returning per-tile result rows."""
+    a, b = _make(M, K, N)
+    ref = a.float() @ b.float()
+    return [
+        {"shape": name, "M": M, "K": K, "N": N, **_bench_blockwise_2d(a, b, ref, tile)}
+        for tile in (16, 32, 64, 128)
+    ]
+
+
 def _bench_shape(name, M, K, N):
     """Return a list of per-scheme result rows for one (name, M, K, N) shape."""
     a, b = _make(M, K, N)
@@ -461,6 +508,21 @@ def main():
     if not args.no_plot:
         plot(results, args.out, device=device)
         print(f"\nwrote {args.out}")
+
+    print("\n2D blockwise (square tile) vs 1D at the same contract extent, fp32 scales")
+    tile_hdr = (
+        f"{'shape':12s} {'M':>7s} {'tile':>6s} {'ms_2d':>10s} {'ms_1d':>10s} "
+        f"{'relerr_2d':>12s} {'relerr_1d':>12s}"
+    )
+    print(tile_hdr)
+    for name, K, N in SHAPES:
+        for M in M_LIST:
+            for r in _bench_blockwise_2d_sweep(name, M, K, N):
+                print(
+                    f"{r['shape']:12s} {r['M']:>7d} {r['tile']:>6d} "
+                    f"{_fmt(r['ms_2d']):>10s} {_fmt(r['ms_1d']):>10s} "
+                    f"{_fmt(r['relerr_2d'], 4):>12s} {_fmt(r['relerr_1d'], 4):>12s}"
+                )
 
 
 if __name__ == "__main__":

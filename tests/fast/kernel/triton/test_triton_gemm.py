@@ -1029,6 +1029,36 @@ def test_compiles_fullgraph():
     assert torch.isfinite(fn()).all()
 
 
+def test_scaled_gemm_2d_scales_compile_fullgraph():
+    """repeat_interleave with a constant tile must not graph-break."""
+    a, b = rand(256, 512), rand(512, 128)
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (32, 32),
+        "scale_dtype": "fp32",
+    }
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    fn = torch.compile(
+        lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
+    )
+    assert torch.isfinite(fn()).all()
+
+
+def test_quantize_operand_2d_compiles_fullgraph():
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (32, 32),
+        "scale_dtype": "fp32",
+    }
+    x = rand(256, 512)
+    fn = torch.compile(
+        lambda: quantize_operand(x, -1, FMT[E4M3], scaling), fullgraph=True
+    )
+    codes, scale = fn()
+    assert scale.shape == (256, 16)
+
+
 @pytest.mark.parametrize(
     "prune,configs",
     [
