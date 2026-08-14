@@ -1366,8 +1366,9 @@ def _make_grouped_layout(layout, counts=(64, 0, 130, 46), M=32, K=64, N=48, seed
     G, R = len(counts), sum(counts)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
 
-    def rand(*shape):
-        return torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 0.1
+    def rand(dim0, dim1, dim2=None):
+        shape = (dim0, dim1) if dim2 is None else (dim0, dim1, dim2)
+        return torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
 
     if layout == "ragged_m":  # (R,K) x (G,K,N) -> (R,N)
         return rand(R, K), rand(G, N, K).mT, offs

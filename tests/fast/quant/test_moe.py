@@ -166,12 +166,32 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
     wgrad_calls = []
     real_gemm = moe.scaled_grouped_gemm
 
-    def spy(aq, bq, sa, sb, offs_, out_dtype, block_size, bias=None, **kwargs):
+    def spy(
+        aq,
+        bq,
+        sa,
+        sb,
+        offs_,
+        out_dtype,
+        block_size,
+        bias=None,
+        scale_dtype=None,
+        backend="auto",
+    ):
         # one op serves every layout now; 2D x 2D is ragged-K, i.e. the wgrad
         if bq.ndim == 2:
             wgrad_calls.append(block_size)
         return real_gemm(
-            aq, bq, sa, sb, offs_, out_dtype, block_size, bias=bias, **kwargs
+            aq,
+            bq,
+            sa,
+            sb,
+            offs_,
+            out_dtype,
+            block_size,
+            bias=bias,
+            scale_dtype=scale_dtype,
+            backend=backend,
         )
 
     monkeypatch.setattr(moe, "scaled_grouped_gemm", spy)
@@ -269,12 +289,34 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
     seen = {}
     real = moe.scaled_grouped_gemm
 
-    def spy(aq, gq, sa, sg, offs_, out_dtype, block_size, bias=None, **kwargs):
+    def spy(
+        aq,
+        gq,
+        sa,
+        sg,
+        offs_,
+        out_dtype,
+        block_size,
+        bias=None,
+        scale_dtype=None,
+        backend="auto",
+    ):
         if gq.ndim == 2:  # ragged-K layout, i.e. the wgrad
             seen["block_size"] = block_size
             # sa arrives transposed (K,nrb) with the contraction axis last
             seen["n_scale_rows"] = sa.shape[-1]
-        return real(aq, gq, sa, sg, offs_, out_dtype, block_size, bias=bias, **kwargs)
+        return real(
+            aq,
+            gq,
+            sa,
+            sg,
+            offs_,
+            out_dtype,
+            block_size,
+            bias=bias,
+            scale_dtype=scale_dtype,
+            backend=backend,
+        )
 
     monkeypatch.setattr(moe, "scaled_grouped_gemm", spy)
     a_q = a.clone().requires_grad_(True)

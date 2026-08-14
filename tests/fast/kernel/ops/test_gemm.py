@@ -123,8 +123,9 @@ def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
     G, R = len(counts), sum(counts)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
 
-    def rand(*shape):
-        return torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 0.1
+    def rand(dim0, dim1, dim2=None):
+        shape = (dim0, dim1) if dim2 is None else (dim0, dim1, dim2)
+        return torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
 
     if layout == "ragged_m":  # (R,K) x (G,K,N) -> (R,N)
         return rand(R, K), rand(G, N, K).mT, offs
@@ -220,8 +221,8 @@ def test_dispatch_triton_rejects_non_bf16():
 MX = _scaling("blockwise", 32, "fp8_e8m0")
 
 
-def rand(*shape):
-    return torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+def rand(rows, columns):
+    return torch.randn(rows, columns, device="cuda", dtype=torch.bfloat16)
 
 
 _VM, _VK, _VN, _VBS = 64, 256, 96, 128  # K / block_size -> 2 scale blocks
@@ -288,8 +289,9 @@ def _make_scaled_layout(
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     scaling = _scaling(gran, bs, scale_dtype)
 
-    def rand(*shape):
-        return torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 0.1
+    def rand(dim0, dim1, dim2=None):
+        shape = (dim0, dim1) if dim2 is None else (dim0, dim1, dim2)
+        return torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
 
     if layout == "ragged_m":  # (R,K) x (E,K,N) -> (R,N)
         aq, sa = quantize_operand(rand(R, K), -1, fmt, scaling)
