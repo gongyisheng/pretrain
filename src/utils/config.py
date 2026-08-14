@@ -300,7 +300,7 @@ class TokenizerTrainingConfig:
 class QuantizationConfig:
     enabled: bool = False
     dtype: dict = field(default_factory=dict)  # {weight/act/grad: fmt}
-    scaling: dict = field(default_factory=dict)  # {granularity, block_size}
+    scaling: dict = field(default_factory=dict)  # {granularity, block_shape}
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
@@ -351,22 +351,38 @@ class QuantizationConfig:
             raise ValueError(
                 "quant scale_dtype 'fp8_e8m0' requires granularity 'blockwise'"
             )
+        if "block_size" in self.scaling:
+            raise ValueError(
+                "quant scaling key 'block_size' was replaced by 'block_shape', a "
+                "(outer, contract) pair; use block_shape: [1, N] for the old behaviour"
+            )
         if granularity == "blockwise":
-            block_size = self.scaling.get("block_size")
+            block_shape = self.scaling.get("block_shape")
             if (
-                not isinstance(block_size, int)
-                or block_size <= 0
-                or block_size % 16 != 0
+                not isinstance(block_shape, (list, tuple))
+                or len(block_shape) != 2
+                or not all(isinstance(v, int) for v in block_shape)
             ):
                 raise ValueError(
-                    "quant granularity 'blockwise' requires block_size a positive "
-                    f"multiple of 16, got {block_size!r}"
+                    "quant granularity 'blockwise' requires block_shape, a pair of "
+                    f"ints (outer, contract), got {block_shape!r}"
                 )
+            outer, contract = block_shape
+            if outer != 1:
+                raise ValueError(
+                    f"quant block_shape outer extent must be 1, got {outer}"
+                )
+            if contract <= 0 or contract % 16 != 0:
+                raise ValueError(
+                    "quant block_shape contract extent must be a positive multiple "
+                    f"of 16, got {contract}"
+                )
+            self.scaling["block_shape"] = (outer, contract)
         else:
-            # block_size only means anything blockwise. Normalize it to the sentinel
+            # block_shape only means anything blockwise. Normalize it to the sentinel
             # every consumer reads as "one scale block per contraction segment", so
             # nothing downstream has to re-check the granularity to know that.
-            self.scaling["block_size"] = 0
+            self.scaling["block_shape"] = (0, 0)
 
         for operand, fmt in self.dtype.items():
             if operand not in QUANT_OPERANDS:

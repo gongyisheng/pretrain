@@ -7,7 +7,7 @@ import torch
 from src.quant.quantize import quantize_operand
 from tests.fast.kernel._refs import scaled_gemm_ref
 
-MX = {"granularity": "blockwise", "block_size": 32, "scale_dtype": "fp8_e8m0"}
+MX = {"granularity": "blockwise", "block_shape": (1, 32), "scale_dtype": "fp8_e8m0"}
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() < (12, 0),

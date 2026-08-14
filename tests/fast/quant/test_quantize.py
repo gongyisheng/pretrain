@@ -13,13 +13,34 @@ _E4M3 = "fp8_e4m3"
 
 
 def _scaling(gran, bs=0, scale_dtype=None):
-    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+    return {
+        "granularity": gran,
+        "block_shape": (1, bs) if bs else (0, 0),
+        "scale_dtype": scale_dtype,
+    }
 
 
 def _roundtrip(x, contract_dim, fmt, scaling):
     """dequant(quant(x)) — the reconstruction the quantized GEMMs actually see."""
     xq, scale = quantize_operand(x, contract_dim, fmt, scaling)
     return dequantize_operand(xq, scale, contract_dim, scaling)
+
+
+@pytest.mark.parametrize("bs", [16, 32, 128])
+@pytest.mark.parametrize("contract_dim", [-1, -2])
+def test_block_shape_1d_matches_legacy_block_size(bs, contract_dim):
+    """(1, B) is exactly what block_size=B produced. The gate on the rename."""
+    x = torch.randn(64, 128)
+    codes, scale = quantize_operand(
+        x,
+        contract_dim,
+        _E4M3,
+        {"granularity": "blockwise", "block_shape": (1, bs), "scale_dtype": "fp32"},
+    )
+    expected_blocks = (x.shape[contract_dim] + bs - 1) // bs
+    assert scale.shape[contract_dim] == expected_blocks
+    outer_dim = -2 if contract_dim == -1 else -1
+    assert scale.shape[outer_dim] == x.shape[outer_dim]
 
 
 # --- ragged scale blocks ---

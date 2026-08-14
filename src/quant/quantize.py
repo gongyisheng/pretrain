@@ -234,7 +234,7 @@ def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
     `scaled_gemm` reads.
     """
     _check_dims(x, contract_dim, ragged_dim, offs)
-    granularity, block_size = scaling["granularity"], scaling["block_size"]
+    granularity, block_size = scaling["granularity"], scaling["block_shape"][1]
     scale_dtype = scaling.get("scale_dtype")
     xf = x.float()
     if granularity == "tensorwise":
@@ -257,7 +257,7 @@ def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
 def dequantize_operand(xq, scale, contract_dim, scaling, offs=None, ragged_dim=None):
     """Invert `quantize_operand` in fp32, given the layout it was called with."""
     _check_dims(xq, contract_dim, ragged_dim, offs)
-    block_size = scaling["block_size"]
+    block_size = scaling["block_shape"][1]
     qf, sf = xq.float(), scale.float()
     if ragged_dim == contract_dim and offs is not None:
         row_blocks, _ = _scale_block_map(offs, xq.shape[contract_dim], block_size)

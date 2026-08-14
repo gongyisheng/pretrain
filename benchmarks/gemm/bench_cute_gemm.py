@@ -35,7 +35,11 @@ from src.kernel.triton.gemm import scaled_gemm
 from src.quant.quantize import quantize_operand
 
 MXFP8_BLOCK = 32
-MX = {"granularity": "blockwise", "block_size": MXFP8_BLOCK, "scale_dtype": "fp8_e8m0"}
+MX = {
+    "granularity": "blockwise",
+    "block_shape": (1, MXFP8_BLOCK),
+    "scale_dtype": "fp8_e8m0",
+}
 
 # (M, K, N): mlp_up and mlp_down from a 51M Qwen3-style config (d_model=512,
 # intermediate=1536) at M=16384 tokens, plus three square shapes.

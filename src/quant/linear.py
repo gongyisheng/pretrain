@@ -43,7 +43,7 @@ def quantized_gemm(
             sa,
             sb,
             out_dtype,
-            scaling_cfg["block_size"],
+            scaling_cfg["block_shape"][1],
             bias=bias,
             scale_dtype=scaling_cfg.get("scale_dtype"),
         )

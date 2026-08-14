@@ -32,7 +32,11 @@ INT_FMT = {127: "int8", 63: "int7", 31: "int6", 15: "int5", 7: "int4"}
 
 
 def _scaling(gran, bs=0, scale_dtype=None):
-    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+    return {
+        "granularity": gran,
+        "block_shape": (1, bs) if bs else (0, 0),
+        "scale_dtype": scale_dtype,
+    }
 
 
 def _run(a, b, gran, bs, a_fmt, b_fmt, scale_dtype=None):

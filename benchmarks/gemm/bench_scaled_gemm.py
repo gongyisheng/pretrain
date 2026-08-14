@@ -147,7 +147,11 @@ _FMT = {E4M3: "fp8_e4m3", E5M2: "fp8_e5m2"}
 
 
 def _scaling(gran, bs=0, scale_dtype=None):
-    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+    return {
+        "granularity": gran,
+        "block_shape": (1, bs) if bs else (0, 0),
+        "scale_dtype": scale_dtype,
+    }
 
 
 # ---------------------------------------------------------------------------

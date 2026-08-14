@@ -22,7 +22,11 @@ _E4M3 = "fp8_e4m3"
 
 
 def _scaling(gran, bs=0, scale_dtype=None):
-    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+    return {
+        "granularity": gran,
+        "block_shape": (1, bs) if bs else (0, 0),
+        "scale_dtype": scale_dtype,
+    }
 
 
 _MXFP8 = _scaling("blockwise", 32, "fp8_e8m0")
@@ -411,7 +415,7 @@ def test_compiled_quant_linear_blockwise_fwd_bwd():
     cfg = QuantizationConfig(
         enabled=True,
         dtype={"recipe": "fp8"},
-        scaling={"granularity": "blockwise", "block_size": 128},
+        scaling={"granularity": "blockwise", "block_shape": (1, 128)},
     )
     q = QuantizedLinear.from_module(lin, cfg)
     x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)

@@ -26,7 +26,7 @@ def quantized_grouped_gemm(
     `bias` is an optional (E,N) tensor broadcast over the output's row dim. It is
     never quantized -- it rides the epilogue, past the scales.
     """
-    block_size = scaling["block_size"]
+    block_size = scaling["block_shape"][1]
     same_family = (is_fp8(a_fmt) and is_fp8(b_fmt)) or (
         is_int8s(a_fmt) and is_int8s(b_fmt)
     )
