@@ -1277,16 +1277,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nvidia-cuda-nvdisasm"
-version = "13.3.73"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/be/e9de501cb71b10f7654381a485fa4ebf470ea25c3dce018cccaecf8a8f9a/nvidia_cuda_nvdisasm-13.3.73-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:dd4751884f9016b9b6dbf007abdeb5681d0a2edc731dd3d2fda9d6d878e88f73", size = 4744517, upload-time = "2026-06-29T16:48:33.527Z" },
-    { url = "https://files.pythonhosted.org/packages/86/3e/88460ebd737e559e8e9843db7a63f8ced9ec7be1882344438819dd13aebc/nvidia_cuda_nvdisasm-13.3.73-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:fa17084b07c0dca68a42892f771b4b1b40fbe9b91660209623e61cea611cae8c", size = 4782824, upload-time = "2026-06-29T16:49:05.109Z" },
-    { url = "https://files.pythonhosted.org/packages/32/63/00d687730b124f94345f83023363251310ccc08eeac269ec2eeff6b097f3/nvidia_cuda_nvdisasm-13.3.73-py3-none-win_amd64.whl", hash = "sha256:da2fab133c3d095d83f13587eb87149beabd199b34a3cc270d0aa99449a628c3", size = 5015368, upload-time = "2026-06-29T17:22:50.207Z" },
-]
-
-[[package]]
 name = "nvidia-cuda-nvrtc"
 version = "13.0.88"
 source = { registry = "https://pypi.org/simple" }
@@ -1379,111 +1369,6 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/10/8dcd1175260706a2fc92a16a52e306b71d4c1ea0b0cc4a9484183399818a/nvidia_cusparselt_cu13-0.8.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:400c6ed1cf6780fc6efedd64ec9f1345871767e6a1a0a552a1ea0578117ea77c", size = 220791277, upload-time = "2025-08-13T19:22:40.982Z" },
     { url = "https://files.pythonhosted.org/packages/fd/53/43b0d71f4e702fa9733f8b4571fdca50a8813f1e450b656c239beff12315/nvidia_cusparselt_cu13-0.8.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:25e30a8a7323935d4ad0340b95a0b69926eee755767e8e0b1cf8dd85b197d3fd", size = 169884119, upload-time = "2025-08-13T19:23:41.967Z" },
-]
-
-[[package]]
-name = "nvidia-cutlass-dsl"
-version = "4.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "nvidia-cutlass-dsl-libs-base" },
-    { name = "nvidia-cutlass-dsl-libs-cu12" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/a7/597b08f293989c3774621f668918bfb6c6c308510cad000abd8ee674f2d4/nvidia_cutlass_dsl-4.7.0-py3-none-any.whl", hash = "sha256:f96e35c1393a8afa9a20cada1aa08fdca16d673852f3274144e3e81693f13a14", size = 10459, upload-time = "2026-08-05T09:14:09.925Z" },
-]
-
-[package.optional-dependencies]
-cu13 = [
-    { name = "nvidia-cutlass-dsl-libs-cu13" },
-]
-
-[[package]]
-name = "nvidia-cutlass-dsl-libs-base"
-version = "4.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cuda-python", version = "13.0.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "cuda-python", version = "13.3.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
-    { name = "numpy" },
-    { name = "nvidia-cuda-nvdisasm" },
-    { name = "nvidia-cutlass-dsl-libs-core" },
-    { name = "protobuf" },
-    { name = "typing-extensions" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/d5/9cd7aa0754ba66f4e7b89c169c235cc42333a2affe32d537bd0d736efb1f/nvidia_cutlass_dsl_libs_base-4.7.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:c8dfdce6e55cd856fd3ace47b881c41e8f71fbed396ccdeb7870d19356f16af7", size = 3328631, upload-time = "2026-08-05T08:50:10.234Z" },
-    { url = "https://files.pythonhosted.org/packages/08/97/896495b02ec87fd19372f3e5245be12e301651f610b6ec7408bc7e562426/nvidia_cutlass_dsl_libs_base-4.7.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:0ee3ca427a43bd3190fc4ac06fba15fa7a923241a1cc928d3e2b4a6f480dbd39", size = 2831724, upload-time = "2026-08-05T08:50:26.836Z" },
-    { url = "https://files.pythonhosted.org/packages/8b/a7/84403cd5170229c62c0be69d043dd9d3985418708d4c911f8513cb69b2b8/nvidia_cutlass_dsl_libs_base-4.7.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:bfefdd551212e10716f5a902be8437ae80644558f0d20a7ccfa990373e96c739", size = 3328530, upload-time = "2026-08-05T08:50:51.048Z" },
-    { url = "https://files.pythonhosted.org/packages/c1/eb/39d8840899487ea897201e4706575254a8b485f3b1e2f899edbb0b89ee9b/nvidia_cutlass_dsl_libs_base-4.7.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:9a22aea60e549aa25148bc7d570e526161b2e99031b390cf12b16d7938bc95b4", size = 2831816, upload-time = "2026-08-05T08:51:47.552Z" },
-    { url = "https://files.pythonhosted.org/packages/09/eb/f7584536be4c4bf9accf557722716a1eba6f05a841b53ca25e1ff85c7d41/nvidia_cutlass_dsl_libs_base-4.7.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:56ae89554d87cfabc8330c0b087111261f4dceb0b70720b01dfff03c916f3084", size = 3328715, upload-time = "2026-08-05T08:52:07.002Z" },
-    { url = "https://files.pythonhosted.org/packages/2c/0f/ea0e737d970d5eae072e3da5d89f7307f8f9bbe45305c4d7c4a9226c9276/nvidia_cutlass_dsl_libs_base-4.7.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:17f9a1cc8488a2c57082c927e3571b1d15db522fffd8bd2f9351c9aaba58c89e", size = 2831838, upload-time = "2026-08-05T08:52:28.812Z" },
-    { url = "https://files.pythonhosted.org/packages/da/da/7658b40ec3c35d443884144c9c37a62435a81f68b9840407df007102ee8f/nvidia_cutlass_dsl_libs_base-4.7.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:f412d50169c0a727f1a08a9bb9ca6b6ae6a65f5056c2d432872ec9d0b09f0adc", size = 3336897, upload-time = "2026-08-05T08:53:02.143Z" },
-    { url = "https://files.pythonhosted.org/packages/8b/bc/c7269d05e33fcf2a38dfe1390e2a19d4e99a1b1d6aba84867812a8c2207b/nvidia_cutlass_dsl_libs_base-4.7.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:44f7c640e6428eca16cbe9e3ebfdeee8f12fa4157431fb97f7a2cbec397724a9", size = 2844487, upload-time = "2026-08-05T08:53:21.979Z" },
-]
-
-[[package]]
-name = "nvidia-cutlass-dsl-libs-core"
-version = "4.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cuda-python", version = "13.0.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "cuda-python", version = "13.3.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
-    { name = "numpy" },
-    { name = "nvidia-cuda-nvdisasm" },
-    { name = "protobuf" },
-    { name = "typing-extensions" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/76/ce/75a7df4b90256f6924f8355e25bb52351750b2ce654cc926dd6a3aa1e354/nvidia_cutlass_dsl_libs_core-4.7.0-py3-none-any.whl", hash = "sha256:3c6a128ce314aca3f332eabcb0e55a2c4c3aa951e336584a7aeb2b013bed4474", size = 1227603, upload-time = "2026-08-05T08:47:03.546Z" },
-]
-
-[[package]]
-name = "nvidia-cutlass-dsl-libs-cu12"
-version = "4.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cuda-python", version = "13.0.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "cuda-python", version = "13.3.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
-    { name = "numpy" },
-    { name = "nvidia-cuda-nvdisasm" },
-    { name = "nvidia-cutlass-dsl-libs-base" },
-    { name = "protobuf" },
-    { name = "typing-extensions" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a8/fa/5feb2cc152845a7bd605f84b2794919ca0fbac2ea5cb73a0954685e46614/nvidia_cutlass_dsl_libs_cu12-4.7.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:eb88f7d19727df3d789e757db2b386f8b52baf82d3eb3c0c51f61e80834f5e87", size = 87275410, upload-time = "2026-08-05T08:57:40.644Z" },
-    { url = "https://files.pythonhosted.org/packages/53/c8/90ebbd437f56fd268482c2eaafb8811c2a2eaa70030dfeef62fa00c10c53/nvidia_cutlass_dsl_libs_cu12-4.7.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:eaf85bd605f41f968c483dcee1ae9e13ffd765b623f976869401f77e7255b5e1", size = 88687558, upload-time = "2026-08-05T08:58:05.702Z" },
-    { url = "https://files.pythonhosted.org/packages/54/27/46215869e68b4425ad858184dbb1dff9e5c466e73a5b75c0592dcfe801af/nvidia_cutlass_dsl_libs_cu12-4.7.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:c731aa342be7643ab2c66e2cd8baabcc8611316c5e8f40ffb3f54e37997620c1", size = 87273667, upload-time = "2026-08-05T08:58:56.093Z" },
-    { url = "https://files.pythonhosted.org/packages/52/33/07c403ae33b533c6916f8263158993f8b8ef2740cd15a9a3c328c7c29b89/nvidia_cutlass_dsl_libs_cu12-4.7.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:b5a66a8442093779a2747c43a4b5c73a35473c61299377fdc790ab45599c88df", size = 88687362, upload-time = "2026-08-05T08:59:22.463Z" },
-    { url = "https://files.pythonhosted.org/packages/ef/80/f435e3f94d4370153d198a4f05a6bf337f5779cd441d7e9d13f93752a62e/nvidia_cutlass_dsl_libs_cu12-4.7.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:3c697d4ceb62e84b00f98b7e3d46228abda65a7f4b5e59ec2a698e7bc87c82ba", size = 87277256, upload-time = "2026-08-05T08:59:58.565Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/16/3dd20e9002cebd7005e5a8826886590427444eb92ae0a0479cc6804ab79e/nvidia_cutlass_dsl_libs_cu12-4.7.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:1f77cef6ef88adfe59bba6b810d7a5b79863b64cfc84b9f1a9ad025d8fda2f51", size = 88687752, upload-time = "2026-08-05T09:00:21.834Z" },
-    { url = "https://files.pythonhosted.org/packages/7a/22/99b3a31c2e86fa32bffb0c4d7c2cf7fa5e62f66e69e1b3b1519c77d6b12a/nvidia_cutlass_dsl_libs_cu12-4.7.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:eed15b7876a87ddc243dc829022798091382badeb3f67045cd457edc3d718386", size = 87277199, upload-time = "2026-08-05T09:00:47.182Z" },
-    { url = "https://files.pythonhosted.org/packages/62/08/21901502d1d42c19b61151d23573c5838f55a580093d732bd111e84d3526/nvidia_cutlass_dsl_libs_cu12-4.7.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:4507c99cac4a795e9270c24d6be117e70486f59de3ca11d9270a9dfb6c946d44", size = 88703769, upload-time = "2026-08-05T09:01:06.297Z" },
-]
-
-[[package]]
-name = "nvidia-cutlass-dsl-libs-cu13"
-version = "4.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cuda-python", version = "13.0.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "cuda-python", version = "13.3.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
-    { name = "numpy" },
-    { name = "nvidia-cuda-nvdisasm" },
-    { name = "nvidia-cutlass-dsl-libs-base" },
-    { name = "protobuf" },
-    { name = "typing-extensions" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/85/30/ef2f0f30a27bc0fe1303242c213c278dcb8cdffa9eec72e3ccef2c3c294c/nvidia_cutlass_dsl_libs_cu13-4.7.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:b037afbba54ba3a1d96502ea70048bee57ab598c63df5158ebc9f0d5b1c0790a", size = 86972936, upload-time = "2026-08-05T09:04:37.225Z" },
-    { url = "https://files.pythonhosted.org/packages/29/4c/1d17ab9cdc4e7494c79c60d832fabf6fcd814caaeba3ea9ea217122dd6a1/nvidia_cutlass_dsl_libs_cu13-4.7.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:66dda9dd19729836b919174bb33d70aef895d785f3320dafceca695513408cef", size = 88271940, upload-time = "2026-08-05T09:09:37.248Z" },
-    { url = "https://files.pythonhosted.org/packages/48/d8/d113bdaa72220b545c36d96aaeea589134dc7cbcfdbd861abbf4855194e7/nvidia_cutlass_dsl_libs_cu13-4.7.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:c831f65faf0b2838b8630f195b989d33cefc97b700a578691e5b3a9efbfd0fbb", size = 86970029, upload-time = "2026-08-05T09:10:01.18Z" },
-    { url = "https://files.pythonhosted.org/packages/2f/57/6d5303dc068715863ba74f4f26480dd021a612c06a4210826448b48f8e4a/nvidia_cutlass_dsl_libs_cu13-4.7.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:b881048bdf00a8d5239638e48fcb6d36c502ba678bcbf71a73a557590edc2dcf", size = 88273265, upload-time = "2026-08-05T09:10:33.972Z" },
-    { url = "https://files.pythonhosted.org/packages/a0/28/28ae017cc6fa5ea5c4035bc6f988d1fd7ea2688aaa0eb6e0c5cd82bf2038/nvidia_cutlass_dsl_libs_cu13-4.7.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:4b010848e36c4c54b254d29673b31ba3b25c4fbaafa5708b9136a9b452c107b0", size = 86973293, upload-time = "2026-08-05T09:11:35.729Z" },
-    { url = "https://files.pythonhosted.org/packages/ef/1d/7c27b4672a3f5812efb4d7723dca604dab9dfdd4796301a0963a14edbf8f/nvidia_cutlass_dsl_libs_cu13-4.7.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:85d9af8d747a34092433788ebd22d29fa4c8816da7a4e61fc73fe477d00e5686", size = 88273715, upload-time = "2026-08-05T09:12:23.596Z" },
-    { url = "https://files.pythonhosted.org/packages/c2/21/97302492dcdc1949ea163bcd520bfaa58ab5c2772b3b33861cfeb3a17b89/nvidia_cutlass_dsl_libs_cu13-4.7.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:39c51e3a224c56f14eaef19a71b72af03494e68dc9f1e20d9a39456d175b79fe", size = 86980630, upload-time = "2026-08-05T09:12:52.844Z" },
-    { url = "https://files.pythonhosted.org/packages/a4/f5/4ede41baaf2a8808cb5a3c743be2225eed8cb6d7c407ed6db25620e1efc2/nvidia_cutlass_dsl_libs_cu13-4.7.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:5360b4b5d4afa4edd52794220f836e09cec850c7102707e200f3db7377fea461", size = 88284161, upload-time = "2026-08-05T09:13:25.672Z" },
 ]
 
 [[package]]
@@ -1697,7 +1582,6 @@ dependencies = [
     { name = "cuda-python", version = "13.3.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
     { name = "datasets" },
     { name = "numpy" },
-    { name = "nvidia-cutlass-dsl", extra = ["cu13"] },
     { name = "pyarrow" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -1722,7 +1606,6 @@ requires-dist = [
     { name = "cuda-python", specifier = ">=13.0" },
     { name = "datasets", specifier = ">=4.5" },
     { name = "numpy", specifier = ">=2.4" },
-    { name = "nvidia-cutlass-dsl", extras = ["cu13"], specifier = ">=4.7,<4.8" },
     { name = "pyarrow", specifier = ">=17.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "regex", specifier = ">=2024.0" },

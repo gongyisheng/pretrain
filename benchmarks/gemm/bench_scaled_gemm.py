@@ -3,8 +3,7 @@
 Sweeps 20 tensorwise, rowwise, blockwise-1D, and blockwise-2D configurations
 across three representative transformer linear shapes (d_model=512,
 intermediate=1536) at two token counts M in {4096, 16384}. The MXFP8 row
-compares preblocked and native-scale CuTe paths with Triton and
-`torch.nn.functional.scaled_mm`. Other rows compare Triton with
+compares Triton with `torch.nn.functional.scaled_mm`. Other rows compare Triton with
 `torch._scaled_mm` or `torch._int_mm` where supported; unsupported native calls
 print `n/a` instead of crashing the sweep. Quantization and layout preparation
 remain outside timed closures. Accuracy is relative error against an fp32
@@ -27,7 +26,6 @@ import torch.nn.functional as F
 sys.path.insert(0, ".")
 
 from src.kernel.ops.gemm import scaled_gemm
-from src.kernel.cute.gemm import scaled_gemm_mxfp8
 from src.quant.quantize import quantize_operand
 
 E4M3 = torch.float8_e4m3fn
@@ -92,7 +90,7 @@ SCHEMES = [config["label"] for config in _scheme_configs()]
 DEFAULT_OUT = "benchmarks/results/scaled_gemm.png"
 
 # Implementation colors aligned with bench_grouped_gemm.py's palette.
-_SCHEME_COLOR = {"cute": "#3fae5c", "triton": "#2a78d6", "native": "#eb6834"}
+_SCHEME_COLOR = {"triton": "#2a78d6", "native": "#eb6834"}
 
 _MX_SUPPORTED = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
     10,
@@ -162,20 +160,20 @@ def _scaling(gran, bs=0, scale_dtype=None):
     }
 
 
-def _bench_mxfp8(a, b, ref, cute_schedule="cpasync"):
+def _bench_mxfp8(a, b, ref):
     scaling = _scaling("blockwise", MXFP8_BLOCK, "fp8_e8m0")
     aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
     bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
     bs = MXFP8_BLOCK
     sa_e8 = sa.to(torch.float8_e8m0fnu).contiguous()
     sb_e8 = sb.t().contiguous().to(torch.float8_e8m0fnu)
-    bq_cute = bq.t().contiguous()
+    bq_native = bq.t().contiguous()
 
-    # Scale blocking for preblocked CuTe/native and the column-major B view are
-    # one-time setup, not part of any timed arm.
+    # Scale blocking and the column-major B view are one-time setup, not part of
+    # any timed arm.
     a_blk = _to_blocked_native(sa_e8)
     b_blk = _to_blocked_native(sb_e8)
-    b_arg = bq_cute.t()
+    b_arg = bq_native.t()
 
     def triton_fn():
         return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs, scale_dtype="fp8_e8m0")
@@ -183,37 +181,6 @@ def _bench_mxfp8(a, b, ref, cute_schedule="cpasync"):
     triton_out = triton_fn()
     triton_ms = _time(triton_fn)
     triton_relerr = _relerr(triton_out, ref)
-
-    cute_ms = cute_native_scale_ms = cute_relerr = None
-    if torch.cuda.get_device_capability() >= (12, 0):
-
-        def cute_preblocked_fn():
-            return scaled_gemm_mxfp8(
-                aq,
-                bq_cute,
-                a_blk,
-                b_blk,
-                torch.bfloat16,
-                schedule="cooperative",
-                scale_layout="swizzle_32_4_4",
-            )
-
-        def cute_native_scale_fn():
-            return scaled_gemm_mxfp8(
-                aq,
-                bq_cute,
-                sa_e8,
-                sb_e8,
-                torch.bfloat16,
-                schedule=cute_schedule,
-                scale_layout="native",
-            )
-
-        cute_out = cute_preblocked_fn()
-        cute_ms = _time(cute_preblocked_fn)
-        cute_relerr = _relerr(cute_out, ref)
-        cute_native_scale_fn()
-        cute_native_scale_ms = _time(cute_native_scale_fn)
 
     native_ms = native_relerr = None
     if _MX_SUPPORTED:
@@ -241,44 +208,27 @@ def _bench_mxfp8(a, b, ref, cute_schedule="cpasync"):
         except Exception:
             pass
     return dict(
-        cute_ms=cute_ms,
-        cute_native_scale_ms=cute_native_scale_ms,
         triton_ms=triton_ms,
         native_ms=native_ms,
-        cute_relerr=cute_relerr,
         triton_relerr=triton_relerr,
         native_relerr=native_relerr,
     )
 
 
-def _bench_scheme(a, b, ref, config, cute_schedule):
+def _bench_scheme(a, b, ref, config):
     """Benchmark one quantization contract with preparation outside timed closures."""
     result = {
         "dtype": config["dtype"],
         "granularity": config["granularity"],
         "block_size": config["block_size"],
         "scheme": config["label"],
-        "cute_ms": None,
-        "cute_native_scale_ms": None,
         "triton_ms": None,
         "native_ms": None,
-        "cute_native_ratio": None,
-        "cute_native_scale_ratio": None,
-        "cute_relerr": None,
         "triton_relerr": None,
         "native_relerr": None,
     }
     if config["label"] == "mxfp8":
-        result.update(_bench_mxfp8(a, b, ref, cute_schedule))
-        if result["cute_ms"] is not None and result["native_ms"] is not None:
-            result["cute_native_ratio"] = result["native_ms"] / result["cute_ms"]
-        if (
-            result["cute_native_scale_ms"] is not None
-            and result["native_ms"] is not None
-        ):
-            result["cute_native_scale_ratio"] = (
-                result["native_ms"] / result["cute_native_scale_ms"]
-            )
+        result.update(_bench_mxfp8(a, b, ref))
         return result
 
     block_size = config["block_size"] or 0
@@ -349,7 +299,7 @@ def _bench_scheme(a, b, ref, config, cute_schedule):
     return result
 
 
-def _bench_shape(name, M, K, N, cute_schedule):
+def _bench_shape(name, M, K, N):
     """Return all 20 matrix rows for one (name, M, K, N) shape."""
     a, b = _make(M, K, N)
     ref = a.float() @ b.float()
@@ -359,7 +309,7 @@ def _bench_shape(name, M, K, N, cute_schedule):
             "M": M,
             "K": K,
             "N": N,
-            **_bench_scheme(a, b, ref, config, cute_schedule),
+            **_bench_scheme(a, b, ref, config),
         }
         for config in _scheme_configs()
     ]
@@ -385,7 +335,7 @@ def plot(results, path, device=""):
     lut = {(r["shape"], r["M"], r["scheme"]): r for r in results}
     shape_names = [name for name, _, _ in SHAPES]
     x = np.arange(len(SCHEMES))
-    bw = 0.25
+    bw = 0.35
 
     fig, axes = plt.subplots(
         len(M_LIST), len(shape_names), figsize=(13, 8), constrained_layout=True
@@ -393,7 +343,7 @@ def plot(results, path, device=""):
     for ri, M in enumerate(M_LIST):
         for ci, shape_name in enumerate(shape_names):
             ax = axes[ri][ci]
-            for j, impl in enumerate(("cute", "triton", "native")):
+            for j, impl in enumerate(("triton", "native")):
                 key = f"{impl}_ms"
                 vals = []
                 for scheme in SCHEMES:
@@ -401,7 +351,7 @@ def plot(results, path, device=""):
                     value = r.get(key) if r else None
                     vals.append(value if value is not None else 0.0)
                 bars = ax.bar(
-                    x + (j - 1) * bw,
+                    x + (j - 0.5) * bw,
                     vals,
                     bw,
                     label=impl,
@@ -421,7 +371,7 @@ def plot(results, path, device=""):
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside upper right", ncol=3, fontsize=10)
-    sup = "Scaled GEMM latency — CuTe vs Triton vs native"
+    sup = "Scaled GEMM latency — Triton vs native"
     sub = "lower is faster · n/a = call unsupported on this GPU"
     if device:
         sub += f" · {device}"
@@ -451,11 +401,6 @@ def main():
     )
     ap.add_argument("--no-plot", action="store_true", help="skip writing the chart")
     ap.add_argument("--json-out", help="write matrix rows as JSON")
-    ap.add_argument(
-        "--cute-schedule",
-        default="cpasync",
-        help="CuTe MXFP8 execution schedule",
-    )
     args = ap.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -466,25 +411,18 @@ def main():
     )
 
     hdr = (
-        f"{'shape':12s} {'M':>7s} {'scheme':16s} {'cute_ms':>10s} "
-        f"{'cute_native_scale_ms':>20s} {'triton_ms':>10s} {'native_ms':>10s} "
-        f"{'cute_native_ratio':>18s} {'cute_native_scale_ratio':>23s} "
-        f"{'cute_relerr':>14s} {'triton_relerr':>14s} {'native_relerr':>14s}"
+        f"{'shape':12s} {'M':>7s} {'scheme':16s} {'triton_ms':>10s} "
+        f"{'native_ms':>10s} {'triton_relerr':>14s} {'native_relerr':>14s}"
     )
     print(hdr)
     results = []
     for name, K, N in SHAPES:
         for M in M_LIST:
-            rows = _bench_shape(name, M, K, N, args.cute_schedule)
+            rows = _bench_shape(name, M, K, N)
             for r in rows:
                 print(
                     f"{r['shape']:12s} {r['M']:>7d} {r['scheme']:16s} "
-                    f"{_fmt(r['cute_ms']):>10s} "
-                    f"{_fmt(r['cute_native_scale_ms']):>20s} "
                     f"{_fmt(r['triton_ms']):>10s} {_fmt(r['native_ms']):>10s} "
-                    f"{_fmt(r['cute_native_ratio']):>18s} "
-                    f"{_fmt(r['cute_native_scale_ratio']):>23s} "
-                    f"{_fmt(r['cute_relerr'], 4):>14s} "
                     f"{_fmt(r['triton_relerr'], 4):>14s} {_fmt(r['native_relerr'], 4):>14s}"
                 )
                 results.append(r)
