@@ -590,6 +590,110 @@ def test_scaled_gemm_scheme_matrix():
     assert ("int8", "tensorwise", None, "int8_tensorwise") in got
 
 
+@requires_sm120
+def test_scaled_gemm_benchmark_reports_both_mxfp8_cute_paths(monkeypatch):
+    """Keep scale blocking out of both CuTe timing closures."""
+    import importlib
+
+    bench = importlib.import_module("benchmarks.gemm.bench_scaled_gemm")
+    a, b = bench._make(128, 128, 128)
+    ref = a.float() @ b.float()
+    config = next(
+        config for config in bench._scheme_configs() if config["label"] == "mxfp8"
+    )
+    original_block = bench._to_blocked_native
+    original_cute = bench.scaled_gemm_mxfp8
+    timings = iter((1.0, 2.0, 4.0, 8.0))
+    events = []
+    cute_calls = []
+    inside_timing = False
+
+    def traced_block(scale):
+        events.append(("block", inside_timing))
+        return original_block(scale)
+
+    def traced_cute(*args, **kwargs):
+        cute_calls.append(
+            (
+                kwargs.get("schedule"),
+                kwargs.get("scale_layout"),
+                args[2].ndim,
+                args[3].ndim,
+            )
+        )
+        return original_cute(*args, **kwargs)
+
+    def deterministic_time(fn, iters=50):
+        del iters
+        nonlocal inside_timing
+        events.append(("time", fn.__name__))
+        inside_timing = True
+        try:
+            fn()
+        finally:
+            inside_timing = False
+        return next(timings)
+
+    monkeypatch.setattr(bench, "_to_blocked_native", traced_block)
+    monkeypatch.setattr(bench, "scaled_gemm_mxfp8", traced_cute)
+    monkeypatch.setattr(bench, "_time", deterministic_time)
+
+    row = bench._bench_scheme(a, b, ref, config, cute_schedule="cpasync")
+
+    assert row["cute_ms"] == 2.0
+    assert row.get("cute_native_scale_ms") == 4.0
+    assert row["native_ms"] == 8.0
+    assert row["cute_native_ratio"] == 4.0
+    assert row.get("cute_native_scale_ratio") == 2.0
+    assert row["cute_relerr"] < 0.05
+    assert row["triton_relerr"] < 0.05
+    assert row["native_relerr"] < 0.05
+    assert events[:2] == [("block", False), ("block", False)]
+    assert not any(event == ("block", True) for event in events)
+    assert [event[1] for event in events if event[0] == "time"] == [
+        "triton_fn",
+        "cute_preblocked_fn",
+        "cute_native_scale_fn",
+        "native_fn",
+    ]
+    assert cute_calls == [
+        ("cooperative", "swizzle_32_4_4", 1, 1),
+        ("cooperative", "swizzle_32_4_4", 1, 1),
+        ("cpasync", "native", 2, 2),
+        ("cpasync", "native", 2, 2),
+    ]
+
+
+def test_scaled_gemm_benchmark_non_mxfp8_cute_fields_are_none(monkeypatch):
+    import importlib
+
+    bench = importlib.import_module("benchmarks.gemm.bench_scaled_gemm")
+    tensor = torch.ones(1, 1)
+    scale = torch.ones(1)
+    config = next(
+        config
+        for config in bench._scheme_configs()
+        if config["label"] == "fp8_blockwise2d_16"
+    )
+    monkeypatch.setattr(
+        bench, "quantize_operand", lambda operand, *args, **kwargs: (operand, scale)
+    )
+    monkeypatch.setattr(bench, "scaled_gemm", lambda *args, **kwargs: tensor)
+    monkeypatch.setattr(bench, "_time", lambda fn: 1.0)
+    monkeypatch.setattr(bench, "_relerr", lambda out, ref: 0.0)
+
+    row = bench._bench_scheme(tensor, tensor, tensor, config, cute_schedule="cpasync")
+    cute_fields = {
+        "cute_ms",
+        "cute_native_scale_ms",
+        "cute_native_ratio",
+        "cute_native_scale_ratio",
+    }
+
+    assert cute_fields <= row.keys()
+    assert all(row[field] is None for field in cute_fields)
+
+
 def test_scaled_gemm_benchmark_has_no_qwen_mode():
     import importlib
 

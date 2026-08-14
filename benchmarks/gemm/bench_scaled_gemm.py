@@ -3,7 +3,8 @@
 Sweeps FP8/INT8 tensorwise, rowwise, blockwise-1D, and blockwise-2D scaling
 across three representative transformer linear shapes (d_model=512,
 intermediate=1536) at two token counts M in {4096, 16384}. The mxfp8 sweep
-compares CuTe, Triton, and native calls. Native calls
+compares preblocked and native-scale CuTe paths with Triton and native calls.
+Native calls
 (`torch._scaled_mm`, `torch._int_mm`, an inlined mxfp8 GEMM recovered from the
 deleted `src/quant/mxfp8.py`) are each wrapped in try/except: combos this
 GPU/cuBLAS rejects (e.g. e5m2 x e5m2, non-Blackwell MX) print `n/a` instead of
@@ -172,8 +173,8 @@ def _bench_mxfp8(a, b, ref, cute_schedule="cpasync"):
     sb_e8 = sb.t().contiguous().to(torch.float8_e8m0fnu)
     bq_cute = bq.t().contiguous()
 
-    # Native scale blocking and the column-major B view are one-time setup, not
-    # part of any timed arm.
+    # Scale blocking for preblocked CuTe/native and the column-major B view are
+    # one-time setup, not part of any timed arm.
     a_blk = _to_blocked_native(sa_e8)
     b_blk = _to_blocked_native(sb_e8)
     b_arg = bq_cute.t()
@@ -185,22 +186,36 @@ def _bench_mxfp8(a, b, ref, cute_schedule="cpasync"):
     triton_ms = _time(triton_fn)
     triton_relerr = _relerr(triton_out, ref)
 
-    cute_ms = cute_relerr = None
+    cute_ms = cute_native_scale_ms = cute_relerr = None
     if torch.cuda.get_device_capability() >= (12, 0):
 
-        def cute_fn():
+        def cute_preblocked_fn():
             return scaled_gemm_mxfp8(
-                aq.contiguous(),
+                aq,
+                bq_cute,
+                a_blk,
+                b_blk,
+                torch.bfloat16,
+                schedule="cooperative",
+                scale_layout="swizzle_32_4_4",
+            )
+
+        def cute_native_scale_fn():
+            return scaled_gemm_mxfp8(
+                aq,
                 bq_cute,
                 sa_e8,
                 sb_e8,
                 torch.bfloat16,
                 schedule=cute_schedule,
+                scale_layout="native",
             )
 
-        cute_out = cute_fn()
-        cute_ms = _time(cute_fn)
+        cute_out = cute_preblocked_fn()
+        cute_ms = _time(cute_preblocked_fn)
         cute_relerr = _relerr(cute_out, ref)
+        cute_native_scale_fn()
+        cute_native_scale_ms = _time(cute_native_scale_fn)
 
     native_ms = native_relerr = None
     if _MX_SUPPORTED:
@@ -228,6 +243,7 @@ def _bench_mxfp8(a, b, ref, cute_schedule="cpasync"):
             pass
     return dict(
         cute_ms=cute_ms,
+        cute_native_scale_ms=cute_native_scale_ms,
         triton_ms=triton_ms,
         native_ms=native_ms,
         cute_relerr=cute_relerr,
@@ -244,8 +260,11 @@ def _bench_scheme(a, b, ref, config, cute_schedule):
         "block_size": config["block_size"],
         "scheme": config["label"],
         "cute_ms": None,
+        "cute_native_scale_ms": None,
         "triton_ms": None,
         "native_ms": None,
+        "cute_native_ratio": None,
+        "cute_native_scale_ratio": None,
         "cute_relerr": None,
         "triton_relerr": None,
         "native_relerr": None,
@@ -254,6 +273,13 @@ def _bench_scheme(a, b, ref, config, cute_schedule):
         result.update(_bench_mxfp8(a, b, ref, cute_schedule))
         if result["cute_ms"] is not None and result["native_ms"] is not None:
             result["cute_native_ratio"] = result["native_ms"] / result["cute_ms"]
+        if (
+            result["cute_native_scale_ms"] is not None
+            and result["native_ms"] is not None
+        ):
+            result["cute_native_scale_ratio"] = (
+                result["native_ms"] / result["cute_native_scale_ms"]
+            )
         return result
 
     block_size = config["block_size"] or 0
@@ -440,9 +466,10 @@ def main():
     )
 
     hdr = (
-        f"{'shape':12s} {'M':>7s} {'scheme':16s} {'cute_ms':>10s} {'triton_ms':>10s} "
-        f"{'native_ms':>10s} {'cute_relerr':>14s} {'triton_relerr':>14s} "
-        f"{'native_relerr':>14s}"
+        f"{'shape':12s} {'M':>7s} {'scheme':16s} {'cute_ms':>10s} "
+        f"{'cute_native_scale_ms':>20s} {'triton_ms':>10s} {'native_ms':>10s} "
+        f"{'cute_native_ratio':>18s} {'cute_native_scale_ratio':>23s} "
+        f"{'cute_relerr':>14s} {'triton_relerr':>14s} {'native_relerr':>14s}"
     )
     print(hdr)
     results = []
@@ -452,8 +479,12 @@ def main():
             for r in rows:
                 print(
                     f"{r['shape']:12s} {r['M']:>7d} {r['scheme']:16s} "
-                    f"{_fmt(r.get('cute_ms')):>10s} {_fmt(r['triton_ms']):>10s} "
-                    f"{_fmt(r['native_ms']):>10s} {_fmt(r.get('cute_relerr'), 4):>14s} "
+                    f"{_fmt(r['cute_ms']):>10s} "
+                    f"{_fmt(r['cute_native_scale_ms']):>20s} "
+                    f"{_fmt(r['triton_ms']):>10s} {_fmt(r['native_ms']):>10s} "
+                    f"{_fmt(r['cute_native_ratio']):>18s} "
+                    f"{_fmt(r['cute_native_scale_ratio']):>23s} "
+                    f"{_fmt(r['cute_relerr'], 4):>14s} "
                     f"{_fmt(r['triton_relerr'], 4):>14s} {_fmt(r['native_relerr'], 4):>14s}"
                 )
                 results.append(r)

@@ -644,3 +644,170 @@ contains only those two maintained paths. No `DEFAULT_SCHEDULE` constant or
 `pingpong` path is introduced because the acceptance gates did not pass. The
 benchmark module docstring and shape comment are now generic; its public text no
 longer labels this matrix as Qwen-specific.
+
+## Preblocked-scale benchmark and promotion gate
+
+Commit `77b5458` added the explicit cooperative
+`scale_layout="swizzle_32_4_4"` kernel path. The benchmark follow-up quantizes each
+operand once and prepares both E8M0 `SWIZZLE_32_4_4` scale tensors before any timed
+closure is defined. `cute_ms` now measures that preblocked cooperative path,
+`cute_native_scale_ms` measures the maintained native-scale path selected by
+`--cute-schedule`, and the existing native arm receives the same preblocked scale
+tensors as the primary CuTe arm. The generic public matrix remains 120 rows and no
+public Qwen mode was added.
+
+Every GPU command below was preceded by `nvidia-smi` and pinned to physical GPU 1.
+The preflights at 08:34, 08:36, 08:37, and 08:38 on August 14 showed GPU 1 at 15 MiB
+and 0% utilization before the public benchmark, private gate, profiler, and full
+kernel suite respectively.
+
+### RED and GREEN contract evidence
+
+The benchmark contract test keeps the real Triton, preblocked CuTe, native-scale
+CuTe, and native calls for numerical output, while replacing `_time` with the
+deterministic sequence `1.0`, `2.0`, `4.0`, and `8.0` ms. Its traced scale converter
+must run twice before the first `_time` call and never while a timed closure is
+executing. It also checks the exact CuTe schedule/layout pairs and requires all four
+CuTe timing/ratio fields to be explicit `None` on a non-MXFP8 row.
+
+RED command and result:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 uv run pytest tests/fast/kernel/cute/test_gemm.py -n 6 \
+  -k "scheme_matrix or benchmark or mxfp8"
+```
+
+```text
+2 failed, 57 passed, 1461 warnings in 44.70s
+```
+
+Both failures were the intended missing contract: the MXFP8 row had no
+`cute_native_scale_ms`, and non-MXFP8 rows lacked the new explicit `None` fields.
+After the minimal benchmark wiring, the complete focused file was GREEN:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 uv run pytest tests/fast/kernel/cute/test_gemm.py -n 6
+```
+
+```text
+63 passed, 1704 warnings in 48.79s
+```
+
+### Generic public matrix
+
+Command and retained JSON artifact:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 uv run python benchmarks/gemm/bench_scaled_gemm.py \
+  --no-plot --cute-schedule cpasync \
+  --json-out /tmp/scaled-gemm-preblocked.json
+```
+
+An independent JSON validation confirmed exactly 120 rows and exactly six MXFP8
+rows. Every present `*_ms` value was finite and nonnegative. All five required
+MXFP8 values (`cute_ms`, `cute_native_scale_ms`, `native_ms`,
+`cute_native_ratio`, and `cute_native_scale_ratio`) were finite and nonnegative;
+the 114 other rows had both CuTe measurements and both CuTe/native ratios set to
+`None`. The traced contract test above confirms that neither scale conversion is
+inside a timed closure.
+
+| shape | M | K | N | preblocked ms | native-scale CuTe ms | native ms | native/preblocked latency | native/native-scale CuTe latency |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| attn_proj | 4096 | 512 | 512 | 0.254955059 | 0.263033819 | 0.074765140 | 0.293248 | 0.284242 |
+| attn_proj | 16384 | 512 | 512 | 0.246966919 | 0.261229619 | 0.073518639 | 0.297686 | 0.281433 |
+| mlp_up | 4096 | 512 | 3072 | 0.250092102 | 0.253760682 | 0.099659222 | 0.398490 | 0.392729 |
+| mlp_up | 16384 | 512 | 3072 | 0.375914602 | 0.523860960 | 0.382602580 | 1.017791 | 0.730351 |
+| mlp_down | 4096 | 1536 | 512 | 0.277278021 | 0.260269400 | 0.074529918 | 0.268791 | 0.286357 |
+| mlp_down | 16384 | 1536 | 512 | 0.267776982 | 0.270876221 | 0.169715858 | 0.633796 | 0.626544 |
+
+Across the six rows, preblocked CuTe totaled `1.672983684` ms, native-scale CuTe
+totaled `1.833030700` ms, and native totaled `0.874791357` ms. Thus the aggregate
+sum-of-latencies native/preblocked latency ratio was `0.522892940`, versus
+`0.477237701` for native/native-scale CuTe latency. Preblocking improved this public
+aggregate, and the 16K MLP-up row slightly exceeded native, but the aggregate
+remained materially below the native kernel.
+
+### Private Qwen3-51M gate
+
+The existing private `/tmp/bench_qwen3_mxfp8.py` harness remained outside the
+public benchmark. It covers 12 projection/role rows; its six MLP rows are the
+per-row gate set. Through the updated `_bench_mxfp8`, `cute_ms` uses the preblocked
+scale tensors and `scale_layout="swizzle_32_4_4"`, while
+`cute_native_scale_ms` retains native scales. The helper writes JSON before
+enforcing either gate.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 uv run python /tmp/bench_qwen3_mxfp8.py \
+  --schedule cpasync --json-out /tmp/qwen3-preblocked.json --enforce-gates
+```
+
+The JSON was written successfully and the command then exited 1 because the
+acceptance gates missed:
+
+| projection | role | count | M | K | N | preblocked ms | native-scale CuTe ms | native ms | native/preblocked latency | native/native-scale CuTe latency |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| attn_qo | forward | 2 | 16384 | 512 | 512 | 0.244665840 | 0.261496119 | 0.072921580 | 0.298046 | 0.278863 |
+| attn_qo | dgrad | 2 | 16384 | 512 | 512 | 0.249974539 | 0.250992901 | 0.073241221 | 0.292995 | 0.291806 |
+| attn_qo | wgrad | 2 | 512 | 16384 | 512 | 0.243713439 | 0.253129159 | 0.098109900 | 0.402563 | 0.387588 |
+| attn_kv | forward | 2 | 16384 | 512 | 256 | 0.248262761 | 0.247516821 | 0.074712939 | 0.300943 | 0.301850 |
+| attn_kv | dgrad | 2 | 16384 | 256 | 512 | 0.252918920 | 0.252678541 | 0.075740220 | 0.299464 | 0.299749 |
+| attn_kv | wgrad | 2 | 256 | 16384 | 512 | 0.243969241 | 0.255581960 | 0.097934720 | 0.401422 | 0.383183 |
+| mlp_gate_up | forward | 1 | 16384 | 512 | 3072 | 0.371174740 | 0.519899679 | 0.374524500 | 1.009025 | 0.720378 |
+| mlp_gate_up | dgrad | 1 | 16384 | 3072 | 512 | 0.565531682 | 0.638883261 | 0.313394901 | 0.554160 | 0.490535 |
+| mlp_gate_up | wgrad | 1 | 3072 | 16384 | 512 | 0.422383200 | 0.559281479 | 0.318708720 | 0.754549 | 0.569854 |
+| mlp_down | forward | 1 | 16384 | 1536 | 512 | 0.263081740 | 0.259053840 | 0.173456639 | 0.659326 | 0.669578 |
+| mlp_down | dgrad | 1 | 16384 | 512 | 1536 | 0.249042201 | 0.268369659 | 0.197175820 | 0.791737 | 0.734717 |
+| mlp_down | wgrad | 1 | 512 | 16384 | 1536 | 0.248802879 | 0.339113621 | 0.209509260 | 0.842069 | 0.617814 |
+
+The multiplicity-weighted totals were `5.087025922` ms for preblocked CuTe,
+`5.627392540` ms for native-scale CuTe, and `2.572091001` ms for native. The
+weighted native/preblocked latency ratio (equivalently, preblocked/native
+throughput ratio) was `0.505617829`, below the `0.85` target. The six MLP
+native/preblocked latency ratios were `1.009025`, `0.554160`,
+`0.754549`, `0.659326`, `0.791737`, and `0.842069`; gate-up dgrad and MLP-down
+forward missed the `0.75` row target. Both the weighted gate and all-MLP-rows gate
+therefore failed.
+
+The preblocked path remains explicit kernel-only experimental support. The public
+default and training call sites remain on `scale_layout="native"`, so
+`benchmarks/bench_train.py` is not applicable to this isolated kernel option.
+
+### Representative launch profile
+
+The worst MLP gate row, gate-up dgrad `(M,K,N)=(16384,3072,512)`, was profiled
+with preblocked scale tensors. The temporary helper changed only the CuTe scale
+arguments and layout, and wrote `/tmp/qwen3-mxfp8-preblocked-profile.json`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 uv run python /tmp/profile_qwen3_mxfp8.py
+```
+
+| implementation | profiler duration us | grid | block | registers/thread | shared memory/CTA |
+|---|---:|---:|---:|---:|---:|
+| preblocked CuTe cooperative | 547.200 | `[1,1,36]` | `[288,1,1]` | 128 | 72,704 B |
+| native CUTLASS | 336.256 | `[4,128,1]` | `[384,1,1]` | 168 | 81,920 B |
+
+The preblocked kernel has one persistent CTA per SM and nine warps per CTA, while
+the native launch has 512 total CTAs and twelve warps per CTA. CuTe uses fewer
+registers per thread and less shared memory per CTA, so the remaining gap is not
+explained by a simple register or shared-memory ceiling. The evidence instead
+points to launch geometry and schedule efficiency after scale conversion has been
+removed. The trace's `blocks per SM` and `warps per SM` values describe whole-grid
+distribution, not achieved occupancy; hardware counters remain unavailable, so
+the profile does not claim a measured occupancy or warp-stall cause.
+
+### Final validation
+
+```text
+CUDA_VISIBLE_DEVICES=1 uv run pytest tests/fast/kernel -n 12 --dist load
+227 passed, 1962 warnings in 55.00s
+
+uv run ruff check src/ tests/
+All checks passed!
+
+uv run ruff format --check src/ tests/
+80 files already formatted
+
+git diff --check
+exit 0
+```
