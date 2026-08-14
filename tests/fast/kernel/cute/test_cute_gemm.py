@@ -1,5 +1,12 @@
 """CuTe DSL mxfp8 kernels (sm120). Numerics are checked against the same
-oracle the Triton backend uses, so the two cannot silently diverge."""
+oracle the Triton backend uses, so the two cannot silently diverge.
+
+The CuTe kernel takes B as `(N, K)` with `sb` as `(N, K//32)` -- the layout the
+MMA wants and the one a `nn.Linear` weight is already in. `scaled_gemm_ref` keeps
+the Triton backend's `(K, N)` convention, so every comparison bridges with `.t()`,
+which is a free view. That the bridge costs nothing is the point of the
+convention.
+"""
 
 import pytest
 import torch
@@ -16,18 +23,19 @@ pytestmark = pytest.mark.skipif(
 
 
 def _operands(M, K, N, seed=0):
+    """`(aq, bq, sa, sb)` in the kernel's convention: A `(M, K)`, B `(N, K)`."""
     torch.manual_seed(seed)
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16) * 0.1
+    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16) * 0.1
     aq, sa = quantize_operand(a, -1, "fp8_e4m3", MX)
-    bq, sb = quantize_operand(b, -2, "fp8_e4m3", MX)
+    bq, sb = quantize_operand(b, -1, "fp8_e4m3", MX)
     return aq, bq, sa, sb
 
 
 def _operands_spread_scales(M, K, N, seed=0):
     """Operands whose per-scale-block magnitudes span 2^-8..2^7.
 
-    A's magnitude varies per (row, K-block) and B's per (K-block, column), so both
+    A's magnitude varies per (row, K-block) and B's per (column, K-block), so both
     axes of *both* scale-factor fragment mappings carry signal. Uniform magnitudes
     would leave SFB's N axis untested, which is the half of the mapping that does not
     mirror SFA -- it reads a different thread coordinate and regroups its modes.
@@ -36,10 +44,10 @@ def _operands_spread_scales(M, K, N, seed=0):
     n_blocks = K // 32
     exp = torch.randint(-8, 8, (M, n_blocks), device="cuda").float()
     a = torch.randn(M, n_blocks, 32, device="cuda") * torch.exp2(exp)[:, :, None]
-    exp = torch.randint(-8, 8, (n_blocks, N), device="cuda").float()
-    b = torch.randn(n_blocks, 32, N, device="cuda") * torch.exp2(exp)[:, None, :]
+    exp = torch.randint(-8, 8, (N, n_blocks), device="cuda").float()
+    b = torch.randn(N, n_blocks, 32, device="cuda") * torch.exp2(exp)[:, :, None]
     aq, sa = quantize_operand(a.reshape(M, K).bfloat16(), -1, "fp8_e4m3", MX)
-    bq, sb = quantize_operand(b.reshape(K, N).bfloat16(), -2, "fp8_e4m3", MX)
+    bq, sb = quantize_operand(b.reshape(N, K).bfloat16(), -1, "fp8_e4m3", MX)
     return aq, bq, sa, sb
 
 
@@ -50,7 +58,7 @@ def test_scaled_gemm_mxfp8_matches_oracle(shape):
     M, K, N = shape
     aq, bq, sa, sb = _operands(M, K, N)
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
-    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+    want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
 
     assert got.shape == (M, N)
     assert got.dtype == torch.float32
@@ -103,7 +111,7 @@ def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
     M, K, N = shape
     aq, bq, sa, sb = _operands_spread_scales(M, K, N)
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
-    oracle = scaled_gemm_ref(aq, bq, sa, sb, 32)
+    oracle = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
     rel = (got - oracle).norm() / oracle.norm()
     assert rel < 1e-6, rel
 
@@ -134,16 +142,16 @@ def test_compile_cache_reused():
     )
     # a cached kernel with M baked static would satisfy the count check above while
     # returning garbage here, so assert the reused kernel is actually correct
-    want = scaled_gemm_ref(aq2, bq2, sa2, sb2, 32)
+    want = scaled_gemm_ref(aq2, bq2.t(), sa2, sb2.t(), 32)
     assert (got - want).norm() / want.norm() < 0.02
 
 
 def _operands_fmt(M, K, N, a_fmt, b_fmt, seed=0):
     torch.manual_seed(seed)
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16) * 0.1
+    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16) * 0.1
     aq, sa = quantize_operand(a, -1, a_fmt, MX)
-    bq, sb = quantize_operand(b, -2, b_fmt, MX)
+    bq, sb = quantize_operand(b, -1, b_fmt, MX)
     return aq, bq, sa, sb
 
 
@@ -156,7 +164,7 @@ def test_scaled_gemm_mxfp8_dtype_combinations(a_fmt, b_fmt):
 
     aq, bq, sa, sb = _operands_fmt(128, 128, 128, a_fmt, b_fmt)
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
-    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+    want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
     assert (got - want).norm() / want.norm() < 0.02
 
 
@@ -177,7 +185,7 @@ def test_scaled_gemm_mxfp8_preserves_out_dtype(shape, out_dtype):
 
     aq, bq, sa, sb = _operands(*shape)
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, out_dtype)
-    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+    want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
 
     assert got.dtype == out_dtype
     # fp16/bf16 out costs precision on top of the mxfp8 quantization, so this bar is
@@ -191,8 +199,9 @@ def test_scaled_gemm_mxfp8_preserves_out_dtype(shape, out_dtype):
         (64, 64, 64),
         (192, 160, 128),
         (129, 128, 130),
-        # N=33 is the only shape here with M aligned, and the only one narrow enough to
-        # drive B's copy down to one byte per thread -- a different thread layout
+        # N=33 is the only shape here with M aligned, so B's N edge is the only thing
+        # predicated -- and it is not a multiple of 4, so a single 128-tile of B's
+        # scales is mostly dropped rows
         (256, 128, 33),
     ],
 )
@@ -202,7 +211,7 @@ def test_scaled_gemm_mxfp8_ragged_shapes(shape):
     M, K, N = shape
     aq, bq, sa, sb = _operands(M, K, N)
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
-    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+    want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
 
     assert got.shape == (M, N)
     assert (got - want).norm() / want.norm() < 0.02
@@ -244,12 +253,14 @@ def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
 
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.bfloat16)
 
+    # cuBLASLt wants B as (K, N) stored column-major and its scales row-per-N: both
+    # are free views of the (N, K) / (N, K//32) pair the CuTe kernel takes directly.
     want = torch.nn.functional.scaled_mm(
         aq,
-        bq.t().contiguous().t(),
+        bq.t(),
         _to_blocked(sa.to(torch.float8_e8m0fnu)),
         torch.nn.functional.ScalingType.BlockWise1x32,
-        _to_blocked(sb.t().contiguous().to(torch.float8_e8m0fnu)),
+        _to_blocked(sb.to(torch.float8_e8m0fnu)),
         torch.nn.functional.ScalingType.BlockWise1x32,
         swizzle_a=torch.nn.functional.SwizzleType.SWIZZLE_32_4_4,
         swizzle_b=torch.nn.functional.SwizzleType.SWIZZLE_32_4_4,
@@ -283,7 +294,7 @@ def test_scaled_gemm_mxfp8_partial_scale_group(shape):
 
     aq, bq, sa, sb = _operands(M, K, N)
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
-    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+    want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
 
     assert got.shape == (M, N)
     assert (got - want).norm() / want.norm() < 0.02

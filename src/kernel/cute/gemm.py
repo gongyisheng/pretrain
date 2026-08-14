@@ -10,24 +10,23 @@ M and N are free of the tile: a trailing tile runs off the end of the tensor, an
 both the loads and the store are predicated against the real extent. K only has to
 be a multiple of the 32-element scale block.
 
-Both operand tiles are held in shared memory K-major and XOR-swizzled: the MMA's
-fragments want four consecutive k per load, and the swizzle spreads the rows a warp
-reads together across all 32 banks. `bq` arrives N-contiguous, so `scaled_gemm_mxfp8`
-relayouts it to K-major before the launch -- see the note there.
+Both operands are taken K-contiguous -- A as `(M, K)`, B as `(N, K)` -- which is
+the layout the MMA's fragments want (four consecutive k per load) and, for B, the
+layout an `nn.Linear` weight is already stored in. Both tiles are held in shared
+memory K-major and XOR-swizzled, the swizzle spreading the rows a warp reads
+together across all 32 banks. Nothing is relayouted on the host.
 
 The mainloop is a `STAGES`-deep software pipeline. Shared memory holds `STAGES`
 copies of each of the four staged tensors, every global->shared transfer is a
 `cp.async` group, and iteration `i` waits only for the group it is about to feed the
 MMA -- the copies for tiles `i+1 .. i+STAGES-1` stay in flight across the MMA.
 
-Scale factors for A are held in shared memory in the cuBLASLt-compatible 32x4x4
-swizzle (`sm120_make_smem_layout_sfa`); B's are held N-contiguous instead, because
-`mSFB` is N-major in global memory and a `cp.async` needs its four bytes contiguous
-at *both* ends. The MMA reads either one correctly: `thrfrg_SFA`/`SFB` derive the
-read partitioning from whatever layout they are handed. Either way the kernel
-consumes scales in `quantize_operand`'s native `(M, K//32)` / `(K//32, N)` layout
-straight from the host and lays them out itself while staging, so no pre-swizzled
-global input is required.
+Scale factors for both operands are held in shared memory in the cuBLASLt-compatible
+32x4x4 swizzle (`sm120_make_smem_layout_sfa`/`_sfb`), whose scale axis is contiguous
+-- as is the scale axis of both global scale tensors -- so a 4-byte `cp.async` moves
+a whole k-tile's scales per thread. The kernel consumes scales in
+`quantize_operand`'s native `(M, K//32)` / `(N, K//32)` layout straight from the host
+and lays them out itself while staging, so no pre-swizzled global input is required.
 """
 
 from __future__ import annotations
@@ -210,12 +209,13 @@ def _tiled_copy(dtype, thr_shape, thr_stride, val_shape, is_async) -> cute.Tiled
     The atom is sized to the whole per-thread vector so that predication is decided
     once per vector rather than per element.
 
-    `is_async` picks `cp.async` over an ordinary load/store pair. It is decided
-    statically per operand: `cp.async` moves 4, 8 or 16 bytes and needs the vector
-    contiguous and aligned at both ends. Both operand tiles always qualify -- their
-    vector is 16 bytes along K, contiguous in global memory and one swizzle granule
-    in shared memory -- but B's scales need `4 | N` and otherwise fall back to the
-    synchronous copy, correct but not overlapped.
+    `is_async` picks `cp.async` over an ordinary load/store pair. `cp.async` moves
+    4, 8 or 16 bytes and needs the vector contiguous and aligned at both ends, which
+    every copy here satisfies for any shape: the operand vector is 16 bytes along K,
+    contiguous in global memory and one swizzle granule in shared memory, and each
+    scale vector is the k-tile's 4 scales, contiguous in global memory because the
+    host pads that axis to a multiple of `TILE_SF` and contiguous in shared memory in
+    both scale layouts.
     """
     op = cute.nvgpu.cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
     return cute.make_tiled_copy_tv(
@@ -257,9 +257,9 @@ def _copy_tile(tiled_copy, tidx, gS, cS, sD, bound, zero_k_tail: bool):
 
     `cS` is the tile's global coordinates, so a copy vector is dropped exactly when
     its source lies past the end of the tensor. One comparison per vector stands for
-    the whole vector, which holds because no vector straddles an edge: both operands
-    and A's scales are cut along K, a multiple of 32; B's scales only take a 4-wide
-    N vector when 4 divides N.
+    the whole vector, which holds because no vector straddles an edge: every copy
+    here is cut along K -- a multiple of 32 for the operands, and padded to a
+    multiple of `TILE_SF` for either operand's scales.
 
     **Drop-never-substitute.** A dropped vector leaves whatever the stage buffer
     already held in *that* slot -- never a neighbour's data. Under staging "already
@@ -372,12 +372,12 @@ def _scaled_gemm_mxfp8_kernel(
     sSFB = smem.allocate_tensor(
         Float8E8M0FNU, cute.make_layout(SF_TILE_BYTES * STAGES), 16
     )
-    # Write views of the scale buffers, indexed as (row, scale) instead of the
-    # (row, k-element) the MMA reads them by. A's restates the 32x4x4 swizzle:
-    # offset = 16 * (row % 32) + 4 * (row // 32) + scale. B's is plain N-major,
-    # matching `sfb_smem_layout`.
-    sfa_write = cute.make_layout(((32, 4), TILE_SF), stride=((16, 4), 1))
-    sfb_write = cute.make_layout((TILE_N, TILE_SF), stride=(1, TILE_N))
+    # Write view of a scale buffer, indexed as (row, scale) instead of the
+    # (row, k-element) the MMA reads it by. It restates the 32x4x4 swizzle both
+    # `sfa_smem_layout` and `sfb_smem_layout` carry: offset = 16 * (row % 32) +
+    # 4 * (row // 32) + scale. One view serves both, since a k-tile of either
+    # operand's scales is the same 128x4 block in the same layout.
+    sf_write = cute.make_layout(((32, 4), TILE_SF), stride=((16, 4), 1))
 
     # this CTA's column of A / row of B tiles, and its one output tile. M and N need
     # not divide the tile: the trailing tiles then run off the end of the tensor, and
@@ -396,24 +396,13 @@ def _scaled_gemm_mxfp8_kernel(
     # 16 bytes per thread along K, the contiguous axis of both operands in global
     # memory -- and, after the swizzle, exactly one granule of the destination row, so
     # the vector lands whole. K is a multiple of 32, so a 16-wide vector never
-    # straddles the K edge and one predicate per vector is enough. The scale tiles
-    # move a whole k-tile's 4 bytes per thread -- along the scale axis for A
-    # (contiguous in `mSFA` and in the 32x4x4 swizzle) and along N for B (contiguous
-    # in `mSFB` and in the N-major smem layout) -- so half the CTA stages A's scales
-    # while the other half stages B's.
+    # straddles the K edge and one predicate per vector is enough. Each scale tile
+    # moves a whole k-tile's 4 bytes per thread along the scale axis, contiguous in
+    # both `mSFA` and `mSFB` and in both smem layouts, so one copy serves both and
+    # half the CTA stages A's scales while the other half stages B's.
     copy_a = _tiled_copy(mA.element_type, (32, 8), (8, 1), (1, 16), True)
     copy_b = _tiled_copy(mB.element_type, (32, 8), (8, 1), (1, 16), True)
-    copy_sfa = _tiled_copy(Float8E8M0FNU, (TILE_M, 1), (1, 1), (1, TILE_SF), True)
-    # a 4-wide N group must sit inside one row of `mSFB` and start on a 4-byte
-    # boundary, both of which need 4 | N; otherwise B's scales go synchronously
-    sfb_async = mB.shape[0] % 4 == 0
-    copy_sfb = (
-        _tiled_copy(
-            Float8E8M0FNU, (TILE_N // 4, TILE_SF), (1, TILE_N // 4), (4, 1), True
-        )
-        if sfb_async
-        else _tiled_copy(Float8E8M0FNU, (TILE_N, 1), (1, 1), (1, 1), False)
-    )
+    copy_sf = _tiled_copy(Float8E8M0FNU, (TILE_M, 1), (1, 1), (1, TILE_SF), True)
 
     thr_mma = tiled_mma.get_slice(tidx)
     tCgD = thr_mma.partition_C(gD)
@@ -435,8 +424,8 @@ def _scaled_gemm_mxfp8_kernel(
 
     job_a = (copy_a, gA, cA, sA, mA.shape)
     job_b = (copy_b, gB, cB, sB, mB.shape)
-    job_sfa = (copy_sfa, gSFA, cSFA, sSFA, sfa_write, mSFA.shape)
-    job_sfb = (copy_sfb, gSFB, cSFB, sSFB, sfb_write, mSFB.shape)
+    job_sfa = (copy_sf, gSFA, cSFA, sSFA, sf_write, mSFA.shape)
+    job_sfb = (copy_sf, gSFB, cSFB, sSFB, sf_write, mSFB.shape)
 
     # Prologue: put the first STAGES-1 tiles in flight. Each iteration below then
     # waits for exactly one group, so every stage must contribute a group even when K
@@ -497,39 +486,40 @@ def _scaled_gemm_mxfp8_host(
     mA: cute.Tensor,
     mB: cute.Tensor,
     sfa: cute.Tensor,
-    sfb: cute.Tensor,
+    mSFB: cute.Tensor,
     mD: cute.Tensor,
 ):
     tiled_mma = _make_mxfp8_tiled_mma(mA.element_type, mB.element_type)
     M, K = mA.shape
     N = mB.shape[0]
-    # Both scale tensors are read as (MN, scale-block); sb arrives transposed, as
-    # (padded blocks, N), so its view just swaps the strides rather than the data.
-    # The extent is the *padded* block count the caller allocated -- sfa.shape[1],
-    # which for sfa is also its row pitch and by construction equals sfb.shape[0] --
-    # not K // SCALE_VEC. Reading the padding is deliberate: those columns hold
-    # zeros, which is what spares the mainloop from having to zero a short K tile's
-    # scales itself, and it leaves the scale copies with no dropped vectors at all.
+    # Both scale tensors arrive as (MN, scale-block) row-major, so B's is already the
+    # tensor the kernel reads and is taken as `mSFB` unchanged. `sfa` is restated only
+    # because M is dynamic: the extent of its block axis must be the *padded* count
+    # the caller allocated, which is also its row pitch. Reading the padding is
+    # deliberate -- those columns hold zeros, which is what spares the mainloop from
+    # having to zero a short K tile's scales itself, and it leaves the scale copies
+    # with no dropped vectors at all. The padding widens each row rather than
+    # appending rows, so the row pitch is the padded count for *both* operands;
+    # taking `mSFB`'s own layout keeps that automatic.
     padded_blocks = sfa.shape[1]
     mSFA = cute.make_tensor(
         sfa.iterator, cute.make_layout((M, padded_blocks), stride=(padded_blocks, 1))
     )
-    mSFB = cute.make_tensor(
-        sfb.iterator, cute.make_layout((N, padded_blocks), stride=(1, N))
-    )
     tile = (TILE_M, TILE_N, TILE_K)
+    # Both operands' scales are staged in the cuBLASLt-compatible 32x4x4 swizzle. Its
+    # scale axis is contiguous, which is what makes the 4-byte `cp.async` legal now
+    # that both scale tensors are scale-contiguous in global memory too. The two
+    # layouts come out identical at this tile -- (((32,4),1),((32,1),4,1)) with
+    # strides (((16,4),512),((0,1),1,512)) -- but they are built from their own
+    # helpers rather than shared, since only the helpers know that. Measured worth
+    # 4-5%: staging B's scales row-major instead cost 91.4 vs 95.0 TF/s at 4096^3.
     sfa_smem_layout = cute.select(
         blockscaled_layout.sm120_make_smem_layout_sfa(tiled_mma, tile, SCALE_VEC, 1),
         mode=[0, 1],
     )
-    # B's scales are staged N-contiguous rather than in `sm120_make_smem_layout_sfb`'s
-    # 32x4x4 swizzle: `mSFB` is N-major, so this is the only layout in which a k-tile
-    # of scales is contiguous at both ends of the copy and a 4-byte `cp.async` is
-    # legal. The domain is still (N, K) in B *element* coordinates -- the 32-fold
-    # stride-0 mode broadcasts one scale over its block -- which is all `thrfrg_SFB`
-    # needs to derive the MMA's read partitioning.
-    sfb_smem_layout = cute.make_layout(
-        (TILE_N, (SCALE_VEC, TILE_SF)), stride=(1, (0, TILE_N))
+    sfb_smem_layout = cute.select(
+        blockscaled_layout.sm120_make_smem_layout_sfb(tiled_mma, tile, SCALE_VEC, 1),
+        mode=[0, 1],
     )
     _scaled_gemm_mxfp8_kernel(
         mA, mB, mSFA, mSFB, mD, tiled_mma, sfa_smem_layout, sfb_smem_layout
@@ -546,30 +536,34 @@ def scaled_gemm_mxfp8(
     sb: torch.Tensor,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    """mxfp8 GEMM, (M,K) x (K,N) -> (M,N), scales applied inside the MMA.
+    """mxfp8 GEMM, (M,K) x (N,K)^T -> (M,N), scales applied inside the MMA.
 
-    `sa` is (M, K//32) and `sb` is (K//32, N), both fp32 holding exact powers of two
-    -- what `quantize_operand` emits for `scale_dtype="fp8_e8m0"` at block size 32 --
-    so the cast to e8m0 below is lossless.
+    Both operands are taken K-contiguous: `aq` is (M, K) and `bq` is (N, K), the
+    layout an `nn.Linear` weight already has and the one the MMA wants, so neither
+    is relayouted anywhere. Callers holding a (K, N) B pass `bq.t()`, a free view.
+
+    `sa` is (M, K//32) and `sb` is (N, K//32), both fp32 holding exact powers of two
+    -- what `quantize_operand(x, -1, fmt, ...)` emits for `scale_dtype="fp8_e8m0"` at
+    block size 32 -- so the cast to e8m0 below is lossless.
 
     Either operand may be e4m3 or e5m2. M and N are arbitrary -- partial tiles are
     predicated -- but K must be a multiple of the 32-element scale block, which is
     what mxfp8 means rather than a limitation of this kernel.
     """
     M, K = aq.shape
-    N = bq.shape[1]
+    N = bq.shape[0]
     assert aq.dtype in FP8_FORMATS and bq.dtype in FP8_FORMATS, (
         f"the CuTe mxfp8 GEMM takes e4m3 or e5m2 operands, got {aq.dtype} x {bq.dtype}"
     )
-    assert bq.shape[0] == K, f"contraction mismatch: aq {K}, bq {bq.shape[0]}"
+    assert bq.shape[1] == K, f"contraction mismatch: aq {K}, bq {bq.shape[1]}"
     # the operand layouts are baked into the compile, so a non-contiguous operand
     # would be read through the wrong strides rather than rejected
     assert aq.is_contiguous() and bq.is_contiguous(), "aq and bq must be contiguous"
     # M and N are predicated, but a scale block is indivisible, so K is not
     assert K % SCALE_VEC == 0, f"K must be a multiple of {SCALE_VEC}, got {K}"
-    assert sa.shape == (M, K // SCALE_VEC) and sb.shape == (K // SCALE_VEC, N), (
+    assert sa.shape == (M, K // SCALE_VEC) and sb.shape == (N, K // SCALE_VEC), (
         f"scale shapes {tuple(sa.shape)} / {tuple(sb.shape)} do not match "
-        f"({M}, {K // SCALE_VEC}) / ({K // SCALE_VEC}, {N})"
+        f"({M}, {K // SCALE_VEC}) / ({N}, {K // SCALE_VEC})"
     )
     assert out_dtype in OUT_DTYPES, f"unsupported out_dtype {out_dtype}"
 
@@ -586,32 +580,24 @@ def scaled_gemm_mxfp8(
     # accumulator row. Do not remove: the mainloop's 4-byte scale `cp.async` reads
     # these columns on every short K tile, both to stay in bounds and to get the
     # zeros -- it does not predicate the scale copy along k at all.
+    #
+    # The block axis is the contiguous axis of both scale tensors, so padding widens
+    # each row rather than appending rows: the row pitch becomes `padded_blocks` for
+    # both, which is what `_scaled_gemm_mxfp8_host` reads back as the extent.
     n_scale_blocks = K // SCALE_VEC
     padded_blocks = -(-n_scale_blocks // TILE_SF) * TILE_SF
     if padded_blocks != n_scale_blocks:
         sa_padded = torch.zeros(M, padded_blocks, device=sa8.device, dtype=sa8.dtype)
         sa_padded[:, :n_scale_blocks] = sa8
         sa8 = sa_padded
-        sb_padded = torch.zeros(padded_blocks, N, device=sb8.device, dtype=sb8.dtype)
-        sb_padded[:n_scale_blocks, :] = sb8
+        sb_padded = torch.zeros(N, padded_blocks, device=sb8.device, dtype=sb8.dtype)
+        sb_padded[:, :n_scale_blocks] = sb8
         sb8 = sb_padded
-    # The MMA reads B as (N, K) and its register fragment wants four consecutive k, so
-    # B's shared tile has to be K-major -- otherwise every element of it arrives as a
-    # separate `ld.shared.b8` and the mainloop issues ~290 shared loads against 64
-    # `mma.sync`. `bq` arrives (K, N) row-major, i.e. N-contiguous, so the relayout
-    # happens here, and it is not cheap: torch's byte transpose runs at ~93 GB/s on a
-    # 5060 Ti, which is 5% of this call at K=512 but 19% at 4096^3 and 11% at 8192^3.
-    # It is also redundant whenever `bq` is a weight that does not change between
-    # calls. Two ways out, neither available here: the transposing 8-bit `ldmatrix`
-    # that would keep the tile N-major mis-lowers against this MMA's N permutation
-    # (it emits 8-byte-spaced `m16n16.b8` addresses, which must be 16-byte rows), and
-    # hoisting the relayout to the caller needs a signature this kernel does not have.
-    b_kmajor = bq.t().contiguous()
     args = (
         from_dlpack(aq, assumed_align=16).mark_compact_shape_dynamic(
             mode=0, stride_order=aq.dim_order(), divisibility=1
         ),
-        from_dlpack(b_kmajor, assumed_align=16),
+        from_dlpack(bq, assumed_align=16),
         from_dlpack(sa8, assumed_align=4).mark_compact_shape_dynamic(
             mode=0, stride_order=sa8.dim_order(), divisibility=1
         ),
