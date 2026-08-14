@@ -10,17 +10,19 @@ M and N are free of the tile: a trailing tile runs off the end of the tensor, an
 both the loads and the store are predicated against the real extent. K only has to
 be a multiple of the 32-element scale block.
 
-There is deliberately no pipelining here: the shared-memory stage is single-buffered
-and fed by ordinary loads, not `cp.async`. That makes this slower than the Triton
-mxfp8 kernel, which is the expected intermediate state -- this module exists to
-establish a correct CuTe mainloop for the feed path to be built on.
+The mainloop is a `STAGES`-deep software pipeline. Shared memory holds `STAGES`
+copies of each of the four staged tensors, every global->shared transfer is a
+`cp.async` group, and iteration `i` waits only for the group it is about to feed the
+MMA -- the copies for tiles `i+1 .. i+STAGES-1` stay in flight across the MMA.
 
-Scale factors are held in shared memory in the cuBLASLt-compatible 32x4x4 swizzle
-(`sm120_make_smem_layout_sfa`/`sfb`), the layout the MMA's scale-factor fragment
-partitioning reads back. That compatibility is about the *smem* layout only: the
-kernel consumes scales in `quantize_operand`'s native `(M, K//32)` layout straight
-from the host and performs the 32x4x4 swizzle itself while staging into shared
-memory, so no pre-swizzled global input is required.
+Scale factors for A are held in shared memory in the cuBLASLt-compatible 32x4x4
+swizzle (`sm120_make_smem_layout_sfa`); B's are held N-contiguous instead, because
+`mSFB` is N-major in global memory and a `cp.async` needs its four bytes contiguous
+at *both* ends. The MMA reads either one correctly: `thrfrg_SFA`/`SFB` derive the
+read partitioning from whatever layout they are handed. Either way the kernel
+consumes scales in `quantize_operand`'s native `(M, K//32)` / `(K//32, N)` layout
+straight from the host and lays them out itself while staging, so no pre-swizzled
+global input is required.
 """
 
 from __future__ import annotations
@@ -48,6 +50,13 @@ SCALE_VEC = 32
 # scale factors per row (column) per K tile
 TILE_SF = TILE_K // SCALE_VEC
 THREADS = 256
+# bytes one k-tile of scale factors occupies in shared memory, for either operand
+SF_TILE_BYTES = TILE_M * TILE_SF
+# Pipeline depth. Shared memory per CTA is STAGES * (32 KiB of operand + 1 KiB of
+# scales); 3 is the deepest that fits sm120's 99 KiB shared-memory budget at a 128^3
+# tile. STAGES-1 tiles are in flight while the MMA consumes the oldest.
+STAGES = 3
+assert STAGES >= 2, "the mainloop needs at least one tile in flight behind the MMA"
 
 # Compiled host functions, keyed on everything baked into the artifact: K, N and the
 # operand/output dtypes. M is dynamic, so a training loop that changes batch size
@@ -129,21 +138,39 @@ def _partition_mxfp8_sf(sf: cute.Tensor, tiled_mma: cute.TiledMma, tidx, is_a: b
     return part if is_a else cute.group_modes(part, 1, 3)
 
 
-def _tiled_copy(dtype, thr_shape, thr_stride, val_shape) -> cute.TiledCopy:
-    """A plain global->shared tiled copy; `thr_*` maps a tile coord to its thread.
+def _tiled_copy(dtype, thr_shape, thr_stride, val_shape, is_async) -> cute.TiledCopy:
+    """A global->shared tiled copy; `thr_*` maps a tile coord to its thread.
 
     The atom is sized to the whole per-thread vector so that predication is decided
     once per vector rather than per element.
+
+    `is_async` picks `cp.async` over an ordinary load/store pair. It is decided
+    statically per operand: `cp.async` moves 4, 8 or 16 bytes and needs the vector
+    contiguous and aligned at both ends, which a narrow N (B's vector shrinks to fit
+    it) or an N indivisible by 4 (B's scales) can break. Those shapes fall back to
+    the synchronous copy -- correct, just not overlapped.
     """
+    op = cute.nvgpu.cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
     return cute.make_tiled_copy_tv(
         cute.make_copy_atom(
-            cute.nvgpu.CopyUniversalOp(),
+            op,
             dtype,
             num_bits_per_copy=dtype.width * val_shape[0] * val_shape[1],
         ),
         cute.make_layout(thr_shape, stride=thr_stride),
         cute.make_layout(val_shape),
     )
+
+
+def _sf_stage(buf: cute.Tensor, stage, layout: cute.Layout) -> cute.Tensor:
+    """One stage's view of a flat scale buffer, under `layout`.
+
+    The offset is a whole multiple of `SF_TILE_BYTES` off a 16-byte-aligned
+    allocation, but pointer arithmetic drops the alignment down to the 1-byte
+    element, and `cp.async` will not accept a destination it believes is unaligned.
+    `align` restates what the allocation already guarantees.
+    """
+    return cute.make_tensor((buf.iterator + stage * SF_TILE_BYTES).align(16), layout)
 
 
 def _group_rest(t: cute.Tensor) -> cute.Tensor:
@@ -158,33 +185,93 @@ def _tile_coords(shape, tiler, tile):
     ]
 
 
-def _copy_tile(tiled_copy, tidx, gS, cS, sD, bound, zero_first: bool):
+def _copy_tile(tiled_copy, tidx, gS, cS, sD, bound, zero_k_tail: bool):
     """Stage one tile in shared memory, skipping whatever falls outside `bound`.
 
     `cS` is the tile's global coordinates, so a copy vector is dropped exactly when
     its source lies past the end of the tensor. One comparison per vector stands for
-    the whole vector, which holds because no vector straddles an edge: A and the
-    scales are cut along K, a multiple of 32, and B's N vector width divides N.
+    the whole vector, which holds because no vector straddles an edge: A and A's
+    scales are cut along K, a multiple of 32; B's N vector width divides N, and B's
+    scales only take a 4-wide N vector when 4 divides N.
 
-    `zero_first` blanks the stage before the copy, and is set only when K leaves a
-    short last tile. That tail multiplies into every output element, so stale bytes
-    there would corrupt the result -- an uninitialised e8m0 byte can even be the 0xFF
-    NaN encoding. The M and N edges need no such care: garbage rows and columns reach
-    only their own accumulator rows and columns, which the epilogue never stores.
+    **Drop-never-substitute.** A dropped vector leaves whatever the stage buffer
+    already held in *that* slot -- never a neighbour's data. Under staging "already
+    held" means "written by the tile that used this stage `STAGES` iterations ago",
+    which is a different value than in the unpipelined kernel but sits at the same
+    (row, column) of the tile, so the argument is unchanged: a stale element only
+    ever reaches the accumulator row (M edge) or column (N edge) it belongs to, and
+    the epilogue stores neither.
+
+    **K-tail zeroing.** A short last K tile is the one case where stale data is not
+    confined: it multiplies into every output element, and an uninitialised e8m0 byte
+    can be the 0xFF NaN encoding, which `NaN * 0` spreads across an accumulator row.
+    `zero_k_tail` therefore stores zeros over exactly the vectors dropped for running
+    past K -- into the same slots, in the same stage buffer, as part of staging that
+    tile. That makes zeroing a property of the stage buffer rather than of the loop
+    iteration, which is what staging requires: the tail tile is copied several
+    iterations before the MMA reads it, so anything done once per iteration would
+    zero the wrong buffer. The zero stores and the copy are disjoint by construction
+    (complementary predicates), so they cannot race each other in the async copy's
+    destination. The scales need no equivalent -- `scaled_gemm_mxfp8` pads their
+    k axis with zeros so their copy has no dropped vectors to begin with.
     """
     copy = tiled_copy.get_slice(tidx)
     src = _group_rest(copy.partition_S(gS))
     crd = _group_rest(copy.partition_S(cS))
     dst = _group_rest(copy.partition_D(sD))
-    if zero_first:
-        zeros = cute.make_fragment_like(dst)
-        zeros.fill(0)
-        cute.autovec_copy(zeros, dst)
     n_vec = cute.size(src, mode=[1])
     pred = cute.make_rmem_tensor((1, n_vec), cutlass.Boolean)
     for i in range(n_vec):
         pred[0, i] = cute.elem_less(crd[0, i], bound)
     cute.copy(tiled_copy, src, dst, pred=pred)
+    if zero_k_tail:
+        zeros = cute.make_fragment_like(dst)
+        zeros.fill(0)
+        # mode 1 of the coordinate is K for both A (M, K) and B (N, K)
+        zpred = cute.make_rmem_tensor((1, n_vec), cutlass.Boolean)
+        for i in range(n_vec):
+            zpred[0, i] = crd[0, i][1] >= bound[1]
+        cute.copy(
+            cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                sD.element_type,
+                num_bits_per_copy=sD.element_type.width * cute.size(dst, mode=[0]),
+            ),
+            zeros,
+            dst,
+            pred=zpred,
+        )
+
+
+@cute.jit
+def _stage_k_tile(k_tile, stage, tidx, k_tail, a, b, sfa, sfb):
+    """Issue every global->shared copy for one k-tile into one stage buffer.
+
+    `@cute.jit` rather than bare: the scale split below branches on `tidx`, and only a
+    decorated body gets its control flow staged. It is still device code -- the
+    decorator marks the function for AST preprocessing, and the call is inlined into
+    whichever `@cute.kernel` reaches it.
+
+    `a` and `b` are `(tiled_copy, global tiles, coordinate tiles, smem, bound)`, the
+    smem buffer carrying the stage as a trailing mode. `sfa` and `sfb` add the write
+    view between smem and bound, since the scale buffers are flat and are addressed
+    through a byte offset plus a `(row, scale)` layout.
+
+    A k-tile of scales is 128 groups of 4 bytes, exactly one `cp.async` per thread
+    for half a CTA, so the halves split the work: threads below the midpoint stage
+    A's scales, the rest stage B's. A shape that falls back to the synchronous scale
+    copy keeps the same split, just at a narrower vector.
+    """
+    k = (None, None, k_tile)
+    _copy_tile(a[0], tidx, a[1][k], a[2][k], a[3][None, None, stage], a[4], k_tail)
+    _copy_tile(b[0], tidx, b[1][k], b[2][k], b[3][None, None, stage], b[4], k_tail)
+    half = THREADS // 2
+    if tidx < half:
+        dst = _sf_stage(sfa[3], stage, sfa[4])
+        _copy_tile(sfa[0], tidx, sfa[1][k], sfa[2][k], dst, sfa[5], False)
+    else:
+        dst = _sf_stage(sfb[3], stage, sfb[4])
+        _copy_tile(sfb[0], tidx - half, sfb[1][k], sfb[2][k], dst, sfb[5], False)
 
 
 @cute.kernel
@@ -201,21 +288,31 @@ def _scaled_gemm_mxfp8_kernel(
     tidx, _, _ = cute.arch.thread_idx()
     tile_m, tile_n, _ = cute.arch.block_idx()
 
+    # Every staged buffer carries a leading pipeline depth: STAGES k-tiles are
+    # resident at once so the copies for the next STAGES-1 can be in flight.
     smem = cutlass.utils.SmemAllocator()
     sA = smem.allocate_tensor(
-        mA.element_type, cute.make_ordered_layout((TILE_M, TILE_K), order=(1, 0)), 16
+        mA.element_type,
+        cute.make_ordered_layout((TILE_M, TILE_K, STAGES), order=(1, 0, 2)),
+        16,
     )
     sB = smem.allocate_tensor(
-        mB.element_type, cute.make_ordered_layout((TILE_N, TILE_K), order=(0, 1)), 16
+        mB.element_type,
+        cute.make_ordered_layout((TILE_N, TILE_K, STAGES), order=(0, 1, 2)),
+        16,
     )
-    sSFA = smem.allocate_tensor(Float8E8M0FNU, sfa_smem_layout, 16)
-    sSFB = smem.allocate_tensor(Float8E8M0FNU, sfb_smem_layout, 16)
-    # Write view of the same two buffers, indexed as (row, scale) instead of the
-    # (row, k-element) the MMA reads them by. It restates the 32x4x4 swizzle above:
-    # offset = 16 * (row % 32) + 4 * (row // 32) + scale.
-    swizzle = cute.make_layout(((32, 4), TILE_SF), stride=((16, 4), 1))
-    sSFA_w = cute.make_tensor(sSFA.iterator, swizzle)
-    sSFB_w = cute.make_tensor(sSFB.iterator, swizzle)
+    sSFA = smem.allocate_tensor(
+        Float8E8M0FNU, cute.make_layout(SF_TILE_BYTES * STAGES), 16
+    )
+    sSFB = smem.allocate_tensor(
+        Float8E8M0FNU, cute.make_layout(SF_TILE_BYTES * STAGES), 16
+    )
+    # Write views of the scale buffers, indexed as (row, scale) instead of the
+    # (row, k-element) the MMA reads them by. A's restates the 32x4x4 swizzle:
+    # offset = 16 * (row % 32) + 4 * (row // 32) + scale. B's is plain N-major,
+    # matching `sfb_smem_layout`.
+    sfa_write = cute.make_layout(((32, 4), TILE_SF), stride=((16, 4), 1))
+    sfb_write = cute.make_layout((TILE_N, TILE_SF), stride=(1, TILE_N))
 
     # this CTA's column of A / row of B tiles, and its one output tile. M and N need
     # not divide the tile: the trailing tiles then run off the end of the tensor, and
@@ -234,47 +331,95 @@ def _scaled_gemm_mxfp8_kernel(
     # 16 bytes per thread along whichever axis is contiguous in global memory: K for
     # A, N for B. B's width drops to the largest power of two dividing N, so that a
     # vector never straddles the N edge nor loads across a row start it is not aligned
-    # to. The scale tiles are copied a byte at a time, which sidesteps straddling and
-    # alignment for them entirely and costs little: 512 bytes against 32 KiB of operand.
+    # to; below 4 bytes `cp.async` cannot carry it and the copy falls back to a
+    # synchronous one. The scale tiles move a whole k-tile's 4 bytes per thread --
+    # along the scale axis for A (contiguous in `mSFA` and in the 32x4x4 swizzle) and
+    # along N for B (contiguous in `mSFB` and in the N-major smem layout) -- so half
+    # the CTA stages A's scales while the other half stages B's.
     b_vec = max(v for v in (16, 8, 4, 2, 1) if mB.shape[0] % v == 0)
     b_thr = TILE_N // b_vec
-    copy_a = _tiled_copy(mA.element_type, (32, 8), (8, 1), (1, 16))
+    copy_a = _tiled_copy(mA.element_type, (32, 8), (8, 1), (1, 16), True)
     copy_b = _tiled_copy(
-        mB.element_type, (b_thr, THREADS // b_thr), (1, b_thr), (b_vec, 1)
+        mB.element_type, (b_thr, THREADS // b_thr), (1, b_thr), (b_vec, 1), b_vec >= 4
     )
-    copy_sf = _tiled_copy(Float8E8M0FNU, (128, 2), (1, 128), (1, 1))
+    copy_sfa = _tiled_copy(Float8E8M0FNU, (TILE_M, 1), (1, 1), (1, TILE_SF), True)
+    # a 4-wide N group must sit inside one row of `mSFB` and start on a 4-byte
+    # boundary, both of which need 4 | N; otherwise B's scales go synchronously
+    sfb_async = mB.shape[0] % 4 == 0
+    copy_sfb = (
+        _tiled_copy(
+            Float8E8M0FNU, (TILE_N // 4, TILE_SF), (1, TILE_N // 4), (4, 1), True
+        )
+        if sfb_async
+        else _tiled_copy(Float8E8M0FNU, (TILE_N, 1), (1, 1), (1, 1), False)
+    )
 
     thr_mma = tiled_mma.get_slice(tidx)
-    tCsA = thr_mma.partition_A(sA)
-    tCsB = thr_mma.partition_B(sB)
     tCgD = thr_mma.partition_C(gD)
-    tCrA = tiled_mma.make_fragment_A(tCsA)
-    tCrB = tiled_mma.make_fragment_B(tCsB)
-    tCsSFA = _partition_mxfp8_sf(sSFA, tiled_mma, tidx, True)
-    tCsSFB = _partition_mxfp8_sf(sSFB, tiled_mma, tidx, False)
-    tCrSFA = cute.make_fragment_like(tCsSFA)
-    tCrSFB = cute.make_fragment_like(tCsSFB)
+    tCrA = tiled_mma.make_fragment_A(thr_mma.partition_A(sA[None, None, 0]))
+    tCrB = tiled_mma.make_fragment_B(thr_mma.partition_B(sB[None, None, 0]))
+    tCrSFA = cute.make_fragment_like(
+        _partition_mxfp8_sf(_sf_stage(sSFA, 0, sfa_smem_layout), tiled_mma, tidx, True)
+    )
+    tCrSFB = cute.make_fragment_like(
+        _partition_mxfp8_sf(_sf_stage(sSFB, 0, sfb_smem_layout), tiled_mma, tidx, False)
+    )
 
     acc = cute.make_rmem_tensor(tCgD.shape, Float32)
     acc.fill(0.0)
 
     # K's last tile is short exactly when the tile does not divide it, and K is static
     k_tail = mA.shape[1] % TILE_K != 0
-    for k_tile in cutlass.range(cute.size(gA, mode=[2]), unroll=1):
-        k = (None, None, k_tile)
-        _copy_tile(copy_a, tidx, gA[k], cA[k], sA, mA.shape, k_tail)
-        _copy_tile(copy_b, tidx, gB[k], cB[k], sB, mB.shape, k_tail)
-        _copy_tile(copy_sf, tidx, gSFA[k], cSFA[k], sSFA_w, mSFA.shape, k_tail)
-        _copy_tile(copy_sf, tidx, gSFB[k], cSFB[k], sSFB_w, mSFB.shape, k_tail)
+    n_k = cute.size(gA, mode=[2])
+
+    job_a = (copy_a, gA, cA, sA, mA.shape)
+    job_b = (copy_b, gB, cB, sB, mB.shape)
+    job_sfa = (copy_sfa, gSFA, cSFA, sSFA, sfa_write, mSFA.shape)
+    job_sfb = (copy_sfb, gSFB, cSFB, sSFB, sfb_write, mSFB.shape)
+
+    # Prologue: put the first STAGES-1 tiles in flight. Each iteration below then
+    # waits for exactly one group, so every stage must contribute a group even when K
+    # is too short to fill it -- an empty `commit_group` keeps the count aligned.
+    for s in range(STAGES - 1):
+        if s < n_k:
+            _stage_k_tile(s, s, tidx, k_tail, job_a, job_b, job_sfa, job_sfb)
+        cute.arch.cp_async_commit_group()
+
+    for k_tile in cutlass.range(n_k, unroll=1):
+        stage = k_tile % STAGES
+        # STAGES-2 groups may still be pending; the oldest, this tile's, must not be
+        cute.arch.cp_async_wait_group(STAGES - 2)
+        # `wait_group` only covers this thread's own copies, and the stage was last
+        # read STAGES-1 iterations ago -- the barrier closes both gaps at once
         cute.arch.barrier()
 
-        cute.autovec_copy(tCsA, tCrA)
-        cute.autovec_copy(tCsB, tCrB)
-        cute.autovec_copy(tCsSFA, tCrSFA)
-        cute.autovec_copy(tCsSFB, tCrSFB)
+        # The barrier just freed the stage STAGES-1 tiles behind, so refill it before
+        # anything else: the transfer then runs underneath both the shared->register
+        # loads and the MMA. Issuing it first also keeps its address registers out of
+        # the live range of the A/B fragments, which is what stops the mainloop
+        # spilling. Reading stage `stage` below is unaffected -- a different buffer.
+        nxt = k_tile + STAGES - 1
+        if nxt < n_k:
+            _stage_k_tile(
+                nxt, nxt % STAGES, tidx, k_tail, job_a, job_b, job_sfa, job_sfb
+            )
+        cute.arch.cp_async_commit_group()
+
+        cute.autovec_copy(thr_mma.partition_A(sA[None, None, stage]), tCrA)
+        cute.autovec_copy(thr_mma.partition_B(sB[None, None, stage]), tCrB)
+        cute.autovec_copy(
+            _partition_mxfp8_sf(
+                _sf_stage(sSFA, stage, sfa_smem_layout), tiled_mma, tidx, True
+            ),
+            tCrSFA,
+        )
+        cute.autovec_copy(
+            _partition_mxfp8_sf(
+                _sf_stage(sSFB, stage, sfb_smem_layout), tiled_mma, tidx, False
+            ),
+            tCrSFB,
+        )
         cute.gemm(tiled_mma, acc, [tCrA, tCrSFA], [tCrB, tCrSFB], acc)
-        # the next tile overwrites the stage, so no thread may run ahead of the MMA
-        cute.arch.barrier()
 
     # fp32 all the way through the mainloop; the caller's dtype is reached here, and
     # only the elements inside (M, N) are written back
@@ -297,27 +442,33 @@ def _scaled_gemm_mxfp8_host(
     tiled_mma = _make_mxfp8_tiled_mma(mA.element_type, mB.element_type)
     M, K = mA.shape
     N = mB.shape[0]
-    n_scale_blocks = K // SCALE_VEC
     # Both scale tensors are read as (MN, scale-block); sb arrives transposed, as
-    # (K // 32, N), so its view just swaps the strides rather than the data.
-    # sfa's row pitch is read from the tensor actually passed in (sfa.shape[1]),
-    # not recomputed as n_scale_blocks: the caller may have padded each row out to
-    # a whole number of TILE_SF groups, which widens the physical stride between
-    # rows without changing the logical (real) scale-block count used below.
+    # (padded blocks, N), so its view just swaps the strides rather than the data.
+    # The extent is the *padded* block count the caller allocated -- sfa.shape[1],
+    # which for sfa is also its row pitch and by construction equals sfb.shape[0] --
+    # not K // SCALE_VEC. Reading the padding is deliberate: those columns hold
+    # zeros, which is what spares the mainloop from having to zero a short K tile's
+    # scales itself, and it leaves the scale copies with no dropped vectors at all.
+    padded_blocks = sfa.shape[1]
     mSFA = cute.make_tensor(
-        sfa.iterator, cute.make_layout((M, n_scale_blocks), stride=(sfa.shape[1], 1))
+        sfa.iterator, cute.make_layout((M, padded_blocks), stride=(padded_blocks, 1))
     )
     mSFB = cute.make_tensor(
-        sfb.iterator, cute.make_layout((N, n_scale_blocks), stride=(1, N))
+        sfb.iterator, cute.make_layout((N, padded_blocks), stride=(1, N))
     )
     tile = (TILE_M, TILE_N, TILE_K)
     sfa_smem_layout = cute.select(
         blockscaled_layout.sm120_make_smem_layout_sfa(tiled_mma, tile, SCALE_VEC, 1),
         mode=[0, 1],
     )
-    sfb_smem_layout = cute.select(
-        blockscaled_layout.sm120_make_smem_layout_sfb(tiled_mma, tile, SCALE_VEC, 1),
-        mode=[0, 1],
+    # B's scales are staged N-contiguous rather than in `sm120_make_smem_layout_sfb`'s
+    # 32x4x4 swizzle: `mSFB` is N-major, so this is the only layout in which a k-tile
+    # of scales is contiguous at both ends of the copy and a 4-byte `cp.async` is
+    # legal. The domain is still (N, K) in B *element* coordinates -- the 32-fold
+    # stride-0 mode broadcasts one scale over its block -- which is all `thrfrg_SFB`
+    # needs to derive the MMA's read partitioning.
+    sfb_smem_layout = cute.make_layout(
+        (TILE_N, (SCALE_VEC, TILE_SF)), stride=(1, (0, TILE_N))
     )
     _scaled_gemm_mxfp8_kernel(
         mA, mB, mSFA, mSFB, mD, tiled_mma, sfa_smem_layout, sfb_smem_layout
@@ -369,10 +520,11 @@ def scaled_gemm_mxfp8(
     # block(s); the rest of that 4-byte group would read past the end of sa8/sb8.
     # Pad the scale-block axis up to a whole number of groups so the read is always
     # in-bounds. Zero, not empty or 0xFF (the e8m0 NaN encoding): the operand elements
-    # those padding blocks would scale are already zeroed by zero_first in shared
-    # memory, and 0 * anything = 0, but 0 * NaN = NaN would poison a whole accumulator
-    # row. Do not remove this once the mainloop vectorizes the scale copy -- it is
-    # the reason that copy never runs out of bounds.
+    # those padding blocks would scale are zeroed in shared memory by `_copy_tile`'s
+    # K-tail store, and 0 * anything = 0, but 0 * NaN = NaN would poison a whole
+    # accumulator row. Do not remove: the mainloop's 4-byte scale `cp.async` reads
+    # these columns on every short K tile, both to stay in bounds and to get the
+    # zeros -- it does not predicate the scale copy along k at all.
     n_scale_blocks = K // SCALE_VEC
     padded_blocks = -(-n_scale_blocks // TILE_SF) * TILE_SF
     if padded_blocks != n_scale_blocks:
