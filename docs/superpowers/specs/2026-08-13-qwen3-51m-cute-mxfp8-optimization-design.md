@@ -11,9 +11,10 @@ model-weighted Qwen3-51M GEMM set, with no dominant MLP GEMM below 75%. Numerica
 behavior must remain within the existing test tolerances. Parity remains the stretch
 goal.
 
-This work also consolidates the CuTe benchmark into
+This work also consolidates scaled-GEMM coverage into
 `benchmarks/gemm/bench_scaled_gemm.py` and deletes
-`benchmarks/gemm/bench_cute_gemm.py`.
+`benchmarks/gemm/bench_cute_gemm.py`. The public benchmark is a dtype/scaling
+matrix rather than a Qwen3-specific training mode.
 
 ## Evidence and root cause
 
@@ -53,7 +54,7 @@ native quantizer output. Those launches are API overhead, not the main kernel ga
 kernel-only benchmarks must pre-convert scales so they do not contaminate schedule
 measurements.
 
-## Qwen3-51M workload
+## Qwen3-51M profiling workload
 
 The default microbatch contains `16 * 1024 = 16384` tokens. Each of eight layers has:
 
@@ -64,34 +65,41 @@ The default microbatch contains `16 * 1024 = 16384` tokens. Each of eight layers
 | fused gate/up | 1 | 512 | 3072 |
 | down | 1 | 1536 | 512 |
 
-For each `(tokens, K_in, N_out)` linear operation, the benchmark includes:
+For each `(tokens, K_in, N_out)` linear operation, the private profiling set includes:
 
 - forward: `(tokens, K_in, N_out)`;
 - dgrad: `(tokens, N_out, K_in)`;
 - wgrad: `(N_out, tokens, K_in)`.
 
-The report shows every unique shape and a weighted aggregate using the per-layer call
-counts above. Multiplying all counts by eight does not change the aggregate ratio, so
-the report labels the aggregate per layer while describing the eight-layer total.
+These shapes remain the private profiling and optimization workload used to choose the
+CuTe schedule. They are recorded in the performance note and are not exposed as a
+Qwen3-specific mode in the public benchmark script.
 
 ## Benchmark consolidation
 
 `benchmarks/gemm/bench_scaled_gemm.py` becomes the only scaled-GEMM benchmark.
 
-- Move reusable CuTe preparation, timing, correctness, and plotting logic from
-  `bench_cute_gemm.py` into the existing MXFP8 benchmark path.
-- Add `cute` beside the existing `triton` and `native` implementations. CuTe is `n/a`
-  for non-MXFP8 schemes.
-- Correct the fused gate/up width from 1536 to 3072.
-- Add a Qwen3-51M training-shape mode covering forward, dgrad, and wgrad.
-- Hoist quantization, E8M0 conversion, B-layout preparation, and cuBLASLt scale
+- Organize every result row by `dtype`, `granularity`, and optional `block_size`.
+- Sweep both FP8 and INT8 through tensorwise, rowwise, blockwise-1D, and
+  blockwise-2D scaling.
+- Sweep block sizes `16`, `32`, `64`, and `128` for both blockwise granularities.
+- Treat FP8 blockwise-1D with block size 32 as MXFP8. This row compares CuTe,
+  Triton, and native `torch.nn.functional.scaled_mm`, and prominently reports the
+  CuTe/native ratio.
+- Add `cute` beside `triton` and `native`; CuTe is `n/a` outside the MXFP8 row, and
+  native is `n/a` for combinations PyTorch does not support.
+- Hoist quantization, E8M0 conversion, B-layout preparation, and native scale
   swizzling out of every kernel-only timed closure.
-- Report latency, TFLOP/s, relative error, CuTe/native ratio, and the model-weighted
-  aggregate.
-- Keep an optional API-overhead measurement that includes each backend's required
-  scale-layout preparation. It is reported separately and never mixed into the pure
-  kernel comparison.
-- Delete `bench_cute_gemm.py` and update its importability test to target the
+- Report latency, TFLOP/s, relative error, and supported implementation ratios in
+  one table, one plot, and optional generic JSON output.
+- Remove Qwen3 workload metadata, weighted aggregation, the `--qwen3-training`
+  switch, and Qwen-specific threshold enforcement from the public script.
+- Keep the representative linear shapes and token counts as ordinary GEMM shapes;
+  they are not labeled or weighted as a Qwen training workload.
+- Fold the old separate blockwise-2D appendix into the unified result matrix.
+- Keep a CuTe schedule selector so the MXFP8 row can compare the baseline and
+  cooperative schedules.
+- Delete `bench_cute_gemm.py` and keep CPU-safe import/metadata tests for the
   consolidated script.
 
 ## Kernel equivalence and profiling
@@ -139,7 +147,8 @@ Each isolated schedule change must pass:
 
 - `tests/fast/kernel/cute/test_gemm.py`, especially the adversarial scale-placement,
   ragged-shape, partial-scale-group, dtype, and `F.scaled_mm` cross-checks;
-- the consolidated Qwen3-51M forward/dgrad/wgrad benchmark;
+- the consolidated dtype/scaling matrix, with special attention to every FP8
+  blockwise-1D block-32 MXFP8 row;
 - Ruff lint and format checks;
 - the full fast kernel tree after the winning schedule is selected.
 
@@ -156,4 +165,3 @@ dominant MLP shape below the 75% floor or changing numerical results.
 - unrelated quantizer or model refactors;
 - CUTLASS C++ integration unless CuTe DSL is proven unable to express the required
   schedule and a separate design is approved.
-
