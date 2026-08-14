@@ -1373,6 +1373,52 @@ def _make_grouped_layout(layout, counts=(64, 0, 130, 46), M=32, K=64, N=48, seed
     return rand(G, M, K), rand(K, R), offs  # ragged_n: (G,M,K) x (K,R) -> (M,R)
 
 
+def _run_grouped_gemm_apply(a0, b0, offs, grad, backend, include_backend):
+    a = a0.clone().requires_grad_(True)
+    b = b0.clone().requires_grad_(True)
+    if include_backend:
+        out = GroupedGemmFn.apply(a, b, None, offs, backend)
+    else:
+        out = GroupedGemmFn.apply(a, b, None, offs)
+    out.backward(grad)
+    return out, a.grad, b.grad
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+@pytest.mark.parametrize(
+    ("backend", "include_backend"),
+    [(None, False), ("torch", True)],
+    ids=["four_inputs", "forced_backend"],
+)
+def test_grouped_gemm_fn_apply_backward_arity(backend, include_backend):
+    a0, b0, offs = _make_grouped_layout("ragged_m")
+    grad = torch.randn(a0.shape[0], b0.shape[-1], device="cuda", dtype=torch.bfloat16)
+
+    out, grad_a, grad_b = _run_grouped_gemm_apply(
+        a0, b0, offs, grad, backend, include_backend
+    )
+
+    assert torch.isfinite(out).all()
+    assert torch.isfinite(grad_a).all()
+    assert torch.isfinite(grad_b).all()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+def test_grouped_gemm_fn_explicit_none_backend_matches_omitted_backend():
+    a0, b0, offs = _make_grouped_layout("ragged_m")
+    grad = torch.randn(a0.shape[0], b0.shape[-1], device="cuda", dtype=torch.bfloat16)
+
+    omitted = _run_grouped_gemm_apply(a0, b0, offs, grad, None, False)
+    explicit_none = _run_grouped_gemm_apply(a0, b0, offs, grad, None, True)
+
+    for got, expected in zip(explicit_none, omitted):
+        torch.testing.assert_close(got, expected)
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
 )

@@ -17,13 +17,16 @@ def _support(
     availability = spec.availability()
     if not availability.supported:
         return availability
+    tensor_requires_grad = any(
+        isinstance(value, torch.Tensor) and value.requires_grad for value in args
+    ) or any(
+        isinstance(value, torch.Tensor) and value.requires_grad
+        for value in kwargs.values()
+    )
     if (
         spec.autograd in ("external", "forward_only")
         and torch.is_grad_enabled()
-        and any(
-            isinstance(value, torch.Tensor) and value.requires_grad
-            for value in (*args, *kwargs.values())
-        )
+        and tensor_requires_grad
     ):
         return SupportResult(
             False,
@@ -48,7 +51,6 @@ def select_kernel(
     op: str,
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
-    *,
     backend: str = "auto",
     registry: KernelRegistry = KERNEL_REGISTRY,
 ) -> KernelSpec:
@@ -80,10 +82,10 @@ def select_kernel(
 
 def dispatch(
     op: str,
-    *args: Any,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
     backend: str = "auto",
     registry: KernelRegistry = KERNEL_REGISTRY,
-    **kwargs: Any,
 ) -> Any:
-    selected = select_kernel(op, args, kwargs, backend=backend, registry=registry)
+    selected = select_kernel(op, args, kwargs, backend, registry)
     return selected.fn(*args, **kwargs)

@@ -30,7 +30,6 @@ KERNEL_REGISTRY = KernelRegistry()
 
 
 def register_kernel(
-    *,
     op: str,
     backend: str,
     priority: int,

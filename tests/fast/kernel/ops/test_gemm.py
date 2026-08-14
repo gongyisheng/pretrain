@@ -115,7 +115,7 @@ def test_backend_selection_and_parity():
     b = w.mT
     ref = torch._grouped_mm(a, b, offs=offs)
     for backend in ("auto", "triton", "torch"):
-        got = grouped_gemm(a, b, offs, backend=backend)
+        got = grouped_gemm(a, b, offs, None, backend)
         torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
     # torch path is exactly torch._grouped_mm
     assert torch.equal(grouped_gemm(a, b, offs, backend="torch"), ref)

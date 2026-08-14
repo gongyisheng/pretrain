@@ -15,7 +15,7 @@ def test_grouped_gemm_benchmark_backward_path_runs(backend):
     bias = torch.randn(2, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     offs = torch.tensor([16, 32], device="cuda", dtype=torch.int32)
 
-    out = _grouped_gemm_with_autograd(a, b, offs, bias=bias, backend=backend)
+    out = _grouped_gemm_with_autograd(a, b, offs, bias, backend)
     out.backward(torch.randn_like(out))
 
     assert out.shape == (32, 16)

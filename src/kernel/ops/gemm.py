@@ -5,8 +5,8 @@ from src.kernel.selector import dispatch
 __all__ = ["grouped_gemm", "scaled_gemm", "scaled_grouped_gemm"]
 
 
-def grouped_gemm(a, b, offs, bias=None, *, backend="auto"):
-    return dispatch("gemm.grouped", a, b, offs, bias, backend=backend)
+def grouped_gemm(a, b, offs, bias=None, backend="auto"):
+    return dispatch("gemm.grouped", (a, b, offs, bias), {}, backend)
 
 
 def scaled_gemm(
@@ -18,20 +18,13 @@ def scaled_gemm(
     block_size,
     bias=None,
     scale_dtype=None,
-    *,
     backend="auto",
 ):
     return dispatch(
         "gemm.scaled",
-        aq,
-        bq,
-        sa,
-        sb,
-        out_dtype,
-        block_size,
-        bias,
-        scale_dtype,
-        backend=backend,
+        (aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype),
+        {},
+        backend,
     )
 
 
@@ -45,19 +38,11 @@ def scaled_grouped_gemm(
     block_size,
     bias=None,
     scale_dtype=None,
-    *,
     backend="auto",
 ):
     return dispatch(
         "gemm.scaled_grouped",
-        aq,
-        bq,
-        sa,
-        sb,
-        offs,
-        out_dtype,
-        block_size,
-        bias,
-        scale_dtype,
-        backend=backend,
+        (aq, bq, sa, sb, offs, out_dtype, block_size, bias, scale_dtype),
+        {},
+        backend,
     )

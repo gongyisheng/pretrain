@@ -48,8 +48,8 @@ DEFAULT_OUT = "benchmarks/results/grouped_gemm.png"
 _BACKEND_COLOR = {"torch": "#eb6834", "triton": "#2a78d6"}
 
 
-def _grouped_gemm_with_autograd(a, b, offs, bias=None, *, backend="auto"):
-    return grouped_gemm_fn(a, b, offs, bias=bias, backend=backend)
+def _grouped_gemm_with_autograd(a, b, offs, bias=None, backend="auto"):
+    return grouped_gemm_fn(a, b, offs, bias, None, backend)
 
 
 def _make(E, M, K, N, requires_grad=False):

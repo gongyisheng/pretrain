@@ -335,8 +335,11 @@ _SCALED_CONFIGS = [
 ]
 
 
-def _early_prune_scaled_configs(configs, named_args, **kwargs):
-    scale_block = kwargs.get("SCALE_BLOCK_SIZE", named_args.get("SCALE_BLOCK_SIZE"))
+def _early_prune_scaled_configs(
+    configs, named_args, SCALE_BLOCK_SIZE, HAS_BIAS, grid=None, warmup=None
+):
+    del named_args, HAS_BIAS, grid, warmup
+    scale_block = SCALE_BLOCK_SIZE
     if not scale_block:
         return configs
     return [c for c in configs if c.kwargs["BLOCK_K"] <= max(32, scale_block)]
@@ -762,8 +765,19 @@ _SCALED_GROUPED_CONFIGS = [
 ]
 
 
-def _early_prune_scaled_grouped_configs(configs, named_args, **kwargs):
-    scale_block = kwargs.get("SCALE_BLOCK_SIZE", named_args.get("SCALE_BLOCK_SIZE"))
+def _early_prune_scaled_grouped_configs(
+    configs,
+    named_args,
+    NUM_SMS,
+    A_IS_2D,
+    B_IS_2D,
+    SCALE_BLOCK_SIZE,
+    HAS_BIAS,
+    grid=None,
+    warmup=None,
+):
+    del named_args, NUM_SMS, A_IS_2D, B_IS_2D, HAS_BIAS, grid, warmup
+    scale_block = SCALE_BLOCK_SIZE
     if not scale_block:
         return configs
     return [c for c in configs if c.kwargs["BLOCK_K"] <= max(32, scale_block)]

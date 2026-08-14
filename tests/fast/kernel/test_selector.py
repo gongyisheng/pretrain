@@ -6,11 +6,11 @@ from src.kernel.selector import KernelSelectionError, dispatch, select_kernel
 from src.kernel.spec import KernelSpec, SupportResult
 
 
-def _yes(*_args, **_kwargs):
+def _yes(args=None, kwargs=None):
     return SupportResult(True)
 
 
-def _no(*_args, **_kwargs):
+def _no(args, kwargs):
     return SupportResult(False, "unsupported dtype")
 
 
@@ -52,9 +52,7 @@ def test_forced_selection_uses_requested_backend():
     registry.register(_spec("torch", lambda x: x, -100))
     registry.register(_spec("triton", lambda x: x, 100))
 
-    selected = select_kernel(
-        "test.identity", (3,), {}, backend="torch", registry=registry
-    )
+    selected = select_kernel("test.identity", (3,), {}, "torch", registry)
 
     assert selected.backend == "torch"
 
@@ -66,7 +64,7 @@ def test_forced_ineligible_backend_raises_reason():
     with pytest.raises(
         KernelSelectionError, match="test.identity.*triton.*unsupported dtype"
     ):
-        select_kernel("test.identity", (3,), {}, backend="triton", registry=registry)
+        select_kernel("test.identity", (3,), {}, "triton", registry)
 
 
 def test_duplicate_registration_raises_value_error():
@@ -87,7 +85,7 @@ def test_unknown_forced_backend_lists_registered_backends():
         KernelSelectionError,
         match="test.identity.*cuda.*registered: torch, triton",
     ):
-        select_kernel("test.identity", (3,), {}, backend="cuda", registry=registry)
+        select_kernel("test.identity", (3,), {}, "cuda", registry)
 
 
 def test_dispatch_does_not_retry_after_selected_kernel_raises():
@@ -106,7 +104,7 @@ def test_dispatch_does_not_retry_after_selected_kernel_raises():
     registry.register(_spec("triton", defect, 100))
 
     with pytest.raises(RuntimeError, match="kernel defect"):
-        dispatch("test.identity", 3, registry=registry)
+        dispatch("test.identity", (3,), {}, registry=registry)
 
     assert calls == {"torch": 0, "triton": 1}
 
@@ -133,7 +131,7 @@ def test_forced_backend_rejects_unsafe_grad_enabled_call(autograd):
         KernelSelectionError,
         match=f"optimized.*autograd mode {autograd!r}.*grad-enabled",
     ):
-        select_kernel("test.identity", (x,), {}, backend="optimized", registry=registry)
+        select_kernel("test.identity", (x,), {}, "optimized", registry)
 
 
 def test_external_backend_is_selectable_without_grad_tracking():
@@ -154,7 +152,7 @@ def test_external_backend_is_selectable_inside_autograd_function_forward():
     class ExternalIdentity(torch.autograd.Function):
         @staticmethod
         def forward(ctx, x):
-            return dispatch("test.identity", x, registry=registry)
+            return dispatch("test.identity", (x,), {}, registry=registry)
 
         @staticmethod
         def backward(ctx, grad_output):
