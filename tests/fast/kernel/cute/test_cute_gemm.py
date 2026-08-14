@@ -206,3 +206,63 @@ def test_scaled_gemm_mxfp8_ragged_shapes(shape):
 
     assert got.shape == (M, N)
     assert (got - want).norm() / want.norm() < 0.02
+
+
+def _to_blocked(scale_2d):
+    """Rearrange an (rows, n_blocks) e8m0 scale into cuBLASLt's SWIZZLE_32_4_4 layout."""
+    rows, cols = scale_2d.shape
+    n_row_tiles, n_col_tiles = (rows + 127) // 128, (cols + 3) // 4
+    padded_rows, padded_cols = n_row_tiles * 128, n_col_tiles * 4
+    padded = scale_2d
+    if (rows, cols) != (padded_rows, padded_cols):
+        padded = torch.zeros(
+            (padded_rows, padded_cols), device=scale_2d.device, dtype=scale_2d.dtype
+        )
+        padded[:rows, :cols] = scale_2d
+    blocks = padded.view(n_row_tiles, 128, n_col_tiles, 4).permute(0, 2, 1, 3)
+    return blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
+
+
+@pytest.mark.parametrize("shape", [(256, 512, 128), (2048, 512, 512), (128, 256, 256)])
+def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
+    """Cross-check against the vendor kernel that runs the same MMA instruction.
+
+    cuBLASLt's sm120 block-scaled kernel and ours issue the identical m16n8k32
+    block-scaled MMA, so the only thing that can differ is the feed path: which
+    operand element meets which scale in the tensor core. That makes this the
+    designated feed-path oracle, and the reason it is worth having on top of the
+    `_refs` comparison -- `_refs` proves the arithmetic, this proves the plumbing
+    against an independent implementation of the same plumbing.
+
+    Shapes are tile-aligned because cuBLASLt requires it; the ragged cases stay on
+    the `_refs` oracle.
+    """
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    M, K, N = shape
+    aq, bq, sa, sb = _operands(M, K, N)
+
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.bfloat16)
+
+    want = torch.nn.functional.scaled_mm(
+        aq,
+        bq.t().contiguous().t(),
+        _to_blocked(sa.to(torch.float8_e8m0fnu)),
+        torch.nn.functional.ScalingType.BlockWise1x32,
+        _to_blocked(sb.t().contiguous().to(torch.float8_e8m0fnu)),
+        torch.nn.functional.ScalingType.BlockWise1x32,
+        swizzle_a=torch.nn.functional.SwizzleType.SWIZZLE_32_4_4,
+        swizzle_b=torch.nn.functional.SwizzleType.SWIZZLE_32_4_4,
+        output_dtype=torch.bfloat16,
+    )
+
+    # same instruction, same operands, same scales -- only accumulation order can
+    # differ, so this bar is far tighter than the 0.02 oracle bar
+    assert (got.float() - want.float()).norm() / want.float().norm() < 1e-3
+
+
+def test_bench_cute_gemm_importable():
+    import importlib
+
+    m = importlib.import_module("benchmarks.gemm.bench_cute_gemm")
+    assert hasattr(m, "main")
