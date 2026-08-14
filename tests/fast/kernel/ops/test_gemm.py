@@ -27,7 +27,7 @@ from tests.fast.kernel._refs import (
 )
 
 
-pytestmark = pytest.mark.skipif(
+cuda_only = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Triton GEMM kernels are CUDA only"
 )
 
@@ -96,6 +96,7 @@ def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
     raise ValueError(layout)
 
 
+@cuda_only
 def test_backend_selection_and_parity():
     torch.manual_seed(0)
     counts = [64, 0, 130, 41]
@@ -115,6 +116,7 @@ def test_backend_selection_and_parity():
         grouped_gemm(a, b, offs, backend="nonsense")
 
 
+@cuda_only
 def test_grouped_gemm_auto_compiles_fullgraph():
     torch.manual_seed(0)
     counts = [64, 0, 130, 41]
@@ -134,6 +136,7 @@ def test_grouped_gemm_auto_compiles_fullgraph():
     )
 
 
+@cuda_only
 def test_grouped_gemm_auto_selects_triton_on_this_arch():
     major = torch.cuda.get_device_capability()[0]
     if major in (9, 10):
@@ -149,6 +152,7 @@ def test_grouped_gemm_auto_selects_triton_on_this_arch():
     assert torch.equal(auto, grouped_gemm(a, b, offs, backend="triton"))
 
 
+@cuda_only
 def test_grouped_gemm_auto_uses_torch_for_non_bf16():
     counts = [64, 130]
     R, K, N = sum(counts), 64, 48
@@ -160,6 +164,7 @@ def test_grouped_gemm_auto_uses_torch_for_non_bf16():
     )
 
 
+@cuda_only
 def test_dispatch_triton_rejects_non_bf16():
     counts = [64, 130]
     R, K, N = sum(counts), 64, 48
@@ -276,6 +281,7 @@ def _expected_shape(layout, counts, M=32, N=48):
     return {"ragged_m": (R, N), "ragged_k": (E, M, N), "ragged_n": (M, R)}[layout]
 
 
+@cuda_only
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
 def test_scaled_grouped_layouts_compile_fullgraph(layout):
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
@@ -288,6 +294,7 @@ def test_scaled_grouped_layouts_compile_fullgraph(layout):
     assert torch.isfinite(fn()).all()
 
 
+@cuda_only
 def test_compiles_fullgraph():
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
@@ -300,6 +307,7 @@ def test_compiles_fullgraph():
     assert torch.isfinite(fn()).all()
 
 
+@cuda_only
 def test_scaled_gemm_2d_scales_compile_fullgraph():
     """repeat_interleave with a constant tile must not graph-break."""
     a, b = rand(256, 512), rand(512, 128)
@@ -332,6 +340,25 @@ def test_grouped_gemm_torch_fallback_keeps_misaligned_groups_separate():
     got = grouped_gemm(a, b, offs)
     expected = grouped_gemm_ref(a, b, offs)
     torch.testing.assert_close(got, expected)
+
+
+@pytest.mark.parametrize("backend", ["auto", "torch", "triton"])
+def test_grouped_gemm_rejects_mismatched_bias_dtype(backend):
+    a = torch.randn(4, 8, device="cpu", dtype=torch.float32)
+    b = torch.randn(1, 8, 6, device="cpu", dtype=torch.float32)
+    offs = torch.tensor([4], device="cpu")
+    bias = torch.randn(1, 6, device="cpu", dtype=torch.float64)
+    with pytest.raises(KernelSelectionError, match="bias dtype.*match"):
+        grouped_gemm(a, b, offs, bias=bias, backend=backend)
+
+
+def test_grouped_gemm_torch_bias_preserves_output_dtype():
+    a = torch.randn(4, 8, device="cpu", dtype=torch.float32)
+    b = torch.randn(1, 8, 6, device="cpu", dtype=torch.float32)
+    offs = torch.tensor([4], device="cpu")
+    bias = torch.randn(1, 6, device="cpu", dtype=torch.float32)
+    out = grouped_gemm(a, b, offs, bias=bias, backend="torch")
+    assert out.dtype == a.dtype
 
 
 def test_forced_triton_does_not_fall_back_for_float32():

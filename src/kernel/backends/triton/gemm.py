@@ -242,6 +242,9 @@ def _grouped_gemm(
 
 def grouped_gemm_eligibility(args, kwargs):
     a, b, offs = args[:3]
+    bias = args[3] if len(args) > 3 else kwargs.get("bias")
+    if bias is not None and bias.dtype != a.dtype:
+        return SupportResult(False, "bias dtype must match operand dtype")
     if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
         return SupportResult(False, "requires bf16 CUDA operands")
     if not (a.is_cuda and b.is_cuda and offs.is_cuda):

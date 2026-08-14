@@ -12,6 +12,14 @@ def _always_eligible(args, kwargs) -> SupportResult:
     return SupportResult(True)
 
 
+def grouped_gemm_eligibility(args, kwargs) -> SupportResult:
+    a = args[0]
+    bias = args[3] if len(args) > 3 else kwargs.get("bias")
+    if bias is not None and bias.dtype != a.dtype:
+        return SupportResult(False, "bias dtype must match operand dtype")
+    return SupportResult(True)
+
+
 def _add_grouped_bias(out, offs, bias):
     if bias is None:
         return out
@@ -45,13 +53,17 @@ def _align_grouped_operand(x):
     backend="torch",
     priority=-100,
     availability=_always_available,
-    eligibility=_always_eligible,
+    eligibility=grouped_gemm_eligibility,
     build="eager",
     autograd="native",
 )
 def grouped_gemm(a, b, offs, bias=None):
     if bias is not None and a.ndim == 3:
         raise NotImplementedError("bias is not supported for the ragged-N layout")
+    if bias is not None:
+        assert bias.dtype == a.dtype, (
+            f"bias dtype {bias.dtype} must match operand dtype {a.dtype}"
+        )
     mm_offs = offs if offs.dtype == torch.int32 else offs.to(torch.int32)
     out = torch._grouped_mm(
         _align_grouped_operand(a), _align_grouped_operand(b), offs=mm_offs
