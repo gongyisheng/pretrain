@@ -574,6 +574,39 @@ def test_mxfp8_kernel_matches_epilogue_at_any_multiple_of_32(bs):
     torch.testing.assert_close(mx, epilogue, rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.parametrize("bs", [32, 64, 128])
+def test_mxfp8_kernel_matches_epilogue_when_k_is_not_a_multiple_of_32(bs):
+    """K not a multiple of 32 leaves sa/sb with a trailing partial scale block --
+    n_scale_blocks is ceil(K/32), one more than K // 32. The bs=32 case is the one that
+    pins the regression: block_size == _MXFP8_BLOCK_SIZE is supposed to be a bit-exact
+    no-op, so if this fails only at bs=32 the bug is in the block count, not the
+    replication.
+    """
+    torch.manual_seed(0)
+    a, b = rand(64, 163), rand(163, 96)
+    scaling = _scaling("blockwise", bs, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    mx = scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype="fp8_e8m0")
+    epilogue = scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
+    torch.testing.assert_close(mx, epilogue, rtol=2e-2, atol=2e-2)
+
+
+def test_mxfp8_kernel_declines_block_size_zero():
+    """block_size 0 is the "one scale block spans all of K" sentinel, not a multiple of
+    32 in any meaningful sense -- but 0 % 32 == 0 in Python, so an unguarded condition
+    would route it into the replication branch, where rep_k=0 collapses sa/sb to a
+    zero-width tensor and the kernel launch reads out of bounds.
+    """
+    torch.manual_seed(0)
+    a, b = rand(64, 163), rand(163, 96)
+    scaling = _scaling("tensorwise", 0, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    out = scaled_gemm(aq, bq, sa, sb, torch.float32, 0, scale_dtype="fp8_e8m0")
+    assert torch.isfinite(out).all()
+
+
 # ---------------------------------------------------------------------------
 # Scaled GEMM: input validation
 # ---------------------------------------------------------------------------
@@ -792,6 +825,35 @@ def test_scaled_grouped_mxfp8_layouts_match_oracle(layout):
     assert got.shape == _expected_shape(layout, _SCALED_COUNTS)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL[layout], rel
+
+
+@pytest.mark.parametrize("bs", [32, 64, 128])
+def test_scaled_grouped_mxfp8_ragged_m_matches_oracle_when_k_is_not_a_multiple_of_32(
+    bs,
+):
+    """Same regression as the dense-gemm K=163 case, for the ragged-M grouped layout --
+    K here is shared by every group (not ragged), so it is the layout the generalized
+    condition applies to. A dropped trailing scale column here does not just lose
+    accuracy: the kernel's own `scale_block_end = tl.cdiv(K, 32)` still expects it, so
+    reading past a host-side tensor narrowed one column short produces NaN, not just a
+    large relative error.
+    """
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_m",
+        _SCALED_COUNTS,
+        "blockwise",
+        bs,
+        "fp8_e4m3",
+        K=163,
+        scale_dtype="fp8_e8m0",
+    )
+    got = scaled_grouped_gemm(
+        aq, bq, sa, sb, offs, torch.float32, kbs, scale_dtype="fp8_e8m0"
+    )
+    ref = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
+    assert torch.isfinite(got).all(), got
+    rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
+    assert rel < _SCALED_TOL["ragged_m"], rel
 
 
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)

@@ -612,6 +612,10 @@ def scaled_gemm(
 
     if (
         scale_dtype == "fp8_e8m0"
+        # block_size 0 is the "one block spans all of K" sentinel, not a real width --
+        # 0 % 32 == 0 in Python, so it must be excluded explicitly or it would collapse
+        # rep_k to 0 below and hand the kernel a zero-width scale tensor.
+        and block_size != 0
         and block_size % _MXFP8_BLOCK_SIZE == 0
         and aq.dtype in _MXFP8_FORMAT
         and bq.dtype in _MXFP8_FORMAT
@@ -621,7 +625,9 @@ def scaled_gemm(
         # block-scaled MMA rather than falling back to epilogue scaling. block_size 32
         # leaves both repeats as no-ops.
         rep_k = block_size // _MXFP8_BLOCK_SIZE
-        n_mx = K // _MXFP8_BLOCK_SIZE
+        # ceil, not floor: the quantizer pads a trailing partial block whenever
+        # block_size does not divide K, and sa/sb legitimately carry that column.
+        n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
         sa_mx = sa.repeat_interleave(rep_k, 1)[:, :n_mx]
         sb_mx = sb.repeat_interleave(rep_k, 0)[:n_mx]
         # e8m0 holds a bare exponent, so `_compute_scale` already produced exact powers
@@ -1163,7 +1169,11 @@ def scaled_grouped_gemm(
         and (
             block_size == _MXFP8_BLOCK_SIZE
             if is_ragged_k
-            else block_size % _MXFP8_BLOCK_SIZE == 0
+            # block_size 0 is the "one block spans the whole segment" sentinel, not a
+            # real width -- 0 % 32 == 0 in Python, so it must be excluded explicitly or
+            # it would collapse rep_k to 0 below and hand the kernel a zero-width
+            # scale tensor.
+            else block_size != 0 and block_size % _MXFP8_BLOCK_SIZE == 0
         )
     )
     if mxfp8_ok:
@@ -1176,7 +1186,9 @@ def scaled_grouped_gemm(
             # axis is always last for sa and second-to-last for sb, in both the 2-D
             # and 3-D (E, ...) shapes, so this covers ragged M and ragged N alike.
             rep_k = block_size // _MXFP8_BLOCK_SIZE
-            n_mx = K // _MXFP8_BLOCK_SIZE
+            # ceil, not floor: the quantizer pads a trailing partial block whenever
+            # block_size does not divide K, and sa/sb legitimately carry that column.
+            n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
             sa_mx = sa.repeat_interleave(rep_k, dim=-1).narrow(-1, 0, n_mx)
             sb_mx = sb.repeat_interleave(rep_k, dim=-2).narrow(-2, 0, n_mx)
             sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
