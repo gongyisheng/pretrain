@@ -12,7 +12,7 @@ from tests.fast.kernel._refs import scaled_gemm_ref
 
 MX = {"granularity": "blockwise", "block_shape": (1, 32), "scale_dtype": "fp8_e8m0"}
 
-pytestmark = pytest.mark.skipif(
+requires_sm120 = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() < (12, 0),
     reason="CuTe mxfp8 kernels are sm120-only",
 )
@@ -41,6 +41,7 @@ def _operands_spread_scales(M, K, N, seed=0):
     return aq, bq, sa, sb
 
 
+@requires_sm120
 @pytest.mark.parametrize("shape", [(128, 128, 128), (256, 128, 256)])
 def test_scaled_gemm_mxfp8_matches_oracle(shape):
     from src.kernel.cute.gemm import scaled_gemm_mxfp8
@@ -56,6 +57,7 @@ def test_scaled_gemm_mxfp8_matches_oracle(shape):
     assert (got - want).norm() / want.norm() < 0.02
 
 
+@requires_sm120
 @pytest.mark.parametrize(
     "shape", [(256, 128, 256), (257, 128, 256), (256, 128, 257), (257, 128, 257)]
 )
@@ -72,6 +74,7 @@ def test_scaled_gemm_mxfp8_epilogue_tile_boundaries(shape):
     assert (got - want).norm() / want.norm() < 0.02
 
 
+@requires_sm120
 @pytest.mark.parametrize(
     "shape",
     [
@@ -98,6 +101,7 @@ def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
     assert rel < 1e-6, rel
 
 
+@requires_sm120
 def test_compile_cache_reused():
     """M is dynamic in the compiled kernel, so a batch-size change must not recompile."""
     from src.kernel.cute import gemm as cute_gemm
@@ -131,6 +135,7 @@ def _operands_fmt(M, K, N, a_fmt, b_fmt, seed=0):
     return aq, bq, sa, sb
 
 
+@requires_sm120
 @pytest.mark.parametrize(
     "a_fmt,b_fmt",
     [("fp8_e4m3", "fp8_e4m3"), ("fp8_e4m3", "fp8_e5m2"), ("fp8_e5m2", "fp8_e4m3")],
@@ -144,6 +149,7 @@ def test_scaled_gemm_mxfp8_dtype_combinations(a_fmt, b_fmt):
     assert (got - want).norm() / want.norm() < 0.02
 
 
+@requires_sm120
 @pytest.mark.parametrize(
     "shape,out_dtype",
     [
@@ -166,6 +172,7 @@ def test_scaled_gemm_mxfp8_preserves_out_dtype(shape, out_dtype):
     assert (got.float() - want.float()).norm() / want.float().norm() < 0.05
 
 
+@requires_sm120
 @pytest.mark.parametrize(
     "shape",
     [
@@ -203,6 +210,7 @@ def _to_blocked(scale_2d):
     return blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
 
 
+@requires_sm120
 @pytest.mark.parametrize("shape", [(256, 512, 128), (2048, 512, 512), (128, 256, 256)])
 def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
     """Use cuBLASLt as an independent scale-feed oracle for aligned shapes.
@@ -234,13 +242,50 @@ def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
     assert (got.float() - want.float()).norm() / want.float().norm() < 1e-3
 
 
-def test_bench_cute_gemm_importable():
+def test_bench_scaled_gemm_contains_qwen3_training_shapes():
     import importlib
 
-    m = importlib.import_module("benchmarks.gemm.bench_cute_gemm")
-    assert hasattr(m, "main")
+    bench = importlib.import_module("benchmarks.gemm.bench_scaled_gemm")
+    rows = bench._qwen3_training_shapes(16384)
+    got = {
+        (r["projection"], r["role"], r["M"], r["K"], r["N"], r["count"]) for r in rows
+    }
+    assert ("mlp_gate_up", "forward", 16384, 512, 3072, 1) in got
+    assert ("mlp_gate_up", "dgrad", 16384, 3072, 512, 1) in got
+    assert ("mlp_gate_up", "wgrad", 3072, 16384, 512, 1) in got
+    assert ("attn_kv", "forward", 16384, 512, 256, 2) in got
+    assert len(rows) == 12
 
 
+def test_cute_benchmark_was_consolidated():
+    from pathlib import Path
+
+    assert not Path("benchmarks/gemm/bench_cute_gemm.py").exists()
+
+
+def test_bench_scaled_gemm_renders_cute_as_na_for_non_mxfp8(tmp_path):
+    import importlib
+
+    bench = importlib.import_module("benchmarks.gemm.bench_scaled_gemm")
+    output = tmp_path / "scaled_gemm.png"
+    bench.plot(
+        [
+            {
+                "shape": "attn_proj",
+                "M": 4096,
+                "K": 512,
+                "N": 512,
+                "scheme": "fp8_tensorwise",
+                "triton_ms": 1.0,
+                "native_ms": 1.0,
+            }
+        ],
+        output,
+    )
+    assert output.exists()
+
+
+@requires_sm120
 @pytest.mark.parametrize("shape", [(128, 160, 128), (256, 96, 128), (128, 224, 256)])
 def test_scaled_gemm_mxfp8_partial_scale_group(shape):
     """Require padding when a four-byte scale copy reaches a partial K tile."""

@@ -2,7 +2,8 @@
 
 Sweeps fp8 tensorwise, fp8 rowwise, int8 rowwise, and mxfp8 (block-32) scaling
 across three linear shapes from a 51M Qwen3-style config (d_model=512,
-intermediate=1536) at two token counts M in {4096, 16384}. Native calls
+intermediate=1536) at two token counts M in {4096, 16384}. The mxfp8 sweep
+compares CuTe, Triton, and native calls. Native calls
 (`torch._scaled_mm`, `torch._int_mm`, an inlined mxfp8 GEMM recovered from the
 deleted `src/quant/mxfp8.py`) are each wrapped in try/except: combos this
 GPU/cuBLAS rejects (e.g. e5m2 x e5m2, non-Blackwell MX) print `n/a` instead of
@@ -15,6 +16,7 @@ error against an fp32 reference `a.float() @ b.float()`. Prints a table and
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -25,12 +27,11 @@ import torch.nn.functional as F
 sys.path.insert(0, ".")
 
 from src.kernel.gemm import scaled_gemm
+from src.kernel.cute.gemm import scaled_gemm_mxfp8
 from src.quant.quantize import quantize_operand
 
 E4M3 = torch.float8_e4m3fn
 E5M2 = torch.float8_e5m2
-FP8_MAX = {E4M3: torch.finfo(E4M3).max, E5M2: torch.finfo(E5M2).max}
-
 MXFP8_BLOCK = 32
 
 # Shapes from a real 51M Qwen3-style config.
@@ -38,13 +39,56 @@ D_MODEL = 512
 INTERMEDIATE = 1536
 M_LIST = [4096, 16384]
 
-# (name, K, N) — three linear shapes: attn proj (d->d), MLP up (d->4d-ish
-# gate/up proj), MLP down (inter->d).
+# (name, K, N) — three linear shapes: attn proj (d->d), MLP fused gate/up
+# (d->6d), MLP down (inter->d).
 SHAPES = [
     ("attn_proj", D_MODEL, D_MODEL),
-    ("mlp_up", D_MODEL, INTERMEDIATE),
+    ("mlp_up", D_MODEL, 3072),
     ("mlp_down", INTERMEDIATE, D_MODEL),
 ]
+
+QWEN3_51M_TOKENS = 16 * 1024
+QWEN3_51M_LINEARS = [
+    ("attn_qo", 2, 512, 512),
+    ("attn_kv", 2, 512, 256),
+    ("mlp_gate_up", 1, 512, 3072),
+    ("mlp_down", 1, 1536, 512),
+]
+
+
+def _qwen3_training_shapes(tokens):
+    rows = []
+    for projection, count, k_in, n_out in QWEN3_51M_LINEARS:
+        rows.extend(
+            [
+                dict(
+                    projection=projection,
+                    role="forward",
+                    M=tokens,
+                    K=k_in,
+                    N=n_out,
+                    count=count,
+                ),
+                dict(
+                    projection=projection,
+                    role="dgrad",
+                    M=tokens,
+                    K=n_out,
+                    N=k_in,
+                    count=count,
+                ),
+                dict(
+                    projection=projection,
+                    role="wgrad",
+                    M=n_out,
+                    K=tokens,
+                    N=k_in,
+                    count=count,
+                ),
+            ]
+        )
+    return rows
+
 
 SCHEMES = ["fp8_tensorwise", "fp8_rowwise", "int8_rowwise", "mxfp8"]
 
@@ -52,44 +96,12 @@ DEFAULT_OUT = "benchmarks/results/scaled_gemm.png"
 
 # reference-palette blue/orange pair (validated colorblind-safe, matches
 # bench_grouped_gemm.py's _IMPL_COLOR)
-_SCHEME_COLOR = {"triton": "#2a78d6", "native": "#eb6834"}
+_SCHEME_COLOR = {"cute": "#3fae5c", "triton": "#2a78d6", "native": "#eb6834"}
 
 _MX_SUPPORTED = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
     10,
     0,
 )
-
-
-# ---------------------------------------------------------------------------
-# Inlined native mxfp8 path (recovered from the deleted src/quant/mxfp8.py via
-# `git show 8e339cf:src/quant/mxfp8.py`) — self-contained, no src.quant.mxfp8
-# import since that module no longer exists.
-# ---------------------------------------------------------------------------
-
-_MX_E8M0_EXP_MIN, _MX_E8M0_EXP_MAX = -127, 127
-_MX_EPS = 1e-30
-
-
-def _quantize_mxfp8_native(x, fp8_dtype, dim):
-    """Blockwise mxfp8 quantization along `dim`; returns (x_fp8, E8M0 scale)."""
-    fp8_max = FP8_MAX[fp8_dtype]
-    xf = x.movedim(dim, -1).contiguous()
-    k = xf.shape[-1]
-    assert k % MXFP8_BLOCK == 0, (
-        f"mxfp8 block dim {k} is not a multiple of {MXFP8_BLOCK}"
-    )
-    xb = xf.unflatten(-1, (k // MXFP8_BLOCK, MXFP8_BLOCK)).float()
-    amax = xb.abs().amax(dim=-1)
-    # matches src.quant.quantize._compute_scale: ceil against fp8_max, so amax/scale
-    # stays at or below fp8_max and the block maximum never saturates
-    exp = torch.ceil(torch.log2(amax.clamp_min(_MX_EPS) / fp8_max)).clamp(
-        _MX_E8M0_EXP_MIN, _MX_E8M0_EXP_MAX
-    )
-    scale = torch.exp2(exp)
-    xq = (xb / scale.unsqueeze(-1)).clamp(-fp8_max, fp8_max).to(fp8_dtype)
-    xq = xq.flatten(-2).movedim(-1, dim).contiguous()
-    scale_e8 = scale.movedim(-1, dim).to(torch.float8_e8m0fnu)
-    return xq, scale_e8
 
 
 def _to_blocked_native(scale_2d):
@@ -277,6 +289,15 @@ def _bench_mxfp8(a, b, ref):
     aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
     bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
     bs = MXFP8_BLOCK
+    sa_e8 = sa.to(torch.float8_e8m0fnu).contiguous()
+    sb_e8 = sb.t().contiguous().to(torch.float8_e8m0fnu)
+    bq_cute = bq.t().contiguous()
+
+    # Native scale blocking and the column-major B view are one-time setup, not
+    # part of any timed arm.
+    a_blk = _to_blocked_native(sa_e8)
+    b_blk = _to_blocked_native(sb_e8)
+    b_arg = bq_cute.t()
 
     def triton_fn():
         return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs, scale_dtype="fp8_e8m0")
@@ -285,28 +306,27 @@ def _bench_mxfp8(a, b, ref):
     triton_ms = _time(triton_fn)
     triton_relerr = _relerr(triton_out, ref)
 
+    cute_ms = cute_relerr = None
+    if torch.cuda.get_device_capability() >= (12, 0):
+
+        def cute_fn():
+            return scaled_gemm_mxfp8(
+                aq.contiguous(), bq_cute, sa_e8, sb_e8, torch.bfloat16
+            )
+
+        cute_out = cute_fn()
+        cute_ms = _time(cute_fn)
+        cute_relerr = _relerr(cute_out, ref)
+
     native_ms = native_relerr = None
     if _MX_SUPPORTED:
         try:
-            # hoisted out of the timed region so this measures the GEMM, not the
-            # quantize+swizzle, which is what the Triton arm above also excludes
-            a_native, b_native = a, b
-            pad = (-a_native.shape[-1]) % MXFP8_BLOCK
-            if pad:  # K auto-padded to a multiple of 32, as mxfp8 quantization requires
-                a_native = F.pad(a_native, (0, pad))
-                b_native = F.pad(b_native, (0, 0, 0, pad))
-            a_fp8, a_scale = _quantize_mxfp8_native(a_native, E4M3, dim=-1)
-            b_fp8, b_scale = _quantize_mxfp8_native(b_native, E4M3, dim=0)
-            a_blk = _to_blocked_native(a_scale)
-            b_blk = _to_blocked_native(b_scale.t().contiguous())
-            a_arg = a_fp8.contiguous()
-            b_arg = b_fp8.t().contiguous().t()  # (K, N) stored column-major
             st = F.ScalingType.BlockWise1x32
             sw = F.SwizzleType.SWIZZLE_32_4_4
 
             def native_fn():
                 return F.scaled_mm(
-                    a_arg,
+                    aq.contiguous(),
                     b_arg,
                     a_blk,
                     st,
@@ -323,11 +343,26 @@ def _bench_mxfp8(a, b, ref):
         except Exception:
             pass
     return dict(
+        cute_ms=cute_ms,
         triton_ms=triton_ms,
         native_ms=native_ms,
+        cute_relerr=cute_relerr,
         triton_relerr=triton_relerr,
         native_relerr=native_relerr,
     )
+
+
+def _aggregate_qwen3(rows):
+    total_flops = sum(2 * r["M"] * r["K"] * r["N"] * r["count"] for r in rows)
+    out = {"flops": total_flops}
+    for impl in ("cute", "triton", "native"):
+        missing = [r for r in rows if r.get(f"{impl}_ms") is None]
+        if missing:
+            raise RuntimeError(f"{impl} is unavailable for {len(missing)} Qwen3 rows")
+        out[f"{impl}_ms"] = sum(r[f"{impl}_ms"] * r["count"] for r in rows)
+        out[f"{impl}_tflops"] = total_flops / out[f"{impl}_ms"] / 1e9
+    out["cute_native_ratio"] = out["cute_tflops"] / out["native_tflops"]
+    return out
 
 
 def _bench_blockwise_2d(a, b, ref, tile):
@@ -415,7 +450,7 @@ def plot(results, path, device=""):
     lut = {(r["shape"], r["M"], r["scheme"]): r for r in results}
     shape_names = [name for name, _, _ in SHAPES]
     x = np.arange(len(SCHEMES))
-    bw = 0.4
+    bw = 0.25
 
     fig, axes = plt.subplots(
         len(M_LIST), len(shape_names), figsize=(13, 8), constrained_layout=True
@@ -423,14 +458,15 @@ def plot(results, path, device=""):
     for ri, M in enumerate(M_LIST):
         for ci, shape_name in enumerate(shape_names):
             ax = axes[ri][ci]
-            for j, impl in enumerate(("triton", "native")):
+            for j, impl in enumerate(("cute", "triton", "native")):
                 key = f"{impl}_ms"
                 vals = []
                 for scheme in SCHEMES:
                     r = lut.get((shape_name, M, scheme))
-                    vals.append(r[key] if r and r[key] is not None else 0.0)
+                    value = r.get(key) if r else None
+                    vals.append(value if value is not None else 0.0)
                 bars = ax.bar(
-                    x + (j - 0.5) * bw,
+                    x + (j - 1) * bw,
                     vals,
                     bw,
                     label=impl,
@@ -449,9 +485,9 @@ def plot(results, path, device=""):
                 ax.spines[spine].set_visible(False)
 
     handles, labels = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="outside upper right", ncol=2, fontsize=10)
-    sup = "Scaled GEMM latency — Triton vs native"
-    sub = "lower is faster · n/a = native call unsupported on this GPU"
+    fig.legend(handles, labels, loc="outside upper right", ncol=3, fontsize=10)
+    sup = "Scaled GEMM latency — CuTe vs Triton vs native"
+    sub = "lower is faster · n/a = call unsupported on this GPU"
     if device:
         sub += f" · {device}"
     fig.suptitle(f"{sup}\n{sub}", fontsize=12, fontweight="bold")
@@ -473,13 +509,71 @@ def _fmt(v, prec=3):
     return f"{v:.{prec}f}" if v is not None else "n/a"
 
 
+def _bench_qwen3_training():
+    rows = []
+    for shape in _qwen3_training_shapes(QWEN3_51M_TOKENS):
+        a, b = _make(shape["M"], shape["K"], shape["N"])
+        ref = a.float() @ b.float()
+        rows.append({**shape, **_bench_mxfp8(a, b, ref)})
+    return rows
+
+
+def _print_qwen3_row(row):
+    print(
+        f"{row['projection']:12s} {row['role']:7s} {row['count']:>5d} "
+        f"{row['M']:>7d} {row['K']:>7d} {row['N']:>7d} "
+        f"{_fmt(row['cute_ms']):>10s} {_fmt(row['triton_ms']):>10s} "
+        f"{_fmt(row['native_ms']):>10s}"
+    )
+
+
+def _enforce_qwen3_threshold(rows, aggregate, min_cute_native_ratio):
+    failed = False
+    if aggregate["cute_native_ratio"] < min_cute_native_ratio:
+        print(
+            "weighted cute/native ratio "
+            f"{aggregate['cute_native_ratio']:.3f} is below {min_cute_native_ratio:.3f}"
+        )
+        for row in rows:
+            _print_qwen3_row(row)
+        failed = True
+    for row in rows:
+        if row["projection"].startswith("mlp"):
+            row_ratio = row["native_ms"] / row["cute_ms"]
+            if row_ratio < 0.75:
+                print(
+                    f"dominant MLP row below 0.75: {row['projection']} {row['role']} "
+                    f"{row_ratio:.3f}"
+                )
+                _print_qwen3_row(row)
+                failed = True
+    if failed:
+        raise SystemExit(1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--out", default=DEFAULT_OUT, help="path to write the latency chart"
     )
     ap.add_argument("--no-plot", action="store_true", help="skip writing the chart")
+    ap.add_argument(
+        "--qwen3-training",
+        action="store_true",
+        help="benchmark Qwen3-51M forward, dgrad, and wgrad MXFP8 linears",
+    )
+    ap.add_argument("--json-out", help="write Qwen3 rows and aggregate as JSON")
+    ap.add_argument(
+        "--min-cute-native-ratio",
+        type=float,
+        help="fail when weighted CuTe/native throughput is below this ratio",
+    )
     args = ap.parse_args()
+
+    if (
+        args.json_out or args.min_cute_native_ratio is not None
+    ) and not args.qwen3_training:
+        ap.error("--json-out and --min-cute-native-ratio require --qwen3-training")
 
     assert torch.cuda.is_available(), "CUDA required"
     device = torch.cuda.get_device_name(0)
@@ -488,9 +582,35 @@ def main():
         f"d_model={D_MODEL} intermediate={INTERMEDIATE} mx_supported={_MX_SUPPORTED}\n"
     )
 
+    if args.qwen3_training:
+        hdr = (
+            f"{'projection':12s} {'role':7s} {'count':>5s} {'M':>7s} {'K':>7s} {'N':>7s} "
+            f"{'cute_ms':>10s} {'triton_ms':>10s} {'native_ms':>10s}"
+        )
+        print(hdr)
+        rows = _bench_qwen3_training()
+        for row in rows:
+            _print_qwen3_row(row)
+        aggregate = _aggregate_qwen3(rows)
+        print(
+            "\nweighted aggregate "
+            f"cute={aggregate['cute_tflops']:.1f} TFLOP/s "
+            f"triton={aggregate['triton_tflops']:.1f} TFLOP/s "
+            f"native={aggregate['native_tflops']:.1f} TFLOP/s "
+            f"cute/native={aggregate['cute_native_ratio']:.3f}"
+        )
+        if args.json_out:
+            with open(args.json_out, "w") as output_file:
+                json.dump({"rows": rows, "aggregate": aggregate}, output_file, indent=2)
+            print(f"wrote {args.json_out}")
+        if args.min_cute_native_ratio is not None:
+            _enforce_qwen3_threshold(rows, aggregate, args.min_cute_native_ratio)
+        return
+
     hdr = (
-        f"{'shape':12s} {'M':>7s} {'scheme':16s} {'triton_ms':>10s} {'native_ms':>10s} "
-        f"{'triton_relerr':>14s} {'native_relerr':>14s}"
+        f"{'shape':12s} {'M':>7s} {'scheme':16s} {'cute_ms':>10s} {'triton_ms':>10s} "
+        f"{'native_ms':>10s} {'cute_relerr':>14s} {'triton_relerr':>14s} "
+        f"{'native_relerr':>14s}"
     )
     print(hdr)
     results = []
@@ -500,7 +620,8 @@ def main():
             for r in rows:
                 print(
                     f"{r['shape']:12s} {r['M']:>7d} {r['scheme']:16s} "
-                    f"{_fmt(r['triton_ms']):>10s} {_fmt(r['native_ms']):>10s} "
+                    f"{_fmt(r.get('cute_ms')):>10s} {_fmt(r['triton_ms']):>10s} "
+                    f"{_fmt(r['native_ms']):>10s} {_fmt(r.get('cute_relerr'), 4):>14s} "
                     f"{_fmt(r['triton_relerr'], 4):>14s} {_fmt(r['native_relerr'], 4):>14s}"
                 )
                 results.append(r)
