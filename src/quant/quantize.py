@@ -218,10 +218,10 @@ def _quantize_rowwise(xf, contract_dim, fmt, scale_dtype, offs, ragged_dim):
     return _compute_codes(xf, scale, fmt), scale
 
 
-def _quantize_blockwise(
+def _quantize_blockwise_1d(
     xf, contract_dim, block_size, fmt, scale_dtype, offs, ragged_dim
 ):
-    """One scale per `block_size` elements along the contraction."""
+    """One scale per `block_size` elements along the contraction (a 1 x B block)."""
     if ragged_dim == contract_dim:
         return _quantize_segmented_contraction(
             xf, contract_dim, block_size, fmt, scale_dtype, offs
@@ -241,6 +241,28 @@ def _quantize_blockwise(
     return codes, scale
 
 
+def _quantize_blockwise_2d(xf, contract_dim, tile, fmt, scale_dtype):
+    """One scale per `tile` x `tile` square, pooling amax over both axes.
+
+    The scale is expanded along the outer axis before returning, so it leaves in the
+    layout a 1 x `tile` blockwise scale would -- outer at full length, contract at
+    n_blocks. That is what lets every kernel, `dequantize_operand` and the metrics fold
+    stay identical to the 1D path: a square tile shows up only as neighbouring rows
+    sharing a value, which nothing downstream can observe.
+    """
+    rows, cols = xf.shape[-2:]
+    tiled = _tile2d(xf, tile)
+    scale = _compute_scale(tiled.abs().amax((-3, -1)), fmt, scale_dtype)
+    codes = _untile2d(
+        _compute_codes(tiled, scale[..., :, None, :, None], fmt), rows, cols
+    )
+    # the outer axis is whichever of the last two is not the contraction
+    outer_dim = -2 if contract_dim == -1 else -1
+    length = rows if outer_dim == -2 else cols
+    scale = scale.repeat_interleave(tile, outer_dim).narrow(outer_dim, 0, length)
+    return codes, scale
+
+
 def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
     """Quantize `x` into scale groups tiled along `contract_dim`.
 
@@ -254,9 +276,14 @@ def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
     Returns codes in `fmt`'s dtype and an fp32 dequant scale whose outer axis is at full
     length and whose contract axis is the number of scale blocks -- the layout
     `scaled_gemm` reads.
+
+    A 2D (square) `block_shape` pools amax over a `T x T` tile and then expands the
+    scale along the outer axis, so the returned layout is the same either way -- the
+    square tile is a quantization policy, not a second scale layout.
     """
     _check_dims(x, contract_dim, ragged_dim, offs)
-    granularity, block_size = scaling["granularity"], scaling["block_shape"][1]
+    granularity = scaling["granularity"]
+    block_outer, block_size = scaling["block_shape"]
     scale_dtype = scaling.get("scale_dtype")
     xf = x.float()
     if granularity == "tensorwise":
@@ -268,9 +295,20 @@ def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
             xf, contract_dim, fmt, scale_dtype, offs, ragged_dim
         )
     elif granularity == "blockwise":
-        codes, scale = _quantize_blockwise(
-            xf, contract_dim, block_size, fmt, scale_dtype, offs, ragged_dim
-        )
+        if block_outer > 1:
+            if offs is not None:
+                raise NotImplementedError(
+                    f"2D block_shape {(block_outer, block_size)} with a ragged axis "
+                    "is not supported; a square tile can straddle two groups on the "
+                    "ragged axis, which is what per-group scales exist to prevent"
+                )
+            codes, scale = _quantize_blockwise_2d(
+                xf, contract_dim, block_outer, fmt, scale_dtype
+            )
+        else:
+            codes, scale = _quantize_blockwise_1d(
+                xf, contract_dim, block_size, fmt, scale_dtype, offs, ragged_dim
+            )
     else:
         raise ValueError(f"unknown granularity: {granularity!r}")
     return codes.contiguous(), scale.contiguous()
