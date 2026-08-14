@@ -23,15 +23,11 @@ def _support(
         isinstance(value, torch.Tensor) and value.requires_grad
         for value in kwargs.values()
     )
-    if (
-        spec.autograd in ("external", "forward_only")
-        and torch.is_grad_enabled()
-        and tensor_requires_grad
-    ):
+    if not spec.autograd and torch.is_grad_enabled() and tensor_requires_grad:
         return SupportResult(
             False,
-            f"autograd mode {spec.autograd!r} cannot be used for a grad-enabled "
-            "call with tensor inputs requiring grad",
+            "backend does not support ordinary autograd for a grad-enabled call "
+            "with tensor inputs requiring grad",
         )
     return spec.eligibility(args, kwargs)
 

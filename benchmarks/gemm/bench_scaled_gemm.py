@@ -5,7 +5,7 @@ across three representative transformer linear shapes (d_model=512,
 intermediate=1536) at two token counts M in {4096, 16384}. Optimized backends are
 called only through `scaled_gemm(..., backend=...)`; unsupported Torch contracts
 print `n/a` instead of silently falling back. Accuracy is relative error against
-the eager `reference` backend for the same quantized operands. Prints a table and
+the eager backend for the same quantized operands. Prints a table and
 (unless --no-plot) writes a matplotlib grouped-bar chart.
 
     uv run python benchmarks/gemm/bench_scaled_gemm.py
@@ -129,6 +129,26 @@ def _scaling(gran, bs=0, scale_dtype=None):
     }
 
 
+def _scaling_for_config(config):
+    block_size = config["block_size"] or 0
+    if config["label"] == "mxfp8":
+        return _scaling("blockwise", block_size, "fp8_e8m0")
+    if config["granularity"] == "tensorwise":
+        return _scaling("tensorwise")
+    if config["granularity"] == "rowwise":
+        return _scaling("rowwise")
+    shape = (
+        (1, block_size)
+        if config["granularity"] == "blockwise1d"
+        else (block_size, block_size)
+    )
+    return {
+        "granularity": "blockwise",
+        "block_shape": shape,
+        "scale_dtype": "fp32",
+    }
+
+
 def _bench_scheme(a, b, config):
     """Benchmark one quantization contract with preparation outside timed closures."""
     result = {
@@ -144,21 +164,7 @@ def _bench_scheme(a, b, config):
     }
 
     block_size = config["block_size"] or 0
-    if config["granularity"] == "tensorwise":
-        scaling = _scaling("tensorwise")
-    elif config["granularity"] == "rowwise":
-        scaling = _scaling("rowwise")
-    else:
-        shape = (
-            (1, block_size)
-            if config["granularity"] == "blockwise1d"
-            else (block_size, block_size)
-        )
-        scaling = {
-            "granularity": "blockwise",
-            "block_shape": shape,
-            "scale_dtype": "fp32",
-        }
+    scaling = _scaling_for_config(config)
     fmt = _FMT[E4M3] if config["dtype"] == "fp8" else "int8"
     aq, sa = quantize_operand(a, -1, fmt, scaling)
     bq, sb = quantize_operand(b, -2, fmt, scaling)
@@ -172,7 +178,7 @@ def _bench_scheme(a, b, config):
         torch.bfloat16,
         block_size,
         scale_dtype=scale_dtype,
-        backend="reference",
+        backend="eager",
     )
 
     def triton_fn():
@@ -285,7 +291,7 @@ def plot(results, path, device=""):
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside upper right", ncol=3, fontsize=10)
     sup = "Scaled GEMM latency — Triton vs optimized Torch"
-    sub = "reference oracle · lower is faster · n/a = unsupported contract"
+    sub = "eager oracle · lower is faster · n/a = unsupported contract"
     if device:
         sub += f" · {device}"
     fig.suptitle(f"{sup}\n{sub}", fontsize=12, fontweight="bold")

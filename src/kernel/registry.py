@@ -2,7 +2,6 @@ from collections.abc import Callable
 from typing import Any
 
 from src.kernel.spec import (
-    AutogradMode,
     AvailabilityFn,
     BuildMode,
     EligibilityFn,
@@ -36,7 +35,7 @@ def register_kernel(
     availability: AvailabilityFn,
     eligibility: EligibilityFn,
     build: BuildMode,
-    autograd: AutogradMode,
+    autograd: bool,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         KERNEL_REGISTRY.register(

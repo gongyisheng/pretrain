@@ -28,6 +28,10 @@ def _is_aligned(x) -> bool:
     return all(stride == 1 or stride % alignment == 0 for stride in x.stride()[-2:])
 
 
+def _is_row_major(x) -> bool:
+    return x.is_contiguous() and x.stride(-1) == 1
+
+
 def grouped_gemm_eligibility(args, kwargs) -> SupportResult:
     del kwargs
     a, b, offs, bias = args
@@ -59,7 +63,7 @@ def grouped_gemm_eligibility(args, kwargs) -> SupportResult:
     availability=_grouped_available,
     eligibility=grouped_gemm_eligibility,
     build="eager",
-    autograd="external",
+    autograd=False,
 )
 def grouped_gemm(a, b, offs, bias=None):
     return F.grouped_mm(a, b, offs=offs, bias=bias)
@@ -77,12 +81,16 @@ def _scaled_common_eligibility(
 ) -> SupportResult:
     if aq.device.type != "cuda" or bq.device.type != "cuda":
         return SupportResult(False, "torch scaled GEMM requires CUDA operands")
+    if torch.cuda.get_device_capability(aq.device) < (8, 9):
+        return SupportResult(False, "torch scaled GEMM requires SM89 or newer")
     if aq.device != bq.device or sa.device != aq.device or sb.device != aq.device:
         return SupportResult(False, "operands and scales must share one device")
     if aq.dtype != torch.float8_e4m3fn or bq.dtype != torch.float8_e4m3fn:
         return SupportResult(False, "torch scaled GEMM requires fp8 e4m3 operands")
     if aq.ndim != 2 or bq.ndim != 2:
         return SupportResult(False, "torch scaled GEMM requires 2D operands")
+    if not _is_row_major(aq):
+        return SupportResult(False, "torch scaled GEMM requires row-major A")
     if aq.shape[1] != bq.shape[0]:
         return SupportResult(False, "operand contraction dimensions must match")
     if any(dim % 16 != 0 for dim in (aq.shape[0], aq.shape[1], bq.shape[1])):
@@ -103,6 +111,8 @@ def _scaled_common_eligibility(
         return SupportResult(False, "torch scaled GEMM output must be bf16 or fp16")
     if bias is not None and bias.dtype != out_dtype:
         return SupportResult(False, "bias dtype must match output dtype")
+    if bias is not None and (bias.shape != (bq.shape[1],) or not bias.is_contiguous()):
+        return SupportResult(False, "bias must be a contiguous output-width vector")
     return SupportResult(True)
 
 
@@ -126,7 +136,7 @@ def _column_major(x):
     availability=_scaled_available,
     eligibility=scaled_gemm_eligibility,
     build="eager",
-    autograd="external",
+    autograd=False,
 )
 def scaled_gemm(
     aq,
@@ -156,12 +166,14 @@ def scaled_grouped_gemm_eligibility(args, kwargs) -> SupportResult:
     aq, bq, sa, sb, offs, out_dtype, block_size, bias, scale_dtype = args
     if aq.device.type != "cuda" or bq.device.type != "cuda":
         return SupportResult(False, "torch scaled grouped GEMM requires CUDA operands")
-    capability = torch.cuda.get_device_capability(aq.device)
-    if capability[0] not in (9, 10):
-        return SupportResult(False, "torch scaled grouped GEMM requires SM90 or SM100")
     if aq.device != bq.device or sa.device != aq.device or sb.device != aq.device:
         return SupportResult(False, "operands and scales must share one device")
-    if offs.device != aq.device or offs.dtype != torch.int32:
+    if (
+        offs.device != aq.device
+        or offs.dtype != torch.int32
+        or offs.ndim != 1
+        or not offs.is_contiguous()
+    ):
         return SupportResult(False, "offsets must be int32 on the operand device")
     if aq.dtype != torch.float8_e4m3fn or bq.dtype != torch.float8_e4m3fn:
         return SupportResult(
@@ -169,8 +181,14 @@ def scaled_grouped_gemm_eligibility(args, kwargs) -> SupportResult:
         )
     if aq.ndim != 2 or bq.ndim != 3:
         return SupportResult(False, "torch scaled grouped GEMM supports ragged-M only")
+    if not _is_row_major(aq):
+        return SupportResult(False, "torch scaled grouped GEMM requires row-major A")
     if aq.shape[1] != bq.shape[1] or offs.numel() != bq.shape[0]:
         return SupportResult(False, "grouped operand dimensions must match offsets")
+    if any(dim % 16 != 0 for dim in (aq.shape[1], bq.shape[2])):
+        return SupportResult(
+            False, "torch scaled grouped GEMM dimensions must be multiples of 16"
+        )
     if block_size != 0:
         return SupportResult(
             False, "torch scaled grouped GEMM supports rowwise scales only"
@@ -191,8 +209,11 @@ def scaled_grouped_gemm_eligibility(args, kwargs) -> SupportResult:
         )
     if out_dtype not in (torch.bfloat16, torch.float16):
         return SupportResult(False, "torch scaled grouped output must be bf16 or fp16")
-    if bias is not None and bias.dtype != out_dtype:
-        return SupportResult(False, "bias dtype must match output dtype")
+    if bias is not None:
+        return SupportResult(False, "torch scaled grouped GEMM does not support bias")
+    capability = torch.cuda.get_device_capability(aq.device)
+    if capability[0] not in (9, 10):
+        return SupportResult(False, "torch scaled grouped GEMM requires SM90 or SM100")
     return SupportResult(True)
 
 
@@ -209,7 +230,7 @@ def _group_column_major(x):
     availability=_scaled_grouped_available,
     eligibility=scaled_grouped_gemm_eligibility,
     build="eager",
-    autograd="external",
+    autograd=False,
 )
 def scaled_grouped_gemm(
     aq,

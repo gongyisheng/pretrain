@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 BuildMode = Literal["eager", "jit", "aot"]
-AutogradMode = Literal["native", "registered", "external", "forward_only"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,4 +24,10 @@ class KernelSpec:
     availability: AvailabilityFn
     eligibility: EligibilityFn
     build: BuildMode
-    autograd: AutogradMode
+    autograd: bool
+
+    def __post_init__(self) -> None:
+        if type(self.autograd) is not bool:
+            raise TypeError(
+                f"autograd must be bool, got {type(self.autograd).__name__}"
+            )

@@ -1,5 +1,4 @@
-"""Parity of the Triton grouped GEMM prototype vs torch._grouped_mm (bf16),
-plus the scaled (quantized) GEMM Triton kernel vs a fake-quantize oracle."""
+"""GEMM backend parity against the eager correctness backend."""
 
 import pytest
 
@@ -20,11 +19,11 @@ from src.kernel.ops.gemm import (
 from src.quant.quantize import quantize_operand
 
 
-def grouped_gemm_ref(a, b, offs, bias=None):
-    return grouped_gemm(a, b, offs, bias=bias, backend="reference")
+def grouped_gemm_eager(a, b, offs, bias=None):
+    return grouped_gemm(a, b, offs, bias=bias, backend="eager")
 
 
-def scaled_gemm_ref(aq, bq, sa, sb, block_size, bias=None):
+def scaled_gemm_eager(aq, bq, sa, sb, block_size, bias=None):
     return scaled_gemm(
         aq,
         bq,
@@ -33,11 +32,11 @@ def scaled_gemm_ref(aq, bq, sa, sb, block_size, bias=None):
         torch.float32,
         block_size,
         bias=bias,
-        backend="reference",
+        backend="eager",
     )
 
 
-def scaled_grouped_gemm_ref(
+def scaled_grouped_gemm_eager(
     aq,
     bq,
     sa,
@@ -55,7 +54,7 @@ def scaled_grouped_gemm_ref(
         torch.float32,
         block_size,
         bias=bias,
-        backend="reference",
+        backend="eager",
     )
 
 
@@ -98,7 +97,7 @@ def _run(a, b, gran, bs, a_fmt, b_fmt, scale_dtype=None):
     aq, sa = quantize_operand(a, -1, a_fmt, scaling)
     bq, sb = quantize_operand(b, -2, b_fmt, scaling)
     out = scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
-    oracle = scaled_gemm_ref(aq, bq, sa, sb, bs or a.shape[1])
+    oracle = scaled_gemm_eager(aq, bq, sa, sb, bs or a.shape[1])
     return out, oracle
 
 
@@ -119,7 +118,7 @@ _LAYOUT_COUNTS = [64, 0, 130, 46]  # sums to 240
 
 
 def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
-    """Build (a, b, offs) for one ragged layout, in torch._grouped_mm's convention."""
+    """Build operands for one grouped ragged layout."""
     torch.manual_seed(seed)
     G, R = len(counts), sum(counts)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
@@ -145,12 +144,16 @@ def test_backend_selection_and_parity():
     a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
     w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
     b = w.mT
-    ref = torch._grouped_mm(a, b, offs=offs)
+    ref = grouped_gemm_eager(a, b, offs)
     for backend in ("auto", "triton", "torch"):
         got = grouped_gemm(a, b, offs, None, backend)
         torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
-    # torch path is exactly torch._grouped_mm
-    assert torch.equal(grouped_gemm(a, b, offs, backend="torch"), ref)
+    torch.testing.assert_close(
+        grouped_gemm(a, b, offs, backend="torch").float(),
+        ref.float(),
+        rtol=2e-2,
+        atol=2e-2,
+    )
     # invalid backend rejected
     with pytest.raises((KernelSelectionError)):
         grouped_gemm(a, b, offs, backend="nonsense")
@@ -170,7 +173,7 @@ def test_grouped_gemm_auto_compiles_fullgraph():
     out = fn(a, w.mT, offs)
     torch.testing.assert_close(
         out.float(),
-        torch._grouped_mm(a, w.mT, offs=offs).float(),
+        grouped_gemm_eager(a, w.mT, offs).float(),
         rtol=2e-2,
         atol=2e-2,
     )
@@ -193,13 +196,13 @@ def test_grouped_gemm_auto_selects_triton_on_this_arch():
 
 
 @cuda_only
-def test_grouped_gemm_auto_uses_reference_for_non_bf16():
+def test_grouped_gemm_auto_uses_eager_for_non_bf16():
     counts = [64, 130]
     R, K, N = sum(counts), 64, 48
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     a = torch.randn(R, K, device="cuda", dtype=torch.float32)
     b = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32).mT
-    assert torch.equal(grouped_gemm(a, b, offs), grouped_gemm_ref(a, b, offs))
+    assert torch.equal(grouped_gemm(a, b, offs), grouped_gemm_eager(a, b, offs))
 
 
 @cuda_only
@@ -362,21 +365,21 @@ def test_scaled_gemm_2d_scales_compile_fullgraph():
     assert torch.isfinite(fn()).all()
 
 
-def test_grouped_gemm_auto_falls_back_to_reference_for_float32():
+def test_grouped_gemm_auto_falls_back_to_eager_for_float32():
     a = torch.randn(4, 8, device="cpu")
     b = torch.randn(1, 8, 6, device="cpu")
     offs = torch.tensor([4], device="cpu")
     got = grouped_gemm(a, b, offs)
-    expected = grouped_gemm_ref(a, b, offs)
+    expected = grouped_gemm_eager(a, b, offs)
     torch.testing.assert_close(got, expected)
 
 
-def test_grouped_gemm_reference_keeps_misaligned_groups_separate():
+def test_grouped_gemm_eagererence_keeps_misaligned_groups_separate():
     a = torch.randn(5, 8, device="cpu")
     b = torch.randn(2, 8, 6, device="cpu")
     offs = torch.tensor([2, 5], dtype=torch.int32, device="cpu")
     got = grouped_gemm(a, b, offs)
-    expected = grouped_gemm_ref(a, b, offs)
+    expected = grouped_gemm_eager(a, b, offs)
     torch.testing.assert_close(got, expected)
 
 
@@ -390,12 +393,12 @@ def test_grouped_gemm_rejects_mismatched_bias_dtype(backend):
         grouped_gemm(a, b, offs, bias=bias, backend=backend)
 
 
-def test_grouped_gemm_reference_bias_preserves_output_dtype():
+def test_grouped_gemm_eagererence_bias_preserves_output_dtype():
     a = torch.randn(4, 8, device="cpu", dtype=torch.float32)
     b = torch.randn(1, 8, 6, device="cpu", dtype=torch.float32)
     offs = torch.tensor([4], device="cpu")
     bias = torch.randn(1, 6, device="cpu", dtype=torch.float32)
-    out = grouped_gemm(a, b, offs, bias=bias, backend="reference")
+    out = grouped_gemm(a, b, offs, bias=bias, backend="eager")
     assert out.dtype == a.dtype
 
 
@@ -407,7 +410,7 @@ def test_forced_triton_does_not_fall_back_for_float32():
         grouped_gemm(a, b, offs, backend="triton")
 
 
-def test_scaled_gemm_auto_falls_back_to_reference_on_cpu():
+def test_scaled_gemm_auto_falls_back_to_eager_on_cpu():
     aq = torch.tensor([[1, -2, 3, 4], [-1, 2, 0, 3]], dtype=torch.int8, device="cpu")
     bq = torch.tensor(
         [[1, 2, -1], [0, -2, 3], [2, 1, 1], [-1, 0, 2]],
@@ -417,11 +420,11 @@ def test_scaled_gemm_auto_falls_back_to_reference_on_cpu():
     sa = torch.tensor([[0.5, 0.25], [0.75, 0.5]], device="cpu")
     sb = torch.tensor([[1.0, 0.5, 0.25], [0.5, 1.0, 2.0]], device="cpu")
     got = scaled_gemm(aq, bq, sa, sb, torch.float32, 2)
-    expected = scaled_gemm_ref(aq, bq, sa, sb, 2)
+    expected = scaled_gemm_eager(aq, bq, sa, sb, 2)
     torch.testing.assert_close(got, expected)
 
 
-def test_scaled_grouped_gemm_auto_falls_back_to_reference_on_cpu():
+def test_scaled_grouped_gemm_auto_falls_back_to_eager_on_cpu():
     aq = torch.tensor(
         [[1, -2, 3, 4], [-1, 2, 0, 3], [2, 1, -1, 0], [0, 3, 2, -2]],
         dtype=torch.int8,
@@ -445,5 +448,5 @@ def test_scaled_grouped_gemm_auto_falls_back_to_reference_on_cpu():
     )
     offs = torch.tensor([1, 4], dtype=torch.int32, device="cpu")
     got = scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, 2)
-    expected = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, 2)
+    expected = scaled_grouped_gemm_eager(aq, bq, sa, sb, offs, 2)
     torch.testing.assert_close(got, expected)

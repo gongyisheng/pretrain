@@ -26,8 +26,8 @@ from tests.fast.layers._refs import (
 )
 
 
-def grouped_gemm_ref(a, b, offs, bias=None):
-    return grouped_gemm(a, b, offs, bias=bias, backend="reference")
+def grouped_gemm_eager(a, b, offs, bias=None):
+    return grouped_gemm(a, b, offs, bias=bias, backend="eager")
 
 
 ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
@@ -963,7 +963,7 @@ def test_grouped_mlp_matches_per_group_loop(
         b_down=b_down,
     )
 
-    # Reference: run each group through the existing 2D fused op.
+    # Oracle: run each group through the existing 2D fused op.
     ref = torch.empty_like(got)
     start = 0
     for e, c in enumerate(counts):
@@ -1361,7 +1361,7 @@ _GG_LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
 
 
 def _make_grouped_layout(layout, counts=(64, 0, 130, 46), M=32, K=64, N=48, seed=0):
-    """Build (a, b, offs) for one ragged layout, in torch._grouped_mm's convention."""
+    """Build operands for one grouped ragged layout."""
     torch.manual_seed(seed)
     G, R = len(counts), sum(counts)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
@@ -1438,7 +1438,7 @@ def test_grouped_gemm_fn_grads_match_torch(layout):
         (out * out).sum().backward()
         return out, a.grad, b.grad
 
-    ref = run(lambda a, b: torch._grouped_mm(a, b, offs=offs))
+    ref = run(lambda a, b: grouped_gemm_eager(a, b, offs))
     got = run(lambda a, b: GroupedGemmFn.apply(a, b, None, offs))
     for g, r in zip(got, ref):
         torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
@@ -1448,11 +1448,11 @@ def test_grouped_gemm_fn_grads_match_torch(layout):
     not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
 )
 @pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
-def test_grouped_gemm_fn_bias_grads_match_reference(layout):
+def test_grouped_gemm_fn_bias_grads_match_eager(layout):
     a0, b0, offs = _make_grouped_layout(layout)
     G, N = offs.shape[0], 48
     bias0 = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
-    grad_out = torch.randn_like(grouped_gemm_ref(a0, b0, offs, bias0))
+    grad_out = torch.randn_like(grouped_gemm_eager(a0, b0, offs, bias0))
 
     def run(fn):
         a, b = a0.clone().requires_grad_(True), b0.clone().requires_grad_(True)
@@ -1461,7 +1461,7 @@ def test_grouped_gemm_fn_bias_grads_match_reference(layout):
         out.backward(grad_out)
         return out, a.grad, b.grad, bias.grad
 
-    ref = run(lambda a, b, bias: grouped_gemm_ref(a, b, offs, bias))
+    ref = run(lambda a, b, bias: grouped_gemm_eager(a, b, offs, bias))
     got = run(lambda a, b, bias: GroupedGemmFn.apply(a, b, bias, offs))
     for index, (g, r) in enumerate(zip(got, ref)):
         if layout == "ragged_m" and index == 3:

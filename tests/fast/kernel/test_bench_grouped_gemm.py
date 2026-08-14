@@ -1,7 +1,19 @@
 import pytest
 import torch
 
-from benchmarks.gemm.bench_grouped_gemm import _grouped_gemm_with_autograd
+from benchmarks.gemm import bench_grouped_gemm
+
+_grouped_gemm_with_autograd = bench_grouped_gemm._grouped_gemm_with_autograd
+
+
+def test_grouped_gemm_benchmark_relative_error():
+    eager = torch.tensor([1.0, 2.0], device="cpu")
+    optimized = torch.tensor([1.0, 2.5], device="cpu")
+
+    assert hasattr(bench_grouped_gemm, "_relative_error")
+    assert bench_grouped_gemm._relative_error(optimized, eager) == pytest.approx(
+        0.5 / 5**0.5
+    )
 
 
 @pytest.mark.skipif(

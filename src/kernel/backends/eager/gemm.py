@@ -29,12 +29,12 @@ def _bounds(offs):
 
 @register_kernel(
     op="gemm.grouped",
-    backend="reference",
+    backend="eager",
     priority=-1000,
     availability=_always_available,
     eligibility=grouped_gemm_eligibility,
     build="eager",
-    autograd="native",
+    autograd=True,
 )
 def grouped_gemm(a, b, offs, bias=None):
     a_is_2d = a.ndim == 2
@@ -77,12 +77,12 @@ def _dequant_b(q, scale, block_size):
 
 @register_kernel(
     op="gemm.scaled",
-    backend="reference",
+    backend="eager",
     priority=-1000,
     availability=_always_available,
     eligibility=_always_eligible,
     build="eager",
-    autograd="native",
+    autograd=True,
 )
 def scaled_gemm(
     aq,
@@ -103,12 +103,12 @@ def scaled_gemm(
 
 @register_kernel(
     op="gemm.scaled_grouped",
-    backend="reference",
+    backend="eager",
     priority=-1000,
     availability=_always_available,
     eligibility=_always_eligible,
     build="eager",
-    autograd="native",
+    autograd=True,
 )
 def scaled_grouped_gemm(
     aq,

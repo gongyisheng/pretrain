@@ -4,7 +4,7 @@ Sweeps the eight expert-GEMM shapes of the latent-MoE configs (gate_up over
 K in {64,128,256,512}; down over N in {64,128,256,512}) at two expert counts
 E in {64, 256}, holding total rows M fixed. Both implementations run through
 `grouped_gemm(a, b, offs, backend=...)` for forward and the production explicit
-autograd composition for backward. The eager reference backend is the correctness
+autograd composition for backward. The eager backend is the correctness
 oracle and is not timed. Prints a table and (unless --no-plot) writes a chart.
 
     uv run python benchmarks/gemm/bench_grouped_gemm.py
@@ -22,6 +22,7 @@ import torch
 sys.path.insert(0, ".")
 
 from src.kernel.ops.gemm import grouped_gemm
+from src.kernel.selector import KernelSelectionError
 from src.layers.mlp import grouped_gemm_fn
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
@@ -44,7 +45,7 @@ SHAPES = [
 
 DEFAULT_OUT = "benchmarks/results/grouped_gemm.png"
 
-# reference-palette blue/orange pair (validated colorblind-safe)
+# blue/orange pair (validated colorblind-safe)
 _BACKEND_COLOR = {"torch": "#eb6834", "triton": "#2a78d6"}
 
 
@@ -80,6 +81,10 @@ def _assert_parity(got, ref, chunk=500_000):
         )
 
 
+def _relative_error(out, eager):
+    return ((out.float() - eager.float()).norm() / eager.float().norm()).item()
+
+
 def _time(fn, iters=50):
     for _ in range(10):
         fn()
@@ -96,17 +101,35 @@ def _bench_point(E, K, N):
     out = {}
     a, b, offs = _make(E, M_FIXED, K, N)
     with torch.no_grad():
-        ref = grouped_gemm(a, b, offs, backend="reference")
-        got = grouped_gemm(a, b, offs, backend="triton")
-        _assert_parity(got, ref)
-        out[("torch", "fwd")] = _time(lambda: grouped_gemm(a, b, offs, backend="torch"))
+        eager = grouped_gemm(a, b, offs, backend="eager")
+        triton_out = grouped_gemm(a, b, offs, backend="triton")
+        _assert_parity(triton_out, eager)
+        out[("triton", "relerr")] = _relative_error(triton_out, eager)
         out[("triton", "fwd")] = _time(
             lambda: grouped_gemm(a, b, offs, backend="triton")
         )
+        try:
+            torch_out = grouped_gemm(a, b, offs, backend="torch")
+        except KernelSelectionError:
+            out[("torch", "fwd")] = None
+            out[("torch", "relerr")] = None
+        else:
+            _assert_parity(torch_out, eager)
+            out[("torch", "relerr")] = _relative_error(torch_out, eager)
+            out[("torch", "fwd")] = _time(
+                lambda: grouped_gemm(a, b, offs, backend="torch")
+            )
     for backend in ("torch", "triton"):
+        if out[(backend, "fwd")] is None:
+            out[(backend, "bwd")] = None
+            continue
         ag, bg, offg = _make(E, M_FIXED, K, N, requires_grad=True)
         go = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16)
-        res = _grouped_gemm_with_autograd(ag, bg, offg, backend=backend)
+        try:
+            res = _grouped_gemm_with_autograd(ag, bg, offg, backend=backend)
+        except KernelSelectionError:
+            out[(backend, "bwd")] = None
+            continue
         # backward-only: forward already ran; time repeated grad passes (retain_graph)
         out[(backend, "bwd")] = _time(lambda: res.backward(go, retain_graph=True))
     return out
@@ -139,7 +162,7 @@ def plot(results, path, device=""):
             ax = axes[ri][ci]
             for j, backend in enumerate(("torch", "triton")):
                 vals = [
-                    lut.get((role, K, N, E, backend, pass_), 0.0)
+                    lut.get((role, K, N, E, backend, pass_), 0.0) or 0.0
                     for role, K, N in SHAPES
                 ]
                 bars = ax.bar(
@@ -198,6 +221,10 @@ def plot(results, path, device=""):
     return path
 
 
+def _fmt(value, precision=3):
+    return f"{value:.{precision}f}" if value is not None else "n/a"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -212,7 +239,7 @@ def main():
     print(f"fixed M = {M_FIXED:,} rows\n")
     hdr = (
         f"{'shape':22s} {'E':>4s} {'rows/grp':>9s} {'torch_fwd':>10s} {'triton_fwd':>11s} "
-        f"{'torch_bwd':>10s} {'triton_bwd':>11s}"
+        f"{'torch_bwd':>10s} {'triton_bwd':>11s} {'torch_err':>10s} {'triton_err':>11s}"
     )
     print(hdr)
     results = []
@@ -222,8 +249,10 @@ def main():
             label = f"{role} K{K} N{N}"
             print(
                 f"{label:22s} {E:>4d} {M_FIXED // E:>9d} "
-                f"{t[('torch', 'fwd')]:>10.3f} {t[('triton', 'fwd')]:>11.3f} "
-                f"{t[('torch', 'bwd')]:>10.3f} {t[('triton', 'bwd')]:>11.3f}"
+                f"{_fmt(t[('torch', 'fwd')]):>10s} {_fmt(t[('triton', 'fwd')]):>11s} "
+                f"{_fmt(t[('torch', 'bwd')]):>10s} {_fmt(t[('triton', 'bwd')]):>11s} "
+                f"{_fmt(t[('torch', 'relerr')], 4):>10s} "
+                f"{_fmt(t[('triton', 'relerr')], 4):>11s}"
             )
             for (backend, pass_), ms in t.items():
                 results.append(

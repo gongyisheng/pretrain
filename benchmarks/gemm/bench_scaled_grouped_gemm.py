@@ -3,7 +3,7 @@
 Sweeps the expert-GEMM shapes of the latent-MoE configs (gate_up over K, down
 over N) at two expert counts E in {64, 256}, holding total rows M fixed, under
 fp8-rowwise and int8-rowwise quantization. Accuracy is relative error against
-the eager `reference` backend for identical quantized operands. Unsupported
+the eager backend for identical quantized operands. Unsupported
 Torch contracts are reported as `n/a`, never timed through auto fallback.
 
     uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py
@@ -41,7 +41,7 @@ SCHEMES = ["fp8_rowwise", "int8_rowwise"]
 
 DEFAULT_OUT = "benchmarks/results/scaled_grouped_gemm.png"
 
-# reference-palette pair (validated colorblind-safe, matches sibling benchmarks)
+# blue/orange pair (validated colorblind-safe, matches sibling benchmarks)
 _IMPL_COLOR = {"torch": "#eb6834", "triton": "#2a78d6"}
 
 
@@ -98,7 +98,7 @@ def _bench_point(E, K, N, scheme):
         offs,
         torch.bfloat16,
         bs,
-        backend="reference",
+        backend="eager",
     )
 
     def triton_fn():
@@ -151,7 +151,7 @@ def _bench_wgrad_point(E, K, N, scheme):
         offs,
         torch.bfloat16,
         0,
-        backend="reference",
+        backend="eager",
     )
 
     def triton_fn():
@@ -228,7 +228,7 @@ def plot(results, path, device=""):
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside upper right", ncol=2, fontsize=10)
     sup = "Scaled grouped GEMM latency — optimized Torch vs Triton"
-    sub = f"reference oracle · M = {M_FIXED:,} rows · lower is faster"
+    sub = f"eager oracle · M = {M_FIXED:,} rows · lower is faster"
     if device:
         sub += f" · {device}"
     fig.suptitle(f"{sup}\n{sub}", fontsize=12, fontweight="bold")

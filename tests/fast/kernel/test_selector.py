@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.kernel.registry import KernelRegistry
+from src.kernel.registry import KernelRegistry, register_kernel
 from src.kernel.selector import KernelSelectionError, dispatch, select_kernel
 from src.kernel.spec import KernelSpec, SupportResult
 
@@ -14,7 +14,7 @@ def _no(args, kwargs):
     return SupportResult(False, "unsupported dtype")
 
 
-def _spec(backend, fn, priority, eligibility=_yes, autograd="native"):
+def _spec(backend, fn, priority, eligibility=_yes, autograd=True):
     return KernelSpec(
         op="test.identity",
         backend=backend,
@@ -109,11 +109,10 @@ def test_dispatch_does_not_retry_after_selected_kernel_raises():
     assert calls == {"torch": 0, "triton": 1}
 
 
-@pytest.mark.parametrize("autograd", ["external", "forward_only"])
-def test_auto_falls_back_when_optimized_backend_cannot_build_autograd(autograd):
+def test_auto_falls_back_when_optimized_backend_cannot_build_autograd():
     registry = KernelRegistry()
     registry.register(_spec("torch", lambda x: x, -100))
-    registry.register(_spec("optimized", lambda x: x, 100, autograd=autograd))
+    registry.register(_spec("optimized", lambda x: x, 100, autograd=False))
     x = torch.ones(2, device="cpu", requires_grad=True)
 
     selected = select_kernel("test.identity", (x,), {}, registry=registry)
@@ -121,35 +120,34 @@ def test_auto_falls_back_when_optimized_backend_cannot_build_autograd(autograd):
     assert selected.backend == "torch"
 
 
-@pytest.mark.parametrize("autograd", ["external", "forward_only"])
-def test_forced_backend_rejects_unsafe_grad_enabled_call(autograd):
+def test_forced_backend_rejects_unsafe_grad_enabled_call():
     registry = KernelRegistry()
-    registry.register(_spec("optimized", lambda x: x, 100, autograd=autograd))
+    registry.register(_spec("optimized", lambda x: x, 100, autograd=False))
     x = torch.ones(2, device="cpu", requires_grad=True)
 
     with pytest.raises(
         KernelSelectionError,
-        match=f"optimized.*autograd mode {autograd!r}.*grad-enabled",
+        match="optimized.*does not support ordinary autograd.*grad-enabled",
     ):
         select_kernel("test.identity", (x,), {}, "optimized", registry)
 
 
-def test_external_backend_is_selectable_without_grad_tracking():
+def test_non_autograd_backend_is_selectable_without_grad_tracking():
     registry = KernelRegistry()
-    registry.register(_spec("external", lambda x: x, 100, autograd="external"))
+    registry.register(_spec("optimized", lambda x: x, 100, autograd=False))
     x = torch.ones(2, device="cpu", requires_grad=True)
 
     with torch.no_grad():
         selected = select_kernel("test.identity", (x,), {}, registry=registry)
 
-    assert selected.backend == "external"
+    assert selected.backend == "optimized"
 
 
-def test_external_backend_is_selectable_inside_autograd_function_forward():
+def test_non_autograd_backend_is_selectable_inside_autograd_function_forward():
     registry = KernelRegistry()
-    registry.register(_spec("external", lambda x: x * 2, 100, autograd="external"))
+    registry.register(_spec("optimized", lambda x: x * 2, 100, autograd=False))
 
-    class ExternalIdentity(torch.autograd.Function):
+    class ComposedIdentity(torch.autograd.Function):
         @staticmethod
         def forward(ctx, x):
             return dispatch("test.identity", (x,), {}, registry=registry)
@@ -159,6 +157,28 @@ def test_external_backend_is_selectable_inside_autograd_function_forward():
             return grad_output * 2
 
     x = torch.ones(2, device="cpu", requires_grad=True)
-    ExternalIdentity.apply(x).sum().backward()
+    ComposedIdentity.apply(x).sum().backward()
 
     torch.testing.assert_close(x.grad, torch.full_like(x, 2))
+
+
+@pytest.mark.parametrize("autograd", ["invalid", None, 1])
+def test_kernel_spec_rejects_non_bool_autograd(autograd):
+    with pytest.raises(TypeError, match="autograd must be bool"):
+        _spec("invalid", lambda x: x, 0, autograd=autograd)
+
+
+def test_register_kernel_rejects_non_bool_autograd():
+    with pytest.raises(TypeError, match="autograd must be bool"):
+
+        @register_kernel(
+            op="test.invalid_autograd",
+            backend="invalid",
+            priority=0,
+            availability=lambda: SupportResult(True),
+            eligibility=_yes,
+            build="eager",
+            autograd="invalid",
+        )
+        def invalid_kernel(x):
+            return x

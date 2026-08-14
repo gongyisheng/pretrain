@@ -261,7 +261,7 @@ def grouped_gemm_eligibility(args, kwargs):
     availability=_always_available,
     eligibility=grouped_gemm_eligibility,
     build="jit",
-    autograd="external",
+    autograd=False,
 )
 def grouped_gemm(
     a: torch.Tensor,
@@ -572,7 +572,7 @@ def scaled_gemm_eligibility(args, kwargs):
     availability=_always_available,
     eligibility=scaled_gemm_eligibility,
     build="jit",
-    autograd="external",
+    autograd=False,
 )
 @triton_op("jit_kernel::scaled_gemm", mutates_args={})
 def scaled_gemm(
@@ -1215,7 +1215,7 @@ def scaled_grouped_gemm_eligibility(args, kwargs):
     availability=_always_available,
     eligibility=scaled_grouped_gemm_eligibility,
     build="jit",
-    autograd="external",
+    autograd=False,
 )
 @triton_op("jit_kernel::scaled_grouped_gemm", mutates_args={})
 def scaled_grouped_gemm(
