@@ -3,9 +3,9 @@
 Sweeps the eight expert-GEMM shapes of the latent-MoE configs (gate_up over
 K in {64,128,256,512}; down over N in {64,128,256,512}) at two expert counts
 E in {64, 256}, holding total rows M fixed. Both implementations run through
-`grouped_gemm(a, b, offs, backend=...)`; a torch-vs-triton parity assert guards the
-forward output before timing. Prints a table and (unless --no-plot) writes a
-matplotlib chart.
+`grouped_gemm(a, b, offs, backend=...)` for forward and the production explicit
+autograd composition for backward; a torch-vs-triton parity assert guards the
+forward output before timing. Prints a table and (unless --no-plot) writes a chart.
 
     uv run python benchmarks/gemm/bench_grouped_gemm.py
     uv run python benchmarks/gemm/bench_grouped_gemm.py --out /tmp/gg.png
@@ -22,6 +22,7 @@ import torch
 sys.path.insert(0, ".")
 
 from src.kernel.ops.gemm import grouped_gemm
+from src.layers.mlp import grouped_gemm_fn
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
 M_FIXED = 8 * 1024 * 8
@@ -44,7 +45,11 @@ SHAPES = [
 DEFAULT_OUT = "benchmarks/results/grouped_gemm.png"
 
 # reference-palette blue/orange pair (validated colorblind-safe)
-_IMPL_COLOR = {"torch": "#eb6834", "triton": "#2a78d6"}
+_BACKEND_COLOR = {"torch": "#eb6834", "triton": "#2a78d6"}
+
+
+def _grouped_gemm_with_autograd(a, b, offs, bias=None, *, backend="auto"):
+    return grouped_gemm_fn(a, b, offs, bias=bias, backend=backend)
 
 
 def _make(E, M, K, N, requires_grad=False):
@@ -95,11 +100,13 @@ def _bench_point(E, K, N):
         got = grouped_gemm(a, b, offs, backend="triton")
         _assert_parity(got, ref)
         out[("torch", "fwd")] = _time(lambda: grouped_gemm(a, b, offs, backend="torch"))
-        out[("triton", "fwd")] = _time(lambda: grouped_gemm(a, b, offs, backend="triton"))
+        out[("triton", "fwd")] = _time(
+            lambda: grouped_gemm(a, b, offs, backend="triton")
+        )
     for backend in ("torch", "triton"):
         ag, bg, offg = _make(E, M_FIXED, K, N, requires_grad=True)
         go = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16)
-        res = grouped_gemm(ag, bg, offg, backend=backend)
+        res = _grouped_gemm_with_autograd(ag, bg, offg, backend=backend)
         # backward-only: forward already ran; time repeated grad passes (retain_graph)
         out[(backend, "bwd")] = _time(lambda: res.backward(go, retain_graph=True))
     return out
@@ -132,14 +139,15 @@ def plot(results, path, device=""):
             ax = axes[ri][ci]
             for j, backend in enumerate(("torch", "triton")):
                 vals = [
-                    lut.get((role, K, N, E, backend, pass_), 0.0) for role, K, N in SHAPES
+                    lut.get((role, K, N, E, backend, pass_), 0.0)
+                    for role, K, N in SHAPES
                 ]
                 bars = ax.bar(
                     x + (j - 0.5) * bw,
                     vals,
                     bw,
                     label=backend,
-                    color=_IMPL_COLOR[backend],
+                    color=_BACKEND_COLOR[backend],
                     zorder=3,
                 )
                 ax.bar_label(bars, fmt="%.2f", fontsize=7, padding=2)

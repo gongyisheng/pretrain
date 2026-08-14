@@ -176,7 +176,16 @@ def _bench_mxfp8(a, b, ref):
     b_arg = bq_native.t()
 
     def triton_fn():
-        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, bs, scale_dtype="fp8_e8m0")
+        return scaled_gemm(
+            aq,
+            bq,
+            sa,
+            sb,
+            torch.bfloat16,
+            bs,
+            scale_dtype="fp8_e8m0",
+            backend="triton",
+        )
 
     triton_out = triton_fn()
     triton_ms = _time(triton_fn)
@@ -252,7 +261,7 @@ def _bench_scheme(a, b, ref, config):
     bq, sb = quantize_operand(b, -2, fmt, scaling)
 
     def triton_fn():
-        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, block_size)
+        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, block_size, backend="triton")
 
     triton_out = triton_fn()
     result["triton_ms"] = _time(triton_fn)

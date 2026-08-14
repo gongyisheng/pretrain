@@ -94,7 +94,9 @@ def _bench_point(E, K, N, scheme):
     aq, bq, sa, sb, bs = _quant(a, b, scheme)
 
     def triton_fn():
-        return scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16, bs)
+        return scaled_grouped_gemm(
+            aq, bq, sa, sb, offs, torch.bfloat16, bs, backend="triton"
+        )
 
     triton_out = triton_fn()
     triton_ms = _time(triton_fn)
@@ -120,7 +122,16 @@ def _bench_wgrad_point(E, K, N, scheme):
     gq, sg = quantize_operand(g, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
 
     def triton_fn():
-        return scaled_grouped_gemm(aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0)
+        return scaled_grouped_gemm(
+            aq.mT,
+            gq,
+            sa.mT,
+            sg,
+            offs,
+            torch.bfloat16,
+            0,
+            backend="triton",
+        )
 
     triton_out = triton_fn()
     triton_ms = _time(triton_fn)

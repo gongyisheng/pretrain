@@ -7,10 +7,13 @@ from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 class GroupedGemmFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, bias, offs):
-        y = grouped_gemm(a, b, offs, bias=bias)
+    def forward(ctx, a, b, bias, offs, backend=None):
+        ctx.has_backend_arg = backend is not None
+        backend = backend or "auto"
+        y = grouped_gemm(a, b, offs, bias=bias, backend=backend)
         ctx.save_for_backward(a, b, offs)
         ctx.bias_needs_grad = ctx.needs_input_grad[2]
+        ctx.backend = backend
         return y
 
     @staticmethod
@@ -22,17 +25,20 @@ class GroupedGemmFn(torch.autograd.Function):
                 grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
             else:
                 ones = grad_c.new_ones(1, grad_c.shape[0])
-                grad_bias = grouped_gemm(ones, grad_c, offs).squeeze(1)
-        return (
-            grouped_gemm(grad_c, b.mT, offs),
-            grouped_gemm(a.mT, grad_c, offs),
+                grad_bias = grouped_gemm(
+                    ones, grad_c, offs, backend=ctx.backend
+                ).squeeze(1)
+        grads = (
+            grouped_gemm(grad_c, b.mT, offs, backend=ctx.backend),
+            grouped_gemm(a.mT, grad_c, offs, backend=ctx.backend),
             grad_bias,
             None,
         )
+        return (*grads, None) if ctx.has_backend_arg else grads
 
 
-def grouped_gemm_fn(a, b, offs, bias=None, projection=None):
-    return GroupedGemmFn.apply(a, b, bias, offs)
+def grouped_gemm_fn(a, b, offs, bias=None, projection=None, *, backend="auto"):
+    return GroupedGemmFn.apply(a, b, bias, offs, backend)
 
 
 def grouped_mlp(

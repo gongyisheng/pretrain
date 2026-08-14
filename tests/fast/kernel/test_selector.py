@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 from src.kernel.registry import KernelRegistry
 from src.kernel.selector import KernelSelectionError, dispatch, select_kernel
@@ -13,7 +14,7 @@ def _no(*_args, **_kwargs):
     return SupportResult(False, "unsupported dtype")
 
 
-def _spec(backend, fn, priority, eligibility=_yes):
+def _spec(backend, fn, priority, eligibility=_yes, autograd="native"):
     return KernelSpec(
         op="test.identity",
         backend=backend,
@@ -22,7 +23,7 @@ def _spec(backend, fn, priority, eligibility=_yes):
         availability=lambda: SupportResult(True),
         eligibility=eligibility,
         build="eager",
-        autograd="native",
+        autograd=autograd,
     )
 
 
@@ -108,3 +109,58 @@ def test_dispatch_does_not_retry_after_selected_kernel_raises():
         dispatch("test.identity", 3, registry=registry)
 
     assert calls == {"torch": 0, "triton": 1}
+
+
+@pytest.mark.parametrize("autograd", ["external", "forward_only"])
+def test_auto_falls_back_when_optimized_backend_cannot_build_autograd(autograd):
+    registry = KernelRegistry()
+    registry.register(_spec("torch", lambda x: x, -100))
+    registry.register(_spec("optimized", lambda x: x, 100, autograd=autograd))
+    x = torch.ones(2, device="cpu", requires_grad=True)
+
+    selected = select_kernel("test.identity", (x,), {}, registry=registry)
+
+    assert selected.backend == "torch"
+
+
+@pytest.mark.parametrize("autograd", ["external", "forward_only"])
+def test_forced_backend_rejects_unsafe_grad_enabled_call(autograd):
+    registry = KernelRegistry()
+    registry.register(_spec("optimized", lambda x: x, 100, autograd=autograd))
+    x = torch.ones(2, device="cpu", requires_grad=True)
+
+    with pytest.raises(
+        KernelSelectionError,
+        match=f"optimized.*autograd mode {autograd!r}.*grad-enabled",
+    ):
+        select_kernel("test.identity", (x,), {}, backend="optimized", registry=registry)
+
+
+def test_external_backend_is_selectable_without_grad_tracking():
+    registry = KernelRegistry()
+    registry.register(_spec("external", lambda x: x, 100, autograd="external"))
+    x = torch.ones(2, device="cpu", requires_grad=True)
+
+    with torch.no_grad():
+        selected = select_kernel("test.identity", (x,), {}, registry=registry)
+
+    assert selected.backend == "external"
+
+
+def test_external_backend_is_selectable_inside_autograd_function_forward():
+    registry = KernelRegistry()
+    registry.register(_spec("external", lambda x: x * 2, 100, autograd="external"))
+
+    class ExternalIdentity(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            return dispatch("test.identity", x, registry=registry)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            return grad_output * 2
+
+    x = torch.ones(2, device="cpu", requires_grad=True)
+    ExternalIdentity.apply(x).sum().backward()
+
+    torch.testing.assert_close(x.grad, torch.full_like(x, 2))

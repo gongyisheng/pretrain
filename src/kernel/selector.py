@@ -1,6 +1,8 @@
 from collections.abc import Mapping
 from typing import Any
 
+import torch
+
 from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry
 from src.kernel.spec import KernelSpec, SupportResult
 
@@ -15,6 +17,19 @@ def _support(
     availability = spec.availability()
     if not availability.supported:
         return availability
+    if (
+        spec.autograd in ("external", "forward_only")
+        and torch.is_grad_enabled()
+        and any(
+            isinstance(value, torch.Tensor) and value.requires_grad
+            for value in (*args, *kwargs.values())
+        )
+    ):
+        return SupportResult(
+            False,
+            f"autograd mode {spec.autograd!r} cannot be used for a grad-enabled "
+            "call with tensor inputs requiring grad",
+        )
     return spec.eligibility(args, kwargs)
 
 
