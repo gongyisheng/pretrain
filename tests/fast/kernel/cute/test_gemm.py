@@ -1,11 +1,7 @@
-"""CuTe DSL mxfp8 kernels (sm120). Numerics are checked against the same
-oracle the Triton backend uses, so the two cannot silently diverge.
+"""SM120 CuTe MXFP8 GEMM tests against shared and vendor oracles.
 
-The CuTe kernel takes B as `(N, K)` with `sb` as `(N, K//32)` -- the layout the
-MMA wants and the one a `nn.Linear` weight is already in. `scaled_gemm_ref` keeps
-the Triton backend's `(K, N)` convention, so every comparison bridges with `.t()`,
-which is a free view. That the bridge costs nothing is the point of the
-convention.
+The kernel keeps B K-contiguous as `(N, K)`; reference calls use a free transpose
+to bridge their `(K, N)` convention.
 """
 
 import pytest
@@ -33,13 +29,7 @@ def _operands(M, K, N, seed=0):
 
 
 def _operands_spread_scales(M, K, N, seed=0):
-    """Operands whose per-scale-block magnitudes span 2^-8..2^7.
-
-    A's magnitude varies per (row, K-block) and B's per (column, K-block), so both
-    axes of *both* scale-factor fragment mappings carry signal. Uniform magnitudes
-    would leave SFB's N axis untested, which is the half of the mapping that does not
-    mirror SFA -- it reads a different thread coordinate and regroups its modes.
-    """
+    """Vary every scale-fragment axis so misplaced SFA/SFB values are observable."""
     torch.manual_seed(seed)
     n_blocks = K // 32
     exp = torch.randint(-8, 8, (M, n_blocks), device="cuda").float()
@@ -62,9 +52,23 @@ def test_scaled_gemm_mxfp8_matches_oracle(shape):
 
     assert got.shape == (M, N)
     assert got.dtype == torch.float32
-    # relative Frobenius norm, matching the bar the Triton mxfp8 kernel is held to
-    # in tests/fast/kernel/triton/test_triton_gemm.py::test_scaled_gemm_mx_matches_oracle.
-    # Elementwise tolerances give spurious failures on block-quantized outputs.
+    # A relative norm avoids unstable elementwise bounds on quantized outputs.
+    assert (got - want).norm() / want.norm() < 0.02
+
+
+@pytest.mark.parametrize(
+    "shape", [(256, 128, 256), (257, 128, 256), (256, 128, 257), (257, 128, 257)]
+)
+def test_scaled_gemm_mxfp8_epilogue_tile_boundaries(shape):
+    """Cover interior, M-edge, N-edge, and combined-edge epilogue paths."""
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    M, K, N = shape
+    aq, bq, sa, sb = _operands(M, K, N)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
+    want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
+
+    assert got.shape == (M, N)
     assert (got - want).norm() / want.norm() < 0.02
 
 
@@ -79,32 +83,10 @@ def test_scaled_gemm_mxfp8_matches_oracle(shape):
     ],
 )
 def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
-    """Applying the e8m0 scales inside the MMA must be as exact as dequantizing first.
+    """Require in-MMA scaling to match fp32 dequantization, including ragged tiles.
 
-    The last two shapes are predicated: one leaves a short K tile, the other partial M
-    and N tiles. Predication is part of the scale feed -- each scale tensor is masked
-    against its own extent, since a ragged M or N makes the scale loads partial too --
-    so it belongs under the tight bound rather than only under the 2e-2 oracle checks,
-    where per-block magnitudes barely differ and a misfed scale has somewhere to hide.
-
-    The bound is fp32-rounding tight (measured 1.0e-7..2.9e-7) on purpose. It sits an
-    order of magnitude above the Triton test's 2e-8 because these operands span 2^15
-    of per-block magnitude, and summing terms of such different size costs fp32
-    precision -- that spread is the point, since it denies a misplaced scale anywhere
-    to hide.
-
-    What the tight bound buys over the 2e-2 oracle comparison in
-    `test_scaled_gemm_mxfp8_matches_oracle` is precision, not placement. Verified by
-    mutation: rounding the result path through bf16 -- standing in for scales or
-    accumulation applied at less than fp32 -- passes every 2e-2 assertion in this file
-    and fails every shape here. Placement is caught either way, because an e8m0
-    scale is a power of two, so landing one on the wrong row, column or k-tile is at
-    least a factor-2 error and never sits inside the quantization noise.
-
-    This is the assertion that pins the instruction's arithmetic, and the one the
-    pipelining work -- which rewrites which k-tile's scales are resident when the MMA
-    fires -- must keep green. It is the CuTe counterpart of the Triton backend's
-    `test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing`.
+    Widely varying block scales expose feed errors; the tight bound isolates scaling
+    and accumulation precision from the looser end-to-end quantization tolerance.
     """
     from src.kernel.cute.gemm import scaled_gemm_mxfp8
 
@@ -123,25 +105,19 @@ def test_compile_cache_reused():
     aq, bq, sa, sb = _operands(128, 128, 128)
     cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
     n_after_first = len(cute_gemm._COMPILED)
-    # cache key mirrors scaled_gemm_mxfp8's: (K, N, a_dtype, b_dtype, out_dtype)
     key = (128, 128, aq.dtype, bq.dtype, torch.float32)
     compiled_after_first = cute_gemm._COMPILED[key]
 
     aq2, bq2, sa2, sb2 = _operands(256, 128, 128, seed=1)  # different M, same K/N
     got = cute_gemm.scaled_gemm_mxfp8(aq2, bq2, sa2, sb2, torch.float32)
 
-    # without this, dropping the store into _COMPILED would leave both checks below
-    # passing while every call silently re-JITs -- the exact cost the cache prevents
     assert n_after_first >= 1, "the first call must have cached a compiled kernel"
     assert len(cute_gemm._COMPILED) == n_after_first, "M must not trigger a recompile"
-    # a mutation that stores into _COMPILED but never looks up would keep the length
-    # check above green while re-JITting on every call -- catch that by requiring the
-    # second call to have left the *same* compiled object in place, not an equal one
+    # Identity catches replacement with a freshly compiled artifact.
     assert cute_gemm._COMPILED[key] is compiled_after_first, (
         "the second call must reuse the cached compiled kernel, not recompile it"
     )
-    # a cached kernel with M baked static would satisfy the count check above while
-    # returning garbage here, so assert the reused kernel is actually correct
+    # Correctness confirms M is truly dynamic in the reused artifact.
     want = scaled_gemm_ref(aq2, bq2.t(), sa2, sb2.t(), 32)
     assert (got - want).norm() / want.norm() < 0.02
 
@@ -174,9 +150,7 @@ def test_scaled_gemm_mxfp8_dtype_combinations(a_fmt, b_fmt):
         ((128, 128, 128), torch.float32),
         ((128, 128, 128), torch.float16),
         ((128, 128, 128), torch.bfloat16),
-        # crossing the two axes: the store converts and predicates in the same pass,
-        # and it has to mask per element, since an odd N splits the C fragment's
-        # column pair -- on an aligned shape that mask is always true
+        # Exercise dtype conversion and edge predication together.
         ((129, 160, 130), torch.bfloat16),
     ],
 )
@@ -188,8 +162,7 @@ def test_scaled_gemm_mxfp8_preserves_out_dtype(shape, out_dtype):
     want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
 
     assert got.dtype == out_dtype
-    # fp16/bf16 out costs precision on top of the mxfp8 quantization, so this bar is
-    # looser than the fp32 case above
+    # Output conversion requires a looser tolerance than fp32.
     assert (got.float() - want.float()).norm() / want.float().norm() < 0.05
 
 
@@ -199,9 +172,7 @@ def test_scaled_gemm_mxfp8_preserves_out_dtype(shape, out_dtype):
         (64, 64, 64),
         (192, 160, 128),
         (129, 128, 130),
-        # N=33 is the only shape here with M aligned, so B's N edge is the only thing
-        # predicated -- and it is not a multiple of 4, so a single 128-tile of B's
-        # scales is mostly dropped rows
+        # Isolate B's N-edge predication with a mostly empty scale tile.
         (256, 128, 33),
     ],
 )
@@ -234,17 +205,10 @@ def _to_blocked(scale_2d):
 
 @pytest.mark.parametrize("shape", [(256, 512, 128), (2048, 512, 512), (128, 256, 256)])
 def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
-    """Cross-check against the vendor kernel that runs the same MMA instruction.
+    """Use cuBLASLt as an independent scale-feed oracle for aligned shapes.
 
-    cuBLASLt's sm120 block-scaled kernel and ours issue the identical m16n8k32
-    block-scaled MMA, so the only thing that can differ is the feed path: which
-    operand element meets which scale in the tensor core. That makes this the
-    designated feed-path oracle, and the reason it is worth having on top of the
-    `_refs` comparison -- `_refs` proves the arithmetic, this proves the plumbing
-    against an independent implementation of the same plumbing.
-
-    Shapes are tile-aligned because cuBLASLt requires it; the ragged cases stay on
-    the `_refs` oracle.
+    Both kernels use the same MMA, so disagreement points to operand/scale plumbing;
+    ragged shapes remain on the shared oracle because cuBLASLt requires alignment.
     """
     from src.kernel.cute.gemm import scaled_gemm_mxfp8
 
@@ -253,8 +217,7 @@ def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
 
     got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.bfloat16)
 
-    # cuBLASLt wants B as (K, N) stored column-major and its scales row-per-N: both
-    # are free views of the (N, K) / (N, K//32) pair the CuTe kernel takes directly.
+    # cuBLASLt consumes free transposed views of the kernel's K-contiguous B/SB.
     want = torch.nn.functional.scaled_mm(
         aq,
         bq.t(),
@@ -267,8 +230,7 @@ def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
         output_dtype=torch.bfloat16,
     )
 
-    # same instruction, same operands, same scales -- only accumulation order can
-    # differ, so this bar is far tighter than the 0.02 oracle bar
+    # Only accumulation order may differ, allowing a tighter tolerance.
     assert (got.float() - want.float()).norm() / want.float().norm() < 1e-3
 
 
@@ -281,12 +243,7 @@ def test_bench_cute_gemm_importable():
 
 @pytest.mark.parametrize("shape", [(128, 160, 128), (256, 96, 128), (128, 224, 256)])
 def test_scaled_gemm_mxfp8_partial_scale_group(shape):
-    """K values whose scale-block count is not a multiple of 4.
-
-    A k-tile spans TILE_K=128 elements = 4 scale blocks, so K=160 (5 blocks) leaves
-    the second tile with a single valid block. Once the scale copy is vectorized to
-    4 bytes it would read past the end of sa/sb without the padding this test pins.
-    """
+    """Require padding when a four-byte scale copy reaches a partial K tile."""
     from src.kernel.cute.gemm import scaled_gemm_mxfp8
 
     M, K, N = shape
