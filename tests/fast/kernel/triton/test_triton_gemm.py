@@ -534,6 +534,46 @@ def test_scaled_gemm_mx_declines_unsupported_combinations(fmt, bs, scale_dtype):
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
 
+def rand(*shape):
+    return torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize("bs", [32, 64, 128])
+def test_e8m0_routes_to_the_mxfp8_kernel_at_any_multiple_of_32(monkeypatch, bs):
+    """A scale width wider than 32 is still the block-scaled MMA's job, via replication."""
+    import src.kernel.triton.gemm as gemm_mod
+
+    launched = []
+    real_wrap = gemm_mod.wrap_triton
+
+    def spy(kernel):
+        # repr(kernel) is just the Autotuner object's address in this Triton version;
+        # the kernel's name lives on the wrapped fn.
+        launched.append(kernel.fn.__name__)
+        return real_wrap(kernel)
+
+    monkeypatch.setattr(gemm_mod, "wrap_triton", spy)
+
+    a, b = rand(256, 512), rand(512, 128)
+    scaling = _scaling("blockwise", bs, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype="fp8_e8m0")
+    assert any("mxfp8" in name for name in launched), launched
+
+
+@pytest.mark.parametrize("bs", [32, 64, 128])
+def test_mxfp8_kernel_matches_epilogue_at_any_multiple_of_32(bs):
+    """The e8m0 fast path must agree with epilogue scaling at every legal width."""
+    a, b = rand(256, 512), rand(512, 128)
+    scaling = _scaling("blockwise", bs, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    mx = scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype="fp8_e8m0")
+    epilogue = scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
+    torch.testing.assert_close(mx, epilogue, rtol=2e-2, atol=2e-2)
+
+
 # ---------------------------------------------------------------------------
 # Scaled GEMM: input validation
 # ---------------------------------------------------------------------------
