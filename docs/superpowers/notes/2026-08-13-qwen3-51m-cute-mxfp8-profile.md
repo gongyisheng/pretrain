@@ -396,6 +396,7 @@ def aggregate(rows):
 parser = argparse.ArgumentParser()
 parser.add_argument("--schedule", required=True, choices=("cpasync", "cooperative"))
 parser.add_argument("--json-out", required=True)
+parser.add_argument("--enforce-gates", action="store_true")
 args = parser.parse_args()
 
 rows = []
@@ -412,9 +413,29 @@ for shape in shapes():
     )
 
 summary = aggregate(rows)
+mlp_ratios = {
+    f"{row['projection']}:{row['role']}": row["native_ms"] / row["cute_ms"]
+    for row in rows
+    if row["projection"].startswith("mlp_")
+}
+gates = {
+    "weighted_target": 0.85,
+    "weighted_actual": summary["cute_native_ratio"],
+    "weighted_pass": summary["cute_native_ratio"] >= 0.85,
+    "mlp_row_target": 0.75,
+    "mlp_row_actual": mlp_ratios,
+    "mlp_rows_pass": all(ratio >= 0.75 for ratio in mlp_ratios.values()),
+}
 print("aggregate", json.dumps(summary, sort_keys=True))
 with open(args.json_out, "w") as output_file:
-    json.dump({"schedule": args.schedule, "rows": rows, "aggregate": summary}, output_file, indent=2)
+    json.dump(
+        {"schedule": args.schedule, "rows": rows, "aggregate": summary, "gates": gates},
+        output_file,
+        indent=2,
+    )
+
+if args.enforce_gates and not (gates["weighted_pass"] and gates["mlp_rows_pass"]):
+    raise SystemExit(f"acceptance gates failed: {json.dumps(gates, sort_keys=True)}")
 ```
 
 `/tmp/bench_blocked_scale_ceiling.py`:
@@ -519,3 +540,107 @@ The cooperative schedule materially improves the compute-heavy MLP rows, but sma
 attention and MLP-down rows regress and the weighted ratio remains below the frozen
 0.85 target. The cpasync schedule therefore remains the default fallback while the
 cooperative path is explicit and cache-isolated.
+
+## Task 5 compact native-scale staging
+
+The Task 4 native-scale cooperative path reached only 0.46370 of native, while the
+private preblocked-scale ceiling reached 119.05 TFLOP/s. The single follow-up
+hypothesis is therefore to replace the producer warp's scattered scale copies with
+ordinary TMA G2S loads from the unchanged native `(rows, K//32)` scale tensors into
+compact shared `(128, 4, stages)` tiles. SFA and SFB's exact 512 bytes per stage
+would join A and B in the main TMA barrier transaction count, and consumers would
+gather the compact logical coordinates into the existing `_MmaMXF8Op` scale
+fragments. The A/B tile, MMA, A/B TMA, scheduler, epilogue, and public scale
+contract remain fixed.
+
+The experiment started behind the temporary internal schedule
+`cooperative_compact_sf`. Its focused spread-scale test failed before production
+changes with `AssertionError: unsupported schedule cooperative_compact_sf`, which
+confirmed that the test exercised the missing path rather than an existing
+schedule.
+
+The attempted ordinary scale descriptor used `CopyBulkTensorTileG2SOp` with
+`internal_type=cutlass.Int16`, matching the pinned CUTLASS helper, and an internal
+16-byte global row pitch for short scale rows. Each `(128, 4)` shared tile used
+`cute.make_layout(((32, 4), 4), stride=((16, 4), 1))`; equivalently, scale
+`(row, group)` maps to byte offset
+`16 * (row % 32) + 4 * (row // 32) + group`. This is the same physical swizzle as
+the existing blockscaled SFA/SFB layouts, so the consumer could alias the compact
+allocation with those layouts and retain `partition_fragment_SFA/SFB`,
+`get_layoutSFA_TV/SFB`, and the exact `_MmaMXF8Op` register fragments. The main
+TMA barrier expected 33,792 bytes per stage: 16,384 A + 16,384 B + 512 SFA +
+512 SFB.
+
+After marking the experiment switch `cutlass.Constexpr[bool]`, lowering succeeded
+and the launch was accepted, but synchronization returned
+`cudaErrorIllegalInstruction`.
+The same failure reproduced on the fully aligned `(M,N,K)=(128,128,128)` case.
+Compute Sanitizer reported a warp illegal instruction at kernel PC `+0x2570` for
+threads 256--287, the producer warp, and an error summary of 34 errors. The scale
+descriptors already used `cutlass.Int16`; rechecking them against the official
+helper therefore did not provide a distinct safe variant. The compact TMA path was
+not timed, and the temporary schedule, focused test, descriptors, compact storage,
+and consumer aliases were removed rather than weakening correctness.
+
+After removal, the complete focused file remained green:
+
+```text
+CUDA_VISIBLE_DEVICES=1 uv run pytest tests/fast/kernel/cute/test_gemm.py -n 6
+48 passed, 1056 warnings in 37.95s
+```
+
+Fresh public MXFP8 rows (`/tmp/scaled-gemm-cpasync-final.json` and
+`/tmp/scaled-gemm-final.json`) were:
+
+| shape | M | cpasync ms | cooperative ms | native ms | cooperative speedup | cooperative/native |
+|---|---:|---:|---:|---:|---:|---:|
+| attn_proj | 4096 | 0.267154 | 0.269394 | 0.072542 | -0.83% | 0.26928 |
+| attn_proj | 16384 | 0.256743 | 0.270921 | 0.073645 | -5.23% | 0.27183 |
+| mlp_up | 4096 | 0.265400 | 0.267309 | 0.096446 | -0.71% | 0.36080 |
+| mlp_up | 16384 | 0.523598 | 0.389498 | 0.382305 | +34.43% | 0.98153 |
+| mlp_down | 4096 | 0.257943 | 0.271833 | 0.071562 | -5.11% | 0.26326 |
+| mlp_down | 16384 | 0.269593 | 0.278084 | 0.169887 | -3.05% | 0.61092 |
+
+The private 16K-token forward/dgrad/wgrad comparison used the helper above. The
+final cooperative invocation deliberately enforced both gates after writing its
+JSON:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 uv run python /tmp/bench_qwen3_mxfp8.py \
+  --schedule cpasync --json-out /tmp/qwen3-cpasync-final.json
+CUDA_VISIBLE_DEVICES=1 uv run python /tmp/bench_qwen3_mxfp8.py \
+  --schedule cooperative --json-out /tmp/qwen3-final.json --enforce-gates
+```
+
+The results were:
+
+| projection | role | cpasync ms | cooperative ms | native ms | cooperative speedup | cooperative/native |
+|---|---|---:|---:|---:|---:|---:|
+| attn_qo | forward | 0.251591 | 0.266384 | 0.069360 | -5.55% | 0.26038 |
+| attn_qo | dgrad | 0.254850 | 0.268013 | 0.070060 | -4.91% | 0.26141 |
+| attn_qo | wgrad | 0.259296 | 0.264124 | 0.097889 | -1.83% | 0.37062 |
+| attn_kv | forward | 0.257661 | 0.275113 | 0.068569 | -6.34% | 0.24924 |
+| attn_kv | dgrad | 0.295965 | 0.281772 | 0.072069 | +5.04% | 0.25577 |
+| attn_kv | wgrad | 0.257325 | 0.263638 | 0.097903 | -2.39% | 0.37135 |
+| mlp_gate_up | forward | 0.513821 | 0.384546 | 0.376015 | +33.62% | 0.97781 |
+| mlp_gate_up | dgrad | 0.635840 | 0.566100 | 0.313841 | +12.32% | 0.55439 |
+| mlp_gate_up | wgrad | 0.555026 | 0.422401 | 0.317782 | +31.40% | 0.75232 |
+| mlp_down | forward | 0.261135 | 0.270261 | 0.169251 | -3.38% | 0.62625 |
+| mlp_down | dgrad | 0.265979 | 0.263088 | 0.191964 | +1.10% | 0.72966 |
+| mlp_down | wgrad | 0.338205 | 0.266968 | 0.209018 | +26.68% | 0.78293 |
+
+Cpasync totaled 5.723383 ms and 54.03 TFLOP/s, or 0.44801 of its paired
+native measurement. Cooperative totaled 5.411453 ms and 57.15 TFLOP/s, 5.45%
+less latency than cpasync but only 0.46745 of its paired 122.25-TFLOP/s native
+measurement. The gated cooperative helper wrote `/tmp/qwen3-final.json` and
+exited nonzero: the weighted ratio missed 0.85, while three of six MLP rows missed
+0.75 (the ratios were 0.97781, 0.55439, 0.75232, 0.62625, 0.72966, and 0.78293).
+The earlier private preblocked-scale ceiling remains 119.05 TFLOP/s.
+
+Consequently, the literal `cpasync` argument default remains the production
+schedule and diagnostic fallback, while Task 4's correct cooperative schedule
+remains an explicit, cache-isolated option for favorable shapes. `_SCHEDULES`
+contains only those two maintained paths. No `DEFAULT_SCHEDULE` constant or
+`pingpong` path is introduced because the acceptance gates did not pass. The
+benchmark module docstring and shape comment are now generic; its public text no
+longer labels this matrix as Qwen-specific.

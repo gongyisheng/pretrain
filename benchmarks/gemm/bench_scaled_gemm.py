@@ -1,7 +1,7 @@
 """Scaled GEMM latency: Triton `scaled_gemm` vs the native torch ops it replaces.
 
 Sweeps FP8/INT8 tensorwise, rowwise, blockwise-1D, and blockwise-2D scaling
-across three linear shapes from a 51M Qwen3-style config (d_model=512,
+across three representative transformer linear shapes (d_model=512,
 intermediate=1536) at two token counts M in {4096, 16384}. The mxfp8 sweep
 compares CuTe, Triton, and native calls. Native calls
 (`torch._scaled_mm`, `torch._int_mm`, an inlined mxfp8 GEMM recovered from the
@@ -34,7 +34,7 @@ E4M3 = torch.float8_e4m3fn
 E5M2 = torch.float8_e5m2
 MXFP8_BLOCK = 32
 
-# Shapes from a real 51M Qwen3-style config.
+# Representative transformer projection dimensions.
 D_MODEL = 512
 INTERMEDIATE = 1536
 M_LIST = [4096, 16384]
