@@ -166,7 +166,6 @@ class GroupedQueryAttention(nn.Module):
         cls,
         d_model,
         max_seq_len,
-        *,
         n_heads,
         n_kv_heads=None,
         bias=False,
@@ -296,7 +295,6 @@ class MultiHeadLatentAttention(nn.Module):
         cls,
         d_model,
         max_seq_len,
-        *,
         n_heads,
         qk_nope_head_dim,
         qk_rope_head_dim,
@@ -336,7 +334,6 @@ class MultiHeadLatentAttention(nn.Module):
     def compute_parameters(
         cls,
         d_model,
-        *,
         n_heads,
         qk_nope_head_dim,
         qk_rope_head_dim,

@@ -360,8 +360,7 @@ class Trainer:
                     f"Loss is {accum_loss} at step {self.step}, stopping training"
                 )
 
-            self.metrics.snapshot_pre_step(self.model, self.step)
-            scale_before = self.scaler.get_scale()
+            self.metrics.snapshot_pre_step(self.model, self.step, self.scaler)
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
@@ -371,7 +370,6 @@ class Trainer:
                 model=self.model,
                 optimizer=self.optimizer,
                 scaler=self.scaler,
-                scale_before=scale_before,
                 aux_loss=aux_loss,
             )
             self.model.post_step()

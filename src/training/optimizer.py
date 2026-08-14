@@ -45,14 +45,14 @@ class LionOptimizer(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
     @staticmethod
-    def _single_tensor_lion(params, grads, exp_avgs, *, lr, beta1, beta2, wd):
+    def _single_tensor_lion(params, grads, exp_avgs, lr, beta1, beta2, wd):
         for p, g, m in zip(params, grads, exp_avgs):
             update = m.mul(beta1).add_(g, alpha=1 - beta1).sign_()
             p.mul_(1 - lr * wd).add_(update, alpha=-lr)
             m.mul_(beta2).add_(g, alpha=1 - beta2)
 
     @staticmethod
-    def _multi_tensor_lion(params, grads, exp_avgs, *, lr, beta1, beta2, wd):
+    def _multi_tensor_lion(params, grads, exp_avgs, lr, beta1, beta2, wd):
         # foreach kernels require uniform device + dtype per call; group accordingly.
         grouped: dict = {}
         for p, g, m in zip(params, grads, exp_avgs):

@@ -40,7 +40,6 @@ def _trainer(
     save_path,
     vocab_size: int,
     method: str,
-    *,
     eval_every: int = 5000,
     checkpoint_every: int = 5000,
     wandb_enabled: bool = False,

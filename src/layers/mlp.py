@@ -72,7 +72,6 @@ class DenseMLPBlock(nn.Module):
     def __init__(
         self,
         d_model: int,
-        *,
         intermediate_size: int,
         activation: str = "silu",
         gated: bool = True,
@@ -100,7 +99,7 @@ class DenseMLPBlock(nn.Module):
         return self.dropout(self.down_proj(hidden)), None
 
     @classmethod
-    def compute_flops(cls, d_model, *, intermediate_size, gated=True, bias=False, **_):
+    def compute_flops(cls, d_model, intermediate_size, gated=True, bias=False, **_):
         d_ff = intermediate_size
         if gated:
             matmul = 6 * d_model * d_ff
@@ -243,14 +242,14 @@ class MoERouter(nn.Module):
             self.expert_bias.update(expert_counts)
 
     @classmethod
-    def compute_flops(cls, d_model: int, n_experts: int, *, expert_bias=False) -> int:
+    def compute_flops(cls, d_model: int, n_experts: int, expert_bias=False) -> int:
         flops = 2 * d_model * n_experts  # gate matmul (no bias)
         if expert_bias:
             flops += ExpertBias.compute_flops(n_experts)
         return flops
 
     @classmethod
-    def compute_parameters(cls, d_model: int, n_experts: int, *, expert_bias=False):
+    def compute_parameters(cls, d_model: int, n_experts: int, expert_bias=False):
         params = d_model * n_experts  # gate, no bias
         if expert_bias:
             params += ExpertBias.compute_parameters(n_experts)
@@ -263,7 +262,6 @@ class SparseMoEBlock(nn.Module):
     def __init__(
         self,
         d_model: int,
-        *,
         intermediate_size: int,
         n_routed_experts: int,
         n_routed_experts_per_token: int,
@@ -454,7 +452,6 @@ class SparseMoEBlock(nn.Module):
     def compute_flops(
         cls,
         d_model,
-        *,
         intermediate_size,
         n_routed_experts,
         n_routed_experts_per_token=2,
@@ -494,7 +491,6 @@ class SparseMoEBlock(nn.Module):
     def compute_parameters(
         cls,
         d_model,
-        *,
         intermediate_size,
         n_routed_experts,
         n_routed_experts_per_token=2,

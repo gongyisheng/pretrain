@@ -53,7 +53,6 @@ class AttnResidual(BaseResidual):
         d_model: int,
         layer_idx: int,
         slot: str,
-        *,
         norm: str = "rmsnorm",
         seal_block_size: int = 1,
         **kwargs,

@@ -19,7 +19,7 @@ class LayerNorm(nn.LayerNorm):
         super().__init__(d_model, eps=eps, elementwise_affine=True, bias=bias)
 
     @classmethod
-    def compute_parameters(cls, d_model, *, bias=True, **_) -> int:
+    def compute_parameters(cls, d_model, bias=True, **_) -> int:
         return d_model * (2 if bias else 1)  # weight + optional bias
 
 

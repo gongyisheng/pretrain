@@ -80,10 +80,9 @@ def _tile(a, dim, block_size):
     The tile axis lands at -1 for `dim == -1` and -2 for `dim == -2`. Both are free
     views on contiguous input -- splitting a dim never transposes.
     """
-    # `dequantize_operand` takes its contraction axis straight from a caller (or a
-    # snapshot) without a `_check_dims` of its own, so an out-of-domain dim reaches
-    # here. Without this the -2 branch would silently claim it and mis-tile at the
-    # right shape.
+    # Both entry points validate their dim up front; this stays because the -2 branch
+    # would otherwise silently claim an out-of-domain dim and mis-tile at the right
+    # shape.
     _check_tile_dim(dim)
     length = a.shape[dim]
     n_blocks = (length + block_size - 1) // block_size
@@ -220,7 +219,7 @@ def _quantize_blockwise(
     return codes, scale
 
 
-def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=None):
+def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
     """Quantize `x` into scale groups tiled along `contract_dim`.
 
     `contract_dim` and `ragged_dim` each name one of the last two dims (-2 or -1), so a
@@ -255,8 +254,9 @@ def quantize_operand(x, contract_dim, fmt, scaling, *, offs=None, ragged_dim=Non
     return codes.contiguous(), scale.contiguous()
 
 
-def dequantize_operand(xq, scale, contract_dim, scaling, *, offs=None, ragged_dim=None):
+def dequantize_operand(xq, scale, contract_dim, scaling, offs=None, ragged_dim=None):
     """Invert `quantize_operand` in fp32, given the layout it was called with."""
+    _check_dims(xq, contract_dim, ragged_dim, offs)
     block_size = scaling["block_size"]
     qf, sf = xq.float(), scale.float()
     if ragged_dim == contract_dim and offs is not None:

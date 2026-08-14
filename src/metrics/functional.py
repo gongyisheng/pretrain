@@ -322,7 +322,6 @@ def compute_statistics(values: list[float]) -> dict[str, float]:
 def count_correct(
     logits: torch.Tensor,
     labels: torch.Tensor,
-    *,
     ignore_index: int = -100,
     exclude_id: int | None = None,
 ) -> tuple[int, int]:

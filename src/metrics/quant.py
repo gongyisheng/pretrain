@@ -131,11 +131,12 @@ def record_operand(
     quantize that produced `codes`, so `source` and `codes` are the exact tensors the
     GEMM consumes.
 
-    `offs` reaches both the dequantize and the sums, and the two read it differently on
-    purpose: `dequantize_operand` branches on `ragged_dim`, so a `None` ragged_dim still
-    takes the dense per-expert path, while the sums branch on `offs` itself to choose a
-    per-expert rather than a global reduction. Narrowing `offs` to match `ragged_dim`
-    would silently drop grouped weight metrics to one global number.
+    `offs` reaches the dequantize and the sums differently on purpose. The sums branch
+    on `offs` itself to choose a per-expert rather than a global reduction, so they get
+    the real one -- narrowing it to match `ragged_dim` would silently drop grouped
+    weight metrics to one global number. `dequantize_operand` reads `offs` only on the
+    ragged path, so it gets one only when `ragged_dim` is set; passing it unpaired
+    would be dead weight there and trips its given-together check.
     """
     if stats is None or not _RECORDING[0]:
         return
@@ -144,7 +145,12 @@ def record_operand(
     # graph. Measurement must not join the computation it measures.
     source, codes, scale = source.detach(), codes.detach(), scale.detach()
     dequantized = dequantize_operand(
-        codes, scale, contract_dim, scaling, offs=offs, ragged_dim=ragged_dim
+        codes,
+        scale,
+        contract_dim,
+        scaling,
+        offs=offs if ragged_dim is not None else None,
+        ragged_dim=ragged_dim,
     )
     sums = accumulate_quantization_sums(source, codes, dequantized, offs=offs)
     for name, value in zip(stats.FIELDS, sums):

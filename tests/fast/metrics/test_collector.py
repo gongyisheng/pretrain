@@ -72,10 +72,9 @@ def _linear_setup():
     return model, opt, scaler
 
 
-def _do_step(tracker, model, opt, scaler, step, *, loss=2.0, grad_norm=0.5):
+def _do_step(tracker, model, opt, scaler, step, loss=2.0, grad_norm=0.5):
     """Run one tracker step (snapshot → optimizer step → on_train_step)."""
-    tracker.snapshot_pre_step(model, step)
-    scale_before = scaler.get_scale()
+    tracker.snapshot_pre_step(model, step, scaler)
     opt.step()
     tracker.on_train_step(
         loss=loss,
@@ -83,7 +82,6 @@ def _do_step(tracker, model, opt, scaler, step, *, loss=2.0, grad_norm=0.5):
         model=model,
         optimizer=opt,
         scaler=scaler,
-        scale_before=scale_before,
     )
 
 
@@ -215,14 +213,14 @@ def test_step_norms_present_on_log_step():
 
 
 def test_step_norms_gated_off_non_log_steps():
-    """snapshot_pre_step is a no-op except on the pre-log step."""
+    """snapshot_pre_step takes a param snapshot only on the pre-log step."""
     tracker, _ = _tracker(_cfg(log_every=10, log_optimizer_step_norms=True))
     model, opt, scaler = _linear_setup()
     tracker.train_begin()
     for s in range(9):  # steps 0..8: (s+1)%10 != 0
-        tracker.snapshot_pre_step(model, s)
+        tracker.snapshot_pre_step(model, s, scaler)
         assert tracker._param_snapshot is None
-    tracker.snapshot_pre_step(model, 9)  # (9+1)%10 == 0
+    tracker.snapshot_pre_step(model, 9, scaler)  # (9+1)%10 == 0
     assert tracker._param_snapshot is not None
 
 
@@ -472,14 +470,13 @@ def _moe_blocks(model):
 def _moe_on_step(tracker, model, opt, step):
     """Drive one tracker step for an MoE model (no grads needed)."""
     scaler = torch.amp.GradScaler(enabled=False)
-    tracker.snapshot_pre_step(model, step)
+    tracker.snapshot_pre_step(model, step, scaler)
     tracker.on_train_step(
         loss=2.0,
         grad_norm=0.5,
         model=model,
         optimizer=opt,
         scaler=scaler,
-        scale_before=scaler.get_scale(),
     )
 
 

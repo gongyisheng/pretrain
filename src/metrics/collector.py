@@ -74,6 +74,7 @@ class MetricsCollector:
         self._loss_scale = 1.0
         self._last_aux_loss: float | None = None
         self._param_snapshot: list[torch.Tensor] | None = None
+        self._scale_before = 1.0
         self._param_step_norm: float | None = None
         self._momentum_norm: float | None = None
         self._variance_norm: float | None = None
@@ -133,12 +134,15 @@ class MetricsCollector:
         self._variance_norm = None
         self._moe_expert_load = None
 
-    def snapshot_pre_step(self, model: torch.nn.Module, step: int) -> None:
+    def snapshot_pre_step(
+        self, model: torch.nn.Module, step: int, scaler: torch.amp.GradScaler
+    ) -> None:
         log_every = self.config.logging.log_every
         if self.config.logging.log_optimizer_step_norms and (step + 1) % log_every == 0:
             self._param_snapshot = metric_utils.snapshot_params(model)
         else:
             self._param_snapshot = None
+        self._scale_before = scaler.get_scale()
 
     def train_step_begin(self, model: torch.nn.Module, step: int) -> None:
         """Open (or leave shut) the accumulation window the next step will fill."""
@@ -152,13 +156,11 @@ class MetricsCollector:
 
     def on_train_step(
         self,
-        *,
         loss: float,
         grad_norm: float,
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         scaler: torch.amp.GradScaler,
-        scale_before: float,
         aux_loss: torch.Tensor | None = None,
     ) -> None:
         """
@@ -174,7 +176,7 @@ class MetricsCollector:
         self._steps_since_log += 1
         self._tokens_since_log += self.tokens_per_step
         self.total_tokens += self.tokens_per_step
-        if scaler.is_enabled() and scaler.get_scale() < scale_before:
+        if scaler.is_enabled() and scaler.get_scale() < self._scale_before:
             self._skipped_steps += 1
 
         if self._param_snapshot is not None:
@@ -192,7 +194,6 @@ class MetricsCollector:
 
     def log_train(
         self,
-        *,
         step: int,
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
@@ -286,10 +287,6 @@ class MetricsCollector:
                 for metric, val in m.items():
                     d[f"weight/{metric}/{name}"] = val
 
-        # Per-site activation RMS and per-operand quantization health, both over the
-        # window opened by train_step_begin, which also owns resetting them --
-        # nothing here mutates the model. The `train-` prefix is applied here, not in
-        # the compute functions: log_eval reads the same accumulators as `val-`.
         if self.config.logging.log_activation_norms:
             for name, rms in metric_utils.compute_activation_norm(model).items():
                 d[f"train-act/norm/{name}"] = rms
@@ -346,7 +343,6 @@ class MetricsCollector:
 
     def on_eval_step(
         self,
-        *,
         loss: float,
         logits: torch.Tensor,
         labels: torch.Tensor,
@@ -386,7 +382,6 @@ class MetricsCollector:
 
     def log_eval(
         self,
-        *,
         step: int,
         model: torch.nn.Module | None = None,
         train_avg_acc: float | None = None,
