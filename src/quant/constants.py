@@ -18,8 +18,16 @@ QUANT_GRANULARITY = frozenset({"tensorwise", "rowwise", "blockwise"})
 QUANT_SCALING_RECIPES = {
     "tensorwise": {"granularity": "tensorwise"},
     "rowwise": {"granularity": "rowwise"},
-    "blockwise": {"granularity": "blockwise", "block_size": 128, "scale_dtype": "fp32"},
-    "mxfp8": {"granularity": "blockwise", "block_size": 32, "scale_dtype": "fp8_e8m0"},
+    "blockwise": {
+        "granularity": "blockwise",
+        "block_shape": (1, 128),
+        "scale_dtype": "fp32",
+    },
+    "mxfp8": {
+        "granularity": "blockwise",
+        "block_shape": (1, 32),
+        "scale_dtype": "fp8_e8m0",
+    },
 }
 
 QUANT_DTYPE_RECIPES = {

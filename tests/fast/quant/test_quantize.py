@@ -13,13 +13,34 @@ _E4M3 = "fp8_e4m3"
 
 
 def _scaling(gran, bs=0, scale_dtype=None):
-    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+    return {
+        "granularity": gran,
+        "block_shape": (1, bs) if bs else (0, 0),
+        "scale_dtype": scale_dtype,
+    }
 
 
 def _roundtrip(x, contract_dim, fmt, scaling):
     """dequant(quant(x)) — the reconstruction the quantized GEMMs actually see."""
     xq, scale = quantize_operand(x, contract_dim, fmt, scaling)
     return dequantize_operand(xq, scale, contract_dim, scaling)
+
+
+@pytest.mark.parametrize("bs", [16, 32, 128])
+@pytest.mark.parametrize("contract_dim", [-1, -2])
+def test_block_shape_1d_matches_legacy_block_size(bs, contract_dim):
+    """(1, B) is exactly what block_size=B produced. The gate on the rename."""
+    x = torch.randn(64, 128)
+    codes, scale = quantize_operand(
+        x,
+        contract_dim,
+        _E4M3,
+        {"granularity": "blockwise", "block_shape": (1, bs), "scale_dtype": "fp32"},
+    )
+    expected_blocks = (x.shape[contract_dim] + bs - 1) // bs
+    assert scale.shape[contract_dim] == expected_blocks
+    outer_dim = -2 if contract_dim == -1 else -1
+    assert scale.shape[outer_dim] == x.shape[outer_dim]
 
 
 # --- ragged scale blocks ---
@@ -580,3 +601,92 @@ def test_ragged_ignored_for_already_per_row_granularities(gran, bs):
     without = quantize_operand(x, -1, _E4M3, _scaling(gran, bs))
     assert torch.equal(with_ragged[0], without[0])
     assert torch.equal(with_ragged[1], without[1])
+
+
+@pytest.mark.parametrize("shape", [(64, 128), (70, 130), (4, 64, 128)])
+@pytest.mark.parametrize("tile", [16, 32])
+def test_tile2d_roundtrip(shape, tile):
+    from src.quant.quantize import _tile2d, _untile2d
+
+    x = torch.randn(*shape)
+    rows, cols = shape[-2:]
+    v = _tile2d(x, tile)
+    assert v.shape[-4:] == (
+        (rows + tile - 1) // tile,
+        tile,
+        (cols + tile - 1) // tile,
+        tile,
+    )
+    assert torch.equal(_untile2d(v, rows, cols), x)
+
+
+@pytest.mark.parametrize("tile", [16, 32])
+def test_tile2d_amax_reduces_to_block_counts(tile):
+    from src.quant.quantize import _tile2d
+
+    x = torch.randn(64, 128)
+    amax = _tile2d(x, tile).abs().amax((-3, -1))
+    assert amax.shape == (64 // tile, 128 // tile)
+    # a tile's amax is the max over exactly that square
+    assert torch.equal(amax[1, 2], x[tile : 2 * tile, 2 * tile : 3 * tile].abs().amax())
+
+
+# --- 2D (square-tile) blockwise ---
+
+
+def _scaling2d(tile, scale_dtype="fp32"):
+    return {
+        "granularity": "blockwise",
+        "block_shape": (tile, tile),
+        "scale_dtype": scale_dtype,
+    }
+
+
+@pytest.mark.parametrize("tile", [16, 32])
+@pytest.mark.parametrize("shape", [(64, 128), (70, 130)])
+def test_blockwise_2d_is_transpose_invariant(tile, shape):
+    """The property the whole feature exists for: a square tile quantizes W and W.T
+    to the same codes, so the forward and dgrad see the same weight."""
+    w = torch.randn(*shape)
+    codes_a, _ = quantize_operand(w, -1, _E4M3, _scaling2d(tile))
+    codes_b, _ = quantize_operand(w.t().contiguous(), -2, _E4M3, _scaling2d(tile))
+    assert torch.equal(codes_a.t().float(), codes_b.float())
+
+
+@pytest.mark.parametrize("tile", [16, 32])
+@pytest.mark.parametrize("contract_dim", [-1, -2])
+def test_blockwise_2d_scale_uses_the_1d_layout(tile, contract_dim):
+    """No kernel may need to know the tile was square: the scale leaves in the same
+    shape a 1D blockwise scale of the same contract extent would."""
+    x = torch.randn(64, 128)
+    _, scale_2d = quantize_operand(x, contract_dim, _E4M3, _scaling2d(tile))
+    _, scale_1d = quantize_operand(
+        x, contract_dim, _E4M3, _scaling("blockwise", tile, "fp32")
+    )
+    assert scale_2d.shape == scale_1d.shape
+
+
+@pytest.mark.parametrize("tile", [16, 32])
+def test_blockwise_2d_scale_is_constant_within_a_tile(tile):
+    """Guards the expansion direction -- the one orientation-dependent step."""
+    x = torch.randn(64, 128)
+    _, scale = quantize_operand(x, -1, _E4M3, _scaling2d(tile))  # (64, 128/tile)
+    for i in range(64 // tile):
+        block = scale[i * tile : (i + 1) * tile, :]
+        assert torch.equal(block, block[:1].expand_as(block))
+
+
+@pytest.mark.parametrize("shape", [(64, 128), (70, 130), (4, 64, 128)])
+def test_blockwise_2d_roundtrip(shape):
+    x = torch.randn(*shape)
+    scaling = _scaling2d(32)
+    deq = _roundtrip(x, -1, _E4M3, scaling)
+    assert deq.shape == x.shape
+    assert (deq - x).abs().max() < 0.1 * x.abs().max()
+
+
+def test_blockwise_2d_rejects_a_ragged_axis():
+    x = torch.randn(64, 128)
+    offs = _offs([32, 64])
+    with pytest.raises(NotImplementedError, match="ragged"):
+        quantize_operand(x, -2, _E4M3, _scaling2d(16), offs=offs, ragged_dim=-2)

@@ -550,10 +550,12 @@ def scaled_gemm(
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
 
-    `scale_dtype` "fp8_e8m0" with `block_size` 32 and fp8 operands is mxfp8, the one
-    combination the hardware scales inside the MMA: it routes to
-    `_scaled_gemm_mxfp8_kernel`. Everything else -- every other width, fp32 scales, int8 --
-    keeps the epilogue-scaling kernel, which is where those recipes are fastest anyway.
+    `scale_dtype` "fp8_e8m0" with fp8 operands and `block_size` any multiple of 32 is
+    mxfp8: the hardware's block-scaled MMA reads a 32-wide scale vector natively, and a
+    wider block is the same scale replicated across consecutive 32-wide groups, so it
+    routes to `_scaled_gemm_mxfp8_kernel` too. Everything else -- a non-multiple-of-32
+    width, fp32 scales, int8 -- keeps the epilogue-scaling kernel, which is where those
+    recipes are fastest anyway.
 
     `block_size` 0 means one scale block spanning the whole contraction.
     `SCALE_BLOCK_SIZE` below is derived from `n_scale_blocks` rather than from that
@@ -610,14 +612,28 @@ def scaled_gemm(
 
     if (
         scale_dtype == "fp8_e8m0"
-        and block_size == _MXFP8_BLOCK_SIZE
+        # block_size 0 is the "one block spans all of K" sentinel, not a real width --
+        # 0 % 32 == 0 in Python, so it must be excluded explicitly or it would collapse
+        # rep_k to 0 below and hand the kernel a zero-width scale tensor.
+        and block_size != 0
+        and block_size % _MXFP8_BLOCK_SIZE == 0
         and aq.dtype in _MXFP8_FORMAT
         and bq.dtype in _MXFP8_FORMAT
     ):
+        # The MMA's scale vector is fixed at 32. A wider scale block is the same scale
+        # repeated across consecutive 32-wide groups, so replicating here reaches the
+        # block-scaled MMA rather than falling back to epilogue scaling. block_size 32
+        # leaves both repeats as no-ops.
+        rep_k = block_size // _MXFP8_BLOCK_SIZE
+        # ceil, not floor: the quantizer pads a trailing partial block whenever
+        # block_size does not divide K, and sa/sb legitimately carry that column.
+        n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
+        sa_mx = sa.repeat_interleave(rep_k, 1)[:, :n_mx]
+        sb_mx = sb.repeat_interleave(rep_k, 0)[:n_mx]
         # e8m0 holds a bare exponent, so `_compute_scale` already produced exact powers
         # of two and this cast is lossless; the kernel wants those bytes, not floats.
-        sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
-        sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
+        sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
+        sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
         wrap_triton(_scaled_gemm_mxfp8_kernel)[grid](
             aq,
             bq,
@@ -628,7 +644,7 @@ def scaled_gemm(
             M,
             N,
             K,
-            n_scale_blocks,
+            n_mx,
             aq.stride(0),
             aq.stride(1),
             bq.stride(0),
@@ -1100,9 +1116,10 @@ def scaled_grouped_gemm(
 ) -> torch.Tensor:
     """Ragged scaled grouped GEMM, layout picked from the operand ranks.
 
-    `scale_dtype` "fp8_e8m0" with `block_size` 32 and fp8 operands routes to
-    `_scaled_grouped_gemm_mxfp8_kernel`, which lets the MMA apply the scales. Every
-    other combination keeps the epilogue-scaling kernel -- see `scaled_gemm`.
+    `scale_dtype` "fp8_e8m0" with fp8 operands routes to `_scaled_grouped_gemm_mxfp8_kernel`,
+    which lets the MMA apply the scales, at `block_size` 32 always and any multiple of 32
+    for the ragged-M/ragged-N layouts (see the ragged-K note below `is_ragged_k` in the
+    body). Every other combination keeps the epilogue-scaling kernel -- see `scaled_gemm`.
 
     Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
         (M,K) x (E,K,N) -> (M,N)    ragged M
@@ -1136,14 +1153,46 @@ def scaled_grouped_gemm(
     c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
 
-    if (
+    # The ragged-K layout (a_is_2d and b_is_2d) re-tiles its scale blocks *inside* each
+    # group at runtime -- group g's blocks start where group g-1's ended, sized off
+    # `offs` via cdiv(k_size_g, 32) -- so a flat repeat_interleave over the whole
+    # scale-block axis would smear a replicated scale across a group boundary. Keep
+    # that layout locked to the kernel's native 32-wide block; the other two layouts
+    # (ragged M, ragged N) have a single non-ragged K shared by every group, where one
+    # repeat_interleave over the whole axis is exact, so they get the generalized
+    # multiple-of-32 condition. Do not simplify this to one shared condition.
+    is_ragged_k = a_is_2d and b_is_2d
+    mxfp8_ok = (
         scale_dtype == "fp8_e8m0"
-        and block_size == _MXFP8_BLOCK_SIZE
         and aq.dtype in _MXFP8_FORMAT
         and bq.dtype in _MXFP8_FORMAT
-    ):
-        sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
-        sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
+        and (
+            block_size == _MXFP8_BLOCK_SIZE
+            if is_ragged_k
+            # block_size 0 is the "one block spans the whole segment" sentinel, not a
+            # real width -- 0 % 32 == 0 in Python, so it must be excluded explicitly or
+            # it would collapse rep_k to 0 below and hand the kernel a zero-width
+            # scale tensor.
+            else block_size != 0 and block_size % _MXFP8_BLOCK_SIZE == 0
+        )
+    )
+    if mxfp8_ok:
+        if is_ragged_k:
+            sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
+            sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
+        else:
+            # Same replication trick as scaled_gemm: K is shared by every group here,
+            # so one repeat_interleave over the whole scale-block axis is exact. The
+            # axis is always last for sa and second-to-last for sb, in both the 2-D
+            # and 3-D (E, ...) shapes, so this covers ragged M and ragged N alike.
+            rep_k = block_size // _MXFP8_BLOCK_SIZE
+            # ceil, not floor: the quantizer pads a trailing partial block whenever
+            # block_size does not divide K, and sa/sb legitimately carry that column.
+            n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
+            sa_mx = sa.repeat_interleave(rep_k, dim=-1).narrow(-1, 0, n_mx)
+            sb_mx = sb.repeat_interleave(rep_k, dim=-2).narrow(-2, 0, n_mx)
+            sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
+            sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
         wrap_triton(_scaled_grouped_gemm_mxfp8_kernel)[(num_sms,)](
             aq,
             bq,

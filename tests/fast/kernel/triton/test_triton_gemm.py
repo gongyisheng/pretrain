@@ -32,7 +32,11 @@ INT_FMT = {127: "int8", 63: "int7", 31: "int6", 15: "int5", 7: "int4"}
 
 
 def _scaling(gran, bs=0, scale_dtype=None):
-    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+    return {
+        "granularity": gran,
+        "block_shape": (1, bs) if bs else (0, 0),
+        "scale_dtype": scale_dtype,
+    }
 
 
 def _run(a, b, gran, bs, a_fmt, b_fmt, scale_dtype=None):
@@ -508,16 +512,19 @@ def test_scaled_gemm_mxfp8_precision_band_against_unquantized():
     "fmt,bs,scale_dtype",
     [
         ("int8", 32, "fp8_e8m0"),  # tl.dot_scaled has no integer format
-        (FMT[E4M3], 128, "fp8_e8m0"),  # the instruction's scale width is 32, not 128
+        (FMT[E4M3], 16, "fp8_e8m0"),  # 16 clears the power-of-two->=16 guard but is
+        # not a multiple of the MMA's fixed 32-wide scale vector
         (FMT[E4M3], 32, None),  # fp32 scales are not e8m0 exponents
     ],
 )
 def test_scaled_gemm_mx_declines_unsupported_combinations(fmt, bs, scale_dtype):
-    """Only fp8 x 32-wide x e8m0 may take the MMA path; the rest must fall back.
+    """Only fp8 x (any nonzero multiple of 32) x e8m0 may take the MMA path; the rest
+    must fall back to epilogue scaling.
 
     Each of these would fail differently if the dispatch were loosened: int8 is
-    rejected outright by tl.dot_scaled ("Invalid float format"), a 128-wide block
-    would silently be read as 32-wide, and fp32 scales are not exponent bytes at all.
+    rejected outright by tl.dot_scaled ("Invalid float format"), a 16-wide block is
+    not a multiple of the instruction's fixed 32-wide scale vector so it cannot be
+    reached by replication, and fp32 scales are not exponent bytes at all.
     """
     torch.manual_seed(0)
     a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
@@ -528,6 +535,79 @@ def test_scaled_gemm_mx_declines_unsupported_combinations(fmt, bs, scale_dtype):
     out = scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype=scale_dtype)
     oracle = scaled_gemm_ref(aq, bq, sa, sb, bs)
     assert (out - oracle).norm() / oracle.norm() < 0.02
+
+
+def rand(*shape):
+    return torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize("bs", [32, 64, 128])
+def test_e8m0_routes_to_the_mxfp8_kernel_at_any_multiple_of_32(monkeypatch, bs):
+    """A scale width wider than 32 is still the block-scaled MMA's job, via replication."""
+    import src.kernel.triton.gemm as gemm_mod
+
+    launched = []
+    real_wrap = gemm_mod.wrap_triton
+
+    def spy(kernel):
+        # repr(kernel) is just the Autotuner object's address in this Triton version;
+        # the kernel's name lives on the wrapped fn.
+        launched.append(kernel.fn.__name__)
+        return real_wrap(kernel)
+
+    monkeypatch.setattr(gemm_mod, "wrap_triton", spy)
+
+    a, b = rand(256, 512), rand(512, 128)
+    scaling = _scaling("blockwise", bs, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype="fp8_e8m0")
+    assert any("mxfp8" in name for name in launched), launched
+
+
+@pytest.mark.parametrize("bs", [32, 64, 128])
+def test_mxfp8_kernel_matches_epilogue_at_any_multiple_of_32(bs):
+    """The e8m0 fast path must agree with epilogue scaling at every legal width."""
+    a, b = rand(256, 512), rand(512, 128)
+    scaling = _scaling("blockwise", bs, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    mx = scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype="fp8_e8m0")
+    epilogue = scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
+    torch.testing.assert_close(mx, epilogue, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("bs", [32, 64, 128])
+def test_mxfp8_kernel_matches_epilogue_when_k_is_not_a_multiple_of_32(bs):
+    """K not a multiple of 32 leaves sa/sb with a trailing partial scale block --
+    n_scale_blocks is ceil(K/32), one more than K // 32. The bs=32 case is the one that
+    pins the regression: block_size == _MXFP8_BLOCK_SIZE is supposed to be a bit-exact
+    no-op, so if this fails only at bs=32 the bug is in the block count, not the
+    replication.
+    """
+    torch.manual_seed(0)
+    a, b = rand(64, 163), rand(163, 96)
+    scaling = _scaling("blockwise", bs, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    mx = scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype="fp8_e8m0")
+    epilogue = scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
+    torch.testing.assert_close(mx, epilogue, rtol=2e-2, atol=2e-2)
+
+
+def test_mxfp8_kernel_declines_block_size_zero():
+    """block_size 0 is the "one scale block spans all of K" sentinel, not a multiple of
+    32 in any meaningful sense -- but 0 % 32 == 0 in Python, so an unguarded condition
+    would route it into the replication branch, where rep_k=0 collapses sa/sb to a
+    zero-width tensor and the kernel launch reads out of bounds.
+    """
+    torch.manual_seed(0)
+    a, b = rand(64, 163), rand(163, 96)
+    scaling = _scaling("tensorwise", 0, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    out = scaled_gemm(aq, bq, sa, sb, torch.float32, 0, scale_dtype="fp8_e8m0")
+    assert torch.isfinite(out).all()
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +830,35 @@ def test_scaled_grouped_mxfp8_layouts_match_oracle(layout):
     assert rel < _SCALED_TOL[layout], rel
 
 
+@pytest.mark.parametrize("bs", [32, 64, 128])
+def test_scaled_grouped_mxfp8_ragged_m_matches_oracle_when_k_is_not_a_multiple_of_32(
+    bs,
+):
+    """Same regression as the dense-gemm K=163 case, for the ragged-M grouped layout --
+    K here is shared by every group (not ragged), so it is the layout the generalized
+    condition applies to. A dropped trailing scale column here does not just lose
+    accuracy: the kernel's own `scale_block_end = tl.cdiv(K, 32)` still expects it, so
+    reading past a host-side tensor narrowed one column short produces NaN, not just a
+    large relative error.
+    """
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_m",
+        _SCALED_COUNTS,
+        "blockwise",
+        bs,
+        "fp8_e4m3",
+        K=163,
+        scale_dtype="fp8_e8m0",
+    )
+    got = scaled_grouped_gemm(
+        aq, bq, sa, sb, offs, torch.float32, kbs, scale_dtype="fp8_e8m0"
+    )
+    ref = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
+    assert torch.isfinite(got).all(), got
+    rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
+    assert rel < _SCALED_TOL["ragged_m"], rel
+
+
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
 def test_scaled_grouped_mxfp8_agrees_with_epilogue_path(layout):
     """`scale_dtype` selects a kernel, not a result."""
@@ -788,6 +897,22 @@ def test_scaled_grouped_mxfp8_adds_no_error_over_dequantizing(layout):
     oracle = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
     rel = (got.float() - oracle).norm() / oracle.norm().clamp_min(1e-12)
     assert rel < 1e-6, rel
+
+
+def test_scaled_grouped_mxfp8_kernel_declines_block_size_zero():
+    """As for the dense kernel's block_size-0 regression: 0 % 32 == 0 in Python, so an
+    unguarded condition would route the "one scale block spans the whole segment"
+    sentinel into the replication branch, collapsing rep_k to 0 and handing the kernel
+    a zero-width scale tensor -- a CUDA illegal memory access hit during development.
+    """
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_m", _SCALED_COUNTS, "tensorwise", 0, "fp8_e4m3", scale_dtype="fp8_e8m0"
+    )
+    got = scaled_grouped_gemm(
+        aq, bq, sa, sb, offs, torch.float32, kbs, scale_dtype="fp8_e8m0"
+    )
+    assert got.shape == _expected_shape("ragged_m", _SCALED_COUNTS)
+    assert torch.isfinite(got).all()
 
 
 def test_scaled_grouped_mxfp8_declines_int8():
@@ -921,6 +1046,36 @@ def test_compiles_fullgraph():
         lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
     )
     assert torch.isfinite(fn()).all()
+
+
+def test_scaled_gemm_2d_scales_compile_fullgraph():
+    """repeat_interleave with a constant tile must not graph-break."""
+    a, b = rand(256, 512), rand(512, 128)
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (32, 32),
+        "scale_dtype": "fp32",
+    }
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    fn = torch.compile(
+        lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
+    )
+    assert torch.isfinite(fn()).all()
+
+
+def test_quantize_operand_2d_compiles_fullgraph():
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (32, 32),
+        "scale_dtype": "fp32",
+    }
+    x = rand(256, 512)
+    fn = torch.compile(
+        lambda: quantize_operand(x, -1, FMT[E4M3], scaling), fullgraph=True
+    )
+    codes, scale = fn()
+    assert scale.shape == (256, 16)
 
 
 @pytest.mark.parametrize(

@@ -22,7 +22,11 @@ _E4M3 = "fp8_e4m3"
 
 
 def _scaling(gran, bs=0, scale_dtype=None):
-    return {"granularity": gran, "block_size": bs, "scale_dtype": scale_dtype}
+    return {
+        "granularity": gran,
+        "block_shape": (1, bs) if bs else (0, 0),
+        "scale_dtype": scale_dtype,
+    }
 
 
 _MXFP8 = _scaling("blockwise", 32, "fp8_e8m0")
@@ -411,7 +415,7 @@ def test_compiled_quant_linear_blockwise_fwd_bwd():
     cfg = QuantizationConfig(
         enabled=True,
         dtype={"recipe": "fp8"},
-        scaling={"granularity": "blockwise", "block_size": 128},
+        scaling={"granularity": "blockwise", "block_shape": (1, 128)},
     )
     q = QuantizedLinear.from_module(lin, cfg)
     x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -421,3 +425,45 @@ def test_compiled_quant_linear_blockwise_fwd_bwd():
     assert out.shape == (64, 128) and torch.isfinite(out).all()
     assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
     assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+@fp8_only
+def test_quantized_linear_forward_backward_with_square_tiles():
+    """End to end: the module runs and produces finite grads at a 2D block shape."""
+    cfg = QuantizationConfig(
+        enabled=True,
+        dtype={"recipe": "fp8"},
+        scaling={
+            "granularity": "blockwise",
+            "block_shape": (32, 32),
+            "scale_dtype": "fp32",
+        },
+    )
+    layer = QuantizedLinear.from_module(nn.Linear(128, 64), cfg)
+    x = torch.randn(16, 128, requires_grad=True)
+    y = layer(x)
+    y.sum().backward()
+    assert y.shape == (16, 64)
+    assert torch.isfinite(x.grad).all()
+    assert torch.isfinite(layer.weight.grad).all()
+
+
+@fp8_only
+@pytest.mark.parametrize("scale_dtype", ["fp32", "fp8_e8m0"])
+@pytest.mark.parametrize("tile", [32, 64])
+def test_quantized_gemm_2d_matches_fp32_dequant_reference(tile, scale_dtype):
+    """The real kernel path against an fp32 oracle, both scale dtypes.
+
+    tile=64 with scale_dtype="fp8_e8m0" also exercises rep_k == 2, composing the 2D
+    outer-axis expansion with the mxfp8 K-replication fast path.
+    """
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (tile, tile),
+        "scale_dtype": scale_dtype,
+    }
+    a = torch.randn(256, 512, device="cuda")
+    b = torch.randn(512, 128, device="cuda")
+    out = quantized_gemm(a, b, _E4M3, _E4M3, torch.float32, scaling)
+    ref = _roundtrip(a, -1, _E4M3, scaling) @ _roundtrip(b, -2, _E4M3, scaling)
+    torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
