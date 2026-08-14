@@ -104,6 +104,28 @@ def _untile(a, dim, length):
     return a.flatten(-3, -2).narrow(-2, 0, length).contiguous()
 
 
+def _tile2d(a, tile):
+    """View the last two dims as (n_rows, tile, n_cols, tile), zero-padding both.
+
+    A square tile needs no `contract_dim` branch -- the reshape is identical whichever
+    of the last two dims is the contraction. Only the scale's expansion back to the 1D
+    layout, in `_quantize_blockwise_2d`, is orientation-dependent.
+    """
+    rows, cols = a.shape[-2:]
+    pad_rows, pad_cols = (-rows) % tile, (-cols) % tile
+    if pad_rows or pad_cols:
+        a = F.pad(a, (0, pad_cols, 0, pad_rows))
+    return a.reshape(
+        *a.shape[:-2], a.shape[-2] // tile, tile, a.shape[-1] // tile, tile
+    )
+
+
+def _untile2d(v, rows, cols):
+    """Inverse of `_tile2d`: fold both tile axes back in and drop the padding."""
+    a = v.reshape(*v.shape[:-4], v.shape[-4] * v.shape[-3], v.shape[-2] * v.shape[-1])
+    return a[..., :rows, :cols].contiguous()
+
+
 def _tile_amax(a, dim, block_size):
     """Dense per-block amax along `dim`, giving `n_blocks` there."""
     return _tile(a, dim, block_size).amax(dim=-1 if dim == -1 else -2)

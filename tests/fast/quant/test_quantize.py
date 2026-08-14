@@ -601,3 +601,31 @@ def test_ragged_ignored_for_already_per_row_granularities(gran, bs):
     without = quantize_operand(x, -1, _E4M3, _scaling(gran, bs))
     assert torch.equal(with_ragged[0], without[0])
     assert torch.equal(with_ragged[1], without[1])
+
+
+@pytest.mark.parametrize("shape", [(64, 128), (70, 130), (4, 64, 128)])
+@pytest.mark.parametrize("tile", [16, 32])
+def test_tile2d_roundtrip(shape, tile):
+    from src.quant.quantize import _tile2d, _untile2d
+
+    x = torch.randn(*shape)
+    rows, cols = shape[-2:]
+    v = _tile2d(x, tile)
+    assert v.shape[-4:] == (
+        (rows + tile - 1) // tile,
+        tile,
+        (cols + tile - 1) // tile,
+        tile,
+    )
+    assert torch.equal(_untile2d(v, rows, cols), x)
+
+
+@pytest.mark.parametrize("tile", [16, 32])
+def test_tile2d_amax_reduces_to_block_counts(tile):
+    from src.quant.quantize import _tile2d
+
+    x = torch.randn(64, 128)
+    amax = _tile2d(x, tile).abs().amax((-3, -1))
+    assert amax.shape == (64 // tile, 128 // tile)
+    # a tile's amax is the max over exactly that square
+    assert torch.equal(amax[1, 2], x[tile : 2 * tile, 2 * tile : 3 * tile].abs().amax())
