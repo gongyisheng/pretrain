@@ -26,7 +26,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
-from src.kernel.gemm import scaled_gemm
+from src.kernel.ops.gemm import scaled_gemm
 from src.kernel.cute.gemm import scaled_gemm_mxfp8
 from src.quant.quantize import quantize_operand
 

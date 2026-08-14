@@ -5,7 +5,7 @@ import copy
 import torch
 import torch.nn as nn
 
-from src.kernel.gemm import scaled_gemm
+from src.kernel.ops.gemm import scaled_gemm
 from src.metrics.quant import record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.utils import is_fp8, is_int8s, is_quantized

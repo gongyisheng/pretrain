@@ -1,1 +1,6 @@
-"""Custom compute kernels (Triton and CuTe DSL) used by the model/training layers."""
+"""Backend-neutral compute kernels.
+
+Import callable operations from ``src.kernel.ops``. Modules under
+``src.kernel.backends`` are implementation details for registration, testing,
+and benchmarking.
+"""

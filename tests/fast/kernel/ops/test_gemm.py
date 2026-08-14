@@ -27,6 +27,14 @@ from tests.fast.kernel._refs import (
 )
 
 
+def test_public_gemm_import_surface():
+    from src.kernel.ops import grouped_gemm, scaled_gemm, scaled_grouped_gemm
+
+    assert callable(grouped_gemm)
+    assert callable(scaled_gemm)
+    assert callable(scaled_grouped_gemm)
+
+
 cuda_only = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Triton GEMM kernels are CUDA only"
 )

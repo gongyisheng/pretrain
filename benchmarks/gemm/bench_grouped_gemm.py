@@ -1,9 +1,9 @@
-"""Grouped GEMM latency: torch._grouped_mm vs the Triton impl, fwd and bwd.
+"""Grouped GEMM latency: torch._grouped_mm vs the Triton backend, fwd and bwd.
 
 Sweeps the eight expert-GEMM shapes of the latent-MoE configs (gate_up over
 K in {64,128,256,512}; down over N in {64,128,256,512}) at two expert counts
 E in {64, 256}, holding total rows M fixed. Both implementations run through
-`grouped_gemm(a, b, offs, impl=...)`; a torch-vs-triton parity assert guards the
+`grouped_gemm(a, b, offs, backend=...)`; a torch-vs-triton parity assert guards the
 forward output before timing. Prints a table and (unless --no-plot) writes a
 matplotlib chart.
 
@@ -21,7 +21,7 @@ import torch
 
 sys.path.insert(0, ".")
 
-from src.kernel.gemm import grouped_gemm
+from src.kernel.ops.gemm import grouped_gemm
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
 M_FIXED = 8 * 1024 * 8
@@ -87,28 +87,28 @@ def _time(fn, iters=50):
 
 
 def _bench_point(E, K, N):
-    """Return {(impl, pass): ms} for one (E, shape) point: fwd + bwd, both impls."""
+    """Return {(backend, pass): ms} for one (E, shape) point: fwd + bwd, both impls."""
     out = {}
     a, b, offs = _make(E, M_FIXED, K, N)
     with torch.no_grad():
-        ref = grouped_gemm(a, b, offs, impl="torch")
-        got = grouped_gemm(a, b, offs, impl="triton")
+        ref = grouped_gemm(a, b, offs, backend="torch")
+        got = grouped_gemm(a, b, offs, backend="triton")
         _assert_parity(got, ref)
-        out[("torch", "fwd")] = _time(lambda: grouped_gemm(a, b, offs, impl="torch"))
-        out[("triton", "fwd")] = _time(lambda: grouped_gemm(a, b, offs, impl="triton"))
-    for impl in ("torch", "triton"):
+        out[("torch", "fwd")] = _time(lambda: grouped_gemm(a, b, offs, backend="torch"))
+        out[("triton", "fwd")] = _time(lambda: grouped_gemm(a, b, offs, backend="triton"))
+    for backend in ("torch", "triton"):
         ag, bg, offg = _make(E, M_FIXED, K, N, requires_grad=True)
         go = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16)
-        res = grouped_gemm(ag, bg, offg, impl=impl)
+        res = grouped_gemm(ag, bg, offg, backend=backend)
         # backward-only: forward already ran; time repeated grad passes (retain_graph)
-        out[(impl, "bwd")] = _time(lambda: res.backward(go, retain_graph=True))
+        out[(backend, "bwd")] = _time(lambda: res.backward(go, retain_graph=True))
     return out
 
 
 def plot(results, path, device=""):
     """Write the 2x2 grouped-bar chart (rows = pass, cols = E) from `results`.
 
-    Each result: {"role","K","N","E","impl","pass","ms"}. Import-safe without CUDA.
+    Each result: {"role","K","N","E","backend","pass","ms"}. Import-safe without CUDA.
     """
     import matplotlib
 
@@ -117,7 +117,7 @@ def plot(results, path, device=""):
     import numpy as np
 
     lut = {
-        (r["role"], r["K"], r["N"], r["E"], r["impl"], r["pass"]): r["ms"]
+        (r["role"], r["K"], r["N"], r["E"], r["backend"], r["pass"]): r["ms"]
         for r in results
     }
     # per-shape x-tick: the varying dim (K for gate_up, N for down)
@@ -130,16 +130,16 @@ def plot(results, path, device=""):
     for ri, (pass_, pass_lbl) in enumerate(passes):
         for ci, E in enumerate(E_LIST):
             ax = axes[ri][ci]
-            for j, impl in enumerate(("torch", "triton")):
+            for j, backend in enumerate(("torch", "triton")):
                 vals = [
-                    lut.get((role, K, N, E, impl, pass_), 0.0) for role, K, N in SHAPES
+                    lut.get((role, K, N, E, backend, pass_), 0.0) for role, K, N in SHAPES
                 ]
                 bars = ax.bar(
                     x + (j - 0.5) * bw,
                     vals,
                     bw,
-                    label=impl,
-                    color=_IMPL_COLOR[impl],
+                    label=backend,
+                    color=_IMPL_COLOR[backend],
                     zorder=3,
                 )
                 ax.bar_label(bars, fmt="%.2f", fontsize=7, padding=2)
@@ -217,14 +217,14 @@ def main():
                 f"{t[('torch', 'fwd')]:>10.3f} {t[('triton', 'fwd')]:>11.3f} "
                 f"{t[('torch', 'bwd')]:>10.3f} {t[('triton', 'bwd')]:>11.3f}"
             )
-            for (impl, pass_), ms in t.items():
+            for (backend, pass_), ms in t.items():
                 results.append(
                     {
                         "role": role,
                         "K": K,
                         "N": N,
                         "E": E,
-                        "impl": impl,
+                        "backend": backend,
                         "pass": pass_,
                         "ms": ms,
                     }

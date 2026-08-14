@@ -4,7 +4,7 @@ import copy
 
 import torch
 
-from src.kernel.gemm import grouped_gemm, scaled_grouped_gemm
+from src.kernel.ops.gemm import grouped_gemm, scaled_grouped_gemm
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand

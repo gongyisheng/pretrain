@@ -21,7 +21,7 @@ import torch
 
 sys.path.insert(0, ".")
 
-from src.kernel.gemm import scaled_grouped_gemm
+from src.kernel.ops.gemm import scaled_grouped_gemm
 from src.quant.quantize import quantize_operand
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.

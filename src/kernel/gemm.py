@@ -1,8 +1,0 @@
-"""Backend-neutral public surface for the custom GEMM kernels.
-
-New code should import the operation-first API from `src.kernel.ops.gemm`.
-"""
-
-from src.kernel.ops.gemm import grouped_gemm, scaled_gemm, scaled_grouped_gemm
-
-__all__ = ["grouped_gemm", "scaled_gemm", "scaled_grouped_gemm"]
