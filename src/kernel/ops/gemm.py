@@ -1,3 +1,4 @@
+from src.kernel.backends import reference as _reference_backend  # noqa: F401
 from src.kernel.backends import torch as _torch_backend  # noqa: F401
 from src.kernel.backends import triton as _triton_backend  # noqa: F401
 from src.kernel.selector import dispatch

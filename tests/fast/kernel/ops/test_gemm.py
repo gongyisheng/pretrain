@@ -20,11 +20,43 @@ from src.kernel.ops.gemm import (
 from src.quant.quantize import quantize_operand
 
 
-from tests.fast.kernel._refs import (
-    grouped_gemm_ref,
-    scaled_gemm_ref,
-    scaled_grouped_gemm_ref,
-)
+def grouped_gemm_ref(a, b, offs, bias=None):
+    return grouped_gemm(a, b, offs, bias=bias, backend="reference")
+
+
+def scaled_gemm_ref(aq, bq, sa, sb, block_size, bias=None):
+    return scaled_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        torch.float32,
+        block_size,
+        bias=bias,
+        backend="reference",
+    )
+
+
+def scaled_grouped_gemm_ref(
+    aq,
+    bq,
+    sa,
+    sb,
+    offs,
+    block_size,
+    bias=None,
+):
+    return scaled_grouped_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        offs,
+        torch.float32,
+        block_size,
+        bias=bias,
+        backend="reference",
+    )
 
 
 def test_public_gemm_import_surface():
@@ -161,15 +193,13 @@ def test_grouped_gemm_auto_selects_triton_on_this_arch():
 
 
 @cuda_only
-def test_grouped_gemm_auto_uses_torch_for_non_bf16():
+def test_grouped_gemm_auto_uses_reference_for_non_bf16():
     counts = [64, 130]
     R, K, N = sum(counts), 64, 48
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     a = torch.randn(R, K, device="cuda", dtype=torch.float32)
     b = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32).mT
-    assert torch.equal(
-        grouped_gemm(a, b, offs, backend="auto"), torch._grouped_mm(a, b, offs=offs)
-    )
+    assert torch.equal(grouped_gemm(a, b, offs), grouped_gemm_ref(a, b, offs))
 
 
 @cuda_only
@@ -332,7 +362,7 @@ def test_scaled_gemm_2d_scales_compile_fullgraph():
     assert torch.isfinite(fn()).all()
 
 
-def test_grouped_gemm_auto_falls_back_to_torch_for_float32():
+def test_grouped_gemm_auto_falls_back_to_reference_for_float32():
     a = torch.randn(4, 8, device="cpu")
     b = torch.randn(1, 8, 6, device="cpu")
     offs = torch.tensor([4], device="cpu")
@@ -341,7 +371,7 @@ def test_grouped_gemm_auto_falls_back_to_torch_for_float32():
     torch.testing.assert_close(got, expected)
 
 
-def test_grouped_gemm_torch_fallback_keeps_misaligned_groups_separate():
+def test_grouped_gemm_reference_keeps_misaligned_groups_separate():
     a = torch.randn(5, 8, device="cpu")
     b = torch.randn(2, 8, 6, device="cpu")
     offs = torch.tensor([2, 5], dtype=torch.int32, device="cpu")
@@ -360,12 +390,12 @@ def test_grouped_gemm_rejects_mismatched_bias_dtype(backend):
         grouped_gemm(a, b, offs, bias=bias, backend=backend)
 
 
-def test_grouped_gemm_torch_bias_preserves_output_dtype():
+def test_grouped_gemm_reference_bias_preserves_output_dtype():
     a = torch.randn(4, 8, device="cpu", dtype=torch.float32)
     b = torch.randn(1, 8, 6, device="cpu", dtype=torch.float32)
     offs = torch.tensor([4], device="cpu")
     bias = torch.randn(1, 6, device="cpu", dtype=torch.float32)
-    out = grouped_gemm(a, b, offs, bias=bias, backend="torch")
+    out = grouped_gemm(a, b, offs, bias=bias, backend="reference")
     assert out.dtype == a.dtype
 
 
@@ -377,7 +407,7 @@ def test_forced_triton_does_not_fall_back_for_float32():
         grouped_gemm(a, b, offs, backend="triton")
 
 
-def test_scaled_gemm_auto_falls_back_to_torch_on_cpu():
+def test_scaled_gemm_auto_falls_back_to_reference_on_cpu():
     aq = torch.tensor([[1, -2, 3, 4], [-1, 2, 0, 3]], dtype=torch.int8, device="cpu")
     bq = torch.tensor(
         [[1, 2, -1], [0, -2, 3], [2, 1, 1], [-1, 0, 2]],
@@ -391,7 +421,7 @@ def test_scaled_gemm_auto_falls_back_to_torch_on_cpu():
     torch.testing.assert_close(got, expected)
 
 
-def test_scaled_grouped_gemm_auto_falls_back_to_torch_on_cpu():
+def test_scaled_grouped_gemm_auto_falls_back_to_reference_on_cpu():
     aq = torch.tensor(
         [[1, -2, 3, 4], [-1, 2, 0, 3], [2, 1, -1, 0], [0, 3, 2, -2]],
         dtype=torch.int8,

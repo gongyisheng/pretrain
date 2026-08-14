@@ -15,25 +15,98 @@ from src.kernel.ops.gemm import (
 )
 from src.kernel.selector import KernelSelectionError
 from src.quant.quantize import quantize_operand
-from tests.fast.kernel._refs import (
-    _dequant_a,
-    _dequant_b,
-    grouped_gemm_ref,
-    scaled_gemm_ref,
-    scaled_grouped_gemm_ref,
-)
+from src.kernel.backends.reference.gemm import _dequant_a, _dequant_b
 
 
-def triton_grouped_gemm(*args, **kwargs):
-    return _public_grouped_gemm(*args, backend="triton", **kwargs)
+def grouped_gemm_ref(a, b, offs, bias=None):
+    return _public_grouped_gemm(a, b, offs, bias=bias, backend="reference")
 
 
-def triton_scaled_gemm(*args, **kwargs):
-    return _public_scaled_gemm(*args, backend="triton", **kwargs)
+def scaled_gemm_ref(aq, bq, sa, sb, block_size, bias=None):
+    return _public_scaled_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        torch.float32,
+        block_size,
+        bias=bias,
+        backend="reference",
+    )
 
 
-def triton_scaled_grouped_gemm(*args, **kwargs):
-    return _public_scaled_grouped_gemm(*args, backend="triton", **kwargs)
+def scaled_grouped_gemm_ref(
+    aq,
+    bq,
+    sa,
+    sb,
+    offs,
+    block_size,
+    bias=None,
+):
+    return _public_scaled_grouped_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        offs,
+        torch.float32,
+        block_size,
+        bias=bias,
+        backend="reference",
+    )
+
+
+def triton_grouped_gemm(a, b, offs, bias=None):
+    return _public_grouped_gemm(a, b, offs, bias=bias, backend="triton")
+
+
+def triton_scaled_gemm(
+    aq,
+    bq,
+    sa,
+    sb,
+    out_dtype,
+    block_size,
+    bias=None,
+    scale_dtype=None,
+):
+    return _public_scaled_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        out_dtype,
+        block_size,
+        bias=bias,
+        scale_dtype=scale_dtype,
+        backend="triton",
+    )
+
+
+def triton_scaled_grouped_gemm(
+    aq,
+    bq,
+    sa,
+    sb,
+    offs,
+    out_dtype,
+    block_size,
+    bias=None,
+    scale_dtype=None,
+):
+    return _public_scaled_grouped_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        offs,
+        out_dtype,
+        block_size,
+        bias=bias,
+        scale_dtype=scale_dtype,
+        backend="triton",
+    )
 
 
 pytestmark = pytest.mark.skipif(
@@ -124,7 +197,7 @@ def test_bias_matches_reference(layout):
     bias = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
     got = triton_grouped_gemm(a, b, offs, bias=bias)
     ref = grouped_gemm_ref(a, b, offs, bias=bias)
-    torch.testing.assert_close(got.float(), ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 
 def test_bias_rejected_for_ragged_n():

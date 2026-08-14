@@ -1,12 +1,10 @@
-"""Scaled grouped GEMM latency: Triton `scaled_grouped_gemm` vs a bf16
-`torch._grouped_mm` baseline (the unquantized reference the kernel replaces).
+"""Scaled grouped GEMM latency: Triton vs optimized Torch.
 
 Sweeps the expert-GEMM shapes of the latent-MoE configs (gate_up over K, down
 over N) at two expert counts E in {64, 256}, holding total rows M fixed, under
-fp8-rowwise and int8-rowwise quantization. torch._scaled_grouped_mm is not a
-baseline: it is restricted to sm90/sm100 and raises elsewhere. Accuracy is
-relative error against an fp32 grouped reference. Prints a table and (unless
---no-plot) writes a matplotlib chart.
+fp8-rowwise and int8-rowwise quantization. Accuracy is relative error against
+the eager `reference` backend for identical quantized operands. Unsupported
+Torch contracts are reported as `n/a`, never timed through auto fallback.
 
     uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py
     uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py --no-plot
@@ -22,6 +20,7 @@ import torch
 sys.path.insert(0, ".")
 
 from src.kernel.ops.gemm import scaled_grouped_gemm
+from src.kernel.selector import KernelSelectionError
 from src.quant.quantize import quantize_operand
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
@@ -43,7 +42,7 @@ SCHEMES = ["fp8_rowwise", "int8_rowwise"]
 DEFAULT_OUT = "benchmarks/results/scaled_grouped_gemm.png"
 
 # reference-palette pair (validated colorblind-safe, matches sibling benchmarks)
-_IMPL_COLOR = {"bf16": "#eb6834", "triton": "#2a78d6"}
+_IMPL_COLOR = {"torch": "#eb6834", "triton": "#2a78d6"}
 
 
 def _fmt(scheme):
@@ -88,10 +87,19 @@ def _relerr(out, ref):
 
 
 def _bench_point(E, K, N, scheme):
-    """Return {triton_ms, bf16_ms, triton_relerr} for one (E, shape, scheme)."""
+    """Return optimized latency and error for one forward benchmark point."""
     a, b, offs = _make(E, M_FIXED, K, N)
-    ref = torch._grouped_mm(a, b, offs=offs).float()
     aq, bq, sa, sb, bs = _quant(a, b, scheme)
+    ref = scaled_grouped_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        offs,
+        torch.bfloat16,
+        bs,
+        backend="reference",
+    )
 
     def triton_fn():
         return scaled_grouped_gemm(
@@ -102,24 +110,49 @@ def _bench_point(E, K, N, scheme):
     triton_ms = _time(triton_fn)
     triton_relerr = _relerr(triton_out, ref)
 
-    bf16_ms = _time(lambda: torch._grouped_mm(a, b, offs=offs))
-    return dict(triton_ms=triton_ms, bf16_ms=bf16_ms, triton_relerr=triton_relerr)
+    def torch_fn():
+        return scaled_grouped_gemm(
+            aq, bq, sa, sb, offs, torch.bfloat16, bs, backend="torch"
+        )
+
+    try:
+        torch_out = torch_fn()
+    except KernelSelectionError:
+        torch_ms = None
+        torch_relerr = None
+    else:
+        torch_ms = _time(torch_fn)
+        torch_relerr = _relerr(torch_out, ref)
+    return dict(
+        triton_ms=triton_ms,
+        torch_ms=torch_ms,
+        triton_relerr=triton_relerr,
+        torch_relerr=torch_relerr,
+    )
 
 
 def _bench_wgrad_point(E, K, N, scheme):
-    """Return {triton_ms, bf16_ms, triton_relerr} for one wgrad (E, shape, scheme).
+    """Return optimized latency and error for one weight-gradient benchmark point.
 
     Both operands are indexed by the same ragged token axis, so one block mapping
     covers them -- matching what src/quant/moe.py does. The bf16 baseline is the
-    ragged-K grouped GEMM the quantized kernel replaces.
+    ragged-K contract is intentionally unsupported by the optimized Torch backend.
     """
     a, _, offs = _make(E, M_FIXED, K, N)
     g = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16) * 0.1
-    ref = torch._grouped_mm(a.mT, g, offs=offs).float()
-
     fmt = _fmt(scheme)
     aq, sa = quantize_operand(a, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
     gq, sg = quantize_operand(g, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
+    ref = scaled_grouped_gemm(
+        aq.mT,
+        gq,
+        sa.mT,
+        sg,
+        offs,
+        torch.bfloat16,
+        0,
+        backend="reference",
+    )
 
     def triton_fn():
         return scaled_grouped_gemm(
@@ -135,18 +168,18 @@ def _bench_wgrad_point(E, K, N, scheme):
 
     triton_out = triton_fn()
     triton_ms = _time(triton_fn)
-    bf16_ms = _time(lambda: torch._grouped_mm(a.mT, g, offs=offs))
     return dict(
         triton_ms=triton_ms,
-        bf16_ms=bf16_ms,
+        torch_ms=None,
         triton_relerr=_relerr(triton_out, ref),
+        torch_relerr=None,
     )
 
 
 def plot(results, path, device=""):
     """Write a grouped-bar chart (rows = scheme, cols = E) from `results`.
 
-    Each result: {"role","K","N","E","scheme","triton_ms","bf16_ms",...}.
+    Each result: {"role","K","N","E","scheme","triton_ms","torch_ms",...}.
     Import-safe without CUDA.
     """
     import matplotlib
@@ -166,7 +199,7 @@ def plot(results, path, device=""):
     for ri, scheme in enumerate(SCHEMES):
         for ci, E in enumerate(E_LIST):
             ax = axes[ri][ci]
-            for j, impl in enumerate(("bf16", "triton")):
+            for j, impl in enumerate(("torch", "triton")):
                 key = f"{impl}_ms"
                 vals = [
                     (lut.get((role, K, N, E, scheme)) or {}).get(key, 0.0)
@@ -180,7 +213,8 @@ def plot(results, path, device=""):
                     color=_IMPL_COLOR[impl],
                     zorder=3,
                 )
-                ax.bar_label(bars, fmt="%.2f", fontsize=7, padding=2)
+                labels = [f"{value:.2f}" if value else "n/a" for value in vals]
+                ax.bar_label(bars, labels=labels, fontsize=7, padding=2)
             ax.set_title(f"{scheme}  ·  E={E}", fontsize=11, fontweight="bold")
             ax.set_xticks(x, ticklabels, fontsize=8)
             ax.set_ylabel("latency (ms)", fontsize=9)
@@ -193,8 +227,8 @@ def plot(results, path, device=""):
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside upper right", ncol=2, fontsize=10)
-    sup = "Scaled grouped GEMM latency — bf16 torch._grouped_mm vs Triton (quantized)"
-    sub = f"M = {M_FIXED:,} rows · lower is faster"
+    sup = "Scaled grouped GEMM latency — optimized Torch vs Triton"
+    sub = f"reference oracle · M = {M_FIXED:,} rows · lower is faster"
     if device:
         sub += f" · {device}"
     fig.suptitle(f"{sup}\n{sub}", fontsize=12, fontweight="bold")
@@ -205,6 +239,10 @@ def plot(results, path, device=""):
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
+
+
+def _display(value, precision=3):
+    return f"{value:.{precision}f}" if value is not None else "n/a"
 
 
 def main():
@@ -227,8 +265,8 @@ def main():
     print(device)
     print(f"fixed M = {M_FIXED:,} rows\n")
     hdr = (
-        f"{'shape':22s} {'E':>4s} {'scheme':13s} {'bf16_ms':>9s} {'triton_ms':>10s} "
-        f"{'triton_relerr':>14s}"
+        f"{'shape':22s} {'E':>4s} {'scheme':13s} {'torch_ms':>9s} {'triton_ms':>10s} "
+        f"{'torch_relerr':>13s} {'triton_relerr':>14s}"
     )
     print(hdr)
     point = _bench_wgrad_point if args.direction == "wgrad" else _bench_point
@@ -240,7 +278,8 @@ def main():
                 label = f"{role} K{K} N{N}"
                 print(
                     f"{label:22s} {E:>4d} {scheme:13s} "
-                    f"{r['bf16_ms']:>9.3f} {r['triton_ms']:>10.3f} "
+                    f"{_display(r['torch_ms']):>9s} {r['triton_ms']:>10.3f} "
+                    f"{_display(r['torch_relerr'], 4):>13s} "
                     f"{r['triton_relerr']:>14.4f}"
                 )
                 results.append(

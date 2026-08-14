@@ -1,11 +1,11 @@
-"""Grouped GEMM latency: torch._grouped_mm vs the Triton backend, fwd and bwd.
+"""Grouped GEMM latency: optimized Torch vs Triton, forward and backward.
 
 Sweeps the eight expert-GEMM shapes of the latent-MoE configs (gate_up over
 K in {64,128,256,512}; down over N in {64,128,256,512}) at two expert counts
 E in {64, 256}, holding total rows M fixed. Both implementations run through
 `grouped_gemm(a, b, offs, backend=...)` for forward and the production explicit
-autograd composition for backward; a torch-vs-triton parity assert guards the
-forward output before timing. Prints a table and (unless --no-plot) writes a chart.
+autograd composition for backward. The eager reference backend is the correctness
+oracle and is not timed. Prints a table and (unless --no-plot) writes a chart.
 
     uv run python benchmarks/gemm/bench_grouped_gemm.py
     uv run python benchmarks/gemm/bench_grouped_gemm.py --out /tmp/gg.png
@@ -96,7 +96,7 @@ def _bench_point(E, K, N):
     out = {}
     a, b, offs = _make(E, M_FIXED, K, N)
     with torch.no_grad():
-        ref = grouped_gemm(a, b, offs, backend="torch")
+        ref = grouped_gemm(a, b, offs, backend="reference")
         got = grouped_gemm(a, b, offs, backend="triton")
         _assert_parity(got, ref)
         out[("torch", "fwd")] = _time(lambda: grouped_gemm(a, b, offs, backend="torch"))

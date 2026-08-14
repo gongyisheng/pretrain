@@ -1,14 +1,12 @@
 """Scaled GEMM latency across generic FP8 and INT8 scaling schemes.
 
-Sweeps 20 tensorwise, rowwise, blockwise-1D, and blockwise-2D configurations
+Sweeps tensorwise, rowwise, blockwise-1D, and blockwise-2D configurations
 across three representative transformer linear shapes (d_model=512,
-intermediate=1536) at two token counts M in {4096, 16384}. The MXFP8 row
-compares Triton with `torch.nn.functional.scaled_mm`. Other rows compare Triton with
-`torch._scaled_mm` or `torch._int_mm` where supported; unsupported native calls
-print `n/a` instead of crashing the sweep. Quantization and layout preparation
-remain outside timed closures. Accuracy is relative error against an fp32
-reference `a.float() @ b.float()`. Prints a table and (unless --no-plot) writes
-a matplotlib grouped-bar chart.
+intermediate=1536) at two token counts M in {4096, 16384}. Optimized backends are
+called only through `scaled_gemm(..., backend=...)`; unsupported Torch contracts
+print `n/a` instead of silently falling back. Accuracy is relative error against
+the eager `reference` backend for the same quantized operands. Prints a table and
+(unless --no-plot) writes a matplotlib grouped-bar chart.
 
     uv run python benchmarks/gemm/bench_scaled_gemm.py
     uv run python benchmarks/gemm/bench_scaled_gemm.py --no-plot
@@ -21,11 +19,11 @@ import sys
 import time
 
 import torch
-import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
 from src.kernel.ops.gemm import scaled_gemm
+from src.kernel.selector import KernelSelectionError
 from src.quant.quantize import quantize_operand
 
 E4M3 = torch.float8_e4m3fn
@@ -90,31 +88,7 @@ SCHEMES = [config["label"] for config in _scheme_configs()]
 DEFAULT_OUT = "benchmarks/results/scaled_gemm.png"
 
 # Implementation colors aligned with bench_grouped_gemm.py's palette.
-_SCHEME_COLOR = {"triton": "#2a78d6", "native": "#eb6834"}
-
-_MX_SUPPORTED = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
-    10,
-    0,
-)
-
-
-def _to_blocked_native(scale_2d):
-    """Rearrange a (rows, n_blocks) E8M0 scale into the SWIZZLE_32_4_4 layout."""
-
-    def _ceil_div(a, b):
-        return (a + b - 1) // b
-
-    rows, cols = scale_2d.shape
-    n_row_tiles, n_col_tiles = _ceil_div(rows, 128), _ceil_div(cols, 4)
-    padded_rows, padded_cols = n_row_tiles * 128, n_col_tiles * 4
-    padded = scale_2d
-    if (rows, cols) != (padded_rows, padded_cols):
-        padded = torch.zeros(
-            (padded_rows, padded_cols), device=scale_2d.device, dtype=scale_2d.dtype
-        )
-        padded[:rows, :cols] = scale_2d
-    blocks = padded.view(n_row_tiles, 128, n_col_tiles, 4).permute(0, 2, 1, 3)
-    return blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
+_SCHEME_COLOR = {"triton": "#2a78d6", "torch": "#eb6834"}
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +111,6 @@ def _relerr(out, ref):
     return ((out.float() - ref).norm() / ref.norm()).item()
 
 
-def _colmajor(x):
-    """Col-major-strided view of contiguous (K, N) x, for torch._scaled_mm's mat2."""
-    return x.t().contiguous().t()
-
-
 def _make(M, K, N):
     torch.manual_seed(0)
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
@@ -160,71 +129,7 @@ def _scaling(gran, bs=0, scale_dtype=None):
     }
 
 
-def _bench_mxfp8(a, b, ref):
-    scaling = _scaling("blockwise", MXFP8_BLOCK, "fp8_e8m0")
-    aq, sa = quantize_operand(a, -1, _FMT[E4M3], scaling)
-    bq, sb = quantize_operand(b, -2, _FMT[E4M3], scaling)
-    bs = MXFP8_BLOCK
-    sa_e8 = sa.to(torch.float8_e8m0fnu).contiguous()
-    sb_e8 = sb.t().contiguous().to(torch.float8_e8m0fnu)
-    bq_native = bq.t().contiguous()
-
-    # Scale blocking and the column-major B view are one-time setup, not part of
-    # any timed arm.
-    a_blk = _to_blocked_native(sa_e8)
-    b_blk = _to_blocked_native(sb_e8)
-    b_arg = bq_native.t()
-
-    def triton_fn():
-        return scaled_gemm(
-            aq,
-            bq,
-            sa,
-            sb,
-            torch.bfloat16,
-            bs,
-            scale_dtype="fp8_e8m0",
-            backend="triton",
-        )
-
-    triton_out = triton_fn()
-    triton_ms = _time(triton_fn)
-    triton_relerr = _relerr(triton_out, ref)
-
-    native_ms = native_relerr = None
-    if _MX_SUPPORTED:
-        try:
-            st = F.ScalingType.BlockWise1x32
-            sw = F.SwizzleType.SWIZZLE_32_4_4
-            aq_native = aq.contiguous()
-
-            def native_fn():
-                return F.scaled_mm(
-                    aq_native,
-                    b_arg,
-                    a_blk,
-                    st,
-                    b_blk,
-                    st,
-                    swizzle_a=sw,
-                    swizzle_b=sw,
-                    output_dtype=torch.bfloat16,
-                )
-
-            native_out = native_fn()
-            native_ms = _time(native_fn)
-            native_relerr = _relerr(native_out, ref)
-        except Exception:
-            pass
-    return dict(
-        triton_ms=triton_ms,
-        native_ms=native_ms,
-        triton_relerr=triton_relerr,
-        native_relerr=native_relerr,
-    )
-
-
-def _bench_scheme(a, b, ref, config):
+def _bench_scheme(a, b, config):
     """Benchmark one quantization contract with preparation outside timed closures."""
     result = {
         "dtype": config["dtype"],
@@ -232,13 +137,11 @@ def _bench_scheme(a, b, ref, config):
         "block_size": config["block_size"],
         "scheme": config["label"],
         "triton_ms": None,
-        "native_ms": None,
+        "torch_ms": None,
         "triton_relerr": None,
-        "native_relerr": None,
+        "torch_relerr": None,
+        "torch_supported": False,
     }
-    if config["label"] == "mxfp8":
-        result.update(_bench_mxfp8(a, b, ref))
-        return result
 
     block_size = config["block_size"] or 0
     if config["granularity"] == "tensorwise":
@@ -259,66 +162,67 @@ def _bench_scheme(a, b, ref, config):
     fmt = _FMT[E4M3] if config["dtype"] == "fp8" else "int8"
     aq, sa = quantize_operand(a, -1, fmt, scaling)
     bq, sb = quantize_operand(b, -2, fmt, scaling)
+    scale_dtype = "fp8_e8m0" if config["label"] == "mxfp8" else None
+
+    ref = scaled_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        torch.bfloat16,
+        block_size,
+        scale_dtype=scale_dtype,
+        backend="reference",
+    )
 
     def triton_fn():
-        return scaled_gemm(aq, bq, sa, sb, torch.bfloat16, block_size, backend="triton")
+        return scaled_gemm(
+            aq,
+            bq,
+            sa,
+            sb,
+            torch.bfloat16,
+            block_size,
+            scale_dtype=scale_dtype,
+            backend="triton",
+        )
 
     triton_out = triton_fn()
     result["triton_ms"] = _time(triton_fn)
     result["triton_relerr"] = _relerr(triton_out, ref)
+
+    def torch_fn():
+        return scaled_gemm(
+            aq,
+            bq,
+            sa,
+            sb,
+            torch.bfloat16,
+            block_size,
+            scale_dtype=scale_dtype,
+            backend="torch",
+        )
+
     try:
-        if config["dtype"] == "fp8" and config["granularity"] in {
-            "tensorwise",
-            "rowwise",
-        }:
-            aq_n = aq.contiguous()
-            bq_col = _colmajor(bq)
-            sa_n = (
-                sa.reshape(-1)[:1].contiguous()
-                if config["granularity"] == "tensorwise"
-                else sa.contiguous()
-            )
-            sb_n = (
-                sb.reshape(-1)[:1].contiguous()
-                if config["granularity"] == "tensorwise"
-                else sb.contiguous()
-            )
-
-            def native_fn():
-                return torch._scaled_mm(
-                    aq_n, bq_col, sa_n, sb_n, out_dtype=torch.bfloat16
-                )
-
-        elif config["dtype"] == "int8" and config["granularity"] in {
-            "tensorwise",
-            "rowwise",
-        }:
-            aqc, bqc = aq.contiguous(), bq.contiguous()
-
-            def native_fn():
-                return (torch._int_mm(aqc, bqc).float() * sa * sb).to(torch.bfloat16)
-
-        else:
-            return result
-        native_out = native_fn()
-        result["native_ms"] = _time(native_fn)
-        result["native_relerr"] = _relerr(native_out, ref)
-    except Exception:
-        pass
+        torch_out = torch_fn()
+    except KernelSelectionError:
+        return result
+    result["torch_supported"] = True
+    result["torch_ms"] = _time(torch_fn)
+    result["torch_relerr"] = _relerr(torch_out, ref)
     return result
 
 
 def _bench_shape(name, M, K, N):
     """Return all 20 matrix rows for one (name, M, K, N) shape."""
     a, b = _make(M, K, N)
-    ref = a.float() @ b.float()
     return [
         {
             "shape": name,
             "M": M,
             "K": K,
             "N": N,
-            **_bench_scheme(a, b, ref, config),
+            **_bench_scheme(a, b, config),
         }
         for config in _scheme_configs()
     ]
@@ -332,7 +236,7 @@ def _bench_shape(name, M, K, N):
 def plot(results, path, device=""):
     """Write a grouped-bar chart (rows = M, cols = shape) from `results`.
 
-    Each result: {"shape","M","K","N","scheme","triton_ms","native_ms",...}.
+    Each result: {"shape","M","K","N","scheme","triton_ms","torch_ms",...}.
     Import-safe without CUDA.
     """
     import matplotlib
@@ -352,7 +256,7 @@ def plot(results, path, device=""):
     for ri, M in enumerate(M_LIST):
         for ci, shape_name in enumerate(shape_names):
             ax = axes[ri][ci]
-            for j, impl in enumerate(("triton", "native")):
+            for j, impl in enumerate(("triton", "torch")):
                 key = f"{impl}_ms"
                 vals = []
                 for scheme in SCHEMES:
@@ -380,8 +284,8 @@ def plot(results, path, device=""):
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside upper right", ncol=3, fontsize=10)
-    sup = "Scaled GEMM latency — Triton vs native"
-    sub = "lower is faster · n/a = call unsupported on this GPU"
+    sup = "Scaled GEMM latency — Triton vs optimized Torch"
+    sub = "reference oracle · lower is faster · n/a = unsupported contract"
     if device:
         sub += f" · {device}"
     fig.suptitle(f"{sup}\n{sub}", fontsize=12, fontweight="bold")
@@ -415,13 +319,11 @@ def main():
     assert torch.cuda.is_available(), "CUDA required"
     device = torch.cuda.get_device_name(0)
     print(device)
-    print(
-        f"d_model={D_MODEL} intermediate={INTERMEDIATE} mx_supported={_MX_SUPPORTED}\n"
-    )
+    print(f"d_model={D_MODEL} intermediate={INTERMEDIATE}\n")
 
     hdr = (
         f"{'shape':12s} {'M':>7s} {'scheme':16s} {'triton_ms':>10s} "
-        f"{'native_ms':>10s} {'triton_relerr':>14s} {'native_relerr':>14s}"
+        f"{'torch_ms':>10s} {'triton_relerr':>14s} {'torch_relerr':>14s}"
     )
     print(hdr)
     results = []
@@ -431,8 +333,8 @@ def main():
             for r in rows:
                 print(
                     f"{r['shape']:12s} {r['M']:>7d} {r['scheme']:16s} "
-                    f"{_fmt(r['triton_ms']):>10s} {_fmt(r['native_ms']):>10s} "
-                    f"{_fmt(r['triton_relerr'], 4):>14s} {_fmt(r['native_relerr'], 4):>14s}"
+                    f"{_fmt(r['triton_ms']):>10s} {_fmt(r['torch_ms']):>10s} "
+                    f"{_fmt(r['triton_relerr'], 4):>14s} {_fmt(r['torch_relerr'], 4):>14s}"
                 )
                 results.append(r)
 
