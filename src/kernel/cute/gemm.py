@@ -57,6 +57,17 @@ SF_TILE_BYTES = TILE_M * TILE_SF
 # tile. STAGES-1 tiles are in flight while the MMA consumes the oldest.
 STAGES = 3
 assert STAGES >= 2, "the mainloop needs at least one tile in flight behind the MMA"
+# The shipped configuration sits exactly on the limit -- 3 * (16384 + 16384 + 512 +
+# 512) = 101376 = 99 KiB, with every allocation already a multiple of 16 so alignment
+# adds no slack. There is no headroom at all, so anything that grows a staged buffer
+# (a wider tile, a padded or swizzled layout that rounds up) has to buy the room back
+# by dropping a stage or shrinking TILE_K. Without this the overflow surfaces only as
+# an opaque launch failure that names nothing.
+SMEM_BYTES = STAGES * (TILE_M * TILE_K + TILE_N * TILE_K + 2 * SF_TILE_BYTES)
+assert SMEM_BYTES <= 99 * 1024, (
+    f"staged shared memory is {SMEM_BYTES} bytes, over sm120's 99 KiB limit -- "
+    f"lower STAGES or shrink the tile (TILE_K halves it fastest)"
+)
 
 # Compiled host functions, keyed on everything baked into the artifact: K, N and the
 # operand/output dtypes. M is dynamic, so a training loop that changes batch size
