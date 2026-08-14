@@ -5,6 +5,9 @@ import triton
 import triton.language as tl
 from torch._library.triton import triton_op, wrap_triton
 
+from src.kernel.registry import register_kernel
+from src.kernel.spec import SupportResult
+
 # ---------------------------------------------------------------------------
 # Config + helpers
 # ---------------------------------------------------------------------------
@@ -13,6 +16,10 @@ from torch._library.triton import triton_op, wrap_triton
 @functools.lru_cache(maxsize=None)
 def _num_sms(device: torch.device | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
+
+
+def _always_available() -> SupportResult:
+    return SupportResult(True)
 
 
 # ---------------------------------------------------------------------------
@@ -233,13 +240,31 @@ def _grouped_gemm(
     return c
 
 
+def grouped_gemm_eligibility(args, kwargs):
+    a, b, offs = args[:3]
+    if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
+        return SupportResult(False, "requires bf16 CUDA operands")
+    if not (a.is_cuda and b.is_cuda and offs.is_cuda):
+        return SupportResult(False, "requires CUDA tensors")
+    if torch.cuda.get_device_capability(a.device)[0] in (9, 10):
+        return SupportResult(False, "unsupported CUDA compute capability")
+    return SupportResult(True)
+
+
+@register_kernel(
+    op="gemm.grouped",
+    backend="triton",
+    priority=100,
+    availability=_always_available,
+    eligibility=grouped_gemm_eligibility,
+    build="jit",
+    autograd="external",
+)
 def grouped_gemm(
     a: torch.Tensor,
     b: torch.Tensor,
     offs: torch.Tensor,
     bias: torch.Tensor | None = None,
-    impl: str = "auto",
-    **_,
 ) -> torch.Tensor:
     """Ragged grouped GEMM matching torch._grouped_mm's layout convention.
 
@@ -249,39 +274,10 @@ def grouped_gemm(
         (G,M,K) x (K,N) -> (M,N)    ragged N
 
     `bias` is an optional (G,N) tensor broadcast over the output's row dim, fused
-    into the Triton epilogue. torch._grouped_mm rejects bias, so `impl="torch"` adds
-    it separately and unfused.
-
-    `impl="torch"` also requires the non-unit stride of the last two dims to be a
-    multiple of 16 bytes, which the Triton path does not — for the ragged-K layout
-    with a contiguous source that means K % 8 == 0 in bf16.
+    into the Triton epilogue.
     """
-    if impl not in ("auto", "triton", "torch"):
-        raise ValueError(f"impl must be auto|triton|torch, got {impl!r}")
     if bias is not None and a.ndim == 3:
         raise NotImplementedError("bias is not supported for the ragged-N layout")
-
-    if impl == "auto":
-        impl = (
-            "triton"
-            if (
-                a.is_cuda
-                and a.dtype == torch.bfloat16
-                and torch.cuda.get_device_capability(a.device)[0] not in (9, 10)
-            )
-            else "torch"
-        )
-
-    if impl == "torch":
-        out = torch._grouped_mm(a, b, offs=offs)
-        if bias is not None:
-            rows = torch.arange(out.shape[0], device=offs.device)
-            out = out + (
-                bias[:, None, :]
-                if out.ndim == 3
-                else bias[torch.searchsorted(offs, rows, right=True)]
-            )
-        return out
 
     assert a.ndim in (2, 3) and b.ndim in (2, 3) and offs.ndim == 1
     assert a.ndim == 2 or b.ndim == 2, "3D x 3D has no ragged dim; use torch.bmm"
@@ -306,8 +302,6 @@ def grouped_gemm(
         )
         assert bias.dtype == a.dtype, f"bias dtype {bias.dtype} != a {a.dtype}"
 
-    if not (a.is_cuda and a.dtype == torch.bfloat16):
-        raise ValueError("impl='triton' requires bf16 CUDA tensors")
     return _grouped_gemm(a, b, offs, bias)
 
 
@@ -537,6 +531,43 @@ def _scaled_gemm_mxfp8_kernel(
     )
 
 
+def scaled_gemm_eligibility(args, kwargs):
+    aq, bq, sa, sb, out_dtype, block_size = args[:6]
+    bias = args[6] if len(args) > 6 else kwargs.get("bias")
+    tensors = (aq, bq, sa, sb) + (() if bias is None else (bias,))
+    if not all(tensor.is_cuda for tensor in tensors):
+        return SupportResult(False, "requires CUDA tensors")
+    quantized_dtypes = {torch.int8, torch.float8_e4m3fn, torch.float8_e5m2}
+    if aq.dtype not in quantized_dtypes or bq.dtype not in quantized_dtypes:
+        return SupportResult(False, "requires int8 or fp8 operands")
+    if aq.dtype.is_floating_point != bq.dtype.is_floating_point:
+        return SupportResult(False, "requires operands from the same dtype family")
+    if aq.ndim != 2 or bq.ndim != 2 or sa.ndim != 2 or sb.ndim != 2:
+        return SupportResult(False, "requires 2-D operands and scales")
+    if aq.shape[1] != bq.shape[0]:
+        return SupportResult(False, "contraction dimensions do not match")
+    nblocks = sa.shape[1]
+    expected = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
+    if nblocks != expected or sa.shape[0] != aq.shape[0]:
+        return SupportResult(False, "invalid A scale layout")
+    if sb.shape != (nblocks, bq.shape[1]):
+        return SupportResult(False, "invalid B scale layout")
+    if nblocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
+        return SupportResult(False, "block_size must be a power of two >= 16")
+    if out_dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        return SupportResult(False, "unsupported output dtype")
+    return SupportResult(True)
+
+
+@register_kernel(
+    op="gemm.scaled",
+    backend="triton",
+    priority=100,
+    availability=_always_available,
+    eligibility=scaled_gemm_eligibility,
+    build="jit",
+    autograd="external",
+)
 @triton_op("jit_kernel::scaled_gemm", mutates_args={})
 def scaled_gemm(
     aq: torch.Tensor,
@@ -1102,6 +1133,73 @@ def _scaled_grouped_gemm_mxfp8_kernel(
         group_tile_start += group_tile_count
 
 
+def scaled_grouped_gemm_eligibility(args, kwargs):
+    aq, bq, sa, sb, offs, out_dtype, block_size = args[:7]
+    bias = args[7] if len(args) > 7 else kwargs.get("bias")
+    tensors = (aq, bq, sa, sb, offs) + (() if bias is None else (bias,))
+    if not all(tensor.is_cuda for tensor in tensors):
+        return SupportResult(False, "requires CUDA tensors")
+    quantized_dtypes = {torch.int8, torch.float8_e4m3fn, torch.float8_e5m2}
+    if aq.dtype not in quantized_dtypes or bq.dtype not in quantized_dtypes:
+        return SupportResult(False, "requires int8 or fp8 operands")
+    if aq.dtype.is_floating_point != bq.dtype.is_floating_point:
+        return SupportResult(False, "requires operands from the same dtype family")
+    if aq.ndim not in (2, 3) or bq.ndim not in (2, 3):
+        return SupportResult(False, "requires 2-D or 3-D operands")
+    if aq.ndim == 3 and bq.ndim == 3:
+        return SupportResult(False, "3D x 3D has no ragged dimension")
+    if offs.ndim != 1 or offs.dtype != torch.int32:
+        return SupportResult(False, "offs must be 1-D int32")
+    if aq.shape[-1] != bq.shape[-2]:
+        return SupportResult(False, "contraction dimensions do not match")
+    if block_size < 0:
+        return SupportResult(False, "block_size must be non-negative")
+    if aq.ndim == 3 and aq.shape[0] != offs.shape[0]:
+        return SupportResult(False, "A group count does not match offs")
+    if bq.ndim == 3 and bq.shape[0] != offs.shape[0]:
+        return SupportResult(False, "B group count does not match offs")
+
+    if aq.ndim == 2 and bq.ndim == 3:
+        nblocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
+        valid_scales = sa.shape == (aq.shape[0], nblocks) and sb.shape == (
+            bq.shape[0],
+            nblocks,
+            bq.shape[2],
+        )
+    elif aq.ndim == 2 and bq.ndim == 2:
+        valid_scales = (
+            sa.ndim == 2
+            and sb.ndim == 2
+            and sa.shape[0] == aq.shape[0]
+            and sa.shape[1] == sb.shape[0]
+            and sb.shape[1] == bq.shape[1]
+        )
+    else:
+        nblocks = (aq.shape[2] + block_size - 1) // block_size if block_size else 1
+        valid_scales = sa.shape == (aq.shape[0], aq.shape[1], nblocks) and sb.shape == (
+            nblocks,
+            bq.shape[1],
+        )
+    if not valid_scales:
+        return SupportResult(False, "invalid scale layout")
+    if bias is not None and aq.ndim == 3:
+        return SupportResult(False, "bias is not supported for the ragged-N layout")
+    if bias is not None and bias.shape != (offs.shape[0], bq.shape[-1]):
+        return SupportResult(False, "invalid bias layout")
+    if out_dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        return SupportResult(False, "unsupported output dtype")
+    return SupportResult(True)
+
+
+@register_kernel(
+    op="gemm.scaled_grouped",
+    backend="triton",
+    priority=100,
+    availability=_always_available,
+    eligibility=scaled_grouped_gemm_eligibility,
+    build="jit",
+    autograd="external",
+)
 @triton_op("jit_kernel::scaled_grouped_gemm", mutates_args={})
 def scaled_grouped_gemm(
     aq: torch.Tensor,

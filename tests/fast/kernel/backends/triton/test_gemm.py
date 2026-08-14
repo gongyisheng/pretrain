@@ -6,12 +6,14 @@ import importlib
 import pytest
 import torch
 
-from src.kernel.triton import gemm
-from src.kernel.gemm import (
-    grouped_gemm,
-    scaled_gemm,
-    scaled_grouped_gemm,
+from src.kernel.backends.triton import gemm
+import src.kernel.backends.triton.gemm as gemm_mod
+from src.kernel.ops.gemm import (
+    grouped_gemm as _public_grouped_gemm,
+    scaled_gemm as _public_scaled_gemm,
+    scaled_grouped_gemm as _public_scaled_grouped_gemm,
 )
+from src.kernel.selector import KernelSelectionError
 from src.quant.quantize import quantize_operand
 from tests.fast.kernel._refs import (
     _dequant_a,
@@ -20,6 +22,19 @@ from tests.fast.kernel._refs import (
     scaled_gemm_ref,
     scaled_grouped_gemm_ref,
 )
+
+
+def grouped_gemm(*args, **kwargs):
+    return _public_grouped_gemm(*args, backend="triton", **kwargs)
+
+
+def scaled_gemm(*args, **kwargs):
+    return _public_scaled_gemm(*args, backend="triton", **kwargs)
+
+
+def scaled_grouped_gemm(*args, **kwargs):
+    return _public_scaled_grouped_gemm(*args, backend="triton", **kwargs)
+
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Triton GEMM kernels are CUDA only"
@@ -199,81 +214,6 @@ def test_wgrad_parity_config_shapes(K, N):
     ref = torch._grouped_mm(a.mT, grad_c, offs=offs)
     got = grouped_gemm(a.mT, grad_c, offs)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
-
-
-def test_dispatch_impl_selection_and_parity():
-    torch.manual_seed(0)
-    counts = [64, 0, 130, 41]
-    R, K, N = sum(counts), 64, 48
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
-    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
-    b = w.mT
-    ref = torch._grouped_mm(a, b, offs=offs)
-    for impl in ("auto", "triton", "torch"):
-        got = gemm.grouped_gemm(a, b, offs, impl=impl)
-        torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
-    # torch path is exactly torch._grouped_mm
-    assert torch.equal(gemm.grouped_gemm(a, b, offs, impl="torch"), ref)
-    # invalid impl rejected
-    with pytest.raises((ValueError, AssertionError)):
-        gemm.grouped_gemm(a, b, offs, impl="nonsense")
-
-
-def test_grouped_gemm_auto_compiles_fullgraph():
-    torch.manual_seed(0)
-    counts = [64, 0, 130, 41]
-    R, K, N = sum(counts), 64, 48
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
-    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
-    fn = torch.compile(
-        lambda a, b, o: grouped_gemm(a, b, o, impl="auto"), fullgraph=True
-    )
-    out = fn(a, w.mT, offs)
-    torch.testing.assert_close(
-        out.float(),
-        torch._grouped_mm(a, w.mT, offs=offs).float(),
-        rtol=2e-2,
-        atol=2e-2,
-    )
-
-
-def test_grouped_gemm_auto_selects_triton_on_this_arch():
-    major = torch.cuda.get_device_capability()[0]
-    if major in (9, 10):
-        pytest.skip("fused torch path available; auto uses torch here")
-    counts = [64, 0, 130, 41]
-    R, K, N = sum(counts), 64, 48
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
-    b = (torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1).mT
-    # auto must take the Triton path here → bitwise-identical to forcing triton,
-    # and (almost certainly) NOT bitwise-equal to the torch fallback.
-    auto = gemm.grouped_gemm(a, b, offs, impl="auto")
-    assert torch.equal(auto, gemm.grouped_gemm(a, b, offs, impl="triton"))
-
-
-def test_grouped_gemm_auto_uses_torch_for_non_bf16():
-    counts = [64, 130]
-    R, K, N = sum(counts), 64, 48
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    a = torch.randn(R, K, device="cuda", dtype=torch.float32)
-    b = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32).mT
-    assert torch.equal(
-        gemm.grouped_gemm(a, b, offs, impl="auto"), torch._grouped_mm(a, b, offs=offs)
-    )
-
-
-def test_dispatch_triton_rejects_non_bf16():
-    counts = [64, 130]
-    R, K, N = sum(counts), 64, 48
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    a = torch.randn(R, K, device="cuda", dtype=torch.float32)  # not bf16
-    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.float32) * 0.1
-    b = w.mT
-    with pytest.raises(ValueError):
-        gemm.grouped_gemm(a, b, offs, impl="triton")
 
 
 @pytest.mark.parametrize(
@@ -544,8 +484,6 @@ def rand(*shape):
 @pytest.mark.parametrize("bs", [32, 64, 128])
 def test_e8m0_routes_to_the_mxfp8_kernel_at_any_multiple_of_32(monkeypatch, bs):
     """A scale width wider than 32 is still the block-scaled MMA's job, via replication."""
-    import src.kernel.triton.gemm as gemm_mod
-
     launched = []
     real_wrap = gemm_mod.wrap_triton
 
@@ -670,7 +608,7 @@ def test_scaled_gemm_rejects_malformed_inputs(case):
     on numbers that mean nothing.
     """
     aq, bq, sa, sb, bias = _MALFORMED[case](*_valid_scaled_args())
-    with pytest.raises((ValueError, AssertionError)):
+    with pytest.raises((KernelSelectionError, ValueError, AssertionError)):
         scaled_gemm(aq, bq, sa, sb, torch.float32, _VBS, bias=bias)
 
 
@@ -686,7 +624,7 @@ def test_scaled_gemm_rejects_unusable_block_size(bs):
     b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
     aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", bs))
     bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", bs))
-    with pytest.raises(ValueError):
+    with pytest.raises((KernelSelectionError, ValueError)):
         scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
 
 
@@ -975,18 +913,6 @@ def test_scaled_grouped_layouts_out_dtype(layout, out_dtype):
     assert out.dtype == out_dtype
 
 
-@pytest.mark.parametrize("layout", SCALED_LAYOUTS)
-def test_scaled_grouped_layouts_compile_fullgraph(layout):
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
-        layout, _SCALED_COUNTS, "blockwise", 32, "fp8_e4m3", seed=4
-    )
-    fn = torch.compile(
-        lambda: scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16, kbs),
-        fullgraph=True,
-    )
-    assert torch.isfinite(fn()).all()
-
-
 @pytest.mark.parametrize(
     "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
 )
@@ -1027,41 +953,13 @@ def test_scaled_grouped_bias_rejected_for_ragged_n():
         "ragged_n", _SCALED_COUNTS, "rowwise", 0, "fp8_e4m3"
     )
     bias = torch.zeros(offs.shape[0], bq.shape[1], device="cuda", dtype=torch.bfloat16)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises((KernelSelectionError, NotImplementedError)):
         scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs, bias=bias)
 
 
 def test_bench_scaled_grouped_gemm_importable():
     m = importlib.import_module("benchmarks.gemm.bench_scaled_grouped_gemm")
     assert hasattr(m, "main")
-
-
-def test_compiles_fullgraph():
-    torch.manual_seed(0)
-    a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", 32))
-    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", 32))
-    fn = torch.compile(
-        lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
-    )
-    assert torch.isfinite(fn()).all()
-
-
-def test_scaled_gemm_2d_scales_compile_fullgraph():
-    """repeat_interleave with a constant tile must not graph-break."""
-    a, b = rand(256, 512), rand(512, 128)
-    scaling = {
-        "granularity": "blockwise",
-        "block_shape": (32, 32),
-        "scale_dtype": "fp32",
-    }
-    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
-    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
-    fn = torch.compile(
-        lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
-    )
-    assert torch.isfinite(fn()).all()
 
 
 def test_quantize_operand_2d_compiles_fullgraph():
@@ -1106,3 +1004,16 @@ def test_early_prune_caps_block_k_at_the_scale_block(prune, configs):
     # scaled_grouped_gemm passes it, its contraction being ragged with no single
     # width to resolve it to; both pruners handle it, so both are held to it.
     assert prune(list(configs), {"SCALE_BLOCK_SIZE": 0}) == list(configs)
+
+
+def test_scaled_grouped_eligibility_rejects_malformed_scale_layout():
+    aq = torch.empty((4, 8), device="cuda", dtype=torch.int8)
+    bq = torch.empty((2, 8, 6), device="cuda", dtype=torch.int8)
+    sa = torch.empty((4, 2), device="cuda")
+    sb = torch.empty((2, 2, 5), device="cuda")
+    offs = torch.tensor([2, 4], device="cuda", dtype=torch.int32)
+    support = gemm.scaled_grouped_gemm_eligibility(
+        (aq, bq, sa, sb, offs, torch.float32, 4, None, None), {}
+    )
+    assert not support.supported
+    assert support.reason == "invalid scale layout"

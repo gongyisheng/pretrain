@@ -24,7 +24,25 @@ def grouped_gemm_ref(a, b, offs, bias=None):
     Without a bias the torch dtype passes through untouched; with one the sum is
     formed in fp32.
     """
-    return _add_bias(torch._grouped_mm(a, b, offs=offs), offs, bias)
+    try:
+        out = torch._grouped_mm(a, b, offs=offs)
+    except RuntimeError as error:
+        expected_error = "strides should be multiple of 16 bytes" in str(
+            error
+        ) or "Offsets have to be int32" in str(error)
+        if not expected_error:
+            raise
+        ends = offs.tolist()
+        bounds = zip([0, *ends[:-1]], ends)
+        if a.ndim == 2 and b.ndim == 3:
+            out = torch.cat([a[lo:hi] @ b[g] for g, (lo, hi) in enumerate(bounds)])
+        elif a.ndim == 2 and b.ndim == 2:
+            out = torch.stack([a[:, lo:hi] @ b[lo:hi] for lo, hi in bounds])
+        else:
+            out = torch.cat(
+                [a[g] @ b[:, lo:hi] for g, (lo, hi) in enumerate(bounds)], dim=1
+            )
+    return _add_bias(out, offs, bias)
 
 
 def _dequant_a(q, scale, bs):
