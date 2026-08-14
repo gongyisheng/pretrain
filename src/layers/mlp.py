@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.kernel.gemm import grouped_gemm
+from src.kernel.ops.gemm import grouped_gemm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 

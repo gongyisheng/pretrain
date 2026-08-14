@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.kernel.gemm import grouped_gemm
+from src.kernel.ops.gemm import grouped_gemm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.mlp import (
     DenseMLPBlock,

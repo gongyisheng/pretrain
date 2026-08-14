@@ -96,7 +96,7 @@ def test_expert_mm_bias_is_additive(scaling):
 def test_moe_block_quantized_forward_backward_runs(bias):
     import torch.nn as nn
 
-    from src.kernel.gemm import grouped_gemm
+    from src.kernel.ops.gemm import grouped_gemm
     from src.layers.mlp import SparseMoEBlock
     from src.quant.convert import apply_quantization
     from src.utils.config import (
