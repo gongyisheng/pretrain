@@ -1,16 +1,15 @@
-"""Scaled GEMM latency: Triton `scaled_gemm` vs the native torch ops it replaces.
+"""Scaled GEMM latency across generic FP8 and INT8 scaling schemes.
 
-Sweeps FP8/INT8 tensorwise, rowwise, blockwise-1D, and blockwise-2D scaling
+Sweeps 20 tensorwise, rowwise, blockwise-1D, and blockwise-2D configurations
 across three representative transformer linear shapes (d_model=512,
-intermediate=1536) at two token counts M in {4096, 16384}. The mxfp8 sweep
-compares preblocked and native-scale CuTe paths with Triton and native calls.
-Native calls
-(`torch._scaled_mm`, `torch._int_mm`, an inlined mxfp8 GEMM recovered from the
-deleted `src/quant/mxfp8.py`) are each wrapped in try/except: combos this
-GPU/cuBLAS rejects (e.g. e5m2 x e5m2, non-Blackwell MX) print `n/a` instead of
-crashing the sweep. Latency is measured via `_time`; accuracy is relative
-error against an fp32 reference `a.float() @ b.float()`. Prints a table and
-(unless --no-plot) writes a matplotlib grouped-bar chart.
+intermediate=1536) at two token counts M in {4096, 16384}. The MXFP8 row
+compares preblocked and native-scale CuTe paths with Triton and
+`torch.nn.functional.scaled_mm`. Other rows compare Triton with
+`torch._scaled_mm` or `torch._int_mm` where supported; unsupported native calls
+print `n/a` instead of crashing the sweep. Quantization and layout preparation
+remain outside timed closures. Accuracy is relative error against an fp32
+reference `a.float() @ b.float()`. Prints a table and (unless --no-plot) writes
+a matplotlib grouped-bar chart.
 
     uv run python benchmarks/gemm/bench_scaled_gemm.py
     uv run python benchmarks/gemm/bench_scaled_gemm.py --no-plot
@@ -92,8 +91,7 @@ SCHEMES = [config["label"] for config in _scheme_configs()]
 
 DEFAULT_OUT = "benchmarks/results/scaled_gemm.png"
 
-# reference-palette blue/orange pair (validated colorblind-safe, matches
-# bench_grouped_gemm.py's _IMPL_COLOR)
+# Implementation colors aligned with bench_grouped_gemm.py's palette.
 _SCHEME_COLOR = {"cute": "#3fae5c", "triton": "#2a78d6", "native": "#eb6834"}
 
 _MX_SUPPORTED = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
@@ -222,10 +220,11 @@ def _bench_mxfp8(a, b, ref, cute_schedule="cpasync"):
         try:
             st = F.ScalingType.BlockWise1x32
             sw = F.SwizzleType.SWIZZLE_32_4_4
+            aq_native = aq.contiguous()
 
             def native_fn():
                 return F.scaled_mm(
-                    aq.contiguous(),
+                    aq_native,
                     b_arg,
                     a_blk,
                     st,
@@ -313,6 +312,7 @@ def _bench_scheme(a, b, ref, config, cute_schedule):
             "tensorwise",
             "rowwise",
         }:
+            aq_n = aq.contiguous()
             bq_col = _colmajor(bq)
             sa_n = (
                 sa.reshape(-1)[:1].contiguous()
@@ -327,7 +327,7 @@ def _bench_scheme(a, b, ref, config, cute_schedule):
 
             def native_fn():
                 return torch._scaled_mm(
-                    aq.contiguous(), bq_col, sa_n, sb_n, out_dtype=torch.bfloat16
+                    aq_n, bq_col, sa_n, sb_n, out_dtype=torch.bfloat16
                 )
 
         elif config["dtype"] == "int8" and config["granularity"] in {
