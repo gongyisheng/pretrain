@@ -109,7 +109,7 @@ def test_compile_cache_reused(schedule):
     aq, bq, sa, sb = _operands(128, 128, 128)
     cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule=schedule)
     n_after_first = len(cute_gemm._COMPILED)
-    key = (schedule, 128, 128, aq.dtype, bq.dtype, torch.float32)
+    key = (schedule, "native", 128, 128, aq.dtype, bq.dtype, torch.float32)
     compiled_after_first = cute_gemm._COMPILED[key]
 
     aq2, bq2, sa2, sb2 = _operands(256, 128, 128, seed=1)  # different M, same K/N
@@ -159,8 +159,24 @@ def test_compile_cache_separates_schedules():
     aq, bq, sa, sb = _operands(128, 128, 128)
     cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule="cpasync")
     cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule="cooperative")
-    cpasync_key = ("cpasync", 128, 128, aq.dtype, bq.dtype, torch.float32)
-    cooperative_key = ("cooperative", 128, 128, aq.dtype, bq.dtype, torch.float32)
+    cpasync_key = (
+        "cpasync",
+        "native",
+        128,
+        128,
+        aq.dtype,
+        bq.dtype,
+        torch.float32,
+    )
+    cooperative_key = (
+        "cooperative",
+        "native",
+        128,
+        128,
+        aq.dtype,
+        bq.dtype,
+        torch.float32,
+    )
 
     assert cpasync_key in cute_gemm._COMPILED
     assert cooperative_key in cute_gemm._COMPILED
@@ -251,6 +267,281 @@ def _to_blocked(scale_2d):
         padded[:rows, :cols] = scale_2d
     blocks = padded.view(n_row_tiles, 128, n_col_tiles, 4).permute(0, 2, 1, 3)
     return blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_rejects_unknown_scale_layout():
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    with pytest.raises(AssertionError, match="unsupported scale_layout"):
+        scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, scale_layout="unknown")
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_rejects_preblocked_cpasync():
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    with pytest.raises(AssertionError, match="requires schedule cooperative"):
+        scaled_gemm_mxfp8(
+            aq,
+            bq,
+            _to_blocked(sa.to(torch.float8_e8m0fnu)),
+            _to_blocked(sb.to(torch.float8_e8m0fnu)),
+            torch.float32,
+            schedule="cpasync",
+            scale_layout="swizzle_32_4_4",
+        )
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_rejects_wrong_preblocked_size():
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    with pytest.raises(AssertionError, match="preblocked scale sizes"):
+        scaled_gemm_mxfp8(
+            aq,
+            bq,
+            _to_blocked(sa.to(torch.float8_e8m0fnu))[:-1],
+            _to_blocked(sb.to(torch.float8_e8m0fnu)),
+            torch.float32,
+            schedule="cooperative",
+            scale_layout="swizzle_32_4_4",
+        )
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_rejects_non_e8m0_preblocked_scales():
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    with pytest.raises(AssertionError, match="E8M0"):
+        scaled_gemm_mxfp8(
+            aq,
+            bq,
+            _to_blocked(sa),
+            _to_blocked(sb),
+            torch.float32,
+            schedule="cooperative",
+            scale_layout="swizzle_32_4_4",
+        )
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_rejects_noncontiguous_preblocked_scales():
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    sa_blocked = _to_blocked(sa.to(torch.float8_e8m0fnu))
+    sb_blocked = _to_blocked(sb.to(torch.float8_e8m0fnu))
+    sa_storage = torch.empty(
+        sa_blocked.numel(), 2, device=sa_blocked.device, dtype=sa_blocked.dtype
+    )
+    sa_storage[:, 0] = sa_blocked
+    sa_noncontiguous = sa_storage[:, 0]
+    assert not sa_noncontiguous.is_contiguous()
+
+    with pytest.raises(AssertionError, match="contiguous"):
+        scaled_gemm_mxfp8(
+            aq,
+            bq,
+            sa_noncontiguous,
+            sb_blocked,
+            torch.float32,
+            schedule="cooperative",
+            scale_layout="swizzle_32_4_4",
+        )
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_rejects_misaligned_preblocked_scales():
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    sa_blocked = _to_blocked(sa.to(torch.float8_e8m0fnu))
+    sb_blocked = _to_blocked(sb.to(torch.float8_e8m0fnu))
+    sa_storage = torch.empty(
+        sa_blocked.numel() + 1, device=sa_blocked.device, dtype=sa_blocked.dtype
+    )
+    sa_misaligned = sa_storage[1:]
+    sa_misaligned.copy_(sa_blocked)
+    assert sa_misaligned.is_contiguous()
+    assert sa_misaligned.data_ptr() % 16 != 0
+
+    with pytest.raises(AssertionError, match="16-byte aligned"):
+        scaled_gemm_mxfp8(
+            aq,
+            bq,
+            sa_misaligned,
+            sb_blocked,
+            torch.float32,
+            schedule="cooperative",
+            scale_layout="swizzle_32_4_4",
+        )
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_rejects_nonflat_preblocked_scales():
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    sa_blocked = _to_blocked(sa.to(torch.float8_e8m0fnu)).view(32, 16)
+    sb_blocked = _to_blocked(sb.to(torch.float8_e8m0fnu))
+
+    with pytest.raises(AssertionError, match="flat"):
+        scaled_gemm_mxfp8(
+            aq,
+            bq,
+            sa_blocked,
+            sb_blocked,
+            torch.float32,
+            schedule="cooperative",
+            scale_layout="swizzle_32_4_4",
+        )
+
+
+@requires_sm120
+@pytest.mark.parametrize(
+    "shape,a_fmt,b_fmt,out_dtype",
+    [
+        ((128, 128, 128), "fp8_e4m3", "fp8_e4m3", torch.float32),
+        ((128, 128, 128), "fp8_e5m2", "fp8_e5m2", torch.float32),
+        ((129, 160, 130), "fp8_e4m3", "fp8_e5m2", torch.float16),
+        ((2048, 160, 2048), "fp8_e5m2", "fp8_e4m3", torch.bfloat16),
+    ],
+)
+def test_scaled_gemm_mxfp8_preblocked_matches_oracle(shape, a_fmt, b_fmt, out_dtype):
+    """Cover ragged dimensions, partial scale tiles, dtypes, and persistent reuse."""
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    M, K, N = shape
+    aq, bq, sa, sb = _operands_fmt(M, K, N, a_fmt, b_fmt)
+    got = scaled_gemm_mxfp8(
+        aq,
+        bq,
+        _to_blocked(sa.to(torch.float8_e8m0fnu)),
+        _to_blocked(sb.to(torch.float8_e8m0fnu)),
+        out_dtype,
+        schedule="cooperative",
+        scale_layout="swizzle_32_4_4",
+    )
+    want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
+
+    if M == 2048:
+        tile_count = ((M + 127) // 128) * ((N + 127) // 128)
+        assert (
+            tile_count
+            > torch.cuda.get_device_properties(aq.device).multi_processor_count
+        )
+    assert got.shape == (M, N)
+    assert got.dtype == out_dtype
+    tolerance = 1e-6 if out_dtype == torch.float32 else 0.05
+    rel = (got.float() - want.float()).norm() / want.float().norm()
+    assert rel < tolerance, rel
+
+
+@requires_sm120
+def test_scaled_gemm_mxfp8_preblocked_agrees_with_scaled_mm():
+    """Check the physical 32x4x4 scale mapping against cuBLASLt."""
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq, bq, sa, sb = _operands_spread_scales(256, 512, 128)
+    sa_blocked = _to_blocked(sa.to(torch.float8_e8m0fnu))
+    sb_blocked = _to_blocked(sb.to(torch.float8_e8m0fnu))
+    got = scaled_gemm_mxfp8(
+        aq,
+        bq,
+        sa_blocked,
+        sb_blocked,
+        torch.bfloat16,
+        schedule="cooperative",
+        scale_layout="swizzle_32_4_4",
+    )
+    want = torch.nn.functional.scaled_mm(
+        aq,
+        bq.t(),
+        sa_blocked,
+        torch.nn.functional.ScalingType.BlockWise1x32,
+        sb_blocked,
+        torch.nn.functional.ScalingType.BlockWise1x32,
+        swizzle_a=torch.nn.functional.SwizzleType.SWIZZLE_32_4_4,
+        swizzle_b=torch.nn.functional.SwizzleType.SWIZZLE_32_4_4,
+        output_dtype=torch.bfloat16,
+    )
+    oracle = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
+
+    assert (got.float() - want.float()).norm() / want.float().norm() < 1e-3
+    assert (got.float() - oracle.float()).norm() / oracle.float().norm() < 0.05
+
+
+@requires_sm120
+def test_compile_cache_separates_preblocked_and_reuses_dynamic_m():
+    from src.kernel.cute import gemm as cute_gemm
+
+    cute_gemm._COMPILED.clear()
+    aq, bq, sa, sb = _operands(128, 128, 128)
+    native = cute_gemm.scaled_gemm_mxfp8(
+        aq,
+        bq,
+        sa,
+        sb,
+        torch.float32,
+        schedule="cooperative",
+        scale_layout="native",
+    )
+    preblocked = cute_gemm.scaled_gemm_mxfp8(
+        aq,
+        bq,
+        _to_blocked(sa.to(torch.float8_e8m0fnu)),
+        _to_blocked(sb.to(torch.float8_e8m0fnu)),
+        torch.float32,
+        schedule="cooperative",
+        scale_layout="swizzle_32_4_4",
+    )
+    native_key = (
+        "cooperative",
+        "native",
+        128,
+        128,
+        aq.dtype,
+        bq.dtype,
+        torch.float32,
+    )
+    preblocked_key = (
+        "cooperative",
+        "swizzle_32_4_4",
+        128,
+        128,
+        aq.dtype,
+        bq.dtype,
+        torch.float32,
+    )
+    preblocked_compiled = cute_gemm._COMPILED[preblocked_key]
+    want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
+
+    assert len(cute_gemm._COMPILED) == 2
+    assert native_key in cute_gemm._COMPILED
+    assert cute_gemm._COMPILED[native_key] is not preblocked_compiled
+    assert (native - want).norm() / want.norm() < 0.02
+    assert (preblocked - want).norm() / want.norm() < 0.02
+
+    aq2, bq2, sa2, sb2 = _operands(256, 128, 128, seed=1)
+    got = cute_gemm.scaled_gemm_mxfp8(
+        aq2,
+        bq2,
+        _to_blocked(sa2.to(torch.float8_e8m0fnu)),
+        _to_blocked(sb2.to(torch.float8_e8m0fnu)),
+        torch.float32,
+        schedule="cooperative",
+        scale_layout="swizzle_32_4_4",
+    )
+    want2 = scaled_gemm_ref(aq2, bq2.t(), sa2, sb2.t(), 32)
+
+    assert len(cute_gemm._COMPILED) == 2
+    assert cute_gemm._COMPILED[preblocked_key] is preblocked_compiled
+    assert (got - want2).norm() / want2.norm() < 0.02
 
 
 @requires_sm120
