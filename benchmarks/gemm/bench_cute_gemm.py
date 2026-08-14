@@ -108,6 +108,10 @@ def _bench_shape(M, K, N):
     aq, sa = quantize_operand(a, -1, "fp8_e4m3", MX)
     bq, sb = quantize_operand(b, -2, "fp8_e4m3", MX)
 
+    # NOT hoisted, unlike the cuBLASLt arm below: `scaled_gemm_mxfp8` relayouts bq to
+    # K-major internally, so the CuTe column includes a host-side B transpose costing
+    # 5-19% of the call (19% at 4096^3, 11% at 8192^3, ~5% at K=512). See the note
+    # beside `bq_cublaslt` -- the two columns are not comparable at the API boundary.
     def cute_fn():
         return scaled_gemm_mxfp8(aq, bq, sa, sb, torch.bfloat16)
 
@@ -124,6 +128,14 @@ def _bench_shape(M, K, N):
 
     # cuBLASLt needs its operands/scales in its own layout -- the swizzle and the
     # column-major view of bq are one-time setup, not part of the timed call.
+    #
+    # This is an asymmetry, and it runs against the CuTe arm: cuBLASLt and CuTe both
+    # need B K-contiguous, but cuBLASLt gets its relayout for free here while CuTe
+    # pays for the same work inside every timed call. Reading the two columns as a
+    # like-for-like kernel comparison overstates the gap by the 5-19% quantified
+    # above. Both placements are defensible -- cuBLASLt's API lets a caller hoist the
+    # relayout, `scaled_gemm_mxfp8`'s does not -- so this measures what each API
+    # actually delivers, not what each kernel is capable of.
     aq_cublaslt = aq.contiguous()
     bq_cublaslt = bq.t().contiguous().t()  # (K, N) stored column-major
     sa_blocked = _to_blocked(sa.to(torch.float8_e8m0fnu))

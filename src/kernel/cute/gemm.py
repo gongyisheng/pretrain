@@ -65,9 +65,31 @@ SF_TILE_BYTES = TILE_M * TILE_SF
 # adds no bytes -- SMEM_BYTES below stays exact. The 16-byte granule is also what
 # keeps the staging copy legal: a `cp.async` vector is exactly one granule, so the
 # swizzle moves it whole rather than splitting it.
+#
+# `Swizzle<b, m, s>` XORs the b bits above bit m into the b bits above bit (m + s), so
+# all three numbers are pinned, not just two: the granules it permutes have to be
+# exactly one row (BASE + BITS == log2 TILE_K) *and* the bits it XORs in have to be
+# the row index (BASE + SHIFT == log2 TILE_K, i.e. SHIFT == BITS). SHIFT is the one a
+# sweep would vary on its own, and it fails in both directions -- measured here at
+# TILE_K = 128, everything else fixed:
+#
+#   Swizzle<3,4,0/1/2>   26/26 tests pass, 45.5 TF/s at 4096^3
+#   Swizzle<3,4,3>       26/26 tests pass, 73.6 TF/s      <- shipped
+#   Swizzle<3,4,4>       25/26 tests FAIL
+#
+# Too small and the XOR source overlaps the granule index instead of being the row
+# index, so rows stop spreading over the banks: still correct, but the swizzle's
+# entire 62% is silently gone and only a benchmark would notice. Too large and it
+# reaches past the row index and the numbers go wrong. Neither crashes, so the assert
+# is the only thing standing between a sweep and a bad result.
 SWIZZLE_BITS, SWIZZLE_BASE, SWIZZLE_SHIFT = 3, 4, 3
-assert TILE_K == (1 << SWIZZLE_BASE) << SWIZZLE_BITS, (
-    "the swizzle must permute exactly one K-major row of the operand tile"
+assert (
+    TILE_K == (1 << SWIZZLE_BASE) << SWIZZLE_BITS and SWIZZLE_SHIFT == SWIZZLE_BITS
+), (
+    f"Swizzle<{SWIZZLE_BITS},{SWIZZLE_BASE},{SWIZZLE_SHIFT}> is not a permutation of "
+    f"one {TILE_K}-byte K-major row: need BASE + BITS == BASE + SHIFT == "
+    f"log2(TILE_K) == {TILE_K.bit_length() - 1}, so that the swizzle XORs the row "
+    f"index into the granule index and touches nothing else"
 )
 # Pipeline depth. Shared memory per CTA is STAGES * (32 KiB of operand + 1 KiB of
 # scales); 3 is the deepest that fits sm120's 99 KiB shared-memory budget at a 128^3
