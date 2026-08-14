@@ -265,3 +265,257 @@ all-warp `cp.async` schedule versus CUTLASS's persistent, TMA, warp-specialized
 schedule. The next optimization should change that schedule directly; it must not
 dispatch the CuTe path to `torch._scaled_mm`, move quantization/layout work into the
 timed region, or weaken the acceptance gate.
+
+## Task 4 cooperative schedule
+
+The implementation was ported from NVIDIA CUTLASS commit
+`564d267e4c992c456d12ad02665f9acedf7708f1` (BSD-3-Clause), specifically the
+complete `dense_blockscaled_gemm_persistent_cooperative.py` and
+`blockscaled_gemm_dispatch.py` references. The MXFP8 subset uses one producer warp
+(warp 8), eight consumer warps, a `(4,2,1)` MMA atom layout, producer/consumer
+register budgets of 40/232, and a static persistent scheduler with cluster shape
+`(1,1,1)`. The upstream main pipeline uses `Agent.Thread` producer and eight-thread
+consumer cooperative groups. Its transaction count covers A, B, SFA, and SFB TMA
+bytes: 33,792 B/stage (16,384 A + 16,384 B + 512 SFA + 512 SFB). Consumers use
+`LdMatrix8x8x16bOp(False, 4)` for both A and B; the epilogue converts registers,
+uses the SM120 shared-store atom, synchronizes eight MMA warps with a named barrier,
+and issues `PipelineTmaStore` S2G copies.
+
+The public native-scale path keeps TMA A/B and uses a paired `PipelineAsync` for
+producer-warp scale copies. Its TMA transaction count is exactly 32,768 bytes per
+stage (A+B only); scale bytes are deliberately excluded. Consumers wait, release,
+and advance both stage states together. Two A/B stages plus one 64x32 epilogue
+stage fit the actual SM120 shared-memory capacity. Aligned interior outputs use the
+TMA epilogue; ragged edges and row pitches not divisible by 16 bytes retain the
+predicated register store.
+
+### Native-scale TMA experiment
+
+A standalone descriptor probe accepted a native scale view with logical K shape
+`(K//32,32)` and zero stride on the 32-element mode. The real data path rejected or
+misexecuted it:
+
+- K=512 failed IR verification with
+  `cute.copy expects same size in restAtomVRank`, reporting source shape
+  `((1,(1,4,32,16,1)),(1))` and destination shape `((1,(512,1)),(1))`.
+- K=128 lowered, but launch failed with `cudaErrorIllegalInstruction`.
+
+The maintained schedule therefore uses the paired native-scale pipeline and does
+not launch a global scale-swizzle kernel. A cp.async-aware scale-barrier variant was
+also numerically correct but slower in the private weighted run, so it was not
+retained.
+
+### Numerical milestones
+
+The initial red run was the requested six-case schedule test: three cpasync cases
+passed and all three cooperative cases failed with `unsupported schedule`. After
+descriptor, paired-pipeline, and direct-epilogue milestones, the focused structural
+suite passed all 16 cases. The first TMA-epilogue version exposed an FP32 store
+geometry error and a non-16-byte ragged-N row-pitch error; the corrected geometry
+and safe fallback restored `16 passed`. Mixed E4M3/E5M2 operands, all requested
+output dtypes, and schedule cache isolation then passed 15 additional cases.
+
+### Final public matrix
+
+Both consolidated runs used physical GPU 1 and wrote
+`/tmp/scaled-gemm-cpasync.json` and `/tmp/scaled-gemm-cooperative.json`. Positive
+speedup means cooperative is faster.
+
+| shape | M | cpasync ms | cooperative ms | speedup | cooperative relerr |
+|---|---:|---:|---:|---:|---:|
+| attn_proj | 4096 | 0.264200 | 0.276784 | -4.55% | 0.037558 |
+| attn_proj | 16384 | 0.248326 | 0.266486 | -6.81% | 0.037483 |
+| mlp_up | 4096 | 0.244316 | 0.273599 | -10.70% | 0.037500 |
+| mlp_up | 16384 | 0.524389 | 0.389701 | +34.56% | 0.037505 |
+| mlp_down | 4096 | 0.253381 | 0.266990 | -5.10% | 0.037576 |
+| mlp_down | 16384 | 0.250951 | 0.273458 | -8.23% | 0.037501 |
+
+### Private Qwen training matrix and blocked-scale ceiling
+
+The private helper remained outside the public benchmark and wrote
+`/tmp/qwen3-cpasync.json`, `/tmp/qwen3-cooperative.json`, and
+`/tmp/qwen3-blocked-scale-ceiling.json`.
+
+The two temporary helpers and their exact final invocations were:
+
+```bash
+nvidia-smi
+CUDA_VISIBLE_DEVICES=1 uv run python /tmp/bench_qwen3_mxfp8.py \
+  --schedule cpasync --json-out /tmp/qwen3-cpasync.json
+nvidia-smi
+CUDA_VISIBLE_DEVICES=1 uv run python /tmp/bench_qwen3_mxfp8.py \
+  --schedule cooperative --json-out /tmp/qwen3-cooperative.json
+nvidia-smi
+CUDA_VISIBLE_DEVICES=1 uv run python /tmp/bench_blocked_scale_ceiling.py \
+  --json-out /tmp/qwen3-blocked-scale-ceiling.json
+```
+
+`/tmp/bench_qwen3_mxfp8.py`:
+
+```python
+import argparse
+import json
+import sys
+
+sys.path.insert(0, ".")
+
+from benchmarks.gemm.bench_scaled_gemm import _bench_mxfp8, _make
+
+TOKENS = 16 * 1024
+LINEARS = [
+    ("attn_qo", 2, 512, 512),
+    ("attn_kv", 2, 512, 256),
+    ("mlp_gate_up", 1, 512, 3072),
+    ("mlp_down", 1, 1536, 512),
+]
+
+
+def shapes():
+    rows = []
+    for projection, count, k_in, n_out in LINEARS:
+        rows.extend(
+            [
+                dict(projection=projection, role="forward", M=TOKENS, K=k_in, N=n_out, count=count),
+                dict(projection=projection, role="dgrad", M=TOKENS, K=n_out, N=k_in, count=count),
+                dict(projection=projection, role="wgrad", M=n_out, K=TOKENS, N=k_in, count=count),
+            ]
+        )
+    return rows
+
+
+def aggregate(rows):
+    total_flops = sum(2 * row["M"] * row["K"] * row["N"] * row["count"] for row in rows)
+    result = {"flops": total_flops}
+    for impl in ("cute", "triton", "native"):
+        result[f"{impl}_ms"] = sum(row[f"{impl}_ms"] * row["count"] for row in rows)
+        result[f"{impl}_tflops"] = total_flops / result[f"{impl}_ms"] / 1e9
+    result["cute_native_ratio"] = result["cute_tflops"] / result["native_tflops"]
+    return result
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--schedule", required=True, choices=("cpasync", "cooperative"))
+parser.add_argument("--json-out", required=True)
+args = parser.parse_args()
+
+rows = []
+for shape in shapes():
+    a, b = _make(shape["M"], shape["K"], shape["N"])
+    reference = a.float() @ b.float()
+    row = {**shape, **_bench_mxfp8(a, b, reference, args.schedule)}
+    rows.append(row)
+    print(
+        row["projection"], row["role"],
+        f"cute={row['cute_ms']:.6f}",
+        f"native={row['native_ms']:.6f}",
+        f"native/cute={row['native_ms'] / row['cute_ms']:.6f}",
+    )
+
+summary = aggregate(rows)
+print("aggregate", json.dumps(summary, sort_keys=True))
+with open(args.json_out, "w") as output_file:
+    json.dump({"schedule": args.schedule, "rows": rows, "aggregate": summary}, output_file, indent=2)
+```
+
+`/tmp/bench_blocked_scale_ceiling.py`:
+
+```python
+import argparse
+import json
+import re
+import subprocess
+import sys
+
+TOKENS = 16 * 1024
+LINEARS = [
+    ("attn_qo", 2, 512, 512),
+    ("attn_kv", 2, 512, 256),
+    ("mlp_gate_up", 1, 512, 3072),
+    ("mlp_down", 1, 1536, 512),
+]
+UPSTREAM = "/tmp/cutlass-ref.bKwpnV/examples/python/CuTeDSL/cute/blackwell_geforce/kernel/blockscaled_gemm/dense_blockscaled_gemm_persistent_cooperative.py"
+
+
+def shapes():
+    rows = []
+    for projection, count, k_in, n_out in LINEARS:
+        rows.extend(
+            [
+                dict(projection=projection, role="forward", M=TOKENS, K=k_in, N=n_out, count=count),
+                dict(projection=projection, role="dgrad", M=TOKENS, K=n_out, N=k_in, count=count),
+                dict(projection=projection, role="wgrad", M=n_out, K=TOKENS, N=k_in, count=count),
+            ]
+        )
+    return rows
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--json-out", required=True)
+args = parser.parse_args()
+
+rows = []
+for shape in shapes():
+    cmd = [
+        sys.executable,
+        UPSTREAM,
+        "--mnkl", f"{shape['M']},{shape['N']},{shape['K']},1",
+        "--tile_shape_mnk", "128,128,128",
+        "--epi_tile", "64,32",
+        "--a_dtype", "Float8E4M3FN",
+        "--b_dtype", "Float8E4M3FN",
+        "--sf_dtype", "Float8E8M0FNU",
+        "--sf_vec_size", "32",
+        "--c_dtype", "BFloat16",
+        "--acc_dtype", "Float32",
+        "--warmup_iterations", "10",
+        "--iterations", "50",
+        "--skip_ref_check",
+    ]
+    completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    match = re.search(r"Execution time: ([0-9.]+) microseconds", completed.stdout)
+    if match is None:
+        raise RuntimeError(completed.stdout + completed.stderr)
+    row = {**shape, "blocked_scale_ms": float(match.group(1)) / 1000.0}
+    rows.append(row)
+    print(shape["projection"], shape["role"], f"blocked_scale={row['blocked_scale_ms']:.6f}")
+
+total_flops = sum(2 * row["M"] * row["K"] * row["N"] * row["count"] for row in rows)
+total_ms = sum(row["blocked_scale_ms"] * row["count"] for row in rows)
+aggregate = {
+    "flops": total_flops,
+    "blocked_scale_ms": total_ms,
+    "blocked_scale_tflops": total_flops / total_ms / 1e9,
+}
+print("aggregate", json.dumps(aggregate, sort_keys=True))
+with open(args.json_out, "w") as output_file:
+    json.dump({"rows": rows, "aggregate": aggregate}, output_file, indent=2)
+```
+
+| projection | role | cpasync ms | cooperative ms | speedup |
+|---|---|---:|---:|---:|
+| mlp_gate_up | forward | 0.517089 | 0.383271 | +34.91% |
+| mlp_gate_up | dgrad | 0.637038 | 0.567360 | +12.28% |
+| mlp_gate_up | wgrad | 0.556171 | 0.422504 | +31.64% |
+| mlp_down | forward | 0.259648 | 0.280822 | -7.54% |
+| mlp_down | dgrad | 0.263042 | 0.277938 | -5.36% |
+| mlp_down | wgrad | 0.338244 | 0.272332 | +24.20% |
+
+The full weighted cpasync aggregate was 5.654098 ms, 54.69 TFLOP/s, and a
+CuTe/native throughput ratio of 0.45127. Cooperative was 5.530528 ms,
+55.91 TFLOP/s, and 0.46370: a 2.23% weighted latency improvement. The official
+preblocked-scale schedule ceiling was 2.597623 ms and 119.05 TFLOP/s, showing that
+native strided scale staging remains the dominant gap.
+
+### Final launch profile
+
+The retained cooperative kernel for `(M,K,N)=(16384,1536,512)` launched one
+persistent CTA per SM: grid `[1,1,36]`, block `[288,1,1]`, 126 registers/thread,
+and 72,704 bytes shared memory/CTA. Its single profiler sample was 239.327 us,
+versus the frozen cpasync sample of 269.633 us. NCU hardware counters remain
+unavailable because this host still returns `ERR_NVGPUCTRPERM`; no occupancy,
+throughput, or stall counters are inferred.
+
+The cooperative schedule materially improves the compute-heavy MLP rows, but small
+attention and MLP-down rows regress and the weighted ratio remains below the frozen
+0.85 target. The cpasync schedule therefore remains the default fallback while the
+cooperative path is explicit and cache-isolated.

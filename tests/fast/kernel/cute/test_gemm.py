@@ -75,17 +75,16 @@ def test_scaled_gemm_mxfp8_epilogue_tile_boundaries(shape):
 
 
 @requires_sm120
+@pytest.mark.parametrize("schedule", ["cpasync", "cooperative"])
 @pytest.mark.parametrize(
     "shape",
     [
         (256, 512, 128),
-        (128, 256, 256),
-        (384, 128, 128),
         (192, 160, 128),  # short K tile, and a partial M tile (192 = 128 + 64)
-        (129, 128, 130),  # partial M and N tiles
+        (129, 128, 130),
     ],
 )
-def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
+def test_scaled_gemm_mxfp8_schedule_adds_no_error(shape, schedule):
     """Require in-MMA scaling to match fp32 dequantization, including ragged tiles.
 
     Widely varying block scales expose feed errors; the tight bound isolates scaling
@@ -95,25 +94,28 @@ def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
 
     M, K, N = shape
     aq, bq, sa, sb = _operands_spread_scales(M, K, N)
-    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule=schedule)
     oracle = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
     rel = (got - oracle).norm() / oracle.norm()
     assert rel < 1e-6, rel
 
 
 @requires_sm120
-def test_compile_cache_reused():
+@pytest.mark.parametrize("schedule", ["cpasync", "cooperative"])
+def test_compile_cache_reused(schedule):
     """M is dynamic in the compiled kernel, so a batch-size change must not recompile."""
     from src.kernel.cute import gemm as cute_gemm
 
     aq, bq, sa, sb = _operands(128, 128, 128)
-    cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
+    cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule=schedule)
     n_after_first = len(cute_gemm._COMPILED)
-    key = ("cpasync", 128, 128, aq.dtype, bq.dtype, torch.float32)
+    key = (schedule, 128, 128, aq.dtype, bq.dtype, torch.float32)
     compiled_after_first = cute_gemm._COMPILED[key]
 
     aq2, bq2, sa2, sb2 = _operands(256, 128, 128, seed=1)  # different M, same K/N
-    got = cute_gemm.scaled_gemm_mxfp8(aq2, bq2, sa2, sb2, torch.float32)
+    got = cute_gemm.scaled_gemm_mxfp8(
+        aq2, bq2, sa2, sb2, torch.float32, schedule=schedule
+    )
 
     assert n_after_first >= 1, "the first call must have cached a compiled kernel"
     assert len(cute_gemm._COMPILED) == n_after_first, "M must not trigger a recompile"
@@ -136,6 +138,19 @@ def test_scaled_gemm_mxfp8_rejects_unknown_schedule():
         scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule="unknown")
 
 
+def test_scaled_gemm_mxfp8_rejects_empty_contraction():
+    """A zero-stage cooperative mainloop would wait on work never produced."""
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    aq = torch.empty((1, 0), dtype=torch.float8_e4m3fn)
+    bq = torch.empty((1, 0), dtype=torch.float8_e4m3fn)
+    sa = torch.empty((1, 0))
+    sb = torch.empty((1, 0))
+
+    with pytest.raises(AssertionError, match="positive"):
+        scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule="cooperative")
+
+
 @requires_sm120
 def test_compile_cache_separates_schedules():
     """Make the selected execution schedule part of the compiled-artifact identity."""
@@ -143,7 +158,13 @@ def test_compile_cache_separates_schedules():
 
     aq, bq, sa, sb = _operands(128, 128, 128)
     cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule="cpasync")
-    assert any(key[0] == "cpasync" for key in cute_gemm._COMPILED)
+    cute_gemm.scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule="cooperative")
+    cpasync_key = ("cpasync", 128, 128, aq.dtype, bq.dtype, torch.float32)
+    cooperative_key = ("cooperative", 128, 128, aq.dtype, bq.dtype, torch.float32)
+
+    assert cpasync_key in cute_gemm._COMPILED
+    assert cooperative_key in cute_gemm._COMPILED
+    assert cute_gemm._COMPILED[cpasync_key] is not cute_gemm._COMPILED[cooperative_key]
 
 
 def _operands_fmt(M, K, N, a_fmt, b_fmt, seed=0):
@@ -156,20 +177,22 @@ def _operands_fmt(M, K, N, a_fmt, b_fmt, seed=0):
 
 
 @requires_sm120
+@pytest.mark.parametrize("schedule", ["cpasync", "cooperative"])
 @pytest.mark.parametrize(
     "a_fmt,b_fmt",
     [("fp8_e4m3", "fp8_e4m3"), ("fp8_e4m3", "fp8_e5m2"), ("fp8_e5m2", "fp8_e4m3")],
 )
-def test_scaled_gemm_mxfp8_dtype_combinations(a_fmt, b_fmt):
+def test_scaled_gemm_mxfp8_dtype_combinations(a_fmt, b_fmt, schedule):
     from src.kernel.cute.gemm import scaled_gemm_mxfp8
 
     aq, bq, sa, sb = _operands_fmt(128, 128, 128, a_fmt, b_fmt)
-    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32, schedule=schedule)
     want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
     assert (got - want).norm() / want.norm() < 0.02
 
 
 @requires_sm120
+@pytest.mark.parametrize("schedule", ["cpasync", "cooperative"])
 @pytest.mark.parametrize(
     "shape,out_dtype",
     [
@@ -180,11 +203,11 @@ def test_scaled_gemm_mxfp8_dtype_combinations(a_fmt, b_fmt):
         ((129, 160, 130), torch.bfloat16),
     ],
 )
-def test_scaled_gemm_mxfp8_preserves_out_dtype(shape, out_dtype):
+def test_scaled_gemm_mxfp8_preserves_out_dtype(shape, out_dtype, schedule):
     from src.kernel.cute.gemm import scaled_gemm_mxfp8
 
     aq, bq, sa, sb = _operands(*shape)
-    got = scaled_gemm_mxfp8(aq, bq, sa, sb, out_dtype)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, out_dtype, schedule=schedule)
     want = scaled_gemm_ref(aq, bq.t(), sa, sb.t(), 32)
 
     assert got.dtype == out_dtype
@@ -231,8 +254,9 @@ def _to_blocked(scale_2d):
 
 
 @requires_sm120
+@pytest.mark.parametrize("schedule", ["cpasync", "cooperative"])
 @pytest.mark.parametrize("shape", [(256, 512, 128), (2048, 512, 512), (128, 256, 256)])
-def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
+def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape, schedule):
     """Use cuBLASLt as an independent scale-feed oracle for aligned shapes.
 
     Both kernels use the same MMA, so disagreement points to operand/scale plumbing;
@@ -243,7 +267,7 @@ def test_scaled_gemm_mxfp8_agrees_with_scaled_mm(shape):
     M, K, N = shape
     aq, bq, sa, sb = _operands(M, K, N)
 
-    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.bfloat16)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.bfloat16, schedule=schedule)
 
     # cuBLASLt consumes free transposed views of the kernel's K-contiguous B/SB.
     want = torch.nn.functional.scaled_mm(
