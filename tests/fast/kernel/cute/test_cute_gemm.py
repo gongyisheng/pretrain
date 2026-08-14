@@ -266,3 +266,24 @@ def test_bench_cute_gemm_importable():
 
     m = importlib.import_module("benchmarks.gemm.bench_cute_gemm")
     assert hasattr(m, "main")
+
+
+@pytest.mark.parametrize("shape", [(128, 160, 128), (256, 96, 128), (128, 224, 256)])
+def test_scaled_gemm_mxfp8_partial_scale_group(shape):
+    """K values whose scale-block count is not a multiple of 4.
+
+    A k-tile spans TILE_K=128 elements = 4 scale blocks, so K=160 (5 blocks) leaves
+    the second tile with a single valid block. Once the scale copy is vectorized to
+    4 bytes it would read past the end of sa/sb without the padding this test pins.
+    """
+    from src.kernel.cute.gemm import scaled_gemm_mxfp8
+
+    M, K, N = shape
+    assert (K // 32) % 4 != 0, "this test is pointless on a K whose blocks divide 4"
+
+    aq, bq, sa, sb = _operands(M, K, N)
+    got = scaled_gemm_mxfp8(aq, bq, sa, sb, torch.float32)
+    want = scaled_gemm_ref(aq, bq, sa, sb, 32)
+
+    assert got.shape == (M, N)
+    assert (got - want).norm() / want.norm() < 0.02

@@ -300,8 +300,12 @@ def _scaled_gemm_mxfp8_host(
     n_scale_blocks = K // SCALE_VEC
     # Both scale tensors are read as (MN, scale-block); sb arrives transposed, as
     # (K // 32, N), so its view just swaps the strides rather than the data.
+    # sfa's row pitch is read from the tensor actually passed in (sfa.shape[1]),
+    # not recomputed as n_scale_blocks: the caller may have padded each row out to
+    # a whole number of TILE_SF groups, which widens the physical stride between
+    # rows without changing the logical (real) scale-block count used below.
     mSFA = cute.make_tensor(
-        sfa.iterator, cute.make_layout((M, n_scale_blocks), stride=(n_scale_blocks, 1))
+        sfa.iterator, cute.make_layout((M, n_scale_blocks), stride=(sfa.shape[1], 1))
     )
     mSFB = cute.make_tensor(
         sfb.iterator, cute.make_layout((N, n_scale_blocks), stride=(1, N))
@@ -360,6 +364,24 @@ def scaled_gemm_mxfp8(
     out = torch.empty(M, N, device=aq.device, dtype=out_dtype)
     sa8 = sa.to(torch.float8_e8m0fnu).contiguous()
     sb8 = sb.to(torch.float8_e8m0fnu).contiguous()
+    # cp.async moves a whole TILE_SF-scale group (4 bytes, one per k-tile) per copy.
+    # When K % TILE_K != 0 the last k-tile's group only has a real scale in its first
+    # block(s); the rest of that 4-byte group would read past the end of sa8/sb8.
+    # Pad the scale-block axis up to a whole number of groups so the read is always
+    # in-bounds. Zero, not empty or 0xFF (the e8m0 NaN encoding): the operand elements
+    # those padding blocks would scale are already zeroed by zero_first in shared
+    # memory, and 0 * anything = 0, but 0 * NaN = NaN would poison a whole accumulator
+    # row. Do not remove this once the mainloop vectorizes the scale copy -- it is
+    # the reason that copy never runs out of bounds.
+    n_scale_blocks = K // SCALE_VEC
+    padded_blocks = -(-n_scale_blocks // TILE_SF) * TILE_SF
+    if padded_blocks != n_scale_blocks:
+        sa_padded = torch.zeros(M, padded_blocks, device=sa8.device, dtype=sa8.dtype)
+        sa_padded[:, :n_scale_blocks] = sa8
+        sa8 = sa_padded
+        sb_padded = torch.zeros(padded_blocks, N, device=sb8.device, dtype=sb8.dtype)
+        sb_padded[:n_scale_blocks, :] = sb8
+        sb8 = sb_padded
     # bq is (K, N) row-major; the MMA reads B as (N, K), which is the same bytes
     args = (
         from_dlpack(aq, assumed_align=16).mark_compact_shape_dynamic(
