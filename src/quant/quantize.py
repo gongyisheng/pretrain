@@ -303,7 +303,7 @@ def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
                     "ragged axis, which is what per-group scales exist to prevent"
                 )
             codes, scale = _quantize_blockwise_2d(
-                xf, contract_dim, block_outer, fmt, scale_dtype
+                xf, contract_dim, block_size, fmt, scale_dtype
             )
         else:
             codes, scale = _quantize_blockwise_1d(

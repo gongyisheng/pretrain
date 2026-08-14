@@ -450,9 +450,13 @@ def test_quantized_linear_forward_backward_with_square_tiles():
 
 @fp8_only
 @pytest.mark.parametrize("scale_dtype", ["fp32", "fp8_e8m0"])
-def test_quantized_gemm_2d_matches_fp32_dequant_reference(scale_dtype):
-    """The real kernel path against an fp32 oracle, both scale dtypes."""
-    tile = 32
+@pytest.mark.parametrize("tile", [32, 64])
+def test_quantized_gemm_2d_matches_fp32_dequant_reference(tile, scale_dtype):
+    """The real kernel path against an fp32 oracle, both scale dtypes.
+
+    tile=64 with scale_dtype="fp8_e8m0" also exercises rep_k == 2, composing the 2D
+    outer-axis expansion with the mxfp8 K-replication fast path.
+    """
     scaling = {
         "granularity": "blockwise",
         "block_shape": (tile, tile),

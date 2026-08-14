@@ -512,16 +512,19 @@ def test_scaled_gemm_mxfp8_precision_band_against_unquantized():
     "fmt,bs,scale_dtype",
     [
         ("int8", 32, "fp8_e8m0"),  # tl.dot_scaled has no integer format
-        (FMT[E4M3], 128, "fp8_e8m0"),  # the instruction's scale width is 32, not 128
+        (FMT[E4M3], 16, "fp8_e8m0"),  # 16 clears the power-of-two->=16 guard but is
+        # not a multiple of the MMA's fixed 32-wide scale vector
         (FMT[E4M3], 32, None),  # fp32 scales are not e8m0 exponents
     ],
 )
 def test_scaled_gemm_mx_declines_unsupported_combinations(fmt, bs, scale_dtype):
-    """Only fp8 x 32-wide x e8m0 may take the MMA path; the rest must fall back.
+    """Only fp8 x (any nonzero multiple of 32) x e8m0 may take the MMA path; the rest
+    must fall back to epilogue scaling.
 
     Each of these would fail differently if the dispatch were loosened: int8 is
-    rejected outright by tl.dot_scaled ("Invalid float format"), a 128-wide block
-    would silently be read as 32-wide, and fp32 scales are not exponent bytes at all.
+    rejected outright by tl.dot_scaled ("Invalid float format"), a 16-wide block is
+    not a multiple of the instruction's fixed 32-wide scale vector so it cannot be
+    reached by replication, and fp32 scales are not exponent bytes at all.
     """
     torch.manual_seed(0)
     a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
@@ -894,6 +897,22 @@ def test_scaled_grouped_mxfp8_adds_no_error_over_dequantizing(layout):
     oracle = scaled_grouped_gemm_ref(aq, bq, sa, sb, offs, kbs)
     rel = (got.float() - oracle).norm() / oracle.norm().clamp_min(1e-12)
     assert rel < 1e-6, rel
+
+
+def test_scaled_grouped_mxfp8_kernel_declines_block_size_zero():
+    """As for the dense kernel's block_size-0 regression: 0 % 32 == 0 in Python, so an
+    unguarded condition would route the "one scale block spans the whole segment"
+    sentinel into the replication branch, collapsing rep_k to 0 and handing the kernel
+    a zero-width scale tensor -- a CUDA illegal memory access hit during development.
+    """
+    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+        "ragged_m", _SCALED_COUNTS, "tensorwise", 0, "fp8_e4m3", scale_dtype="fp8_e8m0"
+    )
+    got = scaled_grouped_gemm(
+        aq, bq, sa, sb, offs, torch.float32, kbs, scale_dtype="fp8_e8m0"
+    )
+    assert got.shape == _expected_shape("ragged_m", _SCALED_COUNTS)
+    assert torch.isfinite(got).all()
 
 
 def test_scaled_grouped_mxfp8_declines_int8():
