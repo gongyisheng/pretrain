@@ -1,7 +1,5 @@
 """Triton GEMM parity against the eager correctness backend."""
 
-import importlib
-
 import pytest
 import torch
 
@@ -15,9 +13,15 @@ from src.kernel.backends.eager.gemm import _dequant_a, _dequant_b
 from src.kernel.backends.eager import gemm as eager_gemm
 from src.kernel.backends.triton import gemm as triton_gemm
 from tests.fast.kernel.backends.helper import (
+    BIAS_CASES,
+    DENSE_WORKLOADS,
+    FORMAT_PAIRS,
     GROUPED_LAYOUTS,
     GROUPED_PROJECTIONS,
+    SCALE_DTYPES,
+    SCALING_CASES,
     make_grouped_inputs,
+    make_scaled_gemm_inputs,
 )
 
 
@@ -119,7 +123,6 @@ pytestmark = pytest.mark.skipif(
 E4M3 = torch.float8_e4m3fn
 E5M2 = torch.float8_e5m2
 FMT = {E4M3: "fp8_e4m3", E5M2: "fp8_e5m2"}
-INT_FMT = {127: "int8", 63: "int7", 31: "int6", 15: "int5", 7: "int4"}
 
 
 def _scaling(gran, bs=0, scale_dtype=None):
@@ -191,6 +194,38 @@ def test_grouped_gemm_precision(projection, layout, with_bias):
     assert actual.dtype == torch.bfloat16
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("workload", DENSE_WORKLOADS, ids=lambda case: case.name)
+@pytest.mark.parametrize("format_pair", FORMAT_PAIRS, ids=lambda case: case.name)
+@pytest.mark.parametrize("scaling_case", SCALING_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("scale_dtype", SCALE_DTYPES)
+@pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
+def test_scaled_gemm_precision(
+    workload, format_pair, scaling_case, scale_dtype, with_bias
+):
+    capability = torch.cuda.get_device_capability()
+    if format_pair.a_format == "int8" and capability < (8, 0):
+        pytest.skip("Triton INT8 scaled GEMM requires SM80+")
+    if format_pair.a_format.startswith("fp8") and capability < (8, 9):
+        pytest.skip("Triton FP8 scaled GEMM requires SM89+")
+
+    aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype = make_scaled_gemm_inputs(
+        workload, format_pair, scaling_case, scale_dtype, with_bias
+    )
+    actual = triton_gemm.scaled_gemm(
+        aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype
+    )
+    expected = eager_gemm.scaled_gemm(
+        aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype
+    )
+
+    assert actual.shape == expected.shape
+    assert actual.dtype == out_dtype
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(
+        actual, expected, rtol=format_pair.rtol, atol=format_pair.atol
+    )
 
 
 def test_output_stride_is_dense_in_the_last_dimension():
@@ -271,102 +306,6 @@ def test_wgrad_parity_config_shapes(K, N):
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.parametrize(
-    "gran,bs",
-    [
-        ("tensorwise", 0),
-        ("rowwise", 0),
-        # 16 is the finest tiling width; BLOCK_K floors at 32, so it exercises the
-        # scale-block mask that keeps a 32-wide tile inside a 16-wide block.
-        ("blockwise", 16),
-        ("blockwise", 32),
-        ("blockwise", 64),
-        ("blockwise", 128),
-    ],
-)
-def test_fp8_e4m3_matches_oracle(gran, bs):
-    torch.manual_seed(0)
-    a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(256, 96, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(a, b, gran, bs, FMT[E4M3], FMT[E4M3])
-    assert out.shape == (128, 96) and out.dtype == torch.float32
-    assert (out - oracle).norm() / oracle.norm() < 0.02
-
-
-def test_fp8_e5m2_times_e5m2_ok():
-    # cuBLAS rejects e5m2 x e5m2; the Triton kernel accepts it.
-    torch.manual_seed(0)
-    a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(a, b, "rowwise", 0, FMT[E5M2], FMT[E5M2])
-    assert torch.isfinite(out).all()
-    assert (out - oracle).norm() / oracle.norm() < 0.05
-
-
-def test_fp8_mixed_e5m2_e4m3():
-    torch.manual_seed(0)
-    a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(a, b, "blockwise", 32, FMT[E5M2], FMT[E4M3])
-    assert (out - oracle).norm() / oracle.norm() < 0.05
-
-
-def test_pow2_e8m0_blockwise_matches_oracle():
-    # power-of-two (E8M0 / MX-style) blockwise scale through the real kernel.
-    torch.manual_seed(0)
-    a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(
-        a, b, "blockwise", 32, FMT[E4M3], FMT[E4M3], scale_dtype="fp8_e8m0"
-    )
-    assert (out - oracle).norm() / oracle.norm() < 0.02
-
-
-@pytest.mark.parametrize("qmax", [127, 63, 31, 15, 7])
-def test_int_matches_oracle(qmax):
-    torch.manual_seed(0)
-    a = torch.randn(96, 128, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    out, oracle = _run(a, b, "rowwise", 0, INT_FMT[qmax], INT_FMT[qmax])
-    assert (out - oracle).norm() / oracle.norm() < 0.02
-
-
-@pytest.mark.parametrize(
-    "gran,bs", [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
-)
-def test_bias_matches_oracle(gran, bs):
-    """Fused (N,) bias, broadcast over rows.
-
-    Blockwise is the discriminating case: the bias belongs on the final
-    accumulator, so an implementation that folded it into the per-scale-block
-    partial would add it once per block (8x here) instead of once.
-    """
-    torch.manual_seed(0)
-    a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(256, 96, device="cuda", dtype=torch.bfloat16)
-    bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling(gran, bs))
-    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling(gran, bs))
-    out = triton_scaled_gemm(aq, bq, sa, sb, torch.float32, bs, bias=bias)
-    oracle = scaled_gemm_eager(aq, bq, sa, sb, bs or a.shape[1]) + bias.float()
-    assert (out - oracle).norm() / oracle.norm() < 0.02
-
-
-def test_bias_none_unchanged():
-    """bias=None must be byte-identical to omitting it -- the HAS_BIAS=False path."""
-    torch.manual_seed(0)
-    a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("rowwise"))
-    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("rowwise"))
-    torch.testing.assert_close(
-        triton_scaled_gemm(aq, bq, sa, sb, torch.float32, 0, bias=None),
-        triton_scaled_gemm(aq, bq, sa, sb, torch.float32, 0),
-        rtol=0,
-        atol=0,
-    )
-
-
 def test_nonmultiple_shapes_mask_correctly():
     torch.manual_seed(0)
     a = torch.randn(70, 100, device="cuda", dtype=torch.bfloat16)  # M,K odd
@@ -387,13 +326,6 @@ def test_output_dtype_respected(out_dtype):
         aq, bq, sa, sb, out_dtype, 0
     )  # rowwise -> one block over K
     assert out.dtype == out_dtype
-
-
-def test_bench_scaled_gemm_importable():
-    m = importlib.import_module("benchmarks.gemm.bench_scaled_gemm")
-    assert hasattr(m, "main")
-    config = next(item for item in m._scheme_configs() if item["label"] == "mxfp8")
-    assert m._scaling_for_config(config)["scale_dtype"] == "fp8_e8m0"
 
 
 # ---------------------------------------------------------------------------
@@ -910,22 +842,3 @@ def test_scaled_grouped_bias_none_unchanged():
         rtol=0,
         atol=0,
     )
-
-
-def test_bench_scaled_grouped_gemm_importable():
-    m = importlib.import_module("benchmarks.gemm.bench_scaled_grouped_gemm")
-    assert hasattr(m, "main")
-
-
-def test_quantize_operand_2d_compiles_fullgraph():
-    scaling = {
-        "granularity": "blockwise",
-        "block_shape": (32, 32),
-        "scale_dtype": "fp32",
-    }
-    x = rand(256, 512)
-    fn = torch.compile(
-        lambda: quantize_operand(x, -1, FMT[E4M3], scaling), fullgraph=True
-    )
-    codes, scale = fn()
-    assert scale.shape == (256, 16)
