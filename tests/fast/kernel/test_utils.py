@@ -307,13 +307,80 @@ class _TensorMeta:
         return total
 
 
-def _grouped_metadata(device: str = "cuda:7"):
+def _grouped_metadata(layout: str, with_bias: bool):
+    offs = _TensorMeta((2,), torch.int32)
+    bias = _TensorMeta((2, 48), torch.bfloat16) if with_bias else None
+    if layout == "ragged_m":
+        return (
+            _TensorMeta((64, 64), torch.bfloat16),
+            _TensorMeta((2, 64, 48), torch.bfloat16),
+            offs,
+            bias,
+        )
+    if layout == "ragged_k":
+        return (
+            _TensorMeta((32, 64), torch.bfloat16),
+            _TensorMeta((64, 48), torch.bfloat16),
+            offs,
+            bias,
+        )
     return (
-        _TensorMeta((64, 64), torch.bfloat16, device),
-        _TensorMeta((2, 64, 48), torch.bfloat16, device),
-        _TensorMeta((2,), torch.int32, device),
-        None,
+        _TensorMeta((2, 32, 64), torch.bfloat16),
+        _TensorMeta((64, 48), torch.bfloat16),
+        offs,
+        bias,
     )
+
+
+def _default_grouped_metadata():
+    return _grouped_metadata("ragged_m", False)
+
+
+@pytest.mark.parametrize("layout", ["ragged_m", "ragged_k"])
+def test_torch_grouped_accepts_supported_bias_layouts(
+    monkeypatch: pytest.MonkeyPatch, layout: str
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = _grouped_metadata(layout=layout, with_bias=True)
+
+    assert torch_gemm.can_implement_grouped_gemm(args, {}).ok
+
+
+def test_torch_grouped_rejects_ragged_n_bias(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    result = torch_gemm.can_implement_grouped_gemm(
+        _grouped_metadata(layout="ragged_n", with_bias=True), {}
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "ragged-N" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("bias", "reason"),
+    [
+        (_TensorMeta((48,), torch.bfloat16), "rank"),
+        (
+            _TensorMeta((2, 48), torch.bfloat16, contiguous=False),
+            "contiguous",
+        ),
+        (_TensorMeta((2, 48), torch.float16), "bias dtype"),
+        (_TensorMeta((2, 47), torch.bfloat16), "shape"),
+    ],
+)
+def test_torch_grouped_requires_contiguous_bf16_grouped_bias(
+    monkeypatch: pytest.MonkeyPatch, bias: _TensorMeta, reason: str
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_grouped_metadata(layout="ragged_m", with_bias=False))
+    args[3] = bias
+
+    result = torch_gemm.can_implement_grouped_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert reason in result.reason
 
 
 def _scaled_metadata(device: str = "cuda:7"):
@@ -360,10 +427,30 @@ def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
 @pytest.mark.parametrize(
     ("predicate", "args_factory", "actual", "expected"),
     [
-        (torch_gemm.can_implement_grouped_gemm, _grouped_metadata, (8, 9), True),
-        (torch_gemm.can_implement_grouped_gemm, _grouped_metadata, (9, 0), True),
-        (torch_gemm.can_implement_grouped_gemm, _grouped_metadata, (10, 0), True),
-        (torch_gemm.can_implement_grouped_gemm, _grouped_metadata, (12, 0), True),
+        (
+            torch_gemm.can_implement_grouped_gemm,
+            _default_grouped_metadata,
+            (8, 9),
+            True,
+        ),
+        (
+            torch_gemm.can_implement_grouped_gemm,
+            _default_grouped_metadata,
+            (9, 0),
+            True,
+        ),
+        (
+            torch_gemm.can_implement_grouped_gemm,
+            _default_grouped_metadata,
+            (10, 0),
+            True,
+        ),
+        (
+            torch_gemm.can_implement_grouped_gemm,
+            _default_grouped_metadata,
+            (12, 0),
+            True,
+        ),
         (torch_gemm.can_implement_scaled_gemm, _scaled_metadata, (8, 9), True),
         (torch_gemm.can_implement_scaled_gemm, _scaled_metadata, (9, 0), True),
         (torch_gemm.can_implement_scaled_gemm, _scaled_metadata, (10, 0), True),
@@ -421,7 +508,11 @@ def test_torch_gemm_validation_architecture_matrix(
 @pytest.mark.parametrize(
     ("attribute", "predicate", "args_factory"),
     [
-        ("grouped_mm", torch_gemm.can_implement_grouped_gemm, _grouped_metadata),
+        (
+            "grouped_mm",
+            torch_gemm.can_implement_grouped_gemm,
+            _default_grouped_metadata,
+        ),
         ("scaled_mm", torch_gemm.can_implement_scaled_gemm, _scaled_metadata),
         (
             "scaled_grouped_mm",
@@ -478,7 +569,7 @@ def test_torch_grouped_gemm_validation_matrix_layouts(
     expected: bool,
 ):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-    args = list(_grouped_metadata())
+    args = list(_default_grouped_metadata())
     args[0] = _TensorMeta((64, 64), torch.bfloat16, contiguous=False, strides=a_strides)
     args[1] = _TensorMeta(
         (2, 64, 48), torch.bfloat16, contiguous=False, strides=b_strides
@@ -497,7 +588,7 @@ def test_torch_grouped_gemm_validation_matrix_layouts(
     [
         (
             torch_gemm.can_implement_grouped_gemm,
-            _grouped_metadata,
+            _default_grouped_metadata,
             2,
             _TensorMeta((2,), torch.int64),
             "int32",
@@ -556,7 +647,7 @@ def test_gemm_validation_rejects_offset_dtype_or_layout_and_output_or_scale_dtyp
     [
         (
             torch_gemm.can_implement_grouped_gemm,
-            _grouped_metadata,
+            _default_grouped_metadata,
             1,
             _TensorMeta((2, 32, 48), torch.bfloat16),
             "contraction",
@@ -591,7 +682,7 @@ def test_gemm_validation_rejects_offset_dtype_or_layout_and_output_or_scale_dtyp
         ),
         (
             triton_gemm.can_implement_grouped_gemm,
-            _grouped_metadata,
+            _default_grouped_metadata,
             3,
             _TensorMeta((2, 47), torch.bfloat16),
             "bias must have shape",
@@ -648,7 +739,7 @@ def test_triton_grouped_gemm_validation_rejects_bias_for_ragged_n(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-    args = list(_grouped_metadata())
+    args = list(_default_grouped_metadata())
     args[0] = _TensorMeta((2, 64, 64), torch.bfloat16)
     args[1] = _TensorMeta((64, 48), torch.bfloat16)
     args[3] = _TensorMeta((2, 48), torch.bfloat16)

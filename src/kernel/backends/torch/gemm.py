@@ -60,8 +60,6 @@ def can_implement_grouped_gemm(
 ) -> CheckResult:
     del kwargs
     a, b, offs, bias = args
-    if bias is not None and bias.dtype != a.dtype:
-        return CheckResult(False, "bias dtype must match operand dtype")
     tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
     result = _first_failure(
         (
@@ -88,8 +86,6 @@ def can_implement_grouped_gemm(
         )
     if offs.numel() == 0:
         return CheckResult(False, "torch grouped GEMM requires at least one offset")
-    if bias is not None:
-        return CheckResult(False, "torch grouped GEMM does not support bias")
     if a.ndim == 3 and b.ndim == 3:
         return CheckResult(False, "3D x 3D has no ragged dimension")
     if a.ndim == 2 and b.ndim == 3:
@@ -105,6 +101,23 @@ def can_implement_grouped_gemm(
             return CheckResult(False, "grouped GEMM contraction dimensions must match")
         if a.shape[0] != offs.numel():
             return CheckResult(False, "group count must match the offset count")
+    if bias is not None:
+        if a.ndim == 3:
+            return CheckResult(False, "bias is not supported for the ragged-N layout")
+        result = _first_failure(
+            (
+                check_rank(bias, frozenset({2}), "torch grouped GEMM bias"),
+                check_contiguous(bias, "torch grouped GEMM bias"),
+            )
+        )
+        if not result.ok:
+            return result
+        if bias.dtype != a.dtype:
+            return CheckResult(False, "bias dtype must match operand dtype")
+        if bias.shape != (offs.numel(), b.shape[-1]):
+            return CheckResult(
+                False, "bias must have shape (group count, output width)"
+            )
     return CheckResult(True)
 
 
@@ -117,7 +130,14 @@ def can_implement_grouped_gemm(
     autograd=False,
 )
 def grouped_gemm(a, b, offs, bias=None):
-    return F.grouped_mm(a, b, offs=offs, bias=bias)
+    out = F.grouped_mm(a, b, offs=offs, bias=None)
+    if bias is None:
+        return out
+    if out.ndim == 3:
+        return out + bias[:, None, :]
+    rows = torch.arange(out.shape[0], device=offs.device)
+    groups = torch.searchsorted(offs, rows, right=True)
+    return out + bias[groups]
 
 
 def _scaled_common_checks(
