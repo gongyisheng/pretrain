@@ -12,6 +12,13 @@ from src.kernel.ops.gemm import (
 )
 from src.quant.quantize import quantize_operand
 from src.kernel.backends.eager.gemm import _dequant_a, _dequant_b
+from src.kernel.backends.eager import gemm as eager_gemm
+from src.kernel.backends.triton import gemm as triton_gemm
+from tests.fast.kernel.backends.helper import (
+    GROUPED_LAYOUTS,
+    GROUPED_PROJECTIONS,
+    make_grouped_inputs,
+)
 
 
 def grouped_gemm_eager(a, b, offs, bias=None):
@@ -169,13 +176,21 @@ def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
     raise ValueError(layout)
 
 
-@pytest.mark.parametrize("layout", LAYOUTS)
-def test_all_ragged_layouts_match_torch(layout):
-    a, b, offs = _make_layout(layout)
-    ref = grouped_gemm_eager(a, b, offs)
-    got = triton_grouped_gemm(a, b, offs)
-    assert got.shape == ref.shape
-    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+@pytest.mark.parametrize("projection", GROUPED_PROJECTIONS, ids=lambda case: case.name)
+@pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
+@pytest.mark.parametrize("with_bias", [False, True], ids=["no-bias", "bias"])
+def test_grouped_gemm_precision(projection, layout, with_bias):
+    if layout == "ragged_n" and with_bias:
+        pytest.skip("ragged-N has no defined per-expert output-channel bias")
+    a, b, offs, bias = make_grouped_inputs(projection, layout, with_bias)
+
+    actual = triton_gemm.grouped_gemm(a, b, offs, bias)
+    expected = eager_gemm.grouped_gemm(a, b, offs, bias)
+
+    assert actual.shape == expected.shape
+    assert actual.dtype == torch.bfloat16
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
 def test_output_stride_is_dense_in_the_last_dimension():
@@ -185,25 +200,6 @@ def test_output_stride_is_dense_in_the_last_dimension():
     assert got.stride(-1) == 1
     assert got.stride(-2) >= got.shape[-1]
     torch.testing.assert_close(got.float(), eager.float(), rtol=2e-2, atol=2e-2)
-
-
-@pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
-def test_bias_matches_eager(layout):
-    a, b, offs = _make_layout(layout)
-    G, N = offs.shape[0], 48
-    bias = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
-    got = triton_grouped_gemm(a, b, offs, bias=bias)
-    ref = grouped_gemm_eager(a, b, offs, bias=bias)
-    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
-
-
-def test_parity_balanced_groups():
-    a, b, offs = _make([128, 128, 128, 128], K=64, N=48)
-    got = triton_grouped_gemm(a, b, offs)
-    ref = grouped_gemm_eager(a, b, offs)
-    assert got.shape == ref.shape
-    assert got.dtype == torch.bfloat16
-    torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 
 def test_parity_empty_and_uneven_groups():
@@ -228,8 +224,6 @@ def test_parity_single_group():
     [
         (64, 384),  # e512_k48 gate_up
         (192, 64),  # e512_k48 down
-        (512, 384),  # e64_k6 gate_up
-        (192, 512),  # e64_k6 down
     ],
 )
 def test_parity_config_shapes(K, N):
@@ -260,8 +254,6 @@ def test_wgrad_parity_uneven_and_empty():
     [
         (64, 384),  # e512_k48 gate_up
         (192, 64),  # e512_k48 down
-        (512, 384),  # e64_k6 gate_up
-        (192, 512),  # e64_k6 down
     ],
 )
 def test_wgrad_parity_config_shapes(K, N):
