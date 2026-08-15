@@ -15,6 +15,8 @@ from src.kernel.utils import (
     check_rank,
     check_same_device,
 )
+from src.kernel.backends.torch import gemm as torch_gemm
+from src.kernel.backends.triton import gemm as triton_gemm
 
 
 class _Owner:
@@ -262,3 +264,409 @@ def test_compute_capability_checks_reject_non_cuda_without_cuda_query(
     assert result.reason is not None
     assert "cpu" in result.reason
     assert "CUDA" in result.reason
+
+
+class _TensorMeta:
+    def __init__(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: str = "cuda:7",
+        contiguous: bool = True,
+        strides: tuple[int, ...] | None = None,
+    ) -> None:
+        self.shape = shape
+        self.dtype = dtype
+        self.device = torch.device(device)
+        self.ndim = len(shape)
+        self.is_cuda = self.device.type == "cuda"
+        self._contiguous = contiguous
+        if strides is None:
+            running = 1
+            calculated = []
+            for size in reversed(shape):
+                calculated.append(running)
+                running *= size
+            self._strides = tuple(reversed(calculated))
+        else:
+            self._strides = strides
+
+    def is_contiguous(self) -> bool:
+        return self._contiguous
+
+    def stride(self, dim: int | None = None):
+        return self._strides if dim is None else self._strides[dim]
+
+    def element_size(self) -> int:
+        return self.dtype.itemsize
+
+    def numel(self) -> int:
+        total = 1
+        for size in self.shape:
+            total *= size
+        return total
+
+
+def _grouped_metadata(device: str = "cuda:7"):
+    return (
+        _TensorMeta((64, 64), torch.bfloat16, device),
+        _TensorMeta((2, 64, 48), torch.bfloat16, device),
+        _TensorMeta((2,), torch.int32, device),
+        None,
+    )
+
+
+def _scaled_metadata(device: str = "cuda:7"):
+    return (
+        _TensorMeta((64, 64), torch.float8_e4m3fn, device),
+        _TensorMeta((64, 48), torch.float8_e4m3fn, device),
+        _TensorMeta((64, 1), torch.float32, device),
+        _TensorMeta((1, 48), torch.float32, device),
+        torch.bfloat16,
+        0,
+        None,
+        None,
+    )
+
+
+def _scaled_grouped_metadata(device: str = "cuda:7"):
+    return (
+        _TensorMeta((64, 64), torch.float8_e4m3fn, device),
+        _TensorMeta((2, 64, 48), torch.float8_e4m3fn, device),
+        _TensorMeta((64, 1), torch.float32, device),
+        _TensorMeta((2, 1, 48), torch.float32, device),
+        _TensorMeta((2,), torch.int32, device),
+        torch.bfloat16,
+        0,
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("predicate", "args_factory", "actual", "expected"),
+    [
+        (torch_gemm.can_implement_grouped_gemm, _grouped_metadata, (8, 9), True),
+        (torch_gemm.can_implement_grouped_gemm, _grouped_metadata, (9, 0), True),
+        (torch_gemm.can_implement_grouped_gemm, _grouped_metadata, (10, 0), True),
+        (torch_gemm.can_implement_grouped_gemm, _grouped_metadata, (12, 0), True),
+        (torch_gemm.can_implement_scaled_gemm, _scaled_metadata, (8, 9), True),
+        (torch_gemm.can_implement_scaled_gemm, _scaled_metadata, (9, 0), True),
+        (torch_gemm.can_implement_scaled_gemm, _scaled_metadata, (10, 0), True),
+        (torch_gemm.can_implement_scaled_gemm, _scaled_metadata, (12, 0), True),
+        (
+            torch_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            (8, 9),
+            False,
+        ),
+        (
+            torch_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            (9, 0),
+            True,
+        ),
+        (
+            torch_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            (10, 0),
+            True,
+        ),
+        (
+            torch_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            (12, 0),
+            False,
+        ),
+    ],
+)
+def test_torch_gemm_validation_architecture_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    predicate,
+    args_factory,
+    actual: tuple[int, int],
+    expected: bool,
+):
+    seen = []
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_capability",
+        lambda device: seen.append(device) or actual,
+    )
+
+    result = predicate(args_factory(), {})
+
+    assert result.ok is expected
+    assert seen == [torch.device("cuda:7")]
+    if actual == (12, 0) and predicate is torch_gemm.can_implement_scaled_grouped_gemm:
+        assert result.reason is not None
+        assert "SM120" in result.reason
+        assert "SM90 or SM100" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("attribute", "predicate", "args_factory"),
+    [
+        ("grouped_mm", torch_gemm.can_implement_grouped_gemm, _grouped_metadata),
+        ("scaled_mm", torch_gemm.can_implement_scaled_gemm, _scaled_metadata),
+        (
+            "scaled_grouped_mm",
+            torch_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+        ),
+    ],
+)
+def test_torch_gemm_validation_requires_callable_functional(
+    monkeypatch: pytest.MonkeyPatch, attribute: str, predicate, args_factory
+):
+    monkeypatch.setattr(torch.nn.functional, attribute, None)
+
+    result = predicate(args_factory(), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert attribute in result.reason
+    assert "callable" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("predicate", "args_factory"),
+    [
+        (torch_gemm.can_implement_scaled_gemm, _scaled_metadata),
+        (torch_gemm.can_implement_scaled_grouped_gemm, _scaled_grouped_metadata),
+    ],
+)
+def test_torch_scaled_gemm_validation_requires_rowwise_scaling_enum(
+    monkeypatch: pytest.MonkeyPatch, predicate, args_factory
+):
+    monkeypatch.setattr(torch.nn.functional, "ScalingType", type("ScalingType", (), {}))
+
+    result = predicate(args_factory(), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "ScalingType.RowWise" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("a_strides", "b_strides", "expected"),
+    [
+        ((64, 1), (3072, 48, 1), True),
+        ((1, 64), (3072, 1, 64), True),
+        ((512, 8), (3072, 48, 1), False),
+        ((64, 1), (3072, 512, 8), False),
+    ],
+)
+def test_torch_grouped_gemm_validation_matrix_layouts(
+    monkeypatch: pytest.MonkeyPatch,
+    a_strides: tuple[int, ...],
+    b_strides: tuple[int, ...],
+    expected: bool,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_grouped_metadata())
+    args[0] = _TensorMeta((64, 64), torch.bfloat16, contiguous=False, strides=a_strides)
+    args[1] = _TensorMeta(
+        (2, 64, 48), torch.bfloat16, contiguous=False, strides=b_strides
+    )
+
+    result = torch_gemm.can_implement_grouped_gemm(tuple(args), {})
+
+    assert result.ok is expected
+    if not expected:
+        assert result.reason is not None
+        assert "row-major or column-major" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("predicate", "args_factory", "index", "replacement", "reason"),
+    [
+        (
+            torch_gemm.can_implement_grouped_gemm,
+            _grouped_metadata,
+            2,
+            _TensorMeta((2,), torch.int64),
+            "int32",
+        ),
+        (
+            torch_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            4,
+            _TensorMeta((2,), torch.int32, contiguous=False, strides=(2,)),
+            "contiguous",
+        ),
+        (
+            torch_gemm.can_implement_scaled_gemm,
+            _scaled_metadata,
+            4,
+            torch.float32,
+            "output must be bf16 or fp16",
+        ),
+        (
+            torch_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            5,
+            torch.float16,
+            "output must be bf16",
+        ),
+        (
+            triton_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            8,
+            "unknown",
+            "scale_dtype",
+        ),
+    ],
+)
+def test_gemm_validation_rejects_offset_dtype_or_layout_and_output_or_scale_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+    predicate,
+    args_factory,
+    index: int,
+    replacement,
+    reason: str,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(args_factory())
+    args[index] = replacement
+
+    result = predicate(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert reason in result.reason
+
+
+@pytest.mark.parametrize(
+    ("predicate", "args_factory", "index", "replacement", "reason"),
+    [
+        (
+            torch_gemm.can_implement_grouped_gemm,
+            _grouped_metadata,
+            1,
+            _TensorMeta((2, 32, 48), torch.bfloat16),
+            "contraction",
+        ),
+        (
+            torch_gemm.can_implement_scaled_gemm,
+            _scaled_metadata,
+            1,
+            _TensorMeta((32, 48), torch.float8_e4m3fn),
+            "contraction",
+        ),
+        (
+            torch_gemm.can_implement_scaled_gemm,
+            _scaled_metadata,
+            2,
+            _TensorMeta((64, 2), torch.float32),
+            "scale shapes",
+        ),
+        (
+            torch_gemm.can_implement_scaled_gemm,
+            _scaled_metadata,
+            5,
+            32,
+            "rowwise scales only",
+        ),
+        (
+            torch_gemm.can_implement_scaled_gemm,
+            _scaled_metadata,
+            6,
+            _TensorMeta((64,), torch.float32),
+            "bias dtype",
+        ),
+        (
+            triton_gemm.can_implement_grouped_gemm,
+            _grouped_metadata,
+            3,
+            _TensorMeta((2, 47), torch.bfloat16),
+            "bias must have shape",
+        ),
+    ],
+)
+def test_gemm_validation_rejects_shape_block_and_bias_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+    predicate,
+    args_factory,
+    index: int,
+    replacement,
+    reason: str,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(args_factory())
+    args[index] = replacement
+
+    result = predicate(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert reason in result.reason
+
+
+def test_triton_scaled_gemm_validation_requires_same_device():
+    args = list(_scaled_metadata())
+    args[2] = _TensorMeta((64, 1), torch.float32, "cuda:6")
+
+    result = triton_gemm.can_implement_scaled_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "same device" in result.reason
+
+
+def test_triton_scaled_grouped_gemm_validation_rejects_malformed_scale_layout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_scaled_grouped_metadata())
+    args[0] = _TensorMeta((4, 8), torch.int8)
+    args[1] = _TensorMeta((2, 8, 6), torch.int8)
+    args[2] = _TensorMeta((4, 2), torch.float32)
+    args[3] = _TensorMeta((2, 2, 5), torch.float32)
+
+    result = triton_gemm.can_implement_scaled_grouped_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason == "invalid scale layout"
+
+
+def _prune_scaled_configs(configs, named_args):
+    return triton_gemm._early_prune_scaled_configs(
+        configs, named_args, named_args["SCALE_BLOCK_SIZE"], False, None, False
+    )
+
+
+def _prune_scaled_grouped_configs(configs, named_args):
+    return triton_gemm._early_prune_scaled_grouped_configs(
+        configs,
+        named_args,
+        36,
+        True,
+        False,
+        named_args["SCALE_BLOCK_SIZE"],
+        False,
+        None,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "prune,configs",
+    [
+        (_prune_scaled_configs, triton_gemm._SCALED_CONFIGS),
+        (_prune_scaled_grouped_configs, triton_gemm._SCALED_GROUPED_CONFIGS),
+    ],
+    ids=["scaled", "scaled_grouped"],
+)
+def test_triton_autotune_pruning_caps_block_k_at_scale_block(prune, configs):
+    for scale_block in (16, 32, 128, 4096):
+        kept = prune(list(configs), {"SCALE_BLOCK_SIZE": scale_block})
+        assert kept
+        assert all(config.kwargs["BLOCK_K"] <= max(32, scale_block) for config in kept)
+        assert {id(config) for config in kept} == {
+            id(config)
+            for config in configs
+            if config.kwargs["BLOCK_K"] <= max(32, scale_block)
+        }
+
+    assert prune(list(configs), {"SCALE_BLOCK_SIZE": 0}) == list(configs)

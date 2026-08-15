@@ -5,7 +5,6 @@ import importlib
 import pytest
 import torch
 
-from src.kernel.backends.triton import gemm
 import src.kernel.backends.triton.gemm as gemm_mod
 from src.kernel.ops.gemm import (
     grouped_gemm as _public_grouped_gemm,
@@ -1059,73 +1058,3 @@ def test_quantize_operand_2d_compiles_fullgraph():
     )
     codes, scale = fn()
     assert scale.shape == (256, 16)
-
-
-def _prune_scaled_configs(configs, named_args):
-    scale_block = named_args["SCALE_BLOCK_SIZE"]
-    return gemm._early_prune_scaled_configs(
-        configs,
-        named_args,
-        scale_block,
-        False,
-        None,
-        False,
-    )
-
-
-def _prune_scaled_grouped_configs(configs, named_args):
-    scale_block = named_args["SCALE_BLOCK_SIZE"]
-    return gemm._early_prune_scaled_grouped_configs(
-        configs,
-        named_args,
-        36,
-        True,
-        False,
-        scale_block,
-        False,
-        None,
-        False,
-    )
-
-
-@pytest.mark.parametrize(
-    "prune,configs",
-    [
-        (_prune_scaled_configs, gemm._SCALED_CONFIGS),
-        (_prune_scaled_grouped_configs, gemm._SCALED_GROUPED_CONFIGS),
-    ],
-    ids=["scaled", "scaled_grouped"],
-)
-def test_early_prune_caps_block_k_at_the_scale_block(prune, configs):
-    """A BLOCK_K wider than one scale block only ever runs masked-off lanes, so the
-    pruner drops it -- but must never prune the list empty, which Triton reports as
-    an unrelated autotune failure. The floor is 32, the narrowest fp8/int8 tl.dot.
-    Each scaled kernel owns a pruner, so this runs against both.
-    """
-    for scale_block in (16, 32, 128, 4096):
-        kept = prune(list(configs), {"SCALE_BLOCK_SIZE": scale_block})
-        assert kept, f"pruned empty at scale_block={scale_block}"
-        assert all(c.kwargs["BLOCK_K"] <= max(32, scale_block) for c in kept)
-        # only the overshooting configs go, never a legal one
-        assert {id(c) for c in kept} == {
-            id(c) for c in configs if c.kwargs["BLOCK_K"] <= max(32, scale_block)
-        }
-
-    # 0 means one block spanning the whole contraction segment, which leaves BLOCK_K
-    # free -- capping it at the floor would hide every wide config. Only
-    # scaled_grouped_gemm passes it, its contraction being ragged with no single
-    # width to resolve it to; both pruners handle it, so both are held to it.
-    assert prune(list(configs), {"SCALE_BLOCK_SIZE": 0}) == list(configs)
-
-
-def test_scaled_grouped_can_implement_rejects_malformed_scale_layout():
-    aq = torch.empty((4, 8), device="cuda", dtype=torch.int8)
-    bq = torch.empty((2, 8, 6), device="cuda", dtype=torch.int8)
-    sa = torch.empty((4, 2), device="cuda")
-    sb = torch.empty((2, 2, 5), device="cuda")
-    offs = torch.tensor([2, 4], device="cuda", dtype=torch.int32)
-    support = gemm.can_implement_scaled_grouped_gemm(
-        (aq, bq, sa, sb, offs, torch.float32, 4, None, None), {}
-    )
-    assert not support.ok
-    assert support.reason == "invalid scale layout"
