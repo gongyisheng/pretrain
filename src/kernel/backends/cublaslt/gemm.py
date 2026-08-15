@@ -55,6 +55,7 @@ def _column_major(bq: torch.Tensor) -> torch.Tensor:
     return bq.t().contiguous().t()
 
 
+@torch.compiler.assume_constant_result
 def _has_aligned_storage_offset(tensor: torch.Tensor) -> bool:
     storage_offset = getattr(tensor, "storage_offset", None)
     if storage_offset is None:
