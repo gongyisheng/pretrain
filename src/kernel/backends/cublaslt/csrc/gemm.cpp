@@ -149,14 +149,6 @@ at::Tensor scaled_gemm_mxfp8_cuda(
       b.numel() == 0 || (b.stride(0) == 1 && b.stride(1) == K),
       "scaled_gemm_mxfp8: B must be column-major");
   TORCH_CHECK(
-      a.numel() == 0 ||
-          reinterpret_cast<uintptr_t>(a.data_ptr()) % 16 == 0,
-      "scaled_gemm_mxfp8: A matrix pointer must be 16-byte aligned");
-  TORCH_CHECK(
-      b.numel() == 0 ||
-          reinterpret_cast<uintptr_t>(b.data_ptr()) % 16 == 0,
-      "scaled_gemm_mxfp8: B matrix pointer must be 16-byte aligned");
-  TORCH_CHECK(
       K % 16 == 0 && N % 16 == 0,
       "scaled_gemm_mxfp8: K and N must be divisible by 16");
   TORCH_CHECK(
@@ -217,6 +209,18 @@ at::Tensor scaled_gemm_mxfp8_cuda(
       out.add_(*bias);
     }
     return out;
+  }
+
+  at::Tensor aligned_a = a;
+  if (reinterpret_cast<uintptr_t>(a.data_ptr()) % 16 != 0) {
+    aligned_a = a.clone(at::MemoryFormat::Contiguous);
+  }
+  at::Tensor aligned_b = b;
+  if (reinterpret_cast<uintptr_t>(b.data_ptr()) % 16 != 0) {
+    aligned_b =
+        b.transpose(0, 1)
+            .clone(at::MemoryFormat::Contiguous)
+            .transpose(0, 1);
   }
 
   at::Tensor out =
@@ -318,13 +322,13 @@ at::Tensor scaled_gemm_mxfp8_cuda(
   CublasLtMatrixLayout c_layout;
   CublasLtMatrixLayout d_layout;
   status = cublasLtMatrixLayoutCreate(
-      a_layout.address(), CUDA_R_8F_E4M3, N, K, K);
+      a_layout.address(), CUDA_R_8F_E4M3, N, K, aligned_b.stride(1));
   TORCH_CHECK(
       status == CUBLAS_STATUS_SUCCESS,
       "scaled_gemm_mxfp8: failed to create A matrix layout");
   set_matrix_order(a_layout.get(), CUBLASLT_ORDER_ROW);
   status = cublasLtMatrixLayoutCreate(
-      b_layout.address(), CUDA_R_8F_E4M3, K, M, K);
+      b_layout.address(), CUDA_R_8F_E4M3, K, M, aligned_a.stride(0));
   TORCH_CHECK(
       status == CUBLAS_STATUS_SUCCESS,
       "scaled_gemm_mxfp8: failed to create B matrix layout");
@@ -371,12 +375,12 @@ at::Tensor scaled_gemm_mxfp8_cuda(
   set_pointer_alignment(
       preference.get(),
       CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,
-      b.data_ptr(),
+      aligned_b.data_ptr(),
       "A");
   set_pointer_alignment(
       preference.get(),
       CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES,
-      a.data_ptr(),
+      aligned_a.data_ptr(),
       "B");
   set_pointer_alignment(
       preference.get(),
@@ -425,9 +429,9 @@ at::Tensor scaled_gemm_mxfp8_cuda(
       handle,
       operation.get(),
       &alpha,
-      b.data_ptr(),
+      aligned_b.data_ptr(),
       a_layout.get(),
-      a.data_ptr(),
+      aligned_a.data_ptr(),
       b_layout.get(),
       &beta,
       out.data_ptr(),

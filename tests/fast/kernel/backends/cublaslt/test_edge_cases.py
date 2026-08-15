@@ -52,7 +52,7 @@ def _view_operands(case: str) -> tuple[object, ...]:
 
 
 @cuda_mxfp8_only
-@pytest.mark.parametrize("case", ["padded_a", "padded_b", "offset_a", "offset_b"])
+@pytest.mark.parametrize("case", ["padded_a", "padded_b"])
 def test_auto_falls_back_for_unsafe_operand_view(case: str):
     _require_mxfp8_device()
     args = _view_operands(case)
@@ -71,8 +71,6 @@ def test_auto_falls_back_for_unsafe_operand_view(case: str):
     [
         ("padded_a", "compact row-major A"),
         ("padded_b", "compact row-major or column-major B"),
-        ("offset_a", "16-byte aligned A"),
-        ("offset_b", "16-byte aligned B"),
     ],
 )
 def test_forced_backend_rejects_unsafe_operand_view(case: str, reason: str):
@@ -86,6 +84,23 @@ def test_forced_backend_rejects_unsafe_operand_view(case: str, reason: str):
     assert reason in eligibility.reason
     with pytest.raises(KernelSelectionError, match=reason):
         scaled_gemm(*args, backend="cublaslt")
+
+
+@cuda_mxfp8_only
+@pytest.mark.parametrize("backend", ["auto", "cublaslt"])
+@pytest.mark.parametrize("case", ["offset_a", "offset_b"])
+def test_misaligned_operand_executes_with_cublaslt(case: str, backend: str):
+    _require_mxfp8_device()
+    args = _view_operands(case)
+
+    eligibility = cublaslt_gemm.can_implement_scaled_gemm_mxfp8(args, {})
+    selected = select_kernel("gemm.scaled", args, {}, backend=backend)
+    expected = scaled_gemm(*args, backend="eager")
+    actual = scaled_gemm(*args, backend=backend)
+
+    assert eligibility.ok
+    assert selected.backend == "cublaslt"
+    _require_mxfp8_precision(f"misaligned {case} {backend}", actual, expected)
 
 
 def _zero_operands(shape: tuple[int, int, int], with_bias: bool) -> tuple[object, ...]:
@@ -130,7 +145,7 @@ def test_zero_size_gemm_matches_eager(
 
 
 def _native_operands() -> list[torch.Tensor | None]:
-    m = k = n = 16
+    m, k, n = 16, 32, 16
     a = _fp8_values(m * k).view(m, k)
     b = _fp8_values(n * k).view(n, k).t()
     scale_a = torch.ones(512, device="cuda", dtype=torch.float8_e8m0fnu)
@@ -151,7 +166,7 @@ def test_native_rejects_b_specific_and_bias_contracts(case: str, message: str):
     _require_mxfp8_device()
     a, b, scale_a, scale_b, bias = _native_operands()
     if case == "b_dtype":
-        b = _fp8_values(16 * 16, torch.float8_e5m2).view(16, 16).t()
+        b = _fp8_values(16 * 32, torch.float8_e5m2).view(16, 32).t()
     elif case == "b_scale_layout":
         scale_b = scale_b.view(2, 256)
     else:
@@ -163,21 +178,21 @@ def test_native_rejects_b_specific_and_bias_contracts(case: str, message: str):
 
 @cuda_mxfp8_only
 @pytest.mark.parametrize("matrix", ["A", "B"])
-def test_native_rejects_misaligned_matrix_pointer(matrix: str):
+def test_native_copies_misaligned_matrix_pointer(matrix: str):
     _require_mxfp8_device()
     a, b, scale_a, scale_b, bias = _native_operands()
     if matrix == "A":
-        a = _fp8_values(16 * 16 + 1)[1:].view(16, 16)
+        a = _fp8_values(16 * 32 + 1)[1:].view(16, 32)
         pointer = a.data_ptr()
     else:
-        b = _fp8_values(16 * 16 + 1)[1:].view(16, 16).t()
+        b = _fp8_values(16 * 32 + 1)[1:].view(16, 32).t()
         pointer = b.data_ptr()
     assert pointer % 16 != 0
 
-    with pytest.raises(
-        RuntimeError, match=f"{matrix} matrix pointer must be 16-byte aligned"
-    ):
-        torch.ops.aot_kernel.scaled_gemm_mxfp8(a, b, scale_a, scale_b, bias)
+    expected = a.to(torch.bfloat16) @ b.to(torch.bfloat16)
+    actual = torch.ops.aot_kernel.scaled_gemm_mxfp8(a, b, scale_a, scale_b, bias)
+
+    _require_mxfp8_precision(f"misaligned native {matrix}", actual, expected)
 
 
 @pytest.mark.parametrize(
