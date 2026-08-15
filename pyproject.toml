@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "pybind11>=2.11", "wheel"]
+requires = ["setuptools>=64", "pybind11>=2.11", "torch>=2.11,<2.12", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -32,6 +32,7 @@ addopts = "-n 6 --dist loadfile"
 dev = [
     "pytest>=9.0",
     "pytest-xdist>=3.6",
+    "pybind11>=2.11",
     "transformers>=4.51",
     "ruff>=0.15.6",
     "pre-commit>=4.0",
@@ -47,13 +48,15 @@ explicit = true
 torch = { index = "pytorch-cu130" }
 
 [tool.uv]
-# Rebuild the editable install (and therefore the C++ `_bpe_engine` extension)
-# when any of these files change. Default cache-keys only watch pyproject.toml,
-# so without this an edit to a .cpp/.h file would be picked up only after an
+no-build-isolation-package = ["pretrain"]
+# Rebuild the editable install (and therefore the native extensions) when any
+# of these files change. Default cache-keys only watch pyproject.toml, so
+# without this an edit to a .cpp/.h file would be picked up only after an
 # explicit `uv sync --reinstall-package pretrain`.
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "setup.py" },
     { file = "src/data/bpe/**/*.cpp" },
     { file = "src/data/bpe/**/*.h" },
+    { file = "src/kernel/backends/cublaslt/csrc/**/*.cpp" },
 ]
