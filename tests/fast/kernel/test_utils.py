@@ -343,6 +343,20 @@ def _scaled_grouped_metadata(device: str = "cuda:7"):
     )
 
 
+def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
+    nblocks = (k + block_size - 1) // block_size if block_size else 1
+    return (
+        _TensorMeta((64, k), torch.float8_e4m3fn),
+        _TensorMeta((k, 48), torch.float8_e4m3fn),
+        _TensorMeta((64, nblocks), torch.float32),
+        _TensorMeta((nblocks, 48), torch.float32),
+        torch.float32,
+        block_size,
+        None,
+        None,
+    )
+
+
 @pytest.mark.parametrize(
     ("predicate", "args_factory", "actual", "expected"),
     [
@@ -628,6 +642,101 @@ def test_triton_scaled_grouped_gemm_validation_rejects_malformed_scale_layout(
 
     assert not result.ok
     assert result.reason == "invalid scale layout"
+
+
+def test_triton_grouped_gemm_validation_rejects_bias_for_ragged_n(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_grouped_metadata())
+    args[0] = _TensorMeta((2, 64, 64), torch.bfloat16)
+    args[1] = _TensorMeta((64, 48), torch.bfloat16)
+    args[3] = _TensorMeta((2, 48), torch.bfloat16)
+
+    result = triton_gemm.can_implement_grouped_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason == "bias is not supported for the ragged-N layout"
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("contraction", "contraction dimensions do not match"),
+        ("sa_rows", "invalid A scale layout"),
+        ("sa_1d", "rank"),
+        ("sb_cols", "invalid B scale layout"),
+        ("sb_blocks", "invalid B scale layout"),
+        ("sb_1d", "rank"),
+        ("scale_blocks_vs_block_size", "invalid A scale layout"),
+        ("bias_len", "bias must be a one-dimensional output-width vector"),
+        ("bias_2d", "bias must be a one-dimensional output-width vector"),
+        ("cross_family_dtype", "same dtype family"),
+    ],
+)
+def test_triton_scaled_gemm_validation_rejects_malformed_metadata(
+    monkeypatch: pytest.MonkeyPatch, case: str, reason: str
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_triton_scaled_metadata(block_size=32, k=256))
+    if case == "contraction":
+        args[1] = _TensorMeta((128, 48), torch.float8_e4m3fn)
+    elif case == "sa_rows":
+        args[2] = _TensorMeta((32, 8), torch.float32)
+    elif case == "sa_1d":
+        args[2] = _TensorMeta((64,), torch.float32)
+    elif case == "sb_cols":
+        args[3] = _TensorMeta((8, 24), torch.float32)
+    elif case == "sb_blocks":
+        args[3] = _TensorMeta((1, 48), torch.float32)
+    elif case == "sb_1d":
+        args[3] = _TensorMeta((48,), torch.float32)
+    elif case == "scale_blocks_vs_block_size":
+        args[2] = _TensorMeta((64, 1), torch.float32)
+        args[3] = _TensorMeta((1, 48), torch.float32)
+    elif case == "bias_len":
+        args[6] = _TensorMeta((24,), torch.bfloat16)
+    elif case == "bias_2d":
+        args[6] = _TensorMeta((1, 48), torch.bfloat16)
+    else:
+        args[1] = _TensorMeta((256, 48), torch.int8)
+
+    result = triton_gemm.can_implement_scaled_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert reason in result.reason
+
+
+@pytest.mark.parametrize(("block_size", "nblocks"), [(8, 32), (96, 3)])
+def test_triton_scaled_gemm_validation_rejects_unusable_block_size(
+    monkeypatch: pytest.MonkeyPatch, block_size: int, nblocks: int
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_triton_scaled_metadata(block_size=block_size, k=256))
+
+    assert args[2].shape == (64, nblocks)
+    result = triton_gemm.can_implement_scaled_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason == "block_size must be a power of two >= 16"
+
+
+def test_triton_scaled_grouped_gemm_validation_rejects_bias_for_ragged_n(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_scaled_grouped_metadata())
+    args[0] = _TensorMeta((2, 64, 64), torch.float8_e4m3fn)
+    args[1] = _TensorMeta((64, 48), torch.float8_e4m3fn)
+    args[2] = _TensorMeta((2, 64, 1), torch.float32)
+    args[3] = _TensorMeta((1, 48), torch.float32)
+    args[7] = _TensorMeta((2, 48), torch.bfloat16)
+
+    result = triton_gemm.can_implement_scaled_grouped_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason == "bias is not supported for the ragged-N layout"
 
 
 def _prune_scaled_configs(configs, named_args):
