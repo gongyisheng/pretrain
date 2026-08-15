@@ -93,13 +93,22 @@ def _scaled_grouped_metadata(device: str = "cuda:7"):
     )
 
 
-@pytest.mark.parametrize("op", ["gemm.grouped", "gemm.scaled", "gemm.scaled_grouped"])
-def test_gemm_registry_contains_eager_torch_and_triton(op):
+@pytest.mark.parametrize(
+    ("op", "expected_backends"),
+    [
+        ("gemm.grouped", {"eager", "torch", "triton"}),
+        ("gemm.scaled", {"cublaslt", "eager", "torch", "triton"}),
+        ("gemm.scaled_grouped", {"eager", "torch", "triton"}),
+    ],
+)
+def test_gemm_registry_contains_expected_backends(op, expected_backends):
     implementations = KERNEL_REGISTRY.implementations(op)
     backends = {spec.backend for spec in implementations}
-    assert backends == {"eager", "torch", "triton"}
+    assert backends == expected_backends
     priorities = {spec.backend: spec.priority for spec in implementations}
     assert priorities["triton"] > priorities["torch"] > priorities["eager"]
+    if op == "gemm.scaled":
+        assert priorities["cublaslt"] > priorities["triton"]
     for spec in implementations:
         assert callable(spec.can_implement)
         assert not hasattr(spec, "availability")
