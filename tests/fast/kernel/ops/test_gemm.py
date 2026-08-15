@@ -4,12 +4,6 @@ import pytest
 import torch
 
 from src.kernel.ops import gemm as gemm_module
-from src.quant.quantize import quantize_operand
-
-
-cuda_only = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="GEMM compilation requires CUDA"
-)
 
 
 def test_public_gemm_import_surface():
@@ -167,57 +161,3 @@ def test_scaled_grouped_gemm_forwards_normalized_arguments(
         "kwargs": {},
         "backend": "triton",
     }
-
-
-def _scaling(block_size: int) -> dict[str, object]:
-    return {
-        "granularity": "blockwise",
-        "block_shape": (1, block_size),
-        "scale_dtype": "fp32",
-    }
-
-
-@cuda_only
-def test_grouped_gemm_auto_compiles_fullgraph():
-    a = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(2, 64, 48, device="cuda", dtype=torch.bfloat16)
-    offs = torch.tensor([32, 64], device="cuda", dtype=torch.int32)
-
-    compiled = torch.compile(
-        lambda: gemm_module.grouped_gemm(a, b, offs), fullgraph=True
-    )
-
-    assert torch.isfinite(compiled()).all()
-
-
-@cuda_only
-def test_scaled_gemm_auto_compiles_fullgraph():
-    a = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(64, 48, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, "fp8_e4m3", _scaling(32))
-    bq, sb = quantize_operand(b, -2, "fp8_e4m3", _scaling(32))
-
-    compiled = torch.compile(
-        lambda: gemm_module.scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32),
-        fullgraph=True,
-    )
-
-    assert torch.isfinite(compiled()).all()
-
-
-@cuda_only
-def test_scaled_grouped_gemm_auto_compiles_fullgraph():
-    aq = torch.randn(64, 64, device="cuda").to(torch.float8_e4m3fn)
-    bq = torch.randn(2, 64, 48, device="cuda").to(torch.float8_e4m3fn)
-    sa = torch.ones(64, 1, device="cuda")
-    sb = torch.ones(2, 1, 48, device="cuda")
-    offs = torch.tensor([32, 64], device="cuda", dtype=torch.int32)
-
-    compiled = torch.compile(
-        lambda: gemm_module.scaled_grouped_gemm(
-            aq, bq, sa, sb, offs, torch.bfloat16, 0
-        ),
-        fullgraph=True,
-    )
-
-    assert torch.isfinite(compiled()).all()

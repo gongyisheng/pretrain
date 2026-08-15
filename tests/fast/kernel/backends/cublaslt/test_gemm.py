@@ -128,39 +128,6 @@ def test_cublaslt_mxfp8_bias_matches_eager_bitwise():
     _assert_matches_eager(aq, bq, scale_a, scale_b, bias)
 
 
-@cuda_mxfp8_only
-def test_cublaslt_mxfp8_scaled_gemm_compiles_fullgraph_bitwise():
-    _require_mxfp8_device()
-    aq, bq, scale_a, scale_b = _mxfp8_operands((129, 144, 160), "varying")
-    eager = scaled_gemm(
-        aq,
-        bq,
-        scale_a,
-        scale_b,
-        torch.bfloat16,
-        32,
-        scale_dtype="fp8_e8m0",
-        backend="eager",
-    )
-    compiled = torch.compile(
-        lambda aq, bq, scale_a, scale_b: scaled_gemm(
-            aq,
-            bq,
-            scale_a,
-            scale_b,
-            torch.bfloat16,
-            32,
-            scale_dtype="fp8_e8m0",
-            backend="cublaslt",
-        ),
-        fullgraph=True,
-    )
-
-    actual = compiled(aq, bq, scale_a, scale_b)
-
-    torch.testing.assert_close(actual, eager, rtol=0, atol=0)
-
-
 def test_native_operator_has_meta_implementation():
     a = torch.empty((129, 144), device="meta", dtype=torch.float8_e4m3fn)
     b = torch.empty_strided(

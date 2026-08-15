@@ -102,11 +102,10 @@ def can_implement_scaled_gemm_mxfp8(
             False,
             "cuBLASLt MXFP8 GEMM requires compact row-major or column-major B",
         )
-    if not torch.compiler.is_compiling():
-        if aq.numel() and not _has_aligned_storage_offset(aq):
-            return CheckResult(False, "cuBLASLt MXFP8 GEMM requires 16-byte aligned A")
-        if bq.numel() and not _has_aligned_storage_offset(bq):
-            return CheckResult(False, "cuBLASLt MXFP8 GEMM requires 16-byte aligned B")
+    if aq.numel() and not _has_aligned_storage_offset(aq):
+        return CheckResult(False, "cuBLASLt MXFP8 GEMM requires 16-byte aligned A")
+    if bq.numel() and not _has_aligned_storage_offset(bq):
+        return CheckResult(False, "cuBLASLt MXFP8 GEMM requires 16-byte aligned B")
     if aq.shape[1] != bq.shape[0]:
         return CheckResult(
             False, "cuBLASLt MXFP8 GEMM contraction dimensions must match"
