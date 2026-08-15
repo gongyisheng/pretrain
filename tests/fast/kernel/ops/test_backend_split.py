@@ -223,6 +223,130 @@ def test_torch_scaled_grouped_rejects_noncontiguous_offsets():
     assert "contiguous" in result.reason
 
 
+def test_torch_scaled_grouped_rejects_fp16_output_on_supported_sm(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (9, 0))
+    args = list(_scaled_grouped_metadata())
+    args[5] = torch.float16
+
+    result = torch_gemm.can_implement_scaled_grouped_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "bf16" in result.reason
+
+
+def test_torch_scaled_grouped_executor_squeezes_public_scale_shapes(monkeypatch):
+    forwarded = {}
+    sentinel = torch.empty(0)
+
+    def fake_scaled_grouped_mm(
+        mat_a,
+        mat_b,
+        scale_a,
+        scale_recipe_a,
+        scale_b,
+        scale_recipe_b,
+        swizzle_a=None,
+        swizzle_b=None,
+        bias=None,
+        offs=None,
+        output_dtype=torch.bfloat16,
+        contraction_dim=(),
+        use_fast_accum=False,
+    ):
+        forwarded.update(
+            mat_a=mat_a,
+            mat_b=mat_b,
+            scale_a=scale_a,
+            scale_recipe_a=scale_recipe_a,
+            scale_b=scale_b,
+            scale_recipe_b=scale_recipe_b,
+            swizzle_a=swizzle_a,
+            swizzle_b=swizzle_b,
+            bias=bias,
+            offs=offs,
+            output_dtype=output_dtype,
+            contraction_dim=contraction_dim,
+            use_fast_accum=use_fast_accum,
+        )
+        return sentinel
+
+    monkeypatch.setattr(F, "scaled_grouped_mm", fake_scaled_grouped_mm)
+    aq = torch.empty((17, 64), dtype=torch.float8_e4m3fn)
+    bq = torch.empty((2, 64, 48), dtype=torch.float8_e4m3fn)
+    sa = torch.empty((17, 1), dtype=torch.float32)
+    sb = torch.empty((2, 1, 48), dtype=torch.float32)
+    offs = torch.tensor([8, 17], dtype=torch.int32)
+
+    result = torch_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16, 0)
+
+    assert result is sentinel
+    assert forwarded["mat_a"] is aq
+    assert forwarded["mat_b"].shape == bq.shape
+    assert forwarded["mat_b"].stride(-2) == 1
+    assert forwarded["scale_a"].shape == (17,)
+    assert forwarded["scale_b"].shape == (2, 48)
+    assert forwarded["scale_recipe_a"] is F.ScalingType.RowWise
+    assert forwarded["scale_recipe_b"] is F.ScalingType.RowWise
+    assert forwarded["offs"] is offs
+    assert forwarded["bias"] is None
+    assert forwarded["output_dtype"] is torch.bfloat16
+
+
+@pytest.mark.parametrize(
+    ("a_strides", "b_strides", "expected"),
+    [
+        ((64, 1), (3072, 48, 1), True),
+        ((1, 64), (3072, 1, 64), True),
+        ((512, 8), (3072, 48, 1), False),
+        ((64, 1), (3072, 512, 8), False),
+    ],
+)
+def test_torch_grouped_requires_matrix_layouts(
+    monkeypatch: pytest.MonkeyPatch,
+    a_strides: tuple[int, ...],
+    b_strides: tuple[int, ...],
+    expected: bool,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_grouped_metadata())
+    args[0] = _TensorMeta((64, 64), torch.bfloat16, contiguous=False, strides=a_strides)
+    args[1] = _TensorMeta(
+        (2, 64, 48), torch.bfloat16, contiguous=False, strides=b_strides
+    )
+
+    result = torch_gemm.can_implement_grouped_gemm(tuple(args), {})
+
+    assert result.ok is expected
+    if not expected:
+        assert result.reason is not None
+        assert "row-major or column-major" in result.reason
+
+
+def test_torch_scaled_can_implement_accepts_non_aligned_m_on_sm120(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_scaled_metadata())
+    args[0] = _TensorMeta((17, 64), torch.float8_e4m3fn)
+    args[2] = _TensorMeta((17, 1), torch.float32)
+
+    assert torch_gemm.can_implement_scaled_gemm(tuple(args), {}).ok
+
+
+@cuda_only
+def test_forced_torch_scaled_gemm_supports_m17_on_sm120():
+    if torch.cuda.get_device_capability()[0] != 12:
+        pytest.skip("executor regression targets the local SM120 functional kernel")
+    aq = torch.randn(17, 64, device="cuda").to(torch.float8_e4m3fn)
+    bq = torch.randn(64, 48, device="cuda").to(torch.float8_e4m3fn)
+    sa = torch.rand(17, 1, device="cuda", dtype=torch.float32)
+    sb = torch.rand(1, 48, device="cuda", dtype=torch.float32)
+
+    expected = scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 0, backend="eager")
+    actual = scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 0, backend="torch")
+
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-2, atol=2e-2)
+
+
 def test_triton_accepts_sm120_scaled_grouped_call_rejected_by_torch(monkeypatch):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
     args = _scaled_grouped_metadata()

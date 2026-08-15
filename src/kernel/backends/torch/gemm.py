@@ -7,13 +7,13 @@ import torch.nn.functional as F
 from src.kernel.registry import register_kernel
 from src.kernel.spec import CheckResult
 from src.kernel.utils import (
-    check_alignment,
     check_callable,
     check_compute_capability_at_least,
     check_compute_capability_in,
     check_contiguous,
     check_cuda_tensors,
     check_dtypes,
+    check_matrix_layout,
     check_rank,
     check_same_device,
 )
@@ -73,8 +73,8 @@ def can_implement_grouped_gemm(
             check_rank(b, frozenset({2, 3}), "torch grouped GEMM B"),
             check_rank(offs, frozenset({1}), "torch grouped GEMM offsets"),
             check_contiguous(offs, "torch grouped GEMM offsets"),
-            check_alignment(a, 16, "torch grouped GEMM A"),
-            check_alignment(b, 16, "torch grouped GEMM B"),
+            check_matrix_layout(a, 16, "torch grouped GEMM A"),
+            check_matrix_layout(b, 16, "torch grouped GEMM B"),
         )
     )
     if not result.ok:
@@ -152,9 +152,7 @@ def _scaled_common_checks(
         return CheckResult(False, f"{feature} requires row-major A")
     if aq.shape[1] != bq.shape[0]:
         return CheckResult(False, f"{feature} contraction dimensions must match")
-    if any(
-        dimension % 16 != 0 for dimension in (aq.shape[0], aq.shape[1], bq.shape[1])
-    ):
+    if any(dimension % 16 != 0 for dimension in (aq.shape[1], bq.shape[1])):
         return CheckResult(False, f"{feature} dimensions must be multiples of 16")
     if block_size != 0:
         return CheckResult(False, f"{feature} supports rowwise scales only")
@@ -292,8 +290,8 @@ def can_implement_scaled_grouped_gemm(
         return CheckResult(False, "torch scaled grouped GEMM requires fp32 scales")
     if sa.shape != (aq.shape[0], 1) or sb.shape != (bq.shape[0], 1, bq.shape[2]):
         return CheckResult(False, "torch scaled grouped GEMM requires rowwise scales")
-    if out_dtype not in _OUTPUT_DTYPES:
-        return CheckResult(False, "torch scaled grouped output must be bf16 or fp16")
+    if out_dtype != torch.bfloat16:
+        return CheckResult(False, "torch scaled grouped output must be bf16")
     if bias is not None:
         return CheckResult(False, "torch scaled grouped GEMM does not support bias")
     return check_compute_capability_in(
@@ -332,9 +330,9 @@ def scaled_grouped_gemm(
     return F.scaled_grouped_mm(
         aq,
         _group_column_major(bq),
-        sa,
+        sa.squeeze(1),
         F.ScalingType.RowWise,
-        sb,
+        sb.squeeze(1),
         F.ScalingType.RowWise,
         bias=bias,
         offs=offs,

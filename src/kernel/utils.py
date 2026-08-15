@@ -153,3 +153,20 @@ def check_alignment(
         f"{feature} has non-unit stride byte(s) {actual}; requires {alignment_bytes}-byte "
         "alignment",
     )
+
+
+def check_matrix_layout(
+    tensor: torch.Tensor, alignment_bytes: int, feature: str
+) -> CheckResult:
+    if tensor.ndim < 2:
+        return CheckResult(
+            False,
+            f"{feature} has rank {tensor.ndim}; requires a matrix with rank 2 or greater",
+        )
+    if tensor.stride(-1) != 1 and tensor.stride(-2) != 1:
+        return CheckResult(
+            False,
+            f"{feature} has matrix strides {tensor.stride()[-2:]}; requires a "
+            "row-major or column-major layout",
+        )
+    return check_alignment(tensor, alignment_bytes, feature)

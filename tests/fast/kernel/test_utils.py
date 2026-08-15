@@ -11,6 +11,7 @@ from src.kernel.utils import (
     check_contiguous,
     check_cuda_tensors,
     check_dtypes,
+    check_matrix_layout,
     check_rank,
     check_same_device,
 )
@@ -138,6 +139,43 @@ def test_check_alignment_rejects_non_positive_alignment(alignment_bytes: int):
     assert result.reason is not None
     assert str(alignment_bytes) in result.reason
     assert "positive" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("shape", "strides"),
+    [
+        ((8, 8), (8, 1)),
+        ((8, 8), (1, 8)),
+        ((2, 8, 8), (64, 8, 1)),
+        ((2, 8, 8), (64, 1, 8)),
+    ],
+)
+def test_check_matrix_layout_accepts_aligned_row_or_column_major_layouts(
+    shape: tuple[int, ...], strides: tuple[int, ...]
+):
+    tensor = torch.empty_strided(shape, strides, dtype=torch.bfloat16)
+
+    assert check_matrix_layout(tensor, 16, "grouped operand").ok
+
+
+@pytest.mark.parametrize(
+    ("shape", "strides", "reason"),
+    [
+        ((8, 8), (512, 8), "row-major or column-major"),
+        ((8, 7), (7, 1), "16-byte"),
+        ((2, 8, 8), (63, 8, 1), "16-byte"),
+    ],
+)
+def test_check_matrix_layout_rejects_exotic_or_misaligned_layouts(
+    shape: tuple[int, ...], strides: tuple[int, ...], reason: str
+):
+    tensor = torch.empty_strided(shape, strides, dtype=torch.bfloat16)
+
+    result = check_matrix_layout(tensor, 16, "grouped operand")
+
+    assert not result.ok
+    assert result.reason is not None
+    assert reason in result.reason
 
 
 @pytest.mark.parametrize(
