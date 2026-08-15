@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 
 
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 SEQUENCE_LENGTH = 1024
 TOP_K = 8
 EXPERT_COUNT = 64
