@@ -518,6 +518,30 @@ def test_torch_scaled_gemm_accepts_supported_scale_dtypes(
     assert result.ok, result.reason
 
 
+@pytest.mark.parametrize(
+    ("m", "n", "k"),
+    [(0, 48, 64), (64, 0, 64), (64, 48, 0)],
+)
+def test_torch_scaled_gemm_rejects_zero_dimensions(
+    monkeypatch: pytest.MonkeyPatch, m: int, n: int, k: int
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(
+            a_dtype=torch.int8,
+            b_dtype=torch.int8,
+            m=m,
+            n=n,
+            k=k,
+        ),
+        {},
+    )
+
+    assert not result.ok
+    assert result.reason == "torch scaled GEMM dimensions must be positive"
+
+
 def test_torch_scaled_gemm_int8_rejects_unaligned_output_rows(
     monkeypatch: pytest.MonkeyPatch,
 ):

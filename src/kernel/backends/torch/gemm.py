@@ -184,6 +184,8 @@ def _scaled_common_checks(
         return CheckResult(False, f"{feature} requires row-major A")
     if aq.shape[1] != bq.shape[0]:
         return CheckResult(False, f"{feature} contraction dimensions must match")
+    if any(dimension == 0 for dimension in (aq.shape[0], aq.shape[1], bq.shape[1])):
+        return CheckResult(False, f"{feature} dimensions must be positive")
     if any(dimension % 16 != 0 for dimension in (aq.shape[1], bq.shape[1])):
         return CheckResult(False, f"{feature} dimensions must be multiples of 16")
     if type(block_size) is not int or block_size < 0:
