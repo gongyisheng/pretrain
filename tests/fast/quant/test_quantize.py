@@ -690,3 +690,18 @@ def test_blockwise_2d_rejects_a_ragged_axis():
     offs = _offs([32, 64])
     with pytest.raises(NotImplementedError, match="ragged"):
         quantize_operand(x, -2, _E4M3, _scaling2d(16), offs=offs, ragged_dim=-2)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="2D quantizer compilation requires CUDA"
+)
+def test_quantize_operand_2d_compiles_fullgraph():
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (32, 32),
+        "scale_dtype": "fp32",
+    }
+    x = torch.randn(256, 512, device="cuda", dtype=torch.bfloat16)
+    fn = torch.compile(lambda: quantize_operand(x, -1, _E4M3, scaling), fullgraph=True)
+    _, scale = fn()
+    assert scale.shape == (256, 16)

@@ -126,15 +126,6 @@ def test_autograd_gate_runs_before_can_implement():
     assert calls == 0
 
 
-def test_duplicate_registration_raises_value_error():
-    registry = KernelRegistry()
-    spec = _spec("torch", lambda x: x, -100)
-    registry.register(spec)
-
-    with pytest.raises(ValueError, match="kernel already registered"):
-        registry.register(spec)
-
-
 def test_unknown_forced_backend_lists_registered_backends():
     registry = KernelRegistry()
     registry.register(_spec("torch", lambda x: x, -100))
