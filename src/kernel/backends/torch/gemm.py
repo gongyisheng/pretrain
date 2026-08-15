@@ -20,7 +20,14 @@ from src.kernel.utils import (
 
 
 _BF16 = frozenset({torch.bfloat16})
-_FP8_E4M3 = frozenset({torch.float8_e4m3fn})
+_SCALED_GROUPED_DTYPES = frozenset({torch.float8_e4m3fn})
+_SCALED_GEMM_DTYPE_PAIRS = frozenset(
+    {
+        (torch.int8, torch.int8),
+        (torch.float8_e4m3fn, torch.float8_e4m3fn),
+        (torch.float8_e5m2, torch.float8_e4m3fn),
+    }
+)
 _FLOAT_SCALES = frozenset({torch.float32})
 _OUTPUT_DTYPES = frozenset({torch.bfloat16, torch.float16})
 
@@ -156,7 +163,6 @@ def _scaled_common_checks(
         (
             check_same_device(tensors, feature),
             check_cuda_tensors(tensors, feature),
-            check_dtypes((aq, bq), _FP8_E4M3, f"{feature} operands"),
             check_rank(aq, frozenset({2}), f"{feature} A"),
             check_rank(bq, frozenset({2}), f"{feature} B"),
             check_rank(sa, frozenset({2}), f"{feature} A scale"),
@@ -168,18 +174,30 @@ def _scaled_common_checks(
     )
     if not result.ok:
         return result
+    dtype_pair = (aq.dtype, bq.dtype)
+    if dtype_pair not in _SCALED_GEMM_DTYPE_PAIRS:
+        return CheckResult(
+            False,
+            f"{feature} does not support operand pair {aq.dtype} x {bq.dtype}",
+        )
     if not _is_row_major(aq):
         return CheckResult(False, f"{feature} requires row-major A")
     if aq.shape[1] != bq.shape[0]:
         return CheckResult(False, f"{feature} contraction dimensions must match")
     if any(dimension % 16 != 0 for dimension in (aq.shape[1], bq.shape[1])):
         return CheckResult(False, f"{feature} dimensions must be multiples of 16")
-    if block_size != 0:
-        return CheckResult(False, f"{feature} supports rowwise scales only")
-    if scale_dtype not in (None, "fp32"):
-        return CheckResult(False, f"{feature} requires fp32 scales")
-    if sa.shape != (aq.shape[0], 1) or sb.shape != (1, bq.shape[1]):
-        return CheckResult(False, f"{feature} requires rowwise scale shapes")
+    if type(block_size) is not int or block_size < 0:
+        return CheckResult(False, "block_size must be a non-negative integer")
+    if scale_dtype not in (None, "fp32", "fp8_e8m0"):
+        return CheckResult(False, f"{feature} has unsupported scale_dtype")
+    scale_blocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
+    if sa.shape != (aq.shape[0], scale_blocks) or sb.shape != (
+        scale_blocks,
+        bq.shape[1],
+    ):
+        return CheckResult(False, f"{feature} has invalid scale shapes")
+    if scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
+        return CheckResult(False, "block_size must be a power of two >= 16")
     if out_dtype not in _OUTPUT_DTYPES:
         return CheckResult(False, f"{feature} output must be bf16 or fp16")
     if bias is not None and bias.dtype != out_dtype:
@@ -203,9 +221,6 @@ def can_implement_scaled_gemm(
 ) -> CheckResult:
     del kwargs
     aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype = args
-    result = _check_rowwise_scaling_functional("scaled_mm")
-    if not result.ok:
-        return result
     result = _scaled_common_checks(
         aq,
         bq,
@@ -219,13 +234,109 @@ def can_implement_scaled_gemm(
     )
     if not result.ok:
         return result
-    return check_compute_capability_at_least(aq.device, (8, 9), "torch scaled GEMM")
+    if aq.dtype == torch.int8 and bq.dtype == torch.int8:
+        result = check_callable(torch, "torch", "_int_mm")
+        minimum_capability = (8, 0)
+    else:
+        result = _check_rowwise_scaling_functional("scaled_mm")
+        minimum_capability = (8, 9)
+    if not result.ok:
+        return result
+    return check_compute_capability_at_least(
+        aq.device, minimum_capability, "torch scaled GEMM"
+    )
 
 
 def _column_major(tensor: torch.Tensor) -> torch.Tensor:
     if tensor.stride(0) == 1:
         return tensor
     return tensor.t().contiguous().t()
+
+
+def _scaled_int8_mm(aq, bq, sa, sb, out_dtype, block_size, bias):
+    width = block_size or aq.shape[1]
+    out = torch.zeros((aq.shape[0], bq.shape[1]), device=aq.device, dtype=torch.float32)
+    for index, start in enumerate(range(0, aq.shape[1], width)):
+        stop = min(start + width, aq.shape[1])
+        partial = torch._int_mm(
+            aq[:, start:stop].contiguous(), bq[start:stop].contiguous()
+        )
+        out += partial.float() * sa[:, index : index + 1] * sb[index : index + 1]
+    if bias is not None:
+        out += bias.float()
+    return out.to(out_dtype)
+
+
+def _scaled_fp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias):
+    width = block_size or aq.shape[1]
+    out = torch.zeros((aq.shape[0], bq.shape[1]), device=aq.device, dtype=torch.float32)
+    for index, start in enumerate(range(0, aq.shape[1], width)):
+        stop = min(start + width, aq.shape[1])
+        partial = F.scaled_mm(
+            aq[:, start:stop].contiguous(),
+            _column_major(bq[start:stop]),
+            sa[:, index : index + 1].contiguous(),
+            F.ScalingType.RowWise,
+            sb[index : index + 1],
+            F.ScalingType.RowWise,
+            bias=None,
+            output_dtype=torch.bfloat16,
+        )
+        out += partial.float()
+    if bias is not None:
+        out += bias.float()
+    return out.to(out_dtype)
+
+
+def _to_blocked_scale(scale):
+    rows, columns = scale.shape
+    row_tiles = (rows + 127) // 128
+    column_tiles = (columns + 3) // 4
+    padded = torch.zeros(
+        (row_tiles * 128, column_tiles * 4),
+        device=scale.device,
+        dtype=scale.dtype,
+    )
+    padded[:rows, :columns] = scale
+    blocked = padded.view(row_tiles, 128, column_tiles, 4)
+    blocked = blocked.permute(0, 2, 1, 3)
+    return blocked.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
+
+
+def _scaled_mxfp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias):
+    repeat = block_size // 32
+    groups = (aq.shape[1] + 31) // 32
+    scale_a = sa.repeat_interleave(repeat, 1)[:, :groups]
+    scale_b = sb.repeat_interleave(repeat, 0)[:groups]
+    scale_a = _to_blocked_scale(scale_a.to(torch.float8_e8m0fnu))
+    scale_b = _to_blocked_scale(scale_b.t().contiguous().to(torch.float8_e8m0fnu))
+    recipe = F.ScalingType.BlockWise1x32
+    swizzle = F.SwizzleType.SWIZZLE_32_4_4
+    return F.scaled_mm(
+        aq,
+        _column_major(bq),
+        scale_a,
+        recipe,
+        scale_b,
+        recipe,
+        swizzle_a=swizzle,
+        swizzle_b=swizzle,
+        bias=bias,
+        output_dtype=out_dtype,
+    )
+
+
+def _can_use_native_mxfp8(aq, bq, block_size, scale_dtype):
+    return (
+        aq.dtype == torch.float8_e4m3fn
+        and bq.dtype == torch.float8_e4m3fn
+        and scale_dtype == "fp8_e8m0"
+        and block_size in (32, 64, 128)
+        and torch.cuda.get_device_capability(aq.device)[0] in (10, 12)
+        and getattr(torch, "float8_e8m0fnu", None) is not None
+        and getattr(getattr(F, "ScalingType", None), "BlockWise1x32", None) is not None
+        and getattr(getattr(F, "SwizzleType", None), "SWIZZLE_32_4_4", None) is not None
+    )
 
 
 @register_kernel(
@@ -246,17 +357,11 @@ def scaled_gemm(
     bias=None,
     scale_dtype=None,
 ):
-    del block_size, scale_dtype
-    return F.scaled_mm(
-        aq,
-        _column_major(bq),
-        sa,
-        F.ScalingType.RowWise,
-        sb,
-        F.ScalingType.RowWise,
-        bias=bias,
-        output_dtype=out_dtype,
-    )
+    if aq.dtype == torch.int8 and bq.dtype == torch.int8:
+        return _scaled_int8_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+    if _can_use_native_mxfp8(aq, bq, block_size, scale_dtype):
+        return _scaled_mxfp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+    return _scaled_fp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
 def can_implement_scaled_grouped_gemm(
@@ -272,7 +377,11 @@ def can_implement_scaled_grouped_gemm(
         (
             check_same_device(tensors, "torch scaled grouped GEMM"),
             check_cuda_tensors(tensors, "torch scaled grouped GEMM"),
-            check_dtypes((aq, bq), _FP8_E4M3, "torch scaled grouped GEMM operands"),
+            check_dtypes(
+                (aq, bq),
+                _SCALED_GROUPED_DTYPES,
+                "torch scaled grouped GEMM operands",
+            ),
             check_rank(aq, frozenset({2}), "torch scaled grouped GEMM A"),
             check_rank(bq, frozenset({3}), "torch scaled grouped GEMM B"),
             check_rank(sa, frozenset({2}), "torch scaled grouped GEMM A scale"),

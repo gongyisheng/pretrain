@@ -396,6 +396,26 @@ def _scaled_metadata(device: str = "cuda:7"):
     )
 
 
+def _torch_scaled_metadata(
+    a_dtype: torch.dtype = torch.float8_e4m3fn,
+    b_dtype: torch.dtype = torch.float8_e4m3fn,
+    block_size: int = 0,
+    scale_dtype: str = "fp32",
+    k: int = 64,
+):
+    scale_blocks = (k + block_size - 1) // block_size if block_size else 1
+    return (
+        _TensorMeta((64, k), a_dtype),
+        _TensorMeta((k, 48), b_dtype),
+        _TensorMeta((64, scale_blocks), torch.float32),
+        _TensorMeta((scale_blocks, 48), torch.float32),
+        torch.bfloat16,
+        block_size,
+        None,
+        scale_dtype,
+    )
+
+
 def _scaled_grouped_metadata(device: str = "cuda:7"):
     return (
         _TensorMeta((64, 64), torch.float8_e4m3fn, device),
@@ -422,6 +442,165 @@ def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
         None,
         None,
     )
+
+
+@pytest.mark.parametrize(
+    ("a_dtype", "b_dtype"),
+    [
+        (torch.int8, torch.int8),
+        (torch.float8_e4m3fn, torch.float8_e4m3fn),
+        (torch.float8_e5m2, torch.float8_e4m3fn),
+    ],
+)
+def test_torch_scaled_gemm_accepts_supported_operand_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(a_dtype=a_dtype, b_dtype=b_dtype), {}
+    )
+
+    assert result.ok, result.reason
+
+
+@pytest.mark.parametrize(
+    ("a_dtype", "b_dtype"),
+    [
+        (torch.float8_e4m3fn, torch.float8_e5m2),
+        (torch.float8_e5m2, torch.float8_e5m2),
+        (torch.float8_e4m3fn, torch.int8),
+    ],
+)
+def test_torch_scaled_gemm_rejects_unsupported_operand_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(a_dtype=a_dtype, b_dtype=b_dtype), {}
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "operand pair" in result.reason
+
+
+@pytest.mark.parametrize("block_size", [0, 16, 32, 64, 128])
+def test_torch_scaled_gemm_accepts_supported_block_sizes(
+    monkeypatch: pytest.MonkeyPatch, block_size: int
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(block_size=block_size, k=256), {}
+    )
+
+    assert result.ok, result.reason
+
+
+@pytest.mark.parametrize("scale_dtype", ["fp32", "fp8_e8m0"])
+def test_torch_scaled_gemm_accepts_supported_scale_dtypes(
+    monkeypatch: pytest.MonkeyPatch, scale_dtype: str
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(scale_dtype=scale_dtype), {}
+    )
+
+    assert result.ok, result.reason
+
+
+@pytest.mark.parametrize(("block_size", "k"), [(8, 64), (96, 256)])
+def test_torch_scaled_gemm_rejects_unusable_tiling_block_size(
+    monkeypatch: pytest.MonkeyPatch, block_size: int, k: int
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(block_size=block_size, k=k), {}
+    )
+
+    assert not result.ok
+    assert result.reason == "block_size must be a power of two >= 16"
+
+
+def test_torch_scaled_gemm_int8_requires_int_mm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch, "_int_mm", None)
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(a_dtype=torch.int8, b_dtype=torch.int8), {}
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "torch._int_mm" in result.reason
+    assert "callable" in result.reason
+
+
+def test_torch_scaled_gemm_int8_does_not_require_scaled_mm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.nn.functional, "scaled_mm", None)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(a_dtype=torch.int8, b_dtype=torch.int8), {}
+    )
+
+    assert result.ok, result.reason
+
+
+def test_torch_scaled_gemm_fp8_requires_scaled_mm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.nn.functional, "scaled_mm", None)
+
+    result = torch_gemm.can_implement_scaled_gemm(_torch_scaled_metadata(), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "torch.nn.functional.scaled_mm" in result.reason
+    assert "callable" in result.reason
+
+
+def test_torch_scaled_gemm_fp8_does_not_require_int_mm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch, "_int_mm", None)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(_torch_scaled_metadata(), {})
+
+    assert result.ok, result.reason
+
+
+@pytest.mark.parametrize(
+    ("actual", "expected"),
+    [((7, 5), False), ((8, 0), True), ((8, 9), True), ((12, 0), True)],
+)
+def test_torch_scaled_gemm_int8_requires_sm80(
+    monkeypatch: pytest.MonkeyPatch,
+    actual: tuple[int, int],
+    expected: bool,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: actual)
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(a_dtype=torch.int8, b_dtype=torch.int8), {}
+    )
+
+    assert result.ok is expected
+    if not expected:
+        assert result.reason is not None
+        assert "SM80 or newer" in result.reason
 
 
 @pytest.mark.parametrize(
@@ -671,7 +850,7 @@ def test_gemm_validation_rejects_offset_dtype_or_layout_and_output_or_scale_dtyp
             _scaled_metadata,
             5,
             32,
-            "rowwise scales only",
+            "scale shapes",
         ),
         (
             torch_gemm.can_implement_scaled_gemm,
