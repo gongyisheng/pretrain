@@ -73,6 +73,11 @@ def check_compute_capability_at_least(
     minimum: tuple[int, int],
     feature: str,
 ) -> CheckResult:
+    if device.type != "cuda":
+        return CheckResult(
+            False,
+            f"{feature} runs on {device}; requires a CUDA device for capability checks",
+        )
     actual = torch.cuda.get_device_capability(device)
     if actual >= minimum:
         return CheckResult(True)
@@ -88,6 +93,11 @@ def check_compute_capability_in(
     supported_majors: frozenset[int],
     feature: str,
 ) -> CheckResult:
+    if device.type != "cuda":
+        return CheckResult(
+            False,
+            f"{feature} runs on {device}; requires a CUDA device for capability checks",
+        )
     actual = torch.cuda.get_device_capability(device)
     if actual[0] in supported_majors:
         return CheckResult(True)
@@ -123,6 +133,12 @@ def check_contiguous(tensor: torch.Tensor, feature: str) -> CheckResult:
 def check_alignment(
     tensor: torch.Tensor, alignment_bytes: int, feature: str
 ) -> CheckResult:
+    if alignment_bytes <= 0:
+        return CheckResult(
+            False,
+            f"{feature} received {alignment_bytes}-byte alignment; requires a positive "
+            "alignment",
+        )
     stride_bytes = tuple(
         stride * tensor.element_size() for stride in tensor.stride() if stride != 1
     )

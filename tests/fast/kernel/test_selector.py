@@ -169,6 +169,26 @@ def test_dispatch_does_not_retry_after_selected_kernel_raises():
     assert calls == {"torch": 0, "triton": 1}
 
 
+def test_forced_selection_calls_can_implement_exactly_once():
+    calls = 0
+
+    def can_implement(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return CheckResult(False, "unsupported test call")
+
+    registry = KernelRegistry()
+    registry.register(
+        _spec("triton", lambda value: value, 100, can_implement=can_implement)
+    )
+
+    with pytest.raises(KernelSelectionError, match="unsupported test call"):
+        select_kernel("test.identity", (3,), {}, "triton", registry)
+
+    assert calls == 1
+
+
 def test_auto_falls_back_when_optimized_backend_cannot_build_autograd():
     registry = KernelRegistry()
     registry.register(_spec("torch", lambda x: x, -100))

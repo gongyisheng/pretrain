@@ -204,7 +204,9 @@ def test_bias_rejected_for_ragged_n():
     """Ragged N partitions the columns, so a (G,N) row-broadcast bias is meaningless."""
     a, b, offs = _make_layout("ragged_n")
     bias = torch.zeros(offs.shape[0], b.shape[1], device="cuda", dtype=torch.bfloat16)
-    with pytest.raises((ValueError, AssertionError, NotImplementedError)):
+    with pytest.raises(
+        (KernelSelectionError, ValueError, AssertionError, NotImplementedError)
+    ):
         triton_grouped_gemm(a, b, offs, bias=bias)
 
 
@@ -1116,14 +1118,14 @@ def test_early_prune_caps_block_k_at_the_scale_block(prune, configs):
     assert prune(list(configs), {"SCALE_BLOCK_SIZE": 0}) == list(configs)
 
 
-def test_scaled_grouped_eligibility_rejects_malformed_scale_layout():
+def test_scaled_grouped_can_implement_rejects_malformed_scale_layout():
     aq = torch.empty((4, 8), device="cuda", dtype=torch.int8)
     bq = torch.empty((2, 8, 6), device="cuda", dtype=torch.int8)
     sa = torch.empty((4, 2), device="cuda")
     sb = torch.empty((2, 2, 5), device="cuda")
     offs = torch.tensor([2, 4], device="cuda", dtype=torch.int32)
-    support = gemm.scaled_grouped_gemm_eligibility(
+    support = gemm.can_implement_scaled_grouped_gemm(
         (aq, bq, sa, sb, offs, torch.float32, 4, None, None), {}
     )
-    assert not support.supported
+    assert not support.ok
     assert support.reason == "invalid scale layout"

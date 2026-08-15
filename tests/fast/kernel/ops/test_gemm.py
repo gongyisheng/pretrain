@@ -408,7 +408,7 @@ def test_forced_triton_does_not_fall_back_for_float32():
     a = torch.randn(4, 8, device="cpu")
     b = torch.randn(1, 8, 6, device="cpu")
     offs = torch.tensor([4], device="cpu")
-    with pytest.raises(KernelSelectionError, match="triton.*bf16 CUDA"):
+    with pytest.raises(KernelSelectionError, match="triton.*CUDA"):
         grouped_gemm(a, b, offs, backend="triton")
 
 

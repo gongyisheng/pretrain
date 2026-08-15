@@ -1,68 +1,97 @@
+from collections.abc import Mapping
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 
 from src.kernel.registry import register_kernel
 from src.kernel.spec import CheckResult
+from src.kernel.utils import (
+    check_alignment,
+    check_callable,
+    check_compute_capability_at_least,
+    check_compute_capability_in,
+    check_contiguous,
+    check_cuda_tensors,
+    check_dtypes,
+    check_rank,
+    check_same_device,
+)
 
 
-def _functional_available(name) -> CheckResult:
-    if hasattr(F, name):
-        return CheckResult(True)
-    return CheckResult(False, f"torch.nn.functional.{name} is unavailable")
+_BF16 = frozenset({torch.bfloat16})
+_FP8_E4M3 = frozenset({torch.float8_e4m3fn})
+_FLOAT_SCALES = frozenset({torch.float32})
+_OUTPUT_DTYPES = frozenset({torch.bfloat16, torch.float16})
 
 
-def _grouped_available() -> CheckResult:
-    return _functional_available("grouped_mm")
+def _first_failure(results: tuple[CheckResult, ...]) -> CheckResult:
+    for result in results:
+        if not result.ok:
+            return result
+    return CheckResult(True)
 
 
-def _scaled_available() -> CheckResult:
-    return _functional_available("scaled_mm")
+def _check_functional(attribute: str) -> CheckResult:
+    return check_callable(F, "torch.nn.functional", attribute)
 
 
-def _scaled_grouped_available() -> CheckResult:
-    return _functional_available("scaled_grouped_mm")
+def _check_rowwise_scaling_functional(attribute: str) -> CheckResult:
+    result = _check_functional(attribute)
+    if not result.ok:
+        return result
+    result = check_callable(F, "torch.nn.functional", "ScalingType")
+    if not result.ok:
+        return result
+    if getattr(F.ScalingType, "RowWise", None) is None:
+        return CheckResult(
+            False,
+            "torch.nn.functional.ScalingType.RowWise is unavailable",
+        )
+    return CheckResult(True)
 
 
-def _is_aligned(x) -> bool:
-    alignment = 16 // x.dtype.itemsize
-    return all(stride == 1 or stride % alignment == 0 for stride in x.stride()[-2:])
+def _is_row_major(tensor: torch.Tensor) -> bool:
+    return tensor.is_contiguous() and tensor.stride(-1) == 1
 
 
-def _is_row_major(x) -> bool:
-    return x.is_contiguous() and x.stride(-1) == 1
-
-
-def grouped_gemm_eligibility(args, kwargs) -> CheckResult:
+def can_implement_grouped_gemm(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
     del kwargs
     a, b, offs, bias = args
     if bias is not None and bias.dtype != a.dtype:
         return CheckResult(False, "bias dtype must match operand dtype")
-    if bias is not None and bias.device != a.device:
-        return CheckResult(False, "bias must be on the same CUDA device as operands")
-    if bias is not None:
-        return CheckResult(False, "torch grouped GEMM does not support bias")
-    if a.device.type != "cuda" or b.device.type != "cuda":
-        return CheckResult(False, "torch grouped GEMM requires CUDA operands")
-    if a.device != b.device:
-        return CheckResult(False, "operands must be on the same CUDA device")
-    if offs.device != a.device:
-        return CheckResult(False, "offsets must be on the same CUDA device")
-    if torch.cuda.get_device_capability(a.device) < (8, 0):
-        return CheckResult(False, "torch grouped GEMM requires SM80 or newer")
-    if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
-        return CheckResult(False, "torch grouped GEMM requires bf16 operands")
-    if offs.dtype != torch.int32 or offs.ndim != 1 or not offs.is_contiguous():
+    tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
+    result = _first_failure(
+        (
+            _check_functional("grouped_mm"),
+            check_same_device(tensors, "torch grouped GEMM"),
+            check_cuda_tensors(tensors, "torch grouped GEMM"),
+            check_dtypes((a, b), _BF16, "torch grouped GEMM operands"),
+            check_rank(a, frozenset({2, 3}), "torch grouped GEMM A"),
+            check_rank(b, frozenset({2, 3}), "torch grouped GEMM B"),
+            check_rank(offs, frozenset({1}), "torch grouped GEMM offsets"),
+            check_contiguous(offs, "torch grouped GEMM offsets"),
+            check_alignment(a, 16, "torch grouped GEMM A"),
+            check_alignment(b, 16, "torch grouped GEMM B"),
+        )
+    )
+    if not result.ok:
+        return result
+    result = check_compute_capability_at_least(a.device, (8, 0), "torch grouped GEMM")
+    if not result.ok:
+        return result
+    if offs.dtype != torch.int32:
         return CheckResult(
             False, "torch grouped GEMM requires contiguous 1D int32 offsets"
         )
     if offs.numel() == 0:
         return CheckResult(False, "torch grouped GEMM requires at least one offset")
-    if a.ndim not in (2, 3) or b.ndim not in (2, 3):
-        return CheckResult(False, "grouped GEMM operands must be 2D or 3D")
+    if bias is not None:
+        return CheckResult(False, "torch grouped GEMM does not support bias")
     if a.ndim == 3 and b.ndim == 3:
         return CheckResult(False, "3D x 3D has no ragged dimension")
-    if not _is_aligned(a) or not _is_aligned(b):
-        return CheckResult(False, "torch grouped GEMM requires 16-byte strides")
     if a.ndim == 2 and b.ndim == 3:
         if a.shape[1] != b.shape[1]:
             return CheckResult(False, "grouped GEMM contraction dimensions must match")
@@ -79,18 +108,11 @@ def grouped_gemm_eligibility(args, kwargs) -> CheckResult:
     return CheckResult(True)
 
 
-def _grouped_can_implement(args, kwargs) -> CheckResult:
-    available = _grouped_available()
-    if not available.ok:
-        return available
-    return grouped_gemm_eligibility(args, kwargs)
-
-
 @register_kernel(
     op="gemm.grouped",
     backend="torch",
     priority=50,
-    can_implement=_grouped_can_implement,
+    can_implement=can_implement_grouped_gemm,
     build="eager",
     autograd=False,
 )
@@ -98,7 +120,7 @@ def grouped_gemm(a, b, offs, bias=None):
     return F.grouped_mm(a, b, offs=offs, bias=bias)
 
 
-def _scaled_common_eligibility(
+def _scaled_common_checks(
     aq,
     bq,
     sa,
@@ -107,71 +129,92 @@ def _scaled_common_eligibility(
     block_size,
     bias,
     scale_dtype,
+    feature: str,
 ) -> CheckResult:
-    if aq.device.type != "cuda" or bq.device.type != "cuda":
-        return CheckResult(False, "torch scaled GEMM requires CUDA operands")
-    if torch.cuda.get_device_capability(aq.device) < (8, 9):
-        return CheckResult(False, "torch scaled GEMM requires SM89 or newer")
-    if aq.device != bq.device or sa.device != aq.device or sb.device != aq.device:
-        return CheckResult(False, "operands and scales must share one device")
-    if aq.dtype != torch.float8_e4m3fn or bq.dtype != torch.float8_e4m3fn:
-        return CheckResult(False, "torch scaled GEMM requires fp8 e4m3 operands")
-    if aq.ndim != 2 or bq.ndim != 2:
-        return CheckResult(False, "torch scaled GEMM requires 2D operands")
-    if not _is_row_major(aq):
-        return CheckResult(False, "torch scaled GEMM requires row-major A")
-    if aq.shape[1] != bq.shape[0]:
-        return CheckResult(False, "operand contraction dimensions must match")
-    if any(dim % 16 != 0 for dim in (aq.shape[0], aq.shape[1], bq.shape[1])):
-        return CheckResult(
-            False, "torch scaled GEMM dimensions must be multiples of 16"
+    tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
+    result = _first_failure(
+        (
+            check_same_device(tensors, feature),
+            check_cuda_tensors(tensors, feature),
+            check_dtypes((aq, bq), _FP8_E4M3, f"{feature} operands"),
+            check_rank(aq, frozenset({2}), f"{feature} A"),
+            check_rank(bq, frozenset({2}), f"{feature} B"),
+            check_rank(sa, frozenset({2}), f"{feature} A scale"),
+            check_rank(sb, frozenset({2}), f"{feature} B scale"),
+            check_dtypes((sa, sb), _FLOAT_SCALES, f"{feature} scales"),
+            check_contiguous(sa, f"{feature} A scale"),
+            check_contiguous(sb, f"{feature} B scale"),
         )
+    )
+    if not result.ok:
+        return result
+    if not _is_row_major(aq):
+        return CheckResult(False, f"{feature} requires row-major A")
+    if aq.shape[1] != bq.shape[0]:
+        return CheckResult(False, f"{feature} contraction dimensions must match")
+    if any(
+        dimension % 16 != 0 for dimension in (aq.shape[0], aq.shape[1], bq.shape[1])
+    ):
+        return CheckResult(False, f"{feature} dimensions must be multiples of 16")
     if block_size != 0:
-        return CheckResult(False, "torch scaled GEMM supports rowwise scales only")
+        return CheckResult(False, f"{feature} supports rowwise scales only")
     if scale_dtype not in (None, "fp32"):
-        return CheckResult(False, "torch scaled GEMM requires fp32 scales")
-    if sa.dtype != torch.float32 or sb.dtype != torch.float32:
-        return CheckResult(False, "torch scaled GEMM requires float32 scale tensors")
+        return CheckResult(False, f"{feature} requires fp32 scales")
     if sa.shape != (aq.shape[0], 1) or sb.shape != (1, bq.shape[1]):
-        return CheckResult(False, "torch scaled GEMM requires rowwise scale shapes")
-    if not sa.is_contiguous() or not sb.is_contiguous():
-        return CheckResult(False, "torch scaled GEMM requires contiguous scales")
-    if out_dtype not in (torch.bfloat16, torch.float16):
-        return CheckResult(False, "torch scaled GEMM output must be bf16 or fp16")
-    if bias is not None and bias.device != aq.device:
-        return CheckResult(False, "bias must be on the same CUDA device as operands")
+        return CheckResult(False, f"{feature} requires rowwise scale shapes")
+    if out_dtype not in _OUTPUT_DTYPES:
+        return CheckResult(False, f"{feature} output must be bf16 or fp16")
     if bias is not None and bias.dtype != out_dtype:
         return CheckResult(False, "bias dtype must match output dtype")
-    if bias is not None and (bias.shape != (bq.shape[1],) or not bias.is_contiguous()):
-        return CheckResult(False, "bias must be a contiguous output-width vector")
+    if bias is not None:
+        result = _first_failure(
+            (
+                check_rank(bias, frozenset({1}), f"{feature} bias"),
+                check_contiguous(bias, f"{feature} bias"),
+            )
+        )
+        if not result.ok:
+            return result
+        if bias.shape != (bq.shape[1],):
+            return CheckResult(False, "bias must be a contiguous output-width vector")
     return CheckResult(True)
 
 
-def scaled_gemm_eligibility(args, kwargs) -> CheckResult:
+def can_implement_scaled_gemm(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
     del kwargs
-    return _scaled_common_eligibility(
-        args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]
+    aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype = args
+    result = _check_rowwise_scaling_functional("scaled_mm")
+    if not result.ok:
+        return result
+    result = _scaled_common_checks(
+        aq,
+        bq,
+        sa,
+        sb,
+        out_dtype,
+        block_size,
+        bias,
+        scale_dtype,
+        "torch scaled GEMM",
     )
+    if not result.ok:
+        return result
+    return check_compute_capability_at_least(aq.device, (8, 9), "torch scaled GEMM")
 
 
-def _scaled_can_implement(args, kwargs) -> CheckResult:
-    available = _scaled_available()
-    if not available.ok:
-        return available
-    return scaled_gemm_eligibility(args, kwargs)
-
-
-def _column_major(x):
-    if x.stride(0) == 1:
-        return x
-    return x.t().contiguous().t()
+def _column_major(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.stride(0) == 1:
+        return tensor
+    return tensor.t().contiguous().t()
 
 
 @register_kernel(
     op="gemm.scaled",
     backend="torch",
     priority=50,
-    can_implement=_scaled_can_implement,
+    can_implement=can_implement_scaled_gemm,
     build="eager",
     autograd=False,
 )
@@ -198,31 +241,46 @@ def scaled_gemm(
     )
 
 
-def scaled_grouped_gemm_eligibility(args, kwargs) -> CheckResult:
+def can_implement_scaled_grouped_gemm(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
     del kwargs
     aq, bq, sa, sb, offs, out_dtype, block_size, bias, scale_dtype = args
-    if aq.device.type != "cuda" or bq.device.type != "cuda":
-        return CheckResult(False, "torch scaled grouped GEMM requires CUDA operands")
-    if aq.device != bq.device or sa.device != aq.device or sb.device != aq.device:
-        return CheckResult(False, "operands and scales must share one device")
-    if (
-        offs.device != aq.device
-        or offs.dtype != torch.int32
-        or offs.ndim != 1
-        or not offs.is_contiguous()
-    ):
-        return CheckResult(False, "offsets must be int32 on the operand device")
-    if aq.dtype != torch.float8_e4m3fn or bq.dtype != torch.float8_e4m3fn:
-        return CheckResult(
-            False, "torch scaled grouped GEMM requires fp8 e4m3 operands"
+    result = _check_rowwise_scaling_functional("scaled_grouped_mm")
+    if not result.ok:
+        return result
+    tensors = (aq, bq, sa, sb, offs) if bias is None else (aq, bq, sa, sb, offs, bias)
+    result = _first_failure(
+        (
+            check_same_device(tensors, "torch scaled grouped GEMM"),
+            check_cuda_tensors(tensors, "torch scaled grouped GEMM"),
+            check_dtypes((aq, bq), _FP8_E4M3, "torch scaled grouped GEMM operands"),
+            check_rank(aq, frozenset({2}), "torch scaled grouped GEMM A"),
+            check_rank(bq, frozenset({3}), "torch scaled grouped GEMM B"),
+            check_rank(sa, frozenset({2}), "torch scaled grouped GEMM A scale"),
+            check_rank(sb, frozenset({3}), "torch scaled grouped GEMM B scale"),
+            check_rank(offs, frozenset({1}), "torch scaled grouped GEMM offsets"),
+            check_contiguous(offs, "torch scaled grouped GEMM offsets"),
+            check_dtypes((sa, sb), _FLOAT_SCALES, "torch scaled grouped GEMM scales"),
+            check_contiguous(sa, "torch scaled grouped GEMM A scale"),
+            check_contiguous(sb, "torch scaled grouped GEMM B scale"),
         )
-    if aq.ndim != 2 or bq.ndim != 3:
-        return CheckResult(False, "torch scaled grouped GEMM supports ragged-M only")
+    )
+    if not result.ok:
+        return result
+    if offs.dtype != torch.int32:
+        return CheckResult(
+            False, "offsets must be contiguous 1D int32 on the operand device"
+        )
+    if offs.numel() == 0:
+        return CheckResult(
+            False, "torch scaled grouped GEMM requires at least one offset"
+        )
     if not _is_row_major(aq):
         return CheckResult(False, "torch scaled grouped GEMM requires row-major A")
     if aq.shape[1] != bq.shape[1] or offs.numel() != bq.shape[0]:
         return CheckResult(False, "grouped operand dimensions must match offsets")
-    if any(dim % 16 != 0 for dim in (aq.shape[1], bq.shape[2])):
+    if any(dimension % 16 != 0 for dimension in (aq.shape[1], bq.shape[2])):
         return CheckResult(
             False, "torch scaled grouped GEMM dimensions must be multiples of 16"
         )
@@ -232,48 +290,30 @@ def scaled_grouped_gemm_eligibility(args, kwargs) -> CheckResult:
         )
     if scale_dtype not in (None, "fp32"):
         return CheckResult(False, "torch scaled grouped GEMM requires fp32 scales")
-    if sa.dtype != torch.float32 or sb.dtype != torch.float32:
-        return CheckResult(False, "torch scaled grouped GEMM requires float32 scales")
-    if sa.shape != (aq.shape[0], 1) or sb.shape != (
-        bq.shape[0],
-        1,
-        bq.shape[2],
-    ):
+    if sa.shape != (aq.shape[0], 1) or sb.shape != (bq.shape[0], 1, bq.shape[2]):
         return CheckResult(False, "torch scaled grouped GEMM requires rowwise scales")
-    if not sa.is_contiguous() or not sb.is_contiguous():
-        return CheckResult(
-            False, "torch scaled grouped GEMM requires contiguous scales"
-        )
-    if out_dtype not in (torch.bfloat16, torch.float16):
+    if out_dtype not in _OUTPUT_DTYPES:
         return CheckResult(False, "torch scaled grouped output must be bf16 or fp16")
-    if bias is not None and bias.device != aq.device:
-        return CheckResult(False, "bias must be on the same CUDA device as operands")
     if bias is not None:
         return CheckResult(False, "torch scaled grouped GEMM does not support bias")
-    capability = torch.cuda.get_device_capability(aq.device)
-    if capability[0] not in (9, 10):
-        return CheckResult(False, "torch scaled grouped GEMM requires SM90 or SM100")
-    return CheckResult(True)
+    return check_compute_capability_in(
+        aq.device,
+        frozenset({9, 10}),
+        "torch scaled grouped GEMM",
+    )
 
 
-def _scaled_grouped_can_implement(args, kwargs) -> CheckResult:
-    available = _scaled_grouped_available()
-    if not available.ok:
-        return available
-    return scaled_grouped_gemm_eligibility(args, kwargs)
-
-
-def _group_column_major(x):
-    if x.stride(-2) == 1:
-        return x
-    return x.transpose(-1, -2).contiguous().transpose(-1, -2)
+def _group_column_major(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.stride(-2) == 1:
+        return tensor
+    return tensor.transpose(-1, -2).contiguous().transpose(-1, -2)
 
 
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="torch",
     priority=50,
-    can_implement=_scaled_grouped_can_implement,
+    can_implement=can_implement_scaled_grouped_gemm,
     build="eager",
     autograd=False,
 )

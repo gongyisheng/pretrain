@@ -130,6 +130,16 @@ def test_check_alignment_reports_stride_bytes_and_requirement():
     assert "16-byte" in result.reason
 
 
+@pytest.mark.parametrize("alignment_bytes", [0, -16])
+def test_check_alignment_rejects_non_positive_alignment(alignment_bytes: int):
+    result = check_alignment(torch.empty(4, 4), alignment_bytes, "grouped operand")
+
+    assert not result.ok
+    assert result.reason is not None
+    assert str(alignment_bytes) in result.reason
+    assert "positive" in result.reason
+
+
 @pytest.mark.parametrize(
     ("actual", "ok"),
     [((8, 8), False), ((8, 9), True), ((9, 0), True), ((12, 0), True)],
@@ -178,3 +188,30 @@ def test_check_compute_capability_in_uses_closed_major_set(
         assert "torch scaled grouped GEMM" in result.reason
         assert f"SM{actual[0]}{actual[1]}" in result.reason
         assert "SM90 or SM100" in result.reason
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        lambda device: check_compute_capability_at_least(
+            device, (8, 9), "torch scaled GEMM"
+        ),
+        lambda device: check_compute_capability_in(
+            device, frozenset({9, 10}), "torch scaled grouped GEMM"
+        ),
+    ],
+)
+def test_compute_capability_checks_reject_non_cuda_without_cuda_query(
+    monkeypatch: pytest.MonkeyPatch, check
+):
+    def unexpected_query(device: torch.device) -> tuple[int, int]:
+        raise AssertionError(f"unexpected CUDA query for {device}")
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected_query)
+
+    result = check(torch.device("cpu"))
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "cpu" in result.reason
+    assert "CUDA" in result.reason
