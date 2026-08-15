@@ -71,69 +71,12 @@ cuda_only = pytest.mark.skipif(
 )
 
 
-E4M3 = torch.float8_e4m3fn
-
-
-E5M2 = torch.float8_e5m2
-
-
-FMT = {E4M3: "fp8_e4m3", E5M2: "fp8_e5m2"}
-
-
-INT_FMT = {127: "int8", 63: "int7", 31: "int6", 15: "int5", 7: "int4"}
-
-
 def _scaling(gran, bs=0, scale_dtype=None):
     return {
         "granularity": gran,
         "block_shape": (1, bs) if bs else (0, 0),
         "scale_dtype": scale_dtype,
     }
-
-
-def _run(a, b, gran, bs, a_fmt, b_fmt, scale_dtype=None):
-    # the kernel takes the 0-sentinel width; the oracle's pad math takes a count
-    scaling = _scaling(gran, bs, scale_dtype)
-    aq, sa = quantize_operand(a, -1, a_fmt, scaling)
-    bq, sb = quantize_operand(b, -2, b_fmt, scaling)
-    out = scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
-    oracle = scaled_gemm_eager(aq, bq, sa, sb, bs or a.shape[1])
-    return out, oracle
-
-
-def _make(counts, K, N, seed=0):
-    """Build (a (R,K), b=w.mT (E,K,N) transposed view, offs (E,) int32) on CUDA/bf16."""
-    torch.manual_seed(seed)
-    E, R = len(counts), sum(counts)
-    a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
-    b = (torch.randn(E, N, K, device="cuda", dtype=torch.bfloat16) * 0.1).mT
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    return a, b, offs
-
-
-LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
-
-
-_LAYOUT_COUNTS = [64, 0, 130, 46]  # sums to 240
-
-
-def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
-    """Build operands for one grouped ragged layout."""
-    torch.manual_seed(seed)
-    G, R = len(counts), sum(counts)
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-
-    def rand(dim0, dim1, dim2=None):
-        shape = (dim0, dim1) if dim2 is None else (dim0, dim1, dim2)
-        return torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
-
-    if layout == "ragged_m":  # (R,K) x (G,K,N) -> (R,N)
-        return rand(R, K), rand(G, N, K).mT, offs
-    if layout == "ragged_k":  # (M,R) x (R,N) -> (G,M,N)
-        return rand(R, M).mT, rand(R, N), offs
-    if layout == "ragged_n":  # (G,M,K) x (K,R) -> (M,R)
-        return rand(G, M, K), rand(K, R), offs
-    raise ValueError(layout)
 
 
 @cuda_only
@@ -218,61 +161,14 @@ def test_dispatch_triton_rejects_non_bf16():
         grouped_gemm(a, b, offs, backend="triton")
 
 
-MX = _scaling("blockwise", 32, "fp8_e8m0")
-
-
 def rand(rows, columns):
     return torch.randn(rows, columns, device="cuda", dtype=torch.bfloat16)
-
-
-_VM, _VK, _VN, _VBS = 64, 256, 96, 128  # K / block_size -> 2 scale blocks
-
-
-def _valid_scaled_args(bs=_VBS):
-    """Consistent (aq, bq, sa, sb, bias), for a case below to break one way."""
-    torch.manual_seed(0)
-    a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", bs))
-    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", bs))
-    return aq, bq, sa, sb, torch.randn(_VN, device="cuda", dtype=torch.bfloat16)
-
-
-_MALFORMED = {
-    "contraction": lambda aq, bq, sa, sb, bias: (aq, bq[: _VK // 2], sa, sb, bias),
-    "sa_rows": lambda aq, bq, sa, sb, bias: (aq, bq, sa[: _VM // 2], sb, bias),
-    "sa_1d": lambda aq, bq, sa, sb, bias: (aq, bq, sa[:, 0], sb, bias),
-    "sb_cols": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb[:, : _VN // 2], bias),
-    "sb_blocks": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb[:1], bias),
-    "sb_1d": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb[0], bias),
-    # sa and sb agree with each other but not with block_size: the block loop then
-    # covers 1 x 128 of K instead of 256, dropping the tail with no error at all
-    "scale_blocks_vs_block_size": lambda aq, bq, sa, sb, bias: (
-        aq,
-        bq,
-        sa[:, :1],
-        sb[:1],
-        bias,
-    ),
-    "bias_len": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb, bias[: _VN // 2]),
-    "bias_2d": lambda aq, bq, sa, sb, bias: (aq, bq, sa, sb, bias[None]),
-    "cross_family_dtype": lambda aq, bq, sa, sb, bias: (
-        aq,
-        bq.to(torch.int8),
-        sa,
-        sb,
-        bias,
-    ),
-}
 
 
 SCALED_LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
 
 
 _SCALED_COUNTS = [64, 0, 130, 46]  # sums to 240; the empty group is deliberate
-
-
-_SCALED_TOL = {"ragged_m": 0.02, "ragged_k": 1e-5, "ragged_n": 0.02}
 
 
 def _make_scaled_layout(
@@ -319,11 +215,6 @@ def _make_scaled_layout(
     raise ValueError(layout)
 
 
-def _expected_shape(layout, counts, M=32, N=48):
-    E, R = len(counts), sum(counts)
-    return {"ragged_m": (R, N), "ragged_k": (E, M, N), "ragged_n": (M, R)}[layout]
-
-
 @cuda_only
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
 def test_scaled_grouped_layouts_compile_fullgraph(layout):
@@ -342,8 +233,8 @@ def test_compiles_fullgraph():
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
-    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", 32))
-    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", 32))
+    aq, sa = quantize_operand(a, -1, "fp8_e4m3", _scaling("blockwise", 32))
+    bq, sb = quantize_operand(b, -2, "fp8_e4m3", _scaling("blockwise", 32))
     fn = torch.compile(
         lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
     )
@@ -359,8 +250,8 @@ def test_scaled_gemm_2d_scales_compile_fullgraph():
         "block_shape": (32, 32),
         "scale_dtype": "fp32",
     }
-    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
-    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
+    aq, sa = quantize_operand(a, -1, "fp8_e4m3", scaling)
+    bq, sb = quantize_operand(b, -2, "fp8_e4m3", scaling)
     fn = torch.compile(
         lambda: scaled_gemm(aq, bq, sa, sb, torch.bfloat16, 32), fullgraph=True
     )
