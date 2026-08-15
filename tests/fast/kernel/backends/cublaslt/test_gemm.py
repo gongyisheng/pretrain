@@ -100,6 +100,28 @@ def _mxfp8_operands(
     return aq, bq, scale_a, scale_b
 
 
+def _mxfp8_block64_args() -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.dtype,
+    int,
+    None,
+    str,
+]:
+    a = torch.randn(129, 144, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(144, 160, device="cuda", dtype=torch.bfloat16)
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (1, 64),
+        "scale_dtype": "fp8_e8m0",
+    }
+    aq, scale_a = quantize_operand(a, -1, "fp8_e4m3", scaling)
+    bq, scale_b = quantize_operand(b, -2, "fp8_e4m3", scaling)
+    return aq, bq, scale_a, scale_b, torch.bfloat16, 64, None, "fp8_e8m0"
+
+
 def _assert_matches_eager(
     aq: torch.Tensor,
     bq: torch.Tensor,
@@ -344,32 +366,30 @@ def test_mxfp8_dispatch_selects_cublaslt_and_falls_back_to_triton():
     legacy_scales = (*args[:7], None)
     assert select_kernel("gemm.scaled", legacy_scales, {}).backend == "triton"
 
-    a = torch.randn(129, 144, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(144, 160, device="cuda", dtype=torch.bfloat16)
-    scaling = {
-        "granularity": "blockwise",
-        "block_shape": (1, 64),
-        "scale_dtype": "fp8_e8m0",
-    }
-    aq, scale_a = quantize_operand(a, -1, "fp8_e4m3", scaling)
-    bq, scale_b = quantize_operand(b, -2, "fp8_e4m3", scaling)
-    block_64 = (aq, bq, scale_a, scale_b, torch.bfloat16, 64, None, "fp8_e8m0")
-    assert select_kernel("gemm.scaled", block_64, {}).backend == "triton"
+    assert select_kernel("gemm.scaled", _mxfp8_block64_args(), {}).backend == "triton"
 
 
 @cuda_mxfp8_only
 @pytest.mark.parametrize(
-    ("mutate", "reason"),
+    ("contract", "mutate", "reason"),
     [
-        (lambda args: args.__setitem__(4, torch.float32), "output must be bf16"),
-        (lambda args: args.__setitem__(7, None), "scale_dtype fp8_e8m0"),
-        (lambda args: args.__setitem__(5, 64), "block_size 32"),
+        (
+            "block_32",
+            lambda args: args.__setitem__(4, torch.float32),
+            "output must be bf16",
+        ),
+        ("block_32", lambda args: args.__setitem__(7, None), "scale_dtype fp8_e8m0"),
+        ("block_64", lambda args: None, "block_size 32"),
     ],
 )
-def test_forced_cublaslt_dispatch_rejects_invalid_mxfp8_contract(mutate, reason: str):
+def test_forced_cublaslt_dispatch_rejects_invalid_mxfp8_contract(
+    contract: str, mutate, reason: str
+):
     _require_mxfp8_device()
     args = list(
-        (
+        _mxfp8_block64_args()
+        if contract == "block_64"
+        else (
             *_mxfp8_operands((129, 144, 160), "varying"),
             torch.bfloat16,
             32,
