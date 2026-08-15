@@ -692,6 +692,9 @@ def test_blockwise_2d_rejects_a_ragged_axis():
         quantize_operand(x, -2, _E4M3, _scaling2d(16), offs=offs, ragged_dim=-2)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="2D quantizer compilation requires CUDA"
+)
 def test_quantize_operand_2d_compiles_fullgraph():
     scaling = {
         "granularity": "blockwise",

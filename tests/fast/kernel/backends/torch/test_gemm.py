@@ -16,6 +16,7 @@ from tests.fast.kernel.backends.helper import (
     SCALE_DTYPES,
     SCALING_CASES,
     FormatPair,
+    ScalingCase,
     make_grouped_inputs,
     make_scaled_gemm_inputs,
 )
@@ -51,9 +52,13 @@ def test_grouped_gemm_precision(projection, layout, with_bias):
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
-def torch_scaled_skip_reason(format_pair: FormatPair) -> str | None:
+def torch_scaled_skip_reason(
+    format_pair: FormatPair, scaling_case: ScalingCase
+) -> str | None:
     if format_pair.name == "e4m3xe5m2":
-        return "public block_size=0 scale layout cannot distinguish tensorwise from rowwise for this PyTorch recipe"
+        if scaling_case.block_size == 0:
+            return "public block_size=0 scale layout cannot distinguish tensorwise from rowwise for this PyTorch recipe"
+        return "F.scaled_mm does not support E5M2 as the B operand"
     if format_pair.name == "e5m2xe5m2":
         return "F.scaled_mm does not support E5M2 x E5M2"
     return None
@@ -67,7 +72,7 @@ def torch_scaled_skip_reason(format_pair: FormatPair) -> str | None:
 def test_scaled_gemm_precision(
     workload, format_pair, scaling_case, scale_dtype, with_bias
 ):
-    reason = torch_scaled_skip_reason(format_pair)
+    reason = torch_scaled_skip_reason(format_pair, scaling_case)
     if reason is not None:
         pytest.skip(reason)
     capability = torch.cuda.get_device_capability()

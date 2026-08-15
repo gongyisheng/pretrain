@@ -401,14 +401,16 @@ def _torch_scaled_metadata(
     b_dtype: torch.dtype = torch.float8_e4m3fn,
     block_size: int = 0,
     scale_dtype: str = "fp32",
+    m: int = 64,
+    n: int = 48,
     k: int = 64,
 ):
     scale_blocks = (k + block_size - 1) // block_size if block_size else 1
     return (
-        _TensorMeta((64, k), a_dtype),
-        _TensorMeta((k, 48), b_dtype),
-        _TensorMeta((64, scale_blocks), torch.float32),
-        _TensorMeta((scale_blocks, 48), torch.float32),
+        _TensorMeta((m, k), a_dtype),
+        _TensorMeta((k, n), b_dtype),
+        _TensorMeta((m, scale_blocks), torch.float32),
+        _TensorMeta((scale_blocks, n), torch.float32),
         torch.bfloat16,
         block_size,
         None,
@@ -511,6 +513,51 @@ def test_torch_scaled_gemm_accepts_supported_scale_dtypes(
 
     result = torch_gemm.can_implement_scaled_gemm(
         _torch_scaled_metadata(scale_dtype=scale_dtype), {}
+    )
+
+    assert result.ok, result.reason
+
+
+def test_torch_scaled_gemm_int8_rejects_unaligned_output_rows(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(
+            a_dtype=torch.int8,
+            b_dtype=torch.int8,
+            block_size=16,
+            m=17,
+        ),
+        {},
+    )
+
+    assert not result.ok
+    assert (
+        result.reason == "torch scaled GEMM INT8 output rows must be a multiple of 32"
+    )
+
+
+@pytest.mark.parametrize(
+    ("n", "k"),
+    [(512, 512), (3072, 512), (512, 1536), (384, 512), (512, 192)],
+)
+def test_torch_scaled_gemm_int8_accepts_shared_model_shapes(
+    monkeypatch: pytest.MonkeyPatch, n: int, k: int
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = torch_gemm.can_implement_scaled_gemm(
+        _torch_scaled_metadata(
+            a_dtype=torch.int8,
+            b_dtype=torch.int8,
+            block_size=16,
+            m=8192,
+            n=n,
+            k=k,
+        ),
+        {},
     )
 
     assert result.ok, result.reason

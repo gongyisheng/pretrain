@@ -235,6 +235,11 @@ def can_implement_scaled_gemm(
     if not result.ok:
         return result
     if aq.dtype == torch.int8 and bq.dtype == torch.int8:
+        if aq.shape[0] % 32 != 0:
+            return CheckResult(
+                False,
+                "torch scaled GEMM INT8 output rows must be a multiple of 32",
+            )
         result = check_callable(torch, "torch", "_int_mm")
         minimum_capability = (8, 0)
     else:
