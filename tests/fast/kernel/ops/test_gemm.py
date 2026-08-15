@@ -258,6 +258,48 @@ def test_scaled_gemm_2d_scales_compile_fullgraph():
     assert torch.isfinite(fn()).all()
 
 
+@cuda_only
+def test_cublaslt_mxfp8_scaled_gemm_compiles_fullgraph_bitwise():
+    if torch.cuda.get_device_capability()[0] < 10:
+        pytest.skip("cuBLASLt MXFP8 GEMM requires SM100 or newer")
+    torch.manual_seed(0)
+    a = torch.randn(129, 144, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(144, 160, device="cuda", dtype=torch.bfloat16)
+    scaling = _scaling("blockwise", 32, "fp8_e8m0")
+    aq, sa = quantize_operand(a, -1, "fp8_e4m3", scaling)
+    bq, sb = quantize_operand(b, -2, "fp8_e4m3", scaling)
+
+    eager = scaled_gemm(
+        aq,
+        bq,
+        sa,
+        sb,
+        torch.bfloat16,
+        32,
+        scale_dtype="fp8_e8m0",
+        backend="eager",
+    )
+    compiled = torch.compile(
+        lambda aq, bq, sa, sb: scaled_gemm(
+            aq,
+            bq,
+            sa,
+            sb,
+            torch.bfloat16,
+            32,
+            scale_dtype="fp8_e8m0",
+            backend="cublaslt",
+        ),
+        fullgraph=True,
+    )
+    actual = compiled(aq, bq, sa, sb)
+    difference = actual.float() - eager.float()
+    relative_error = (difference.norm() / eager.float().norm()).item()
+    maximum_error = difference.abs().max().item()
+
+    assert torch.equal(actual, eager), (relative_error, maximum_error)
+
+
 def test_grouped_gemm_auto_falls_back_to_eager_for_float32():
     a = torch.randn(4, 8, device="cpu")
     b = torch.randn(1, 8, 6, device="cpu")

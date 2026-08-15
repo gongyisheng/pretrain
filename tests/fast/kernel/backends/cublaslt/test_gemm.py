@@ -5,6 +5,7 @@ import torch
 
 import src.kernel.backends.cublaslt._C  # noqa: F401
 from src.kernel.backends.cublaslt import gemm as cublaslt_gemm
+from src.kernel.selector import KernelSelectionError, select_kernel
 from src.kernel.ops.gemm import scaled_gemm
 from src.quant.quantize import quantize_operand
 
@@ -322,6 +323,64 @@ def test_can_implement_scaled_gemm_mxfp8_accepts_sm120_contract(monkeypatch):
     result = cublaslt_gemm.can_implement_scaled_gemm_mxfp8(_scaled_mxfp8_metadata(), {})
 
     assert result.ok
+
+
+@cuda_mxfp8_only
+def test_mxfp8_dispatch_selects_cublaslt_and_falls_back_to_triton():
+    _require_mxfp8_device()
+    args = (
+        *_mxfp8_operands((129, 144, 160), "varying"),
+        torch.bfloat16,
+        32,
+        None,
+        "fp8_e8m0",
+    )
+
+    assert select_kernel("gemm.scaled", args, {}).backend == "cublaslt"
+
+    fp32_output = (*args[:4], torch.float32, *args[5:])
+    assert select_kernel("gemm.scaled", fp32_output, {}).backend == "triton"
+
+    legacy_scales = (*args[:7], None)
+    assert select_kernel("gemm.scaled", legacy_scales, {}).backend == "triton"
+
+    a = torch.randn(129, 144, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(144, 160, device="cuda", dtype=torch.bfloat16)
+    scaling = {
+        "granularity": "blockwise",
+        "block_shape": (1, 64),
+        "scale_dtype": "fp8_e8m0",
+    }
+    aq, scale_a = quantize_operand(a, -1, "fp8_e4m3", scaling)
+    bq, scale_b = quantize_operand(b, -2, "fp8_e4m3", scaling)
+    block_64 = (aq, bq, scale_a, scale_b, torch.bfloat16, 64, None, "fp8_e8m0")
+    assert select_kernel("gemm.scaled", block_64, {}).backend == "triton"
+
+
+@cuda_mxfp8_only
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (lambda args: args.__setitem__(4, torch.float32), "output must be bf16"),
+        (lambda args: args.__setitem__(7, None), "scale_dtype fp8_e8m0"),
+        (lambda args: args.__setitem__(5, 64), "block_size 32"),
+    ],
+)
+def test_forced_cublaslt_dispatch_rejects_invalid_mxfp8_contract(mutate, reason: str):
+    _require_mxfp8_device()
+    args = list(
+        (
+            *_mxfp8_operands((129, 144, 160), "varying"),
+            torch.bfloat16,
+            32,
+            None,
+            "fp8_e8m0",
+        )
+    )
+    mutate(args)
+
+    with pytest.raises(KernelSelectionError, match=reason):
+        select_kernel("gemm.scaled", tuple(args), {}, backend="cublaslt")
 
 
 def test_can_implement_scaled_gemm_mxfp8_rejects_missing_extension(monkeypatch):
