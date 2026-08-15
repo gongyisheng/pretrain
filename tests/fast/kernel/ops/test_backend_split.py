@@ -480,6 +480,166 @@ def test_auto_scaled_gemm_uses_eager_for_cpu_blockwise_inputs():
     torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("backend", ["eager", "auto"])
+def test_grouped_rejects_3d_by_3d_before_eager_execution(backend: str):
+    a = torch.randn(2, 4, 8)
+    b = torch.randn(2, 8, 6)
+    offs = torch.tensor([2, 4], dtype=torch.int32)
+
+    with pytest.raises(KernelSelectionError, match="3D x 3D"):
+        grouped_gemm(a, b, offs, backend=backend)
+
+
+@pytest.mark.parametrize("backend", ["eager", "auto"])
+def test_grouped_rejects_ragged_n_bias_before_eager_execution(backend: str):
+    a = torch.randn(2, 4, 8)
+    b = torch.randn(8, 6)
+    offs = torch.tensor([3, 6], dtype=torch.int32)
+    bias = torch.randn(2, 6)
+
+    with pytest.raises(KernelSelectionError, match="ragged-N"):
+        grouped_gemm(a, b, offs, bias=bias, backend=backend)
+
+
+@pytest.mark.parametrize("backend", ["eager", "auto"])
+def test_grouped_rejects_contraction_mismatch_before_eager_execution(backend: str):
+    a = torch.randn(4, 8)
+    b = torch.randn(2, 7, 6)
+    offs = torch.tensor([2, 4], dtype=torch.int32)
+
+    with pytest.raises(KernelSelectionError, match="contraction"):
+        grouped_gemm(a, b, offs, backend=backend)
+
+
+@pytest.mark.parametrize("backend", ["eager", "auto"])
+def test_scaled_rejects_invalid_scale_layout_before_eager_execution(backend: str):
+    aq = torch.ones((4, 8), dtype=torch.int8)
+    bq = torch.ones((8, 6), dtype=torch.int8)
+    sa = torch.ones((4, 1), dtype=torch.float32)
+    sb = torch.ones((2, 6), dtype=torch.float32)
+
+    with pytest.raises(KernelSelectionError, match="B scale"):
+        scaled_gemm(aq, bq, sa, sb, torch.float32, 0, backend=backend)
+
+
+@pytest.mark.parametrize("backend", ["eager", "auto"])
+def test_scaled_rejects_negative_block_size_before_eager_execution(backend: str):
+    aq = torch.ones((4, 8), dtype=torch.int8)
+    bq = torch.ones((8, 6), dtype=torch.int8)
+    sa = torch.ones((4, 1), dtype=torch.float32)
+    sb = torch.ones((1, 6), dtype=torch.float32)
+
+    with pytest.raises(KernelSelectionError, match="block_size.*non-negative"):
+        scaled_gemm(aq, bq, sa, sb, torch.float32, -1, backend=backend)
+
+
+@pytest.mark.parametrize("backend", ["eager", "auto"])
+@pytest.mark.parametrize("case", ["group_count", "offset_rank", "scale_layout", "bias"])
+def test_scaled_grouped_rejects_invalid_metadata_before_eager_execution(
+    backend: str, case: str
+):
+    aq = torch.ones((4, 8), dtype=torch.int8)
+    bq = torch.ones((2, 8, 6), dtype=torch.int8)
+    sa = torch.ones((4, 1), dtype=torch.float32)
+    sb = torch.ones((2, 1, 6), dtype=torch.float32)
+    offs = torch.tensor([2, 4], dtype=torch.int32)
+    bias = None
+    match = {
+        "group_count": "group count",
+        "offset_rank": "offsets",
+        "scale_layout": "scale",
+        "bias": "ragged-N",
+    }[case]
+    if case == "group_count":
+        bq = torch.ones((3, 8, 6), dtype=torch.int8)
+    elif case == "offset_rank":
+        offs = offs[None, :]
+    elif case == "scale_layout":
+        sb = torch.ones((2, 2, 6), dtype=torch.float32)
+    else:
+        aq = torch.ones((2, 4, 8), dtype=torch.int8)
+        bq = torch.ones((8, 6), dtype=torch.int8)
+        sa = torch.ones((2, 4, 1), dtype=torch.float32)
+        sb = torch.ones((1, 6), dtype=torch.float32)
+        bias = torch.ones((2, 6), dtype=torch.float32)
+
+    with pytest.raises(KernelSelectionError, match=match):
+        scaled_grouped_gemm(
+            aq,
+            bq,
+            sa,
+            sb,
+            offs,
+            torch.float32,
+            0,
+            bias=bias,
+            backend=backend,
+        )
+
+
+@pytest.mark.parametrize("backend", ["eager", "auto"])
+def test_scaled_grouped_rejects_negative_block_size_before_eager_execution(
+    backend: str,
+):
+    aq = torch.ones((4, 8), dtype=torch.int8)
+    bq = torch.ones((2, 8, 6), dtype=torch.int8)
+    sa = torch.ones((4, 1), dtype=torch.float32)
+    sb = torch.ones((2, 1, 6), dtype=torch.float32)
+    offs = torch.tensor([2, 4], dtype=torch.int32)
+
+    with pytest.raises(KernelSelectionError, match="block_size.*non-negative"):
+        scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, -1, backend=backend)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_eager_grouped_accepts_supported_dtypes_and_gradients(dtype: torch.dtype):
+    a = torch.randn(4, 8, dtype=dtype, requires_grad=True)
+    b = torch.randn(2, 8, 6, dtype=dtype, requires_grad=True)
+    offs = torch.tensor([2, 4], dtype=torch.int32)
+
+    out = grouped_gemm(a, b, offs, backend="eager")
+    out.float().sum().backward()
+
+    assert out.dtype == dtype
+    assert a.grad is not None
+    assert b.grad is not None
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_eager_scaled_accepts_supported_outputs_and_scale_gradients(
+    out_dtype: torch.dtype,
+):
+    aq = torch.ones((4, 8), dtype=torch.int8)
+    bq = torch.ones((8, 6), dtype=torch.int8)
+    sa = torch.ones((4, 1), dtype=torch.float32, requires_grad=True)
+    sb = torch.ones((1, 6), dtype=torch.float32, requires_grad=True)
+
+    out = scaled_gemm(aq, bq, sa, sb, out_dtype, 0, backend="eager")
+    out.float().sum().backward()
+
+    assert out.dtype == out_dtype
+    assert sa.grad is not None
+    assert sb.grad is not None
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_eager_scaled_grouped_accepts_supported_outputs_and_scale_gradients(
+    out_dtype: torch.dtype,
+):
+    aq = torch.ones((4, 8), dtype=torch.int8)
+    bq = torch.ones((2, 8, 6), dtype=torch.int8)
+    sa = torch.ones((4, 1), dtype=torch.float32, requires_grad=True)
+    sb = torch.ones((2, 1, 6), dtype=torch.float32, requires_grad=True)
+    offs = torch.tensor([2, 4], dtype=torch.int32)
+
+    out = scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype, 0, backend="eager")
+    out.float().sum().backward()
+
+    assert out.dtype == out_dtype
+    assert sa.grad is not None
+    assert sb.grad is not None
+
+
 @cuda_only
 def test_torch_grouped_gemm_matches_eager_for_supported_inputs():
     torch.manual_seed(0)
