@@ -154,7 +154,7 @@ def scaled_gemm_mxfp8(
     scale_dtype=None,
 ):
     del out_dtype, block_size, scale_dtype
-    return torch.ops.aot_kernel.scaled_gemm_mxfp8(
+    return torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
         aq,
         _column_major(bq),
         _swizzle_32_4_4(sa),

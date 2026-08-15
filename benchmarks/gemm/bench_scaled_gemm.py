@@ -294,7 +294,7 @@ def _bench_scheme(a, b, config):
     native_sb = _swizzle_32_4_4(sb.t())
 
     def cublaslt_native_fn():
-        return torch.ops.aot_kernel.scaled_gemm_mxfp8(
+        return torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
             aq, native_bq, native_sa, native_sb, None
         )
 

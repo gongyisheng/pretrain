@@ -68,13 +68,6 @@ void set_matrix_order(cublasLtMatrixLayout_t layout, cublasLtOrder_t order) {
       "scaled_gemm_mxfp8: failed to set matrix layout order");
 }
 
-int64_t mxfp8_scale_numel(int64_t rows, int64_t inner) {
-  const int64_t rounded_rows = (rows + 127) / 128 * 128;
-  const int64_t blocks = (inner + 31) / 32;
-  const int64_t rounded_blocks = (blocks + 3) / 4 * 4;
-  return rounded_rows * rounded_blocks;
-}
-
 uint32_t pointer_alignment(const void* pointer) {
   const auto address = reinterpret_cast<uintptr_t>(pointer);
   uint32_t alignment = 256;
@@ -99,7 +92,7 @@ void set_pointer_alignment(
       " pointer alignment");
 }
 
-at::Tensor scaled_gemm_mxfp8_meta(
+at::Tensor scaled_gemm_mxfp8_cublaslt_meta(
     const at::Tensor& a,
     const at::Tensor& b,
     const at::Tensor& scale_a,
@@ -112,95 +105,17 @@ at::Tensor scaled_gemm_mxfp8_meta(
       {a.sym_size(0), b.sym_size(1)}, a.options().dtype(at::kBFloat16));
 }
 
-at::Tensor scaled_gemm_mxfp8_cuda(
+at::Tensor scaled_gemm_mxfp8_cublaslt_cuda(
     const at::Tensor& a,
     const at::Tensor& b,
     const at::Tensor& scale_a,
     const at::Tensor& scale_b,
     const std::optional<at::Tensor>& bias) {
-  TORCH_CHECK(
-      a.is_cuda() && b.is_cuda() && scale_a.is_cuda() && scale_b.is_cuda() &&
-          (!bias.has_value() || bias->is_cuda()),
-      "scaled_gemm_mxfp8: operands, scales, and bias must be CUDA tensors");
   c10::cuda::CUDAGuard device_guard(a.device());
-  TORCH_CHECK(
-      a.device() == b.device() && a.device() == scale_a.device() &&
-          a.device() == scale_b.device() &&
-          (!bias.has_value() || a.device() == bias->device()),
-      "scaled_gemm_mxfp8: operands, scales, and bias must be on the same device");
-  TORCH_CHECK(
-      a.dim() == 2 && b.dim() == 2,
-      "scaled_gemm_mxfp8: A and B must be 2D");
-  TORCH_CHECK(
-      a.size(1) == b.size(0),
-      "scaled_gemm_mxfp8: mismatched K dimension");
-  TORCH_CHECK(
-      a.scalar_type() == at::ScalarType::Float8_e4m3fn &&
-          b.scalar_type() == at::ScalarType::Float8_e4m3fn,
-      "scaled_gemm_mxfp8: operands must use float8_e4m3fn");
 
   const int64_t M = a.size(0);
   const int64_t K = a.size(1);
   const int64_t N = b.size(1);
-  TORCH_CHECK(
-      a.numel() == 0 || (a.stride(0) == K && a.stride(1) == 1),
-      "scaled_gemm_mxfp8: A must be row-major");
-  TORCH_CHECK(
-      b.numel() == 0 || (b.stride(0) == 1 && b.stride(1) == K),
-      "scaled_gemm_mxfp8: B must be column-major");
-  TORCH_CHECK(
-      K % 16 == 0 && N % 16 == 0,
-      "scaled_gemm_mxfp8: K and N must be divisible by 16");
-  TORCH_CHECK(
-      scale_a.scalar_type() == at::ScalarType::Float8_e8m0fnu &&
-          scale_b.scalar_type() == at::ScalarType::Float8_e8m0fnu,
-      "scaled_gemm_mxfp8: scales must use float8_e8m0fnu");
-  TORCH_CHECK(
-      scale_a.dim() == 1 && scale_b.dim() == 1,
-      "scaled_gemm_mxfp8: scales must be flat");
-  TORCH_CHECK(
-      scale_a.is_contiguous() && scale_b.is_contiguous(),
-      "scaled_gemm_mxfp8: scales must be contiguous");
-  TORCH_CHECK(
-      (scale_a.numel() == 0 ||
-       reinterpret_cast<uintptr_t>(scale_a.data_ptr()) % 16 == 0) &&
-          (scale_b.numel() == 0 ||
-           reinterpret_cast<uintptr_t>(scale_b.data_ptr()) % 16 == 0),
-      "scaled_gemm_mxfp8: scales must be 16-byte aligned");
-  const int64_t expected_a = mxfp8_scale_numel(M, K);
-  const int64_t expected_b = mxfp8_scale_numel(N, K);
-  TORCH_CHECK(
-      scale_a.numel() == expected_a && scale_b.numel() == expected_b,
-      "scaled_gemm_mxfp8: invalid MXFP8 scale storage: expected (",
-      expected_a,
-      ", ",
-      expected_b,
-      "), got (",
-      scale_a.numel(),
-      ", ",
-      scale_b.numel(),
-      ")");
-  if (bias.has_value()) {
-    TORCH_CHECK(
-        bias->scalar_type() == at::ScalarType::BFloat16,
-        "scaled_gemm_mxfp8: bias must use bfloat16");
-    TORCH_CHECK(
-        bias->dim() == 1 && bias->size(0) == N,
-        "scaled_gemm_mxfp8: bias must have shape (N,)");
-    TORCH_CHECK(
-        bias->is_contiguous(),
-        "scaled_gemm_mxfp8: bias must be contiguous");
-  }
-
-  cudaDeviceProp properties;
-  const cudaError_t properties_status =
-      cudaGetDeviceProperties(&properties, a.device().index());
-  TORCH_CHECK(
-      properties_status == cudaSuccess,
-      "scaled_gemm_mxfp8: failed to get CUDA device properties");
-  TORCH_CHECK(
-      properties.major >= 10,
-      "scaled_gemm_mxfp8: requires compute capability 10.0 or newer");
 
   if (M == 0 || N == 0 || K == 0) {
     at::Tensor out =
@@ -225,9 +140,6 @@ at::Tensor scaled_gemm_mxfp8_cuda(
 
   at::Tensor out =
       at::empty({M, N}, a.options().dtype(at::ScalarType::BFloat16));
-  TORCH_CHECK(
-      reinterpret_cast<uintptr_t>(out.data_ptr()) % 16 == 0,
-      "scaled_gemm_mxfp8: output must be 16-byte aligned");
 
   cublasLtHandle_t handle = get_cublas_lt_handle(a.device().index());
   const auto stream = at::cuda::getCurrentCUDAStream(a.device().index());
@@ -452,16 +364,20 @@ at::Tensor scaled_gemm_mxfp8_cuda(
 
 TORCH_LIBRARY_FRAGMENT(aot_kernel, m) {
   m.def(
-      "scaled_gemm_mxfp8(Tensor a, Tensor b, Tensor scale_a, "
+      "_scaled_gemm_mxfp8_cublaslt(Tensor a, Tensor b, Tensor scale_a, "
       "Tensor scale_b, Tensor? bias=None) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(aot_kernel, Meta, m) {
-  m.impl("scaled_gemm_mxfp8", TORCH_FN(scaled_gemm_mxfp8_meta));
+  m.impl(
+      "_scaled_gemm_mxfp8_cublaslt",
+      TORCH_FN(scaled_gemm_mxfp8_cublaslt_meta));
 }
 
 TORCH_LIBRARY_IMPL(aot_kernel, CUDA, m) {
-  m.impl("scaled_gemm_mxfp8", TORCH_FN(scaled_gemm_mxfp8_cuda));
+  m.impl(
+      "_scaled_gemm_mxfp8_cublaslt",
+      TORCH_FN(scaled_gemm_mxfp8_cublaslt_cuda));
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {}

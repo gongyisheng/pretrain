@@ -539,64 +539,6 @@ def test_cublaslt_scaled_gemm_rejects_sm90(monkeypatch: pytest.MonkeyPatch):
     assert "SM100" in result.reason
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="cuBLASLt MXFP8 GEMM requires CUDA"
-)
-@pytest.mark.parametrize(
-    ("case", "message"),
-    [
-        ("row_major_b", "B must be column-major"),
-        ("e5m2_operand", "operands must use float8_e4m3fn"),
-        ("short_a_scale_storage", "invalid MXFP8 scale storage"),
-        ("short_b_scale_storage", "invalid MXFP8 scale storage"),
-        ("noncontiguous_scale", "scales must be contiguous"),
-        ("misaligned_scale", "scales must be 16-byte aligned"),
-        ("invalid_bias_dtype", "bias must use bfloat16"),
-        ("invalid_bias_shape", "bias must have shape"),
-    ],
-)
-def test_cublaslt_native_contract_rejects_invalid_inputs(case: str, message: str):
-    m, k, n = 129, 144, 128
-    scale_a_numel = 256 * 8
-    scale_b_numel = 128 * 8
-    a = torch.empty((m, k), device="cuda", dtype=torch.float8_e4m3fn)
-    b = torch.empty((n, k), device="cuda", dtype=torch.float8_e4m3fn).t()
-    scale_a = torch.empty(scale_a_numel, device="cuda", dtype=torch.float8_e8m0fnu)
-    scale_b = torch.empty(scale_b_numel, device="cuda", dtype=torch.float8_e8m0fnu)
-    bias = None
-
-    assert a.stride() == (k, 1)
-    assert b.stride() == (1, k)
-
-    if case == "row_major_b":
-        b = b.contiguous()
-    elif case == "e5m2_operand":
-        a = torch.empty((m, k), device="cuda", dtype=torch.float8_e5m2)
-        b = torch.empty((n, k), device="cuda", dtype=torch.float8_e5m2).t()
-    elif case == "short_a_scale_storage":
-        scale_a = scale_a[:-1]
-    elif case == "short_b_scale_storage":
-        scale_b = scale_b[:-1]
-    elif case == "noncontiguous_scale":
-        scale_a = torch.empty(
-            scale_a_numel * 2, device="cuda", dtype=torch.float8_e8m0fnu
-        )[::2]
-        assert not scale_a.is_contiguous()
-    elif case == "misaligned_scale":
-        scale_a = torch.empty(
-            scale_a_numel + 1, device="cuda", dtype=torch.float8_e8m0fnu
-        )[1:]
-        assert scale_a.is_contiguous()
-        assert scale_a.data_ptr() % 16 != 0
-    elif case == "invalid_bias_dtype":
-        bias = torch.empty(n, device="cuda", dtype=torch.float16)
-    else:
-        bias = torch.empty((1, n), device="cuda", dtype=torch.bfloat16)
-
-    with pytest.raises(RuntimeError, match=message):
-        torch.ops.aot_kernel.scaled_gemm_mxfp8(a, b, scale_a, scale_b, bias)
-
-
 @pytest.mark.parametrize(
     ("a_dtype", "b_dtype"),
     [

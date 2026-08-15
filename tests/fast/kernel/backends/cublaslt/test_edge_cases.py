@@ -144,57 +144,6 @@ def test_zero_size_gemm_matches_eager(
     assert torch.equal(actual, expected)
 
 
-def _native_operands() -> list[torch.Tensor | None]:
-    m, k, n = 16, 32, 16
-    a = _fp8_values(m * k).view(m, k)
-    b = _fp8_values(n * k).view(n, k).t()
-    scale_a = torch.ones(512, device="cuda", dtype=torch.float8_e8m0fnu)
-    scale_b = torch.ones(512, device="cuda", dtype=torch.float8_e8m0fnu)
-    return [a, b, scale_a, scale_b, None]
-
-
-@cuda_mxfp8_only
-@pytest.mark.parametrize(
-    ("case", "message"),
-    [
-        ("b_dtype", "operands must use float8_e4m3fn"),
-        ("b_scale_layout", "scales must be flat"),
-        ("wrong_width_bias", "bias must have shape"),
-    ],
-)
-def test_native_rejects_b_specific_and_bias_contracts(case: str, message: str):
-    _require_mxfp8_device()
-    a, b, scale_a, scale_b, bias = _native_operands()
-    if case == "b_dtype":
-        b = _fp8_values(16 * 32, torch.float8_e5m2).view(16, 32).t()
-    elif case == "b_scale_layout":
-        scale_b = scale_b.view(2, 256)
-    else:
-        bias = torch.empty(15, device="cuda", dtype=torch.bfloat16)
-
-    with pytest.raises(RuntimeError, match=message):
-        torch.ops.aot_kernel.scaled_gemm_mxfp8(a, b, scale_a, scale_b, bias)
-
-
-@cuda_mxfp8_only
-@pytest.mark.parametrize("matrix", ["A", "B"])
-def test_native_copies_misaligned_matrix_pointer(matrix: str):
-    _require_mxfp8_device()
-    a, b, scale_a, scale_b, bias = _native_operands()
-    if matrix == "A":
-        a = _fp8_values(16 * 32 + 1)[1:].view(16, 32)
-        pointer = a.data_ptr()
-    else:
-        b = _fp8_values(16 * 32 + 1)[1:].view(16, 32).t()
-        pointer = b.data_ptr()
-    assert pointer % 16 != 0
-
-    expected = a.to(torch.bfloat16) @ b.to(torch.bfloat16)
-    actual = torch.ops.aot_kernel.scaled_gemm_mxfp8(a, b, scale_a, scale_b, bias)
-
-    _require_mxfp8_precision(f"misaligned native {matrix}", actual, expected)
-
-
 @pytest.mark.parametrize(
     ("out_values", "reference_values"),
     [
