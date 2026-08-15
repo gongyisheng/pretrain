@@ -22,6 +22,7 @@ import torch
 
 sys.path.insert(0, ".")
 
+from src.kernel.backends.cublaslt.gemm import _column_major, _swizzle_32_4_4
 from src.kernel.ops.gemm import scaled_gemm
 from src.kernel.selector import KernelSelectionError
 from src.quant.quantize import quantize_operand
@@ -111,6 +112,27 @@ def _relerr(out, ref):
     return ((out.float() - ref).norm() / ref.norm()).item()
 
 
+def _precision_diagnostics(out, ref):
+    difference = out.float() - ref.float()
+    return {
+        "relerr": (difference.norm() / ref.float().norm()).item(),
+        "max_abs_error": difference.abs().max().item(),
+        "mismatch_fraction": out.ne(ref).float().mean().item(),
+    }
+
+
+def _require_mxfp8_precision(label, out, ref):
+    diagnostics = _precision_diagnostics(out, ref)
+    if not torch.isfinite(out).all() or diagnostics["relerr"] > 5e-5:
+        raise AssertionError(
+            f"{label} output exceeds the MXFP8 eager-relative error gate "
+            f"(relative_error={diagnostics['relerr']}, "
+            f"max_abs_error={diagnostics['max_abs_error']}, "
+            f"mismatch_fraction={diagnostics['mismatch_fraction']})"
+        )
+    return diagnostics
+
+
 def _make(M, K, N):
     torch.manual_seed(0)
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
@@ -161,6 +183,17 @@ def _bench_scheme(a, b, config):
         "triton_relerr": None,
         "torch_relerr": None,
         "torch_supported": False,
+        "cublaslt_ms": None,
+        "cublaslt_native_ms": None,
+        "cublaslt_relerr": None,
+        "cublaslt_native_relerr": None,
+        "cublaslt_max_abs_error": None,
+        "cublaslt_native_max_abs_error": None,
+        "cublaslt_mismatch_fraction": None,
+        "cublaslt_native_mismatch_fraction": None,
+        "cublaslt_supported": False,
+        "cublaslt_speedup": None,
+        "cublaslt_native_speedup": None,
     }
 
     block_size = config["block_size"] or 0
@@ -212,10 +245,66 @@ def _bench_scheme(a, b, config):
     try:
         torch_out = torch_fn()
     except KernelSelectionError:
+        pass
+    else:
+        result["torch_supported"] = True
+        result["torch_ms"] = _time(torch_fn)
+        result["torch_relerr"] = _relerr(torch_out, ref)
+
+    if config["label"] != "mxfp8":
         return result
-    result["torch_supported"] = True
-    result["torch_ms"] = _time(torch_fn)
-    result["torch_relerr"] = _relerr(torch_out, ref)
+
+    def cublaslt_fn():
+        return scaled_gemm(
+            aq,
+            bq,
+            sa,
+            sb,
+            torch.bfloat16,
+            block_size,
+            scale_dtype=scale_dtype,
+            backend="cublaslt",
+        )
+
+    try:
+        cublaslt_out = cublaslt_fn()
+    except KernelSelectionError:
+        return result
+
+    cublaslt_diagnostics = _require_mxfp8_precision(
+        "cuBLASLt end-to-end", cublaslt_out, ref
+    )
+    result["cublaslt_supported"] = True
+    result["cublaslt_ms"] = _time(cublaslt_fn)
+    result["cublaslt_relerr"] = cublaslt_diagnostics["relerr"]
+    result["cublaslt_max_abs_error"] = cublaslt_diagnostics["max_abs_error"]
+    result["cublaslt_mismatch_fraction"] = cublaslt_diagnostics["mismatch_fraction"]
+    result["cublaslt_speedup"] = result["triton_ms"] / result["cublaslt_ms"]
+
+    native_bq = _column_major(bq)
+    native_sa = _swizzle_32_4_4(sa)
+    native_sb = _swizzle_32_4_4(sb.t())
+
+    def cublaslt_native_fn():
+        return torch.ops.aot_kernel.scaled_gemm_mxfp8(
+            aq, native_bq, native_sa, native_sb, None
+        )
+
+    cublaslt_native_out = cublaslt_native_fn()
+    cublaslt_native_diagnostics = _require_mxfp8_precision(
+        "cuBLASLt native", cublaslt_native_out, ref
+    )
+    result["cublaslt_native_ms"] = _time(cublaslt_native_fn)
+    result["cublaslt_native_relerr"] = cublaslt_native_diagnostics["relerr"]
+    result["cublaslt_native_max_abs_error"] = cublaslt_native_diagnostics[
+        "max_abs_error"
+    ]
+    result["cublaslt_native_mismatch_fraction"] = cublaslt_native_diagnostics[
+        "mismatch_fraction"
+    ]
+    result["cublaslt_native_speedup"] = (
+        result["triton_ms"] / result["cublaslt_native_ms"]
+    )
     return result
 
 
@@ -329,7 +418,9 @@ def main():
 
     hdr = (
         f"{'shape':12s} {'M':>7s} {'scheme':16s} {'triton_ms':>10s} "
-        f"{'torch_ms':>10s} {'triton_relerr':>14s} {'torch_relerr':>14s}"
+        f"{'torch_ms':>10s} {'cublaslt':>8s} {'cublaslt_ms':>12s} {'native_ms':>10s} "
+        f"{'e2e_x':>8s} {'native_x':>8s} {'triton_relerr':>14s} "
+        f"{'torch_relerr':>14s} {'cublaslt_relerr':>16s}"
     )
     print(hdr)
     results = []
@@ -340,7 +431,14 @@ def main():
                 print(
                     f"{r['shape']:12s} {r['M']:>7d} {r['scheme']:16s} "
                     f"{_fmt(r['triton_ms']):>10s} {_fmt(r['torch_ms']):>10s} "
-                    f"{_fmt(r['triton_relerr'], 4):>14s} {_fmt(r['torch_relerr'], 4):>14s}"
+                    f"{str(r['cublaslt_supported']):>8s} "
+                    f"{_fmt(r['cublaslt_ms']):>12s} "
+                    f"{_fmt(r['cublaslt_native_ms']):>10s} "
+                    f"{_fmt(r['cublaslt_speedup']):>8s} "
+                    f"{_fmt(r['cublaslt_native_speedup']):>8s} "
+                    f"{_fmt(r['triton_relerr'], 4):>14s} "
+                    f"{_fmt(r['torch_relerr'], 4):>14s} "
+                    f"{_fmt(r['cublaslt_relerr'], 4):>16s}"
                 )
                 results.append(r)
 
