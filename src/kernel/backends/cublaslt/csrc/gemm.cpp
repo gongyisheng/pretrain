@@ -143,11 +143,19 @@ at::Tensor scaled_gemm_mxfp8_cuda(
   const int64_t K = a.size(1);
   const int64_t N = b.size(1);
   TORCH_CHECK(
-      a.stride(0) == K && a.stride(1) == 1,
+      a.numel() == 0 || (a.stride(0) == K && a.stride(1) == 1),
       "scaled_gemm_mxfp8: A must be row-major");
   TORCH_CHECK(
-      b.stride(0) == 1 && b.stride(1) == K,
+      b.numel() == 0 || (b.stride(0) == 1 && b.stride(1) == K),
       "scaled_gemm_mxfp8: B must be column-major");
+  TORCH_CHECK(
+      a.numel() == 0 ||
+          reinterpret_cast<uintptr_t>(a.data_ptr()) % 16 == 0,
+      "scaled_gemm_mxfp8: A matrix pointer must be 16-byte aligned");
+  TORCH_CHECK(
+      b.numel() == 0 ||
+          reinterpret_cast<uintptr_t>(b.data_ptr()) % 16 == 0,
+      "scaled_gemm_mxfp8: B matrix pointer must be 16-byte aligned");
   TORCH_CHECK(
       K % 16 == 0 && N % 16 == 0,
       "scaled_gemm_mxfp8: K and N must be divisible by 16");
@@ -162,8 +170,10 @@ at::Tensor scaled_gemm_mxfp8_cuda(
       scale_a.is_contiguous() && scale_b.is_contiguous(),
       "scaled_gemm_mxfp8: scales must be contiguous");
   TORCH_CHECK(
-      reinterpret_cast<uintptr_t>(scale_a.data_ptr()) % 16 == 0 &&
-          reinterpret_cast<uintptr_t>(scale_b.data_ptr()) % 16 == 0,
+      (scale_a.numel() == 0 ||
+       reinterpret_cast<uintptr_t>(scale_a.data_ptr()) % 16 == 0) &&
+          (scale_b.numel() == 0 ||
+           reinterpret_cast<uintptr_t>(scale_b.data_ptr()) % 16 == 0),
       "scaled_gemm_mxfp8: scales must be 16-byte aligned");
   const int64_t expected_a = mxfp8_scale_numel(M, K);
   const int64_t expected_b = mxfp8_scale_numel(N, K);
@@ -199,6 +209,15 @@ at::Tensor scaled_gemm_mxfp8_cuda(
   TORCH_CHECK(
       properties.major >= 10,
       "scaled_gemm_mxfp8: requires compute capability 10.0 or newer");
+
+  if (M == 0 || N == 0 || K == 0) {
+    at::Tensor out =
+        at::zeros({M, N}, a.options().dtype(at::ScalarType::BFloat16));
+    if (bias.has_value()) {
+      out.add_(*bias);
+    }
+    return out;
+  }
 
   at::Tensor out =
       at::empty({M, N}, a.options().dtype(at::ScalarType::BFloat16));

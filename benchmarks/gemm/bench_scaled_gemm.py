@@ -14,6 +14,7 @@ the eager backend for the same quantized operands. Prints a table and
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -123,10 +124,17 @@ def _precision_diagnostics(out, ref):
 
 def _require_mxfp8_precision(label, out, ref):
     diagnostics = _precision_diagnostics(out, ref)
-    if not torch.isfinite(out).all() or diagnostics["relerr"] > 5e-5:
+    reference_norm = ref.float().norm().item()
+    if (
+        not torch.isfinite(out).all()
+        or not math.isfinite(reference_norm)
+        or not math.isfinite(diagnostics["relerr"])
+        or diagnostics["relerr"] > 5e-5
+    ):
         raise AssertionError(
             f"{label} output exceeds the MXFP8 eager-relative error gate "
             f"(relative_error={diagnostics['relerr']}, "
+            f"reference_norm={reference_norm}, "
             f"max_abs_error={diagnostics['max_abs_error']}, "
             f"mismatch_fraction={diagnostics['mismatch_fraction']})"
         )

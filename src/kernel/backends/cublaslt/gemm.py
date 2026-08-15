@@ -55,6 +55,13 @@ def _column_major(bq: torch.Tensor) -> torch.Tensor:
     return bq.t().contiguous().t()
 
 
+def _has_aligned_storage_offset(tensor: torch.Tensor) -> bool:
+    storage_offset = getattr(tensor, "storage_offset", None)
+    if storage_offset is None:
+        return True
+    return storage_offset() * tensor.element_size() % 16 == 0
+
+
 def can_implement_scaled_gemm_mxfp8(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
@@ -85,8 +92,21 @@ def can_implement_scaled_gemm_mxfp8(
     )
     if not result.ok:
         return result
-    if aq.stride(-1) != 1:
-        return CheckResult(False, "cuBLASLt MXFP8 GEMM requires row-major A")
+    if aq.numel() and aq.stride() != (aq.shape[1], 1):
+        return CheckResult(False, "cuBLASLt MXFP8 GEMM requires compact row-major A")
+    if bq.numel() and bq.stride() not in (
+        (bq.shape[1], 1),
+        (1, bq.shape[0]),
+    ):
+        return CheckResult(
+            False,
+            "cuBLASLt MXFP8 GEMM requires compact row-major or column-major B",
+        )
+    if not torch.compiler.is_compiling():
+        if aq.numel() and not _has_aligned_storage_offset(aq):
+            return CheckResult(False, "cuBLASLt MXFP8 GEMM requires 16-byte aligned A")
+        if bq.numel() and not _has_aligned_storage_offset(bq):
+            return CheckResult(False, "cuBLASLt MXFP8 GEMM requires 16-byte aligned B")
     if aq.shape[1] != bq.shape[0]:
         return CheckResult(
             False, "cuBLASLt MXFP8 GEMM contraction dimensions must match"
