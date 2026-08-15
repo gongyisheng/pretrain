@@ -323,6 +323,44 @@ def test_torch_grouped_requires_matrix_layouts(
         assert "row-major or column-major" in result.reason
 
 
+@cuda_only
+@pytest.mark.parametrize("operand", ["a", "b"])
+def test_forced_torch_grouped_rejects_overlapping_matrix_dimensions(operand: str):
+    a_strides = (8, 1) if operand == "a" else (64, 1)
+    b_strides = (4096, 8, 1) if operand == "b" else (4096, 64, 1)
+    a = torch.empty_strided((64, 64), a_strides, device="cuda", dtype=torch.bfloat16)
+    b = torch.empty_strided((2, 64, 48), b_strides, device="cuda", dtype=torch.bfloat16)
+    offs = torch.tensor([32, 64], device="cuda", dtype=torch.int32)
+
+    with pytest.raises(KernelSelectionError, match="torch.*overlapping"):
+        grouped_gemm(a, b, offs, backend="torch")
+
+
+@cuda_only
+@pytest.mark.parametrize(
+    ("a_strides", "b_strides"),
+    [
+        ((80, 1), (4096, 64, 1)),
+        ((1, 80), (3840, 1, 80)),
+    ],
+)
+def test_forced_torch_grouped_executes_padded_matrix_layouts(
+    a_strides: tuple[int, int], b_strides: tuple[int, int, int]
+):
+    a = torch.empty_strided(
+        (64, 64), a_strides, device="cuda", dtype=torch.bfloat16
+    ).normal_()
+    b = torch.empty_strided(
+        (2, 64, 48), b_strides, device="cuda", dtype=torch.bfloat16
+    ).normal_()
+    offs = torch.tensor([32, 64], device="cuda", dtype=torch.int32)
+
+    expected = grouped_gemm(a, b, offs, backend="eager")
+    actual = grouped_gemm(a, b, offs, backend="torch")
+
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-2, atol=2e-2)
+
+
 def test_torch_scaled_can_implement_accepts_non_aligned_m_on_sm120(monkeypatch):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
     args = list(_scaled_metadata())

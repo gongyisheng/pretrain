@@ -163,10 +163,22 @@ def check_matrix_layout(
             False,
             f"{feature} has rank {tensor.ndim}; requires a matrix with rank 2 or greater",
         )
-    if tensor.stride(-1) != 1 and tensor.stride(-2) != 1:
+    row_extent, column_extent = tensor.shape[-2:]
+    row_stride, column_stride = tensor.stride()[-2:]
+    row_major = column_stride == 1 and (row_extent <= 1 or row_stride >= column_extent)
+    column_major = row_stride == 1 and (
+        column_extent <= 1 or column_stride >= row_extent
+    )
+    if row_major or column_major:
+        return check_alignment(tensor, alignment_bytes, feature)
+    if column_stride != 1 and row_stride != 1:
         return CheckResult(
             False,
-            f"{feature} has matrix strides {tensor.stride()[-2:]}; requires a "
+            f"{feature} has matrix strides {(row_stride, column_stride)}; requires a "
             "row-major or column-major layout",
         )
-    return check_alignment(tensor, alignment_bytes, feature)
+    return CheckResult(
+        False,
+        f"{feature} has matrix shape {(row_extent, column_extent)} and strides "
+        f"{(row_stride, column_stride)} with overlapping logical matrix dimensions",
+    )

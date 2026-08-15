@@ -146,8 +146,15 @@ def test_check_alignment_rejects_non_positive_alignment(alignment_bytes: int):
     [
         ((8, 8), (8, 1)),
         ((8, 8), (1, 8)),
+        ((64, 64), (80, 1)),
+        ((64, 64), (1, 80)),
         ((2, 8, 8), (64, 8, 1)),
         ((2, 8, 8), (64, 1, 8)),
+        ((2, 64, 48), (4096, 64, 1)),
+        ((2, 64, 48), (3840, 1, 80)),
+        ((2, 64, 48), (0, 64, 1)),
+        ((1, 64), (0, 1)),
+        ((64, 1), (1, 0)),
     ],
 )
 def test_check_matrix_layout_accepts_aligned_row_or_column_major_layouts(
@@ -162,6 +169,8 @@ def test_check_matrix_layout_accepts_aligned_row_or_column_major_layouts(
     ("shape", "strides", "reason"),
     [
         ((8, 8), (512, 8), "row-major or column-major"),
+        ((64, 64), (8, 1), "overlapping"),
+        ((2, 64, 48), (4096, 8, 1), "overlapping"),
         ((8, 7), (7, 1), "16-byte"),
         ((2, 8, 8), (63, 8, 1), "16-byte"),
     ],
