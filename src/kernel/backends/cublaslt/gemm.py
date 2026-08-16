@@ -2,7 +2,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 from src.kernel.registry import register_kernel
 from src.kernel.spec import CheckResult
@@ -26,6 +25,7 @@ from src.kernel.utils import (
     check_values,
     first_failure,
     to_column_major,
+    to_swizzle_32_4_4,
 )
 
 try:
@@ -34,20 +34,6 @@ except ImportError as error:
     _EXTENSION_ERROR: str | None = f"cuBLASLt extension unavailable: {error}"
 else:
     _EXTENSION_ERROR = None
-
-
-def _swizzle_32_4_4(scale: torch.Tensor) -> torch.Tensor:
-    rows, blocks = scale.shape
-    padded_rows = (rows + 127) // 128 * 128
-    padded_blocks = (blocks + 3) // 4 * 4
-    padded = F.pad(scale, (0, padded_blocks - blocks, 0, padded_rows - rows))
-    return (
-        padded.to(torch.float8_e8m0fnu)
-        .reshape(padded_rows // 128, 4, 32, padded_blocks // 4, 4)
-        .permute(0, 3, 2, 1, 4)
-        .contiguous()
-        .flatten()
-    )
 
 
 def can_implement_scaled_gemm_mxfp8(
@@ -135,7 +121,7 @@ def scaled_gemm_mxfp8(
     return torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
         aq,
         to_column_major(bq),
-        _swizzle_32_4_4(sa),
-        _swizzle_32_4_4(sb.t()),
+        to_swizzle_32_4_4(sa),
+        to_swizzle_32_4_4(sb.t()),
         bias,
     )

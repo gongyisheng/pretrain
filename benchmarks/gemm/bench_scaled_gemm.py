@@ -23,10 +23,9 @@ import torch
 
 sys.path.insert(0, ".")
 
-from src.kernel.backends.cublaslt.gemm import _swizzle_32_4_4
 from src.kernel.ops.gemm import scaled_gemm
 from src.kernel.selector import KernelSelectionError
-from src.kernel.utils import to_column_major
+from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 from src.quant.quantize import quantize_operand
 
 E4M3 = torch.float8_e4m3fn
@@ -291,8 +290,8 @@ def _bench_scheme(a, b, config):
     result["cublaslt_speedup"] = result["triton_ms"] / result["cublaslt_ms"]
 
     native_bq = to_column_major(bq)
-    native_sa = _swizzle_32_4_4(sa)
-    native_sb = _swizzle_32_4_4(sb.t())
+    native_sa = to_swizzle_32_4_4(sa)
+    native_sb = to_swizzle_32_4_4(sb.t())
 
     def cublaslt_native_fn():
         return torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
