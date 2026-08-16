@@ -1,7 +1,2 @@
-from src.kernel.backends.torch.gemm import (
-    grouped_gemm,
-    scaled_gemm,
-    scaled_grouped_gemm,
-)
-
-__all__ = ["grouped_gemm", "scaled_gemm", "scaled_grouped_gemm"]
+# Import implementation modules to register kernels.
+from . import gemm as _gemm  # noqa: F401

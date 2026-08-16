@@ -3,7 +3,7 @@ import torch
 from src.kernel.registry import register_kernel
 
 
-def _bounds(offs):
+def _to_bounds(offs):
     ends = offs.tolist()
     return list(zip([0] + ends[:-1], ends))
 
@@ -22,7 +22,7 @@ def grouped_gemm(
 ) -> torch.Tensor:
     a_is_2d = a.ndim == 2
     b_is_2d = b.ndim == 2
-    bounds = _bounds(offs)
+    bounds = _to_bounds(offs)
 
     if not a_is_2d and not b_is_2d:
         raise NotImplementedError("3D x 3D not supported")
@@ -101,7 +101,7 @@ def scaled_grouped_gemm(
     del scale_dtype
     a_is_2d = aq.ndim == 2
     b_is_2d = bq.ndim == 2
-    bounds = _bounds(offs)
+    bounds = _to_bounds(offs)
 
     if not a_is_2d and not b_is_2d:
         raise NotImplementedError("3D x 3D not supported")
