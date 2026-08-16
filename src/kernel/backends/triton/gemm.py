@@ -10,6 +10,14 @@ from torch._library.triton import triton_op, wrap_triton
 from src.kernel.registry import register_kernel
 from src.kernel.spec import CheckResult
 from src.kernel.utils import (
+    BF16,
+    FP16,
+    FP32,
+    FP8_E4M3,
+    FP8_E5M2,
+    FP8_E8M0,
+    INT8,
+    INT32,
     check_compute_capability_at_least,
     check_contiguous,
     check_cuda_tensors,
@@ -19,9 +27,12 @@ from src.kernel.utils import (
     check_nonempty,
     check_same_device,
     check_shape,
-    check_values,
     first_failure,
 )
+
+
+_FLOAT_DTYPES = FP32 | BF16 | FP16
+_QUANTIZED_DTYPES = INT8 | FP8_E4M3 | FP8_E5M2
 
 # ---------------------------------------------------------------------------
 # Config + helpers
@@ -256,61 +267,81 @@ def can_implement_grouped_gemm(
 ) -> CheckResult:
     a, b, offs = args[:3]
     bias = args[3] if len(args) > 3 else kwargs.get("bias")
-    if bias is not None:
-        result = check_dtypes((bias,), frozenset({a.dtype}), "Triton grouped GEMM bias")
-        if not result.ok:
-            return result
     tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
     result = first_failure(
         (
             check_same_device(tensors, "Triton grouped GEMM"),
             check_cuda_tensors(tensors, "Triton grouped GEMM"),
-            check_dtypes(
-                (a, b), frozenset({torch.bfloat16}), "Triton grouped GEMM operands"
-            ),
+        )
+    )
+    if not result.ok:
+        return result
+    result = first_failure(
+        (
+            check_dtypes((a, b), BF16, "Triton grouped GEMM operands"),
             check_ndim(a, frozenset({2, 3}), "Triton grouped GEMM A"),
             check_ndim(b, frozenset({2, 3}), "Triton grouped GEMM B"),
             check_ndim(offs, frozenset({1}), "Triton grouped GEMM offsets"),
             check_contiguous(offs, "Triton grouped GEMM offsets"),
-            check_dtypes(
-                (offs,), frozenset({torch.int32}), "Triton grouped GEMM offsets"
-            ),
+            check_dtypes((offs,), INT32, "Triton grouped GEMM offsets"),
             check_nonempty(offs, "Triton grouped GEMM offsets"),
         )
     )
     if not result.ok:
         return result
-    result = check_compute_capability_at_least(a.device, (8, 0), "Triton grouped GEMM")
-    if not result.ok:
-        return result
+    if bias is not None:
+        result = first_failure(
+            (check_dtypes((bias,), frozenset({a.dtype}), "Triton grouped GEMM bias"),)
+        )
+        if not result.ok:
+            return result
     if a.ndim == 3 and b.ndim == 3:
         return CheckResult(False, "3D x 3D has no ragged dimension")
-    result = check_dimension_sizes_match(
-        ((a, -1), (b, -2)), "Triton grouped GEMM contraction dimensions"
+    result = first_failure(
+        (
+            check_dimension_sizes_match(
+                ((a, -1), (b, -2)), "Triton grouped GEMM contraction dimensions"
+            ),
+        )
     )
     if not result.ok:
         return result
     if a.ndim == 3:
-        result = check_dimension_sizes_match(
-            ((a, 0), (offs, 0)), "Triton grouped GEMM A group count"
+        result = first_failure(
+            (
+                check_dimension_sizes_match(
+                    ((a, 0), (offs, 0)), "Triton grouped GEMM A group count"
+                ),
+            )
         )
         if not result.ok:
             return result
     if b.ndim == 3:
-        result = check_dimension_sizes_match(
-            ((b, 0), (offs, 0)), "Triton grouped GEMM B group count"
+        result = first_failure(
+            (
+                check_dimension_sizes_match(
+                    ((b, 0), (offs, 0)), "Triton grouped GEMM B group count"
+                ),
+            )
         )
         if not result.ok:
             return result
     if bias is not None and a.ndim == 3:
         return CheckResult(False, "bias is not supported for the ragged-N layout")
     if bias is not None:
-        result = check_shape(
-            bias, (offs.numel(), b.shape[-1]), "Triton grouped GEMM bias"
+        result = first_failure(
+            (
+                check_shape(
+                    bias, (offs.numel(), b.shape[-1]), "Triton grouped GEMM bias"
+                ),
+            )
         )
         if not result.ok:
             return result
-    return CheckResult(True)
+    result = first_failure(
+        (check_compute_capability_at_least(a.device, (8, 0), "Triton grouped GEMM"),)
+    )
+    return result
 
 
 @register_kernel(
@@ -597,16 +628,14 @@ def _scaled_gemm_mxfp8_kernel(
 def _check_triton_quantized_operands(
     aq: torch.Tensor, bq: torch.Tensor, feature: str
 ) -> CheckResult:
-    quantized_dtypes = frozenset({torch.int8, torch.float8_e4m3fn, torch.float8_e5m2})
-    result = check_dtypes((aq, bq), quantized_dtypes, feature)
+    result = first_failure((check_dtypes((aq, bq), _QUANTIZED_DTYPES, feature),))
     if not result.ok:
         return result
     if aq.dtype.is_floating_point != bq.dtype.is_floating_point:
         return CheckResult(
             False, f"{feature} requires operands from the same dtype family"
         )
-    minimum = (8, 9) if aq.dtype.is_floating_point else (8, 0)
-    return check_compute_capability_at_least(aq.device, minimum, feature)
+    return CheckResult(True)
 
 
 def can_implement_scaled_gemm(
@@ -615,54 +644,52 @@ def can_implement_scaled_gemm(
     aq, bq, sa, sb, out_dtype, block_size = args[:6]
     bias = args[6] if len(args) > 6 else kwargs.get("bias")
     scale_dtype = args[7] if len(args) > 7 else kwargs.get("scale_dtype")
-    result = check_values(
-        (scale_dtype,),
-        frozenset({None, "fp32", "fp8_e8m0"}),
-        "Triton scaled GEMM scale_dtype",
-    )
-    if not result.ok:
-        return result
     tensors = (aq, bq, sa, sb) + (() if bias is None else (bias,))
     result = first_failure(
         (
             check_same_device(tensors, "Triton scaled GEMM"),
             check_cuda_tensors(tensors, "Triton scaled GEMM"),
+        )
+    )
+    if not result.ok:
+        return result
+    result = first_failure(
+        (
+            check_dtypes(
+                () if scale_dtype is None else (scale_dtype,),
+                FP32 | FP8_E8M0,
+                "Triton scaled GEMM scale_dtype",
+            ),
             check_ndim(aq, frozenset({2}), "Triton scaled GEMM A"),
             check_ndim(bq, frozenset({2}), "Triton scaled GEMM B"),
             check_ndim(sa, frozenset({2}), "Triton scaled GEMM A scale"),
             check_ndim(sb, frozenset({2}), "Triton scaled GEMM B scale"),
-            check_dtypes(
-                (sa, sb), frozenset({torch.float32}), "Triton scaled GEMM scales"
-            ),
+            check_dtypes((sa, sb), FP32, "Triton scaled GEMM scales"),
         )
     )
     if not result.ok:
         return result
-    result = _check_triton_quantized_operands(aq, bq, "Triton scaled GEMM")
-    if not result.ok:
-        return result
-    result = check_dimension_sizes_match(
-        ((aq, -1), (bq, -2)), "Triton scaled GEMM contraction dimensions"
-    )
-    if not result.ok:
-        return result
-    if block_size < 0:
-        return CheckResult(False, "block_size must be non-negative")
-    nblocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
+    if type(block_size) is not int or block_size < 0:
+        return CheckResult(False, "block_size must be a non-negative integer")
     result = first_failure(
-        (
-            check_shape(sa, (aq.shape[0], nblocks), "Triton scaled GEMM A scale"),
-            check_shape(sb, (nblocks, bq.shape[1]), "Triton scaled GEMM B scale"),
-        )
+        (_check_triton_quantized_operands(aq, bq, "Triton scaled GEMM"),)
     )
     if not result.ok:
         return result
+    nblocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
     if nblocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
         return CheckResult(False, "block_size must be a power of two >= 16")
-    result = check_dtypes(
-        (out_dtype,),
-        frozenset({torch.float32, torch.float16, torch.bfloat16}),
-        "Triton scaled GEMM output dtype",
+    result = first_failure(
+        (
+            check_dimension_sizes_match(
+                ((aq, -1), (bq, -2)), "Triton scaled GEMM contraction dimensions"
+            ),
+            check_shape(sa, (aq.shape[0], nblocks), "Triton scaled GEMM A scale"),
+            check_shape(sb, (nblocks, bq.shape[1]), "Triton scaled GEMM B scale"),
+            check_dtypes(
+                (out_dtype,), _FLOAT_DTYPES, "Triton scaled GEMM output dtype"
+            ),
+        )
     )
     if not result.ok:
         return result
@@ -672,14 +699,22 @@ def can_implement_scaled_gemm(
                 check_shape(bias, (bq.shape[1],), "Triton scaled GEMM bias"),
                 check_dtypes(
                     (bias,),
-                    frozenset({torch.float32, torch.float16, torch.bfloat16}),
+                    _FLOAT_DTYPES,
                     "Triton scaled GEMM bias",
                 ),
             )
         )
         if not result.ok:
             return result
-    return CheckResult(True)
+    minimum_capability = (8, 9) if aq.dtype.is_floating_point else (8, 0)
+    result = first_failure(
+        (
+            check_compute_capability_at_least(
+                aq.device, minimum_capability, "Triton scaled GEMM"
+            ),
+        )
+    )
+    return result
 
 
 @register_kernel(
@@ -698,11 +733,11 @@ def scaled_gemm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
-    scale_dtype: str | None = None,
+    scale_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
 
-    `scale_dtype` "fp8_e8m0" with fp8 operands and `block_size` any multiple of 32 is
+    `scale_dtype=torch.float8_e8m0fnu` with fp8 operands and `block_size` any multiple of 32 is
     mxfp8: the hardware's block-scaled MMA reads a 32-wide scale vector natively, and a
     wider block is the same scale replicated across consecutive 32-wide groups, so it
     routes to `_scaled_gemm_mxfp8_kernel` too. Everything else -- a non-multiple-of-32
@@ -763,7 +798,7 @@ def scaled_gemm(
         return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
 
     if (
-        scale_dtype == "fp8_e8m0"
+        scale_dtype == torch.float8_e8m0fnu
         # block_size 0 is the "one block spans all of K" sentinel, not a real width --
         # 0 % 32 == 0 in Python, so it must be excluded explicitly or it would collapse
         # rep_k to 0 below and hand the kernel a zero-width scale tensor.
@@ -1271,65 +1306,75 @@ def can_implement_scaled_grouped_gemm(
     aq, bq, sa, sb, offs, out_dtype, block_size = args[:7]
     bias = args[7] if len(args) > 7 else kwargs.get("bias")
     scale_dtype = args[8] if len(args) > 8 else kwargs.get("scale_dtype")
-    result = check_values(
-        (scale_dtype,),
-        frozenset({None, "fp32", "fp8_e8m0"}),
-        "Triton scaled grouped GEMM scale_dtype",
-    )
-    if not result.ok:
-        return result
     tensors = (aq, bq, sa, sb, offs) + (() if bias is None else (bias,))
     result = first_failure(
         (
             check_same_device(tensors, "Triton scaled grouped GEMM"),
             check_cuda_tensors(tensors, "Triton scaled grouped GEMM"),
+        )
+    )
+    if not result.ok:
+        return result
+    result = first_failure(
+        (
+            check_dtypes(
+                () if scale_dtype is None else (scale_dtype,),
+                FP32 | FP8_E8M0,
+                "Triton scaled grouped GEMM scale_dtype",
+            ),
             check_ndim(aq, frozenset({2, 3}), "Triton scaled grouped GEMM A"),
             check_ndim(bq, frozenset({2, 3}), "Triton scaled grouped GEMM B"),
             check_ndim(offs, frozenset({1}), "Triton scaled grouped GEMM offsets"),
             check_contiguous(offs, "Triton scaled grouped GEMM offsets"),
             check_dtypes(
                 (sa, sb),
-                frozenset({torch.float32}),
+                FP32,
                 "Triton scaled grouped GEMM scales",
             ),
         )
     )
     if not result.ok:
         return result
-    result = _check_triton_quantized_operands(aq, bq, "Triton scaled grouped GEMM")
+    if type(block_size) is not int or block_size < 0:
+        return CheckResult(False, "block_size must be a non-negative integer")
+    result = first_failure(
+        (_check_triton_quantized_operands(aq, bq, "Triton scaled grouped GEMM"),)
+    )
     if not result.ok:
         return result
     if aq.ndim == 3 and bq.ndim == 3:
         return CheckResult(False, "3D x 3D has no ragged dimension")
     result = first_failure(
         (
-            check_dtypes(
-                (offs,),
-                frozenset({torch.int32}),
-                "Triton scaled grouped GEMM offsets",
-            ),
+            check_dtypes((offs,), INT32, "Triton scaled grouped GEMM offsets"),
             check_nonempty(offs, "Triton scaled grouped GEMM offsets"),
+            check_dimension_sizes_match(
+                ((aq, -1), (bq, -2)),
+                "Triton scaled grouped GEMM contraction dimensions",
+            ),
         )
     )
     if not result.ok:
         return result
-    result = check_dimension_sizes_match(
-        ((aq, -1), (bq, -2)),
-        "Triton scaled grouped GEMM contraction dimensions",
-    )
-    if not result.ok:
-        return result
-    if block_size < 0:
-        return CheckResult(False, "block_size must be non-negative")
     if aq.ndim == 3:
-        result = check_dimension_sizes_match(
-            ((aq, 0), (offs, 0)), "Triton scaled grouped GEMM A group count"
+        result = first_failure(
+            (
+                check_dimension_sizes_match(
+                    ((aq, 0), (offs, 0)),
+                    "Triton scaled grouped GEMM A group count",
+                ),
+            )
         )
         if not result.ok:
             return result
     if bq.ndim == 3:
-        result = check_dimension_sizes_match(
-            ((bq, 0), (offs, 0)), "Triton scaled grouped GEMM B group count"
+        result = first_failure(
+            (
+                check_dimension_sizes_match(
+                    ((bq, 0), (offs, 0)),
+                    "Triton scaled grouped GEMM B group count",
+                ),
+            )
         )
         if not result.ok:
             return result
@@ -1359,6 +1404,17 @@ def can_implement_scaled_grouped_gemm(
         return CheckResult(False, "invalid scale layout")
     if bias is not None and aq.ndim == 3:
         return CheckResult(False, "bias is not supported for the ragged-N layout")
+    result = first_failure(
+        (
+            check_dtypes(
+                (out_dtype,),
+                _FLOAT_DTYPES,
+                "Triton scaled grouped GEMM output dtype",
+            ),
+        )
+    )
+    if not result.ok:
+        return result
     if bias is not None:
         result = first_failure(
             (
@@ -1369,21 +1425,22 @@ def can_implement_scaled_grouped_gemm(
                 ),
                 check_dtypes(
                     (bias,),
-                    frozenset({torch.float32, torch.float16, torch.bfloat16}),
+                    _FLOAT_DTYPES,
                     "Triton scaled grouped GEMM bias",
                 ),
             )
         )
         if not result.ok:
             return result
-    result = check_dtypes(
-        (out_dtype,),
-        frozenset({torch.float32, torch.float16, torch.bfloat16}),
-        "Triton scaled grouped GEMM output dtype",
+    minimum_capability = (8, 9) if aq.dtype.is_floating_point else (8, 0)
+    result = first_failure(
+        (
+            check_compute_capability_at_least(
+                aq.device, minimum_capability, "Triton scaled grouped GEMM"
+            ),
+        )
     )
-    if not result.ok:
-        return result
-    return CheckResult(True)
+    return result
 
 
 @register_kernel(
@@ -1403,11 +1460,11 @@ def scaled_grouped_gemm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
-    scale_dtype: str | None = None,
+    scale_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Ragged scaled grouped GEMM, layout picked from the operand ranks.
 
-    `scale_dtype` "fp8_e8m0" with fp8 operands routes to `_scaled_grouped_gemm_mxfp8_kernel`,
+    `scale_dtype=torch.float8_e8m0fnu` with fp8 operands routes to `_scaled_grouped_gemm_mxfp8_kernel`,
     which lets the MMA apply the scales, at `block_size` 32 always and any multiple of 32
     for the ragged-M/ragged-N layouts (see the ragged-K note below `is_ragged_k` in the
     body). Every other combination keeps the epilogue-scaling kernel -- see `scaled_gemm`.
@@ -1454,7 +1511,7 @@ def scaled_grouped_gemm(
     # multiple-of-32 condition. Do not simplify this to one shared condition.
     is_ragged_k = a_is_2d and b_is_2d
     mxfp8_ok = (
-        scale_dtype == "fp8_e8m0"
+        scale_dtype == torch.float8_e8m0fnu
         and aq.dtype in _MXFP8_FORMAT
         and bq.dtype in _MXFP8_FORMAT
         and (

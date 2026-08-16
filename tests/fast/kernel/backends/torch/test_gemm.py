@@ -13,6 +13,7 @@ from tests.fast.kernel.backends.helper import (
     FORMAT_PAIRS,
     GROUPED_LAYOUTS,
     GROUPED_PROJECTIONS,
+    SCALE_DTYPE_VALUES,
     SCALE_DTYPES,
     SCALING_CASES,
     FormatPair,
@@ -122,7 +123,16 @@ def _make_scaled_route_inputs(
         if with_bias
         else None
     )
-    return aq, bq, sa, sb, torch.bfloat16, block_size, bias, scale_dtype
+    return (
+        aq,
+        bq,
+        sa,
+        sb,
+        torch.bfloat16,
+        block_size,
+        bias,
+        SCALE_DTYPE_VALUES[scale_dtype],
+    )
 
 
 def _assert_scaled_route(

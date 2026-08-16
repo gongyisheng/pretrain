@@ -83,6 +83,10 @@ SCALING_CASES = (
 )
 
 SCALE_DTYPES = ("fp32", "fp8_e8m0")
+SCALE_DTYPE_VALUES = {
+    "fp32": torch.float32,
+    "fp8_e8m0": torch.float8_e8m0fnu,
+}
 BIAS_CASES = (False, True)
 
 
@@ -142,7 +146,7 @@ def make_scaled_gemm_inputs(
     torch.dtype,
     int,
     torch.Tensor | None,
-    str,
+    torch.dtype,
 ]:
     from src.quant.quantize import quantize_operand
 
@@ -162,4 +166,13 @@ def make_scaled_gemm_inputs(
         if with_bias
         else None
     )
-    return aq, bq, sa, sb, torch.bfloat16, scaling_case.block_size, bias, scale_dtype
+    return (
+        aq,
+        bq,
+        sa,
+        sb,
+        torch.bfloat16,
+        scaling_case.block_size,
+        bias,
+        SCALE_DTYPE_VALUES[scale_dtype],
+    )

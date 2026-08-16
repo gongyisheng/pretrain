@@ -24,6 +24,7 @@ from src.kernel.utils import (
     check_same_device,
     check_shape,
     check_stride,
+    check_torch_tensors,
     check_values,
     first_failure,
 )
@@ -61,6 +62,19 @@ def test_check_callable_rejects_missing_or_non_callable_attribute(attribute: str
     assert "test owner" in result.reason
     assert attribute in result.reason
     assert "callable" in result.reason
+
+
+def test_check_torch_tensors_accepts_torch_tensors():
+    assert check_torch_tensors((torch.empty(0),), "grouped GEMM").ok
+
+
+def test_check_torch_tensors_rejects_non_torch_tensors():
+    result = check_torch_tensors((object(),), "grouped GEMM")
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "object" in result.reason
+    assert "torch.Tensor" in result.reason
 
 
 def test_check_cuda_tensors_reports_actual_device_and_requirement():
@@ -700,7 +714,7 @@ def _cublaslt_scaled_metadata():
         torch.bfloat16,
         32,
         None,
-        "fp8_e8m0",
+        torch.float8_e8m0fnu,
     )
 
 
@@ -708,7 +722,7 @@ def _torch_scaled_metadata(
     a_dtype: torch.dtype = torch.float8_e4m3fn,
     b_dtype: torch.dtype = torch.float8_e4m3fn,
     block_size: int = 0,
-    scale_dtype: str = "fp32",
+    scale_dtype: torch.dtype = torch.float32,
     m: int = 64,
     n: int = 48,
     k: int = 64,
@@ -805,7 +819,11 @@ def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
             ),
             "operands",
         ),
-        ("wrong_scale_dtype", lambda args: args.__setitem__(7, "fp32"), "scale_dtype"),
+        (
+            "wrong_scale_dtype",
+            lambda args: args.__setitem__(7, torch.float32),
+            "scale_dtype",
+        ),
         ("wrong_block_size", lambda args: args.__setitem__(5, 64), "block_size"),
         (
             "invalid_logical_scale_shapes",
@@ -950,9 +968,9 @@ def test_torch_scaled_gemm_accepts_supported_block_sizes(
     assert result.ok, result.reason
 
 
-@pytest.mark.parametrize("scale_dtype", ["fp32", "fp8_e8m0"])
+@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float8_e8m0fnu])
 def test_torch_scaled_gemm_accepts_supported_scale_dtypes(
-    monkeypatch: pytest.MonkeyPatch, scale_dtype: str
+    monkeypatch: pytest.MonkeyPatch, scale_dtype: torch.dtype
 ):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
 
@@ -1202,6 +1220,73 @@ def test_torch_gemm_validation_architecture_matrix(
 
 
 @pytest.mark.parametrize(
+    ("predicate", "args_factory", "index", "replacement"),
+    [
+        (
+            cublaslt_gemm.can_implement_scaled_gemm_mxfp8,
+            _cublaslt_scaled_metadata,
+            7,
+            torch.float32,
+        ),
+        (
+            torch_gemm.can_implement_grouped_gemm,
+            _default_grouped_metadata,
+            2,
+            _TensorMeta((2,), torch.int64),
+        ),
+        (
+            torch_gemm.can_implement_scaled_gemm,
+            _scaled_metadata,
+            4,
+            torch.float32,
+        ),
+        (
+            torch_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            5,
+            torch.float16,
+        ),
+        (
+            triton_gemm.can_implement_grouped_gemm,
+            _default_grouped_metadata,
+            2,
+            _TensorMeta((2,), torch.int64),
+        ),
+        (
+            triton_gemm.can_implement_scaled_gemm,
+            _scaled_metadata,
+            7,
+            torch.float16,
+        ),
+        (
+            triton_gemm.can_implement_scaled_grouped_gemm,
+            _scaled_grouped_metadata,
+            8,
+            torch.float16,
+        ),
+    ],
+)
+def test_gemm_validation_checks_compute_capability_last(
+    monkeypatch: pytest.MonkeyPatch,
+    predicate,
+    args_factory,
+    index: int,
+    replacement,
+):
+    def unexpected_query(device: torch.device) -> tuple[int, int]:
+        raise AssertionError(f"unexpected CUDA query for {device}")
+
+    monkeypatch.setattr(cublaslt_gemm, "_EXTENSION_ERROR", None)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected_query)
+    args = list(args_factory())
+    args[index] = replacement
+
+    result = predicate(tuple(args), {})
+
+    assert not result.ok
+
+
+@pytest.mark.parametrize(
     ("attribute", "predicate", "args_factory"),
     [
         (
@@ -1314,7 +1399,7 @@ def test_torch_grouped_gemm_validation_matrix_layouts(
             triton_gemm.can_implement_scaled_grouped_gemm,
             _scaled_grouped_metadata,
             8,
-            "unknown",
+            torch.float16,
             "scale_dtype",
         ),
     ],

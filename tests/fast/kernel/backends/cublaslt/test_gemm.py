@@ -140,7 +140,7 @@ def test_cublaslt_adapter_has_meta_implementation():
         scale_b,
         torch.bfloat16,
         32,
-        scale_dtype="fp8_e8m0",
+        scale_dtype=torch.float8_e8m0fnu,
     )
     assert out.shape == (129, 160)
     assert out.dtype == torch.bfloat16

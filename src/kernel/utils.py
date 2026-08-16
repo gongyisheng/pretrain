@@ -3,6 +3,17 @@ import torch
 from src.kernel.spec import CheckResult
 
 
+FP32 = frozenset({torch.float32})
+BF16 = frozenset({torch.bfloat16})
+FP16 = frozenset({torch.float16})
+FP8_E4M3 = frozenset({torch.float8_e4m3fn})
+FP8_E5M2 = frozenset({torch.float8_e5m2})
+FP8_E8M0 = frozenset({torch.float8_e8m0fnu})
+INT8 = frozenset({torch.int8})
+INT32 = frozenset({torch.int32})
+INT64 = frozenset({torch.int64})
+
+
 def first_failure(results: tuple[CheckResult, ...]) -> CheckResult:
     for result in results:
         if not result.ok:
@@ -33,6 +44,20 @@ def check_callable(owner: object, owner_name: str, attribute: str) -> CheckResul
         False,
         f"{owner_name}.{attribute} is {type(value).__name__}, requires a callable",
     )
+
+
+def check_torch_tensors(tensors: tuple[object, ...], feature: str) -> CheckResult:
+    invalid = tuple(
+        type(tensor).__name__
+        for tensor in tensors
+        if not isinstance(tensor, torch.Tensor)
+    )
+    if invalid:
+        actual = ", ".join(invalid)
+        return CheckResult(
+            False, f"{feature} received {actual}; requires torch.Tensor inputs"
+        )
+    return CheckResult(True)
 
 
 def check_cuda_tensors(tensors: tuple[torch.Tensor, ...], feature: str) -> CheckResult:

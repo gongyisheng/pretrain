@@ -7,6 +7,10 @@ import torch.nn.functional as F
 from src.kernel.registry import register_kernel
 from src.kernel.spec import CheckResult
 from src.kernel.utils import (
+    BF16,
+    FP32,
+    FP8_E4M3,
+    FP8_E8M0,
     check_compute_capability_at_least,
     check_contiguous,
     check_cuda_tensors,
@@ -28,11 +32,6 @@ except ImportError as error:
     _EXTENSION_ERROR: str | None = f"cuBLASLt extension unavailable: {error}"
 else:
     _EXTENSION_ERROR = None
-
-
-_E4M3 = frozenset({torch.float8_e4m3fn})
-_FP32 = frozenset({torch.float32})
-_BF16 = frozenset({torch.bfloat16})
 
 
 def _swizzle_32_4_4(scale: torch.Tensor) -> torch.Tensor:
@@ -67,68 +66,61 @@ def can_implement_scaled_gemm_mxfp8(
         )
     aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype = args
     tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
-    a_allowed_strides = ((aq.shape[1], 1),) if aq.ndim == 2 else ()
-    b_allowed_strides = ((bq.shape[1], 1), (1, bq.shape[0])) if bq.ndim == 2 else ()
     result = first_failure(
         (
             check_same_device(tensors, "cuBLASLt MXFP8 GEMM"),
             check_cuda_tensors(tensors, "cuBLASLt MXFP8 GEMM"),
-            check_dtypes((aq, bq), _E4M3, "cuBLASLt MXFP8 GEMM operands"),
+        )
+    )
+    if not result.ok:
+        return result
+    result = first_failure(
+        (
+            check_dtypes((aq, bq), FP8_E4M3, "cuBLASLt MXFP8 GEMM operands"),
             check_ndim(aq, frozenset({2}), "cuBLASLt MXFP8 GEMM A"),
             check_ndim(bq, frozenset({2}), "cuBLASLt MXFP8 GEMM B"),
+            check_ndim(sa, frozenset({2}), "cuBLASLt MXFP8 GEMM A scale"),
+            check_ndim(sb, frozenset({2}), "cuBLASLt MXFP8 GEMM B scale"),
+            check_dtypes((sa, sb), FP32, "cuBLASLt MXFP8 GEMM scales"),
+            check_values(
+                (block_size,),
+                frozenset({32}),
+                "cuBLASLt MXFP8 GEMM block_size",
+            ),
+            check_dtypes((scale_dtype,), FP8_E8M0, "cuBLASLt MXFP8 GEMM scale_dtype"),
+        )
+    )
+    if not result.ok:
+        return result
+    a_allowed_strides = ((aq.shape[1], 1),)
+    b_allowed_strides = ((bq.shape[1], 1), (1, bq.shape[0]))
+    scale_blocks = (aq.shape[1] + 31) // 32
+    result = first_failure(
+        (
             check_dimension_sizes_match(
                 ((aq, -1), (bq, -2)),
                 "cuBLASLt MXFP8 GEMM contraction dimensions",
             ),
-            check_ndim(sa, frozenset({2}), "cuBLASLt MXFP8 GEMM A scale"),
-            check_ndim(sb, frozenset({2}), "cuBLASLt MXFP8 GEMM B scale"),
-            check_dtypes((sa, sb), _FP32, "cuBLASLt MXFP8 GEMM scales"),
             check_contiguous(sa, "cuBLASLt MXFP8 GEMM A scale"),
             check_contiguous(sb, "cuBLASLt MXFP8 GEMM B scale"),
             check_matrix_layout(aq, 16, "cuBLASLt MXFP8 GEMM A"),
             check_matrix_layout(bq, 16, "cuBLASLt MXFP8 GEMM B"),
             check_stride(aq, a_allowed_strides, "cuBLASLt MXFP8 GEMM A"),
             check_stride(bq, b_allowed_strides, "cuBLASLt MXFP8 GEMM B"),
-            check_compute_capability_at_least(
-                aq.device, (10, 0), "cuBLASLt MXFP8 GEMM"
+            check_dimension_sizes_multiple_of(
+                ((aq, -1), (bq, -1)), 16, "cuBLASLt MXFP8 GEMM dimensions"
             ),
-        )
-    )
-    if not result.ok:
-        return result
-    result = check_dimension_sizes_multiple_of(
-        ((aq, -1), (bq, -1)), 16, "cuBLASLt MXFP8 GEMM dimensions"
-    )
-    if not result.ok:
-        return result
-    result = check_values(
-        (block_size,), frozenset({32}), "cuBLASLt MXFP8 GEMM block_size"
-    )
-    if not result.ok:
-        return result
-    result = check_values(
-        (scale_dtype,),
-        frozenset({"fp8_e8m0"}),
-        "cuBLASLt MXFP8 GEMM scale_dtype",
-    )
-    if not result.ok:
-        return result
-    scale_blocks = (aq.shape[1] + 31) // 32
-    result = first_failure(
-        (
             check_shape(sa, (aq.shape[0], scale_blocks), "cuBLASLt MXFP8 GEMM A scale"),
             check_shape(sb, (scale_blocks, bq.shape[1]), "cuBLASLt MXFP8 GEMM B scale"),
+            check_dtypes((out_dtype,), BF16, "cuBLASLt MXFP8 GEMM output dtype"),
         )
     )
-    if not result.ok:
-        return result
-    result = check_dtypes((out_dtype,), _BF16, "cuBLASLt MXFP8 GEMM output dtype")
     if not result.ok:
         return result
     if bias is not None:
         result = first_failure(
             (
-                check_dtypes((bias,), _BF16, "cuBLASLt MXFP8 GEMM bias"),
+                check_dtypes((bias,), BF16, "cuBLASLt MXFP8 GEMM bias"),
                 check_ndim(bias, frozenset({1}), "cuBLASLt MXFP8 GEMM bias"),
                 check_contiguous(bias, "cuBLASLt MXFP8 GEMM bias"),
                 check_shape(bias, (bq.shape[1],), "cuBLASLt MXFP8 GEMM bias"),
@@ -136,7 +128,10 @@ def can_implement_scaled_gemm_mxfp8(
         )
         if not result.ok:
             return result
-    return CheckResult(True)
+    result = first_failure(
+        (check_compute_capability_at_least(aq.device, (10, 0), "cuBLASLt MXFP8 GEMM"),)
+    )
+    return result
 
 
 @register_kernel(

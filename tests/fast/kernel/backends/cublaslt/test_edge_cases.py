@@ -48,7 +48,7 @@ def _view_operands(case: str) -> tuple[object, ...]:
         assert b.data_ptr() % 16 != 0
     scale_a = torch.ones((m, 1), device="cuda", dtype=torch.float32)
     scale_b = torch.ones((1, n), device="cuda", dtype=torch.float32)
-    return a, b, scale_a, scale_b, torch.bfloat16, 32, None, "fp8_e8m0"
+    return a, b, scale_a, scale_b, torch.bfloat16, 32, None, torch.float8_e8m0fnu
 
 
 @cuda_mxfp8_only
@@ -115,7 +115,16 @@ def _zero_operands(shape: tuple[int, int, int], with_bias: bool) -> tuple[object
         if with_bias
         else None
     )
-    return a, b, scale_a, scale_b, torch.bfloat16, 32, bias, "fp8_e8m0"
+    return (
+        a,
+        b,
+        scale_a,
+        scale_b,
+        torch.bfloat16,
+        32,
+        bias,
+        torch.float8_e8m0fnu,
+    )
 
 
 @cuda_mxfp8_only
