@@ -3,6 +3,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from src.kernel.backends.cublaslt import gemm as cublaslt_gemm
+from src.kernel.backends.eager import gemm as eager_gemm
+from src.kernel.backends.torch import gemm as torch_gemm
+from src.kernel.backends.triton import gemm as triton_gemm
+from src.kernel.spec import CheckResult
 from src.kernel.utils import (
     check_alignment,
     check_callable,
@@ -10,19 +15,35 @@ from src.kernel.utils import (
     check_compute_capability_in,
     check_contiguous,
     check_cuda_tensors,
+    check_dimension_sizes_match,
     check_dtypes,
     check_matrix_layout,
-    check_rank,
+    check_ndim,
+    check_nonempty,
     check_same_device,
+    check_shape,
+    check_stride,
+    first_failure,
 )
-from src.kernel.backends.cublaslt import gemm as cublaslt_gemm
-from src.kernel.backends.torch import gemm as torch_gemm
-from src.kernel.backends.triton import gemm as triton_gemm
 
 
 class _Owner:
     available = staticmethod(lambda: None)
     not_callable = None
+
+
+def test_first_failure_returns_first_failed_result():
+    first_failed_result = CheckResult(False, "first")
+    second_failed_result = CheckResult(False, "second")
+
+    assert (
+        first_failure((CheckResult(True), first_failed_result, second_failed_result))
+        is first_failed_result
+    )
+
+
+def test_first_failure_accepts_all_successful_results():
+    assert first_failure((CheckResult(True), CheckResult(True))) == CheckResult(True)
 
 
 def test_check_callable_accepts_callable_attribute():
@@ -90,15 +111,126 @@ def test_check_dtypes_reports_actual_and_allowed_dtypes():
     assert "float32" in result.reason
 
 
+def test_check_dtypes_requires_matching_dtypes_when_requested():
+    tensors = (torch.ones(1, dtype=torch.float32), torch.ones(1, dtype=torch.float16))
+
+    result = check_dtypes(
+        tensors,
+        frozenset({torch.float32, torch.float16}),
+        "grouped GEMM operands",
+        require_same=True,
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "grouped GEMM operands" in result.reason
+    assert "float16" in result.reason
+    assert "float32" in result.reason
+    assert "same dtype" in result.reason
+
+
+def test_check_dtypes_accepts_matching_dtypes_when_required():
+    tensors = (torch.ones(1, dtype=torch.float16), torch.zeros(1, dtype=torch.float16))
+
+    assert check_dtypes(
+        tensors,
+        frozenset({torch.float16, torch.float32}),
+        "grouped GEMM operands",
+        require_same=True,
+    ).ok
+
+
+def test_check_dtypes_reports_disallowed_dtype_before_mismatch():
+    tensors = (torch.ones(1, dtype=torch.float32), torch.ones(1, dtype=torch.float16))
+
+    result = check_dtypes(
+        tensors,
+        frozenset({torch.float32}),
+        "grouped GEMM operands",
+        require_same=True,
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "requires one of float32" in result.reason
+
+
+def test_check_nonempty_rejects_empty_tensor():
+    result = check_nonempty(torch.empty(0), "grouped GEMM offsets")
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "grouped GEMM offsets" in result.reason
+    assert "nonempty" in result.reason
+
+
+def test_check_nonempty_accepts_populated_tensor():
+    assert check_nonempty(torch.ones(1), "grouped GEMM offsets").ok
+
+
+def test_check_shape_reports_actual_and_expected_shapes():
+    result = check_shape(torch.empty(2, 3), (2, 4), "scaled GEMM A scale")
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "scaled GEMM A scale" in result.reason
+    assert "(2, 3)" in result.reason
+    assert "(2, 4)" in result.reason
+
+
+def test_check_shape_accepts_expected_shape():
+    assert check_shape(torch.empty(2, 3), (2, 3), "scaled GEMM A scale").ok
+
+
+def test_check_dimension_sizes_match_accepts_selected_dimensions():
+    tensors = ((torch.empty(2, 3), -1), (torch.empty(3, 4), 0))
+
+    assert check_dimension_sizes_match(tensors, "GEMM contraction dimensions").ok
+
+
+def test_check_dimension_sizes_match_accepts_more_than_two_dimensions():
+    tensors = (
+        (torch.empty(2, 3), 0),
+        (torch.empty(2, 4), 0),
+        (torch.empty(5, 2), 1),
+    )
+
+    assert check_dimension_sizes_match(tensors, "group counts").ok
+
+
+def test_check_dimension_sizes_match_reports_selected_sizes():
+    tensors = ((torch.empty(2, 3), -1), (torch.empty(4, 5), 0))
+
+    result = check_dimension_sizes_match(tensors, "GEMM contraction dimensions")
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "GEMM contraction dimensions" in result.reason
+    assert "3" in result.reason
+    assert "4" in result.reason
+    assert "matching sizes" in result.reason
+
+
+def test_check_dimension_sizes_match_rejects_invalid_dimension():
+    result = check_dimension_sizes_match(
+        ((torch.empty(3), -2), (torch.empty(3, 4), -2)),
+        "scaled GEMM contraction dimensions",
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "dimension -2" in result.reason
+
+
 @pytest.mark.parametrize("ndim", [2, 3])
-def test_check_rank_accepts_allowed_ranks(ndim: int):
+def test_check_ndim_accepts_allowed_ndims(ndim: int):
     tensor = torch.empty((1,) * ndim)
 
-    assert check_rank(tensor, frozenset({2, 3}), "grouped operand").ok
+    assert check_ndim(tensor, frozenset({2, 3}), "grouped operand").ok
 
 
-def test_check_rank_reports_actual_and_allowed_ranks():
-    result = check_rank(torch.ones(1), frozenset({2, 3}), "grouped operand")
+def test_check_ndim_reports_actual_and_allowed_ndims():
+    result = check_ndim(torch.ones(1), frozenset({2, 3}), "grouped operand")
 
     assert not result.ok
     assert result.reason is not None
@@ -118,6 +250,31 @@ def test_check_contiguous_reports_layout_requirement():
     assert "scale tensor" in result.reason
     assert "non-contiguous" in result.reason
     assert "contiguous" in result.reason
+
+
+def test_check_stride_accepts_allowed_stride():
+    tensor = torch.empty_strided((2, 3), (3, 1))
+
+    assert check_stride(tensor, ((3, 1),), "matrix").ok
+
+
+def test_check_stride_accepts_empty_tensor_with_disallowed_stride():
+    tensor = torch.empty_strided((0, 3), (4, 1))
+
+    assert check_stride(tensor, ((3, 1),), "matrix").ok
+
+
+def test_check_stride_reports_actual_and_allowed_strides():
+    tensor = torch.empty_strided((2, 3), (4, 1))
+
+    result = check_stride(tensor, ((3, 1), (1, 2)), "matrix")
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "matrix" in result.reason
+    assert "(4, 1)" in result.reason
+    assert "(3, 1)" in result.reason
+    assert "(1, 2)" in result.reason
 
 
 def test_check_alignment_accepts_aligned_non_unit_strides():
@@ -337,6 +494,57 @@ def _default_grouped_metadata():
     return _grouped_metadata("ragged_m", False)
 
 
+def test_eager_grouped_requires_matching_allowed_operand_dtypes():
+    args = (
+        torch.empty(64, 64, dtype=torch.float16),
+        torch.empty(2, 64, 48, dtype=torch.float32),
+        torch.tensor([32, 64], dtype=torch.int32),
+        None,
+    )
+
+    result = eager_gemm.can_implement_grouped_gemm(args, {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "same dtype" in result.reason
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        torch_gemm.can_implement_grouped_gemm,
+        triton_gemm.can_implement_grouped_gemm,
+    ],
+)
+def test_grouped_backends_reject_empty_offsets(
+    monkeypatch: pytest.MonkeyPatch, predicate
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_default_grouped_metadata())
+    args[2] = _TensorMeta((0,), torch.int32)
+
+    result = predicate(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "nonempty" in result.reason
+
+
+def test_eager_grouped_rejects_empty_offsets():
+    args = (
+        torch.empty(64, 64, dtype=torch.bfloat16),
+        torch.empty(2, 64, 48, dtype=torch.bfloat16),
+        torch.empty(0, dtype=torch.int32),
+        None,
+    )
+
+    result = eager_gemm.can_implement_grouped_gemm(args, {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "nonempty" in result.reason
+
+
 @pytest.mark.parametrize("layout", ["ragged_m", "ragged_k"])
 def test_torch_grouped_accepts_supported_bias_layouts(
     monkeypatch: pytest.MonkeyPatch, layout: str
@@ -366,7 +574,7 @@ def test_torch_grouped_rejects_ragged_n_bias(monkeypatch: pytest.MonkeyPatch):
             _TensorMeta((2, 48), torch.bfloat16, contiguous=False),
             "contiguous",
         ),
-        (_TensorMeta((2, 48), torch.float16), "bias dtype"),
+        (_TensorMeta((2, 48), torch.float16), "dtype"),
         (_TensorMeta((2, 47), torch.bfloat16), "shape"),
     ],
 )
@@ -446,6 +654,47 @@ def _scaled_grouped_metadata(device: str = "cuda:7"):
     )
 
 
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        torch_gemm.can_implement_scaled_grouped_gemm,
+        triton_gemm.can_implement_scaled_grouped_gemm,
+    ],
+)
+def test_scaled_grouped_backends_reject_empty_offsets(
+    monkeypatch: pytest.MonkeyPatch, predicate
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_scaled_grouped_metadata())
+    args[4] = _TensorMeta((0,), torch.int32)
+
+    result = predicate(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "nonempty" in result.reason
+
+
+def test_eager_scaled_grouped_rejects_empty_offsets():
+    args = (
+        torch.empty(64, 64, dtype=torch.float8_e4m3fn),
+        torch.empty(2, 64, 48, dtype=torch.float8_e4m3fn),
+        torch.empty(64, 1, dtype=torch.float32),
+        torch.empty(2, 1, 48, dtype=torch.float32),
+        torch.empty(0, dtype=torch.int32),
+        torch.bfloat16,
+        0,
+        None,
+        None,
+    )
+
+    result = eager_gemm.can_implement_scaled_grouped_gemm(args, {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "nonempty" in result.reason
+
+
 def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
     nblocks = (k + block_size - 1) // block_size if block_size else 1
     return (
@@ -475,13 +724,13 @@ def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
         (
             "invalid_logical_scale_shapes",
             lambda args: args.__setitem__(2, _TensorMeta((129, 4), torch.float32)),
-            "scale shapes",
+            "A scale",
         ),
         ("fp16_output", lambda args: args.__setitem__(4, torch.float16), "bf16"),
         (
             "invalid_bias",
             lambda args: args.__setitem__(6, _TensorMeta((160,), torch.float16)),
-            "bias dtype",
+            "dtype",
         ),
     ],
 )
@@ -513,6 +762,21 @@ def test_cublaslt_scaled_gemm_accepts_sm120_contract(
     assert result.ok
 
 
+def test_cublaslt_scaled_gemm_rejects_invalid_ndim_before_stride_contract(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(cublaslt_gemm, "_EXTENSION_ERROR", None)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+    args = list(_cublaslt_scaled_metadata())
+    args[0] = _TensorMeta((144,), torch.float8_e4m3fn)
+
+    result = cublaslt_gemm.can_implement_scaled_gemm_mxfp8(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "rank" in result.reason
+
+
 def test_cublaslt_scaled_gemm_rejects_missing_extension(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -526,17 +790,19 @@ def test_cublaslt_scaled_gemm_rejects_missing_extension(
     assert result.reason == "extension unavailable"
 
 
-def test_cublaslt_scaled_gemm_rejects_sm90(monkeypatch: pytest.MonkeyPatch):
+def test_cublaslt_scaled_gemm_checks_contract_before_sm100(
+    monkeypatch: pytest.MonkeyPatch,
+):
     monkeypatch.setattr(cublaslt_gemm, "_EXTENSION_ERROR", None)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (9, 0))
+    args = list(_cublaslt_scaled_metadata())
+    args[0] = _TensorMeta((129, 144), torch.int8)
 
-    result = cublaslt_gemm.can_implement_scaled_gemm_mxfp8(
-        _cublaslt_scaled_metadata(), {}
-    )
+    result = cublaslt_gemm.can_implement_scaled_gemm_mxfp8(tuple(args), {})
 
     assert not result.ok
     assert result.reason is not None
-    assert "SM100" in result.reason
+    assert "operands" in result.reason
 
 
 @pytest.mark.parametrize(
@@ -1007,28 +1273,28 @@ def test_gemm_validation_rejects_offset_dtype_or_layout_and_output_or_scale_dtyp
             _scaled_metadata,
             2,
             _TensorMeta((64, 2), torch.float32),
-            "scale shapes",
+            "A scale",
         ),
         (
             torch_gemm.can_implement_scaled_gemm,
             _scaled_metadata,
             5,
             32,
-            "scale shapes",
+            "A scale",
         ),
         (
             torch_gemm.can_implement_scaled_gemm,
             _scaled_metadata,
             6,
             _TensorMeta((64,), torch.float32),
-            "bias dtype",
+            "dtype",
         ),
         (
             triton_gemm.can_implement_grouped_gemm,
             _default_grouped_metadata,
             3,
             _TensorMeta((2, 47), torch.bfloat16),
-            "bias must have shape",
+            "shape",
         ),
     ],
 )
@@ -1096,15 +1362,15 @@ def test_triton_grouped_gemm_validation_rejects_bias_for_ragged_n(
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
-        ("contraction", "contraction dimensions do not match"),
-        ("sa_rows", "invalid A scale layout"),
+        ("contraction", "contraction dimensions"),
+        ("sa_rows", "A scale"),
         ("sa_1d", "rank"),
-        ("sb_cols", "invalid B scale layout"),
-        ("sb_blocks", "invalid B scale layout"),
+        ("sb_cols", "B scale"),
+        ("sb_blocks", "B scale"),
         ("sb_1d", "rank"),
-        ("scale_blocks_vs_block_size", "invalid A scale layout"),
-        ("bias_len", "bias must be a one-dimensional output-width vector"),
-        ("bias_2d", "bias must be a one-dimensional output-width vector"),
+        ("scale_blocks_vs_block_size", "A scale"),
+        ("bias_len", "bias"),
+        ("bias_2d", "bias"),
         ("cross_family_dtype", "same dtype family"),
     ],
 )

@@ -69,8 +69,8 @@ def test_auto_falls_back_for_unsafe_operand_view(case: str):
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
-        ("padded_a", "compact row-major A"),
-        ("padded_b", "compact row-major or column-major B"),
+        ("padded_a", "MXFP8 GEMM A has stride"),
+        ("padded_b", "MXFP8 GEMM B has stride"),
     ],
 )
 def test_forced_backend_rejects_unsafe_operand_view(case: str, reason: str):

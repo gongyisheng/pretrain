@@ -3,6 +3,13 @@ import torch
 from src.kernel.spec import CheckResult
 
 
+def first_failure(results: tuple[CheckResult, ...]) -> CheckResult:
+    for result in results:
+        if not result.ok:
+            return result
+    return CheckResult(True)
+
+
 def _dtype_name(dtype: torch.dtype) -> str:
     return str(dtype).removeprefix("torch.")
 
@@ -55,16 +62,69 @@ def check_dtypes(
     tensors: tuple[torch.Tensor, ...],
     allowed_dtypes: frozenset[torch.dtype],
     feature: str,
+    require_same: bool = False,
 ) -> CheckResult:
     actual_dtypes = frozenset(tensor.dtype for tensor in tensors)
     rejected = actual_dtypes.difference(allowed_dtypes)
-    if not rejected:
+    if rejected:
+        actual = ", ".join(_dtype_name(dtype) for dtype in sorted(rejected, key=str))
+        allowed = ", ".join(
+            _dtype_name(dtype) for dtype in sorted(allowed_dtypes, key=str)
+        )
+        return CheckResult(
+            False,
+            f"{feature} received dtype(s) {actual}; requires one of {allowed}",
+        )
+    if require_same and len(actual_dtypes) > 1:
+        actual = ", ".join(
+            _dtype_name(dtype) for dtype in sorted(actual_dtypes, key=str)
+        )
+        return CheckResult(
+            False,
+            f"{feature} received dtype(s) {actual}; requires the same dtype",
+        )
+    return CheckResult(True)
+
+
+def check_nonempty(tensor: torch.Tensor, feature: str) -> CheckResult:
+    if tensor.numel() > 0:
         return CheckResult(True)
-    actual = ", ".join(_dtype_name(dtype) for dtype in sorted(rejected, key=str))
-    allowed = ", ".join(_dtype_name(dtype) for dtype in sorted(allowed_dtypes, key=str))
+    return CheckResult(False, f"{feature} is empty; requires a nonempty tensor")
+
+
+def check_shape(
+    tensor: torch.Tensor,
+    expected_shape: tuple[int, ...],
+    feature: str,
+) -> CheckResult:
+    actual_shape = tuple(tensor.shape)
+    if actual_shape == expected_shape:
+        return CheckResult(True)
     return CheckResult(
         False,
-        f"{feature} received dtype(s) {actual}; requires one of {allowed}",
+        f"{feature} has shape {actual_shape}; requires shape {expected_shape}",
+    )
+
+
+def check_dimension_sizes_match(
+    tensor_dimensions: tuple[tuple[torch.Tensor, int], ...],
+    feature: str,
+) -> CheckResult:
+    sizes = []
+    for tensor, dimension in tensor_dimensions:
+        if not -tensor.ndim <= dimension < tensor.ndim:
+            return CheckResult(
+                False,
+                f"{feature} received dimension {dimension} for a rank {tensor.ndim} "
+                "tensor",
+            )
+        sizes.append(tensor.shape[dimension])
+    if len(set(sizes)) <= 1:
+        return CheckResult(True)
+    actual = ", ".join(str(size) for size in sizes)
+    return CheckResult(
+        False,
+        f"{feature} received sizes {actual}; requires matching sizes",
     )
 
 
@@ -109,12 +169,12 @@ def check_compute_capability_in(
     )
 
 
-def check_rank(
-    tensor: torch.Tensor, allowed_ranks: frozenset[int], feature: str
+def check_ndim(
+    tensor: torch.Tensor, allowed_ndims: frozenset[int], feature: str
 ) -> CheckResult:
-    if tensor.ndim in allowed_ranks:
+    if tensor.ndim in allowed_ndims:
         return CheckResult(True)
-    allowed = ", ".join(str(rank) for rank in sorted(allowed_ranks))
+    allowed = ", ".join(str(ndim) for ndim in sorted(allowed_ndims))
     return CheckResult(
         False,
         f"{feature} has rank {tensor.ndim}; requires rank in {{{allowed}}}",
@@ -127,6 +187,21 @@ def check_contiguous(tensor: torch.Tensor, feature: str) -> CheckResult:
     return CheckResult(
         False,
         f"{feature} is non-contiguous; requires a contiguous tensor",
+    )
+
+
+def check_stride(
+    tensor: torch.Tensor,
+    allowed_strides: tuple[tuple[int, ...], ...],
+    feature: str,
+) -> CheckResult:
+    actual_stride = tensor.stride()
+    if tensor.numel() == 0 or actual_stride in allowed_strides:
+        return CheckResult(True)
+    allowed = ", ".join(str(stride) for stride in allowed_strides)
+    return CheckResult(
+        False,
+        f"{feature} has stride {actual_stride}; requires one of {allowed}",
     )
 
 
