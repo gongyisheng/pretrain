@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Union
+import torch
 import yaml
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
@@ -19,6 +20,10 @@ from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 _DEVICES = frozenset({"auto", "cuda", "cpu"})
+_SCALE_DTYPES = {
+    "fp32": torch.float32,
+    "fp8_e8m0": torch.float8_e8m0fnu,
+}
 
 
 @dataclass
@@ -412,6 +417,8 @@ class QuantizationConfig:
                         f"mxfp8 scaling requires an fp8 element for {operand}, "
                         f"got {fmt!r}"
                     )
+
+        self.scaling["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
 
 
 @dataclass

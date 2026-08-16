@@ -12,7 +12,7 @@ from src.quant.utils import str_to_qmax
 _E4M3 = "fp8_e4m3"
 
 
-def _scaling(gran, bs=0, scale_dtype="fp32"):
+def _scaling(gran, bs=0, scale_dtype=torch.float32):
     return {
         "granularity": gran,
         "block_shape": (1, bs) if bs else (0, 0),
@@ -45,7 +45,11 @@ def test_block_shape_1d_matches_legacy_block_size(bs, contract_dim):
         x,
         contract_dim,
         _E4M3,
-        {"granularity": "blockwise", "block_shape": (1, bs), "scale_dtype": "fp32"},
+        {
+            "granularity": "blockwise",
+            "block_shape": (1, bs),
+            "scale_dtype": torch.float32,
+        },
     )
     expected_blocks = (x.shape[contract_dim] + bs - 1) // bs
     assert scale.shape[contract_dim] == expected_blocks
@@ -205,7 +209,7 @@ def test_int_tensorwise_recon_within_half_scale(fmt):
 
 # --- power-of-two (E8M0 / MX-style) scale ---
 
-_MXFP8 = _scaling("blockwise", 32, "fp8_e8m0")
+_MXFP8 = _scaling("blockwise", 32, torch.float8_e8m0fnu)
 
 
 def test_power_of_two_scale_is_exact_pow2():
@@ -374,7 +378,7 @@ def test_ragged_last_dim_is_the_transpose_of_ragged_first(gran, bs):
 # --- dequantize_operand ---
 
 
-def _manual_dequant(x, contract_dim, bs, fmt, scale_dtype="fp32"):
+def _manual_dequant(x, contract_dim, bs, fmt, scale_dtype=torch.float32):
     """Reference dequant using the *true* block size `bs` (never inferred from
     `nkb`/`K`), to regression-test that dequantize_operand's own bs recovery
     matches it even when the last block is partial (K not a multiple of bs)."""
@@ -644,7 +648,7 @@ def test_tile2d_amax_reduces_to_block_counts(tile):
 # --- 2D (square-tile) blockwise ---
 
 
-def _scaling2d(tile, scale_dtype="fp32"):
+def _scaling2d(tile, scale_dtype=torch.float32):
     return {
         "granularity": "blockwise",
         "block_shape": (tile, tile),
@@ -671,7 +675,7 @@ def test_blockwise_2d_scale_uses_the_1d_layout(tile, contract_dim):
     x = torch.randn(64, 128)
     _, scale_2d = quantize_operand(x, contract_dim, _E4M3, _scaling2d(tile))
     _, scale_1d = quantize_operand(
-        x, contract_dim, _E4M3, _scaling("blockwise", tile, "fp32")
+        x, contract_dim, _E4M3, _scaling("blockwise", tile, torch.float32)
     )
     assert scale_2d.shape == scale_1d.shape
 
@@ -709,7 +713,7 @@ def test_quantize_operand_2d_compiles_fullgraph():
     scaling = {
         "granularity": "blockwise",
         "block_shape": (32, 32),
-        "scale_dtype": "fp32",
+        "scale_dtype": torch.float32,
     }
     x = torch.randn(256, 512, device="cuda", dtype=torch.bfloat16)
     fn = torch.compile(lambda: quantize_operand(x, -1, _E4M3, scaling), fullgraph=True)

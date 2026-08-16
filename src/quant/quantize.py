@@ -45,9 +45,11 @@ def _scale_block_map(offs, n_rows, block_size) -> tuple[torch.Tensor, int]:
     return row_blocks, n_rows // block_size + n_groups
 
 
-def _compute_scale(amax: torch.Tensor, fmt: str, scale_dtype: str) -> torch.Tensor:
+def _compute_scale(
+    amax: torch.Tensor, fmt: str, scale_dtype: torch.dtype
+) -> torch.Tensor:
     """fp32 dequant scale from per-block amax."""
-    if scale_dtype == "fp8_e8m0":
+    if scale_dtype is torch.float8_e8m0fnu:
         # e8m0 is a bare 8-bit exponent: a power of two, biased to cover +-127.
         exp = torch.ceil(torch.log2(amax.clamp_min(EPS) / str_to_qmax(fmt)))
         return torch.exp2(exp.clamp(-127, 127))

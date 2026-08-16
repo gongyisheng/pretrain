@@ -2,6 +2,7 @@ import glob
 import tempfile
 import os
 import pytest
+import torch
 import yaml
 from src.utils.config import (
     ModelConfig,
@@ -911,7 +912,7 @@ def test_quant_mxfp8_recipe_expands_dtype_and_scaling():
     assert q.scaling == {
         "granularity": "blockwise",
         "block_shape": (1, 32),
-        "scale_dtype": "fp8_e8m0",
+        "scale_dtype": torch.float8_e8m0fnu,
     }
 
 
@@ -923,7 +924,7 @@ def test_quant_mxfp8_scaling_recipe_expands():
     )
     assert q.scaling["granularity"] == "blockwise"
     assert q.scaling["block_shape"] == (1, 32)
-    assert q.scaling["scale_dtype"] == "fp8_e8m0"
+    assert q.scaling["scale_dtype"] is torch.float8_e8m0fnu
     assert "recipe" not in q.scaling  # recipe key is consumed on expansion
 
 
@@ -977,7 +978,7 @@ def test_quant_rowwise_defaults_scale_dtype_to_fp32(scale_dtype):
         scaling={"granularity": "rowwise", **scale_dtype},
     )
     assert q.scaling["granularity"] == "rowwise"
-    assert q.scaling["scale_dtype"] == "fp32"
+    assert q.scaling["scale_dtype"] is torch.float32
 
 
 def test_quant_mxfp8_normalizes_through_training_config():
@@ -987,7 +988,7 @@ def test_quant_mxfp8_normalizes_through_training_config():
             quantization={"dtype": {"recipe": "mxfp8"}, "enabled": True},
         )
     )
-    assert r.scaling["scale_dtype"] == "fp8_e8m0"
+    assert r.scaling["scale_dtype"] is torch.float8_e8m0fnu
     assert r.dtype["weight"] == "fp8_e4m3"
 
 
@@ -1215,7 +1216,7 @@ def test_quant_blockwise_recipe_expands():
     )
     assert q.scaling["granularity"] == "blockwise"
     assert q.scaling["block_shape"] == (1, 128)
-    assert q.scaling["scale_dtype"] == "fp32"
+    assert q.scaling["scale_dtype"] is torch.float32
     assert "recipe" not in q.scaling
 
 
@@ -1267,7 +1268,7 @@ def test_quant_blockwise_fp32_scale_dtype_ok():
             "scale_dtype": "fp32",
         },
     )
-    assert q.scaling["scale_dtype"] == "fp32"
+    assert q.scaling["scale_dtype"] is torch.float32
 
 
 def test_quant_block_size_key_is_rejected():
