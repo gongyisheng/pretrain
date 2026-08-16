@@ -151,7 +151,7 @@ def _make(M, K, N):
 _FMT = {E4M3: "fp8_e4m3", E5M2: "fp8_e5m2"}
 
 
-def _scaling(gran, bs=0, scale_dtype=None):
+def _scaling(gran, bs=0, scale_dtype=torch.float32):
     return {
         "granularity": gran,
         "block_shape": (1, bs) if bs else (0, 0),
@@ -162,7 +162,7 @@ def _scaling(gran, bs=0, scale_dtype=None):
 def _scaling_for_config(config):
     block_size = config["block_size"] or 0
     if config["label"] == "mxfp8":
-        return _scaling("blockwise", block_size, "fp8_e8m0")
+        return _scaling("blockwise", block_size, torch.float8_e8m0fnu)
     if config["granularity"] == "tensorwise":
         return _scaling("tensorwise")
     if config["granularity"] == "rowwise":
@@ -175,7 +175,7 @@ def _scaling_for_config(config):
     return {
         "granularity": "blockwise",
         "block_shape": shape,
-        "scale_dtype": "fp32",
+        "scale_dtype": torch.float32,
     }
 
 
@@ -209,7 +209,7 @@ def _bench_scheme(a, b, config):
     fmt = _FMT[E4M3] if config["dtype"] == "fp8" else "int8"
     aq, sa = quantize_operand(a, -1, fmt, scaling)
     bq, sb = quantize_operand(b, -2, fmt, scaling)
-    scale_dtype = "fp8_e8m0" if config["label"] == "mxfp8" else None
+    scale_dtype = scaling["scale_dtype"]
 
     ref = scaled_gemm(
         aq,

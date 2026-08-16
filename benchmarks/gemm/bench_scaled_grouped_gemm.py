@@ -49,7 +49,11 @@ def _fmt(scheme):
     return "fp8_e4m3" if scheme == "fp8_rowwise" else "int8"
 
 
-_ROWWISE = {"granularity": "rowwise", "block_shape": (0, 0), "scale_dtype": None}
+_ROWWISE = {
+    "granularity": "rowwise",
+    "block_shape": (0, 0),
+    "scale_dtype": torch.float32,
+}
 
 
 def _make(E, M, K, N, seed=0):

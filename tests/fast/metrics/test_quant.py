@@ -5,7 +5,11 @@ from src.quant.quantize import dequantize_operand, quantize_operand
 from src.metrics.functional import _quantization_metrics, compute_quantization_metrics
 from src.metrics.quant import QuantizationStats, accumulate_quantization_sums
 
-_TENSORWISE = {"granularity": "tensorwise", "block_shape": (0, 0), "scale_dtype": None}
+_TENSORWISE = {
+    "granularity": "tensorwise",
+    "block_shape": (0, 0),
+    "scale_dtype": torch.float32,
+}
 
 METRICS = ("sqnr", "underflow_rate")
 SPREAD_METRICS = ("sqnr_min", "underflow_rate_max")

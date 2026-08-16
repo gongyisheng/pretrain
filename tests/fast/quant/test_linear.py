@@ -21,7 +21,7 @@ from src.utils.config import (
 _E4M3 = "fp8_e4m3"
 
 
-def _scaling(gran, bs=0, scale_dtype="fp32"):
+def _scaling(gran, bs=0, scale_dtype=torch.float32):
     return {
         "granularity": gran,
         "block_shape": (1, bs) if bs else (0, 0),
@@ -29,7 +29,13 @@ def _scaling(gran, bs=0, scale_dtype="fp32"):
     }
 
 
-_MXFP8 = _scaling("blockwise", 32, "fp8_e8m0")
+_MXFP8 = _scaling("blockwise", 32, torch.float8_e8m0fnu)
+
+
+def test_mxfp8_oracle_scaling_uses_power_of_two_scales():
+    _, scale = quantize_operand(torch.ones(1, 32), -1, _E4M3, _MXFP8)
+    log2_scale = torch.log2(scale)
+    assert torch.equal(log2_scale, log2_scale.round())
 
 
 def _roundtrip(x, contract_dim, fmt, scaling):
@@ -449,12 +455,12 @@ def test_quantized_linear_forward_backward_with_square_tiles():
 
 
 @fp8_only
-@pytest.mark.parametrize("scale_dtype", ["fp32", "fp8_e8m0"])
+@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float8_e8m0fnu])
 @pytest.mark.parametrize("tile", [32, 64])
 def test_quantized_gemm_2d_matches_fp32_dequant_reference(tile, scale_dtype):
     """The real kernel path against an fp32 oracle, both scale dtypes.
 
-    tile=64 with scale_dtype="fp8_e8m0" also exercises rep_k == 2, composing the 2D
+    tile=64 with `torch.float8_e8m0fnu` also exercises rep_k == 2, composing the 2D
     outer-axis expansion with the mxfp8 K-replication fast path.
     """
     scaling = {
