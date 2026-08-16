@@ -13,6 +13,7 @@ from src.kernel.utils import (
     check_contiguous,
     check_cuda_tensors,
     check_dimension_sizes_match,
+    check_dimension_sizes_multiple_of,
     check_dtypes,
     check_matrix_layout,
     check_ndim,
@@ -141,7 +142,6 @@ def can_implement_grouped_gemm(
 @register_kernel(
     op="gemm.grouped",
     backend="torch",
-    priority=50,
     can_implement=can_implement_grouped_gemm,
     build="eager",
     autograd=False,
@@ -199,8 +199,11 @@ def _scaled_common_checks(
         return result
     if any(dimension == 0 for dimension in (aq.shape[0], aq.shape[1], bq.shape[1])):
         return CheckResult(False, f"{feature} dimensions must be positive")
-    if any(dimension % 16 != 0 for dimension in (aq.shape[1], bq.shape[1])):
-        return CheckResult(False, f"{feature} dimensions must be multiples of 16")
+    result = check_dimension_sizes_multiple_of(
+        ((aq, -1), (bq, -1)), 16, f"{feature} dimensions"
+    )
+    if not result.ok:
+        return result
     if type(block_size) is not int or block_size < 0:
         return CheckResult(False, "block_size must be a non-negative integer")
     result = check_values(
@@ -257,11 +260,11 @@ def can_implement_scaled_gemm(
     if not result.ok:
         return result
     if aq.dtype == torch.int8 and bq.dtype == torch.int8:
-        if aq.shape[0] % 32 != 0:
-            return CheckResult(
-                False,
-                "torch scaled GEMM INT8 output rows must be a multiple of 32",
-            )
+        result = check_dimension_sizes_multiple_of(
+            ((aq, -2),), 32, "torch scaled GEMM INT8 output rows"
+        )
+        if not result.ok:
+            return result
         result = check_callable(torch, "torch", "_int_mm")
         minimum_capability = (8, 0)
     else:
@@ -369,7 +372,6 @@ def _can_use_native_mxfp8(aq, bq, block_size, scale_dtype):
 @register_kernel(
     op="gemm.scaled",
     backend="torch",
-    priority=50,
     can_implement=can_implement_scaled_gemm,
     build="eager",
     autograd=False,
@@ -447,10 +449,11 @@ def can_implement_scaled_grouped_gemm(
     )
     if not result.ok:
         return result
-    if any(dimension % 16 != 0 for dimension in (aq.shape[1], bq.shape[2])):
-        return CheckResult(
-            False, "torch scaled grouped GEMM dimensions must be multiples of 16"
-        )
+    result = check_dimension_sizes_multiple_of(
+        ((aq, -1), (bq, -1)), 16, "torch scaled grouped GEMM dimensions"
+    )
+    if not result.ok:
+        return result
     result = check_values(
         (block_size,), frozenset({0}), "torch scaled grouped GEMM block_size"
     )
@@ -496,7 +499,6 @@ def _group_column_major(tensor: torch.Tensor) -> torch.Tensor:
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="torch",
-    priority=50,
     can_implement=can_implement_scaled_grouped_gemm,
     build="eager",
     autograd=False,

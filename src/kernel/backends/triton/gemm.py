@@ -316,7 +316,6 @@ def can_implement_grouped_gemm(
 @register_kernel(
     op="gemm.grouped",
     backend="triton",
-    priority=100,
     can_implement=can_implement_grouped_gemm,
     build="jit",
     autograd=False,
@@ -686,7 +685,6 @@ def can_implement_scaled_gemm(
 @register_kernel(
     op="gemm.scaled",
     backend="triton",
-    priority=100,
     can_implement=can_implement_scaled_gemm,
     build="jit",
     autograd=False,
@@ -1391,7 +1389,6 @@ def can_implement_scaled_grouped_gemm(
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="triton",
-    priority=100,
     can_implement=can_implement_scaled_grouped_gemm,
     build="jit",
     autograd=False,

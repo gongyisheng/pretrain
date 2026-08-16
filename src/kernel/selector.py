@@ -4,7 +4,7 @@ from typing import Any
 import torch
 
 from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry
-from src.kernel.spec import CheckResult, KernelSpec
+from src.kernel.spec import BACKEND_PRIORITIES, CheckResult, KernelSpec
 
 
 class KernelSelectionError(RuntimeError):
@@ -63,7 +63,11 @@ def select_kernel(
         return spec
 
     rejected: list[str] = []
-    for spec in sorted(specs, key=lambda item: item.priority, reverse=True):
+    for spec in sorted(
+        specs,
+        key=lambda item: BACKEND_PRIORITIES[item.backend],
+        reverse=True,
+    ):
         result = _check(spec, args, kwargs)
         if result.ok:
             return spec

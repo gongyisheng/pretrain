@@ -16,6 +16,7 @@ from src.kernel.utils import (
     check_contiguous,
     check_cuda_tensors,
     check_dimension_sizes_match,
+    check_dimension_sizes_multiple_of,
     check_dtypes,
     check_matrix_layout,
     check_ndim,
@@ -261,6 +262,45 @@ def test_check_dimension_sizes_match_rejects_invalid_dimension():
     result = check_dimension_sizes_match(
         ((torch.empty(3), -2), (torch.empty(3, 4), -2)),
         "scaled GEMM contraction dimensions",
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "dimension -2" in result.reason
+
+
+def test_check_dimension_sizes_multiple_of_accepts_selected_dimensions():
+    tensor_dimensions = (
+        (torch.empty(2, 16), -1),
+        (torch.empty(32, 3), 0),
+    )
+
+    assert check_dimension_sizes_multiple_of(
+        tensor_dimensions, 16, "GEMM dimensions"
+    ).ok
+
+
+def test_check_dimension_sizes_multiple_of_reports_rejected_sizes():
+    tensor_dimensions = (
+        (torch.empty(2, 15), -1),
+        (torch.empty(18, 3), 0),
+    )
+
+    result = check_dimension_sizes_multiple_of(tensor_dimensions, 16, "GEMM dimensions")
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "GEMM dimensions" in result.reason
+    assert "15" in result.reason
+    assert "18" in result.reason
+    assert "multiples of 16" in result.reason
+
+
+def test_check_dimension_sizes_multiple_of_rejects_invalid_dimension():
+    result = check_dimension_sizes_multiple_of(
+        ((torch.empty(3), -2),),
+        16,
+        "scaled GEMM dimensions",
     )
 
     assert not result.ok
@@ -963,9 +1003,10 @@ def test_torch_scaled_gemm_int8_rejects_unaligned_output_rows(
     )
 
     assert not result.ok
-    assert (
-        result.reason == "torch scaled GEMM INT8 output rows must be a multiple of 32"
-    )
+    assert result.reason is not None
+    assert "torch scaled GEMM INT8 output rows" in result.reason
+    assert "17" in result.reason
+    assert "multiples of 32" in result.reason
 
 
 @pytest.mark.parametrize(

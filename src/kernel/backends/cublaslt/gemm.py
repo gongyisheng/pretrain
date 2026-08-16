@@ -11,6 +11,7 @@ from src.kernel.utils import (
     check_contiguous,
     check_cuda_tensors,
     check_dimension_sizes_match,
+    check_dimension_sizes_multiple_of,
     check_dtypes,
     check_matrix_layout,
     check_ndim,
@@ -31,6 +32,7 @@ else:
 
 _E4M3 = frozenset({torch.float8_e4m3fn})
 _FP32 = frozenset({torch.float32})
+_BF16 = frozenset({torch.bfloat16})
 
 
 def _swizzle_32_4_4(scale: torch.Tensor) -> torch.Tensor:
@@ -94,10 +96,11 @@ def can_implement_scaled_gemm_mxfp8(
     )
     if not result.ok:
         return result
-    if any(dimension % 16 != 0 for dimension in (aq.shape[1], bq.shape[1])):
-        return CheckResult(
-            False, "cuBLASLt MXFP8 GEMM dimensions must be multiples of 16"
-        )
+    result = check_dimension_sizes_multiple_of(
+        ((aq, -1), (bq, -1)), 16, "cuBLASLt MXFP8 GEMM dimensions"
+    )
+    if not result.ok:
+        return result
     result = check_values(
         (block_size,), frozenset({32}), "cuBLASLt MXFP8 GEMM block_size"
     )
@@ -119,19 +122,13 @@ def can_implement_scaled_gemm_mxfp8(
     )
     if not result.ok:
         return result
-    result = check_dtypes(
-        (out_dtype,),
-        frozenset({torch.bfloat16}),
-        "cuBLASLt MXFP8 GEMM output dtype",
-    )
+    result = check_dtypes((out_dtype,), _BF16, "cuBLASLt MXFP8 GEMM output dtype")
     if not result.ok:
         return result
     if bias is not None:
         result = first_failure(
             (
-                check_dtypes(
-                    (bias,), frozenset({torch.bfloat16}), "cuBLASLt MXFP8 GEMM bias"
-                ),
+                check_dtypes((bias,), _BF16, "cuBLASLt MXFP8 GEMM bias"),
                 check_ndim(bias, frozenset({1}), "cuBLASLt MXFP8 GEMM bias"),
                 check_contiguous(bias, "cuBLASLt MXFP8 GEMM bias"),
                 check_shape(bias, (bq.shape[1],), "cuBLASLt MXFP8 GEMM bias"),
@@ -145,7 +142,6 @@ def can_implement_scaled_gemm_mxfp8(
 @register_kernel(
     op="gemm.scaled",
     backend="cublaslt",
-    priority=150,
     can_implement=can_implement_scaled_gemm_mxfp8,
     build="aot",
     autograd=False,

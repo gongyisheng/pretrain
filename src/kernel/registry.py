@@ -30,7 +30,6 @@ KERNEL_REGISTRY = KernelRegistry()
 def register_kernel(
     op: str,
     backend: str,
-    priority: int,
     can_implement: CanImplementFn,
     build: BuildMode,
     autograd: bool,
@@ -41,7 +40,6 @@ def register_kernel(
                 op=op,
                 backend=backend,
                 fn=fn,
-                priority=priority,
                 can_implement=can_implement,
                 build=build,
                 autograd=autograd,

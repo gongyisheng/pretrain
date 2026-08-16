@@ -214,7 +214,6 @@ def _bounds(offs):
 @register_kernel(
     op="gemm.grouped",
     backend="eager",
-    priority=-1000,
     can_implement=can_implement_grouped_gemm,
     build="eager",
     autograd=True,
@@ -261,7 +260,6 @@ def _dequant_b(q, scale, block_size):
 @register_kernel(
     op="gemm.scaled",
     backend="eager",
-    priority=-1000,
     can_implement=can_implement_scaled_gemm,
     build="eager",
     autograd=True,
@@ -392,7 +390,6 @@ def can_implement_scaled_grouped_gemm(
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="eager",
-    priority=-1000,
     can_implement=can_implement_scaled_grouped_gemm,
     build="eager",
     autograd=True,

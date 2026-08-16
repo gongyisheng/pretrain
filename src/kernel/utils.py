@@ -146,6 +146,30 @@ def check_dimension_sizes_match(
     )
 
 
+def check_dimension_sizes_multiple_of(
+    tensor_dimensions: tuple[tuple[torch.Tensor, int], ...],
+    multiple: int,
+    feature: str,
+) -> CheckResult:
+    sizes = []
+    for tensor, dimension in tensor_dimensions:
+        if not -tensor.ndim <= dimension < tensor.ndim:
+            return CheckResult(
+                False,
+                f"{feature} received dimension {dimension} for a rank {tensor.ndim} "
+                "tensor",
+            )
+        sizes.append(tensor.shape[dimension])
+    rejected = tuple(size for size in sizes if size % multiple != 0)
+    if not rejected:
+        return CheckResult(True)
+    actual = ", ".join(str(size) for size in rejected)
+    return CheckResult(
+        False,
+        f"{feature} received size(s) {actual}; requires multiples of {multiple}",
+    )
+
+
 def check_compute_capability_at_least(
     device: torch.device,
     minimum: tuple[int, int],
