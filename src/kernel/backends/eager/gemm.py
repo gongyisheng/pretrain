@@ -15,7 +15,8 @@ from src.kernel.utils import (
     INT8,
     INT32,
     INT64,
-    check_dimension_sizes_match,
+    check_condition,
+    check_dimension_size_match,
     check_dtypes,
     check_ndim,
     check_nonempty,
@@ -41,16 +42,17 @@ def _check_scaled_common(
     scale_dtype: object,
     feature: str,
 ) -> CheckResult:
-    tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
-    result = first_failure((check_same_device(tensors, feature),))
-    if not result.ok:
-        return result
-    if type(block_size) is not int or block_size < 0:
-        return CheckResult(
-            False, f"{feature} block_size must be a non-negative integer"
-        )
-    result = first_failure(
+    bias_results = (
+        ()
+        if bias is None
+        else (check_dtypes((bias,), _FLOAT_DTYPES, f"{feature} bias"),)
+    )
+    return first_failure(
         (
+            check_condition(
+                type(block_size) is int and block_size >= 0,
+                f"{feature} block_size must be a non-negative integer",
+            ),
             check_dtypes((aq, bq), _QUANTIZED_DTYPES, f"{feature} operands"),
             check_dtypes((sa, sb), FP32, f"{feature} scales"),
             check_dtypes((out_dtype,), _FLOAT_DTYPES, f"{feature} output dtype"),
@@ -59,34 +61,26 @@ def _check_scaled_common(
                 FP32 | FP8_E8M0,
                 f"{feature} scale_dtype",
             ),
+            *bias_results,
         )
     )
-    if not result.ok:
-        return result
-    if bias is not None:
-        result = first_failure(
-            (check_dtypes((bias,), _FLOAT_DTYPES, f"{feature} bias"),)
-        )
-        if not result.ok:
-            return result
-    return CheckResult(True)
 
 
 def can_implement_grouped_gemm(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
     del kwargs
-    if len(args) != 4:
-        return CheckResult(
-            False, "eager grouped GEMM requires four normalized arguments"
-        )
-    a, b, offs, bias = args
-    tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
-    result = first_failure((check_same_device(tensors, "eager grouped GEMM"),))
+    result = check_condition(
+        len(args) == 4,
+        "eager grouped GEMM requires four normalized arguments",
+    )
     if not result.ok:
         return result
+    a, b, offs, bias = args
+    tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
     result = first_failure(
         (
+            check_same_device(tensors, "eager grouped GEMM"),
             check_dtypes(
                 (a, b),
                 _FLOAT_DTYPES,
@@ -102,66 +96,71 @@ def can_implement_grouped_gemm(
     )
     if not result.ok:
         return result
-    if a.ndim == 3 and b.ndim == 3:
-        return CheckResult(False, "3D x 3D has no ragged dimension")
-    result = first_failure(
-        (
-            check_dimension_sizes_match(
-                ((a, -1), (b, -2)), "eager grouped GEMM contraction dimensions"
+    a_group_results = (
+        ()
+        if a.ndim != 3
+        else (
+            check_dimension_size_match(
+                ((a, 0), (offs, 0)), "eager grouped GEMM A group count"
             ),
         )
     )
-    if not result.ok:
-        return result
-    if a.ndim == 3:
-        result = first_failure(
-            (
-                check_dimension_sizes_match(
-                    ((a, 0), (offs, 0)), "eager grouped GEMM A group count"
-                ),
-            )
+    b_group_results = (
+        ()
+        if b.ndim != 3
+        else (
+            check_dimension_size_match(
+                ((b, 0), (offs, 0)), "eager grouped GEMM B group count"
+            ),
         )
-        if not result.ok:
-            return result
-    if b.ndim == 3:
-        result = first_failure(
-            (
-                check_dimension_sizes_match(
-                    ((b, 0), (offs, 0)), "eager grouped GEMM B group count"
-                ),
-            )
+    )
+    bias_results = (
+        ()
+        if bias is None
+        else (
+            check_condition(
+                a.ndim != 3,
+                "bias is not supported for the ragged-N layout",
+            ),
+            check_dtypes((bias,), frozenset({a.dtype}), "eager grouped GEMM bias"),
+            check_shape(
+                bias,
+                (offs.numel(), b.shape[-1]),
+                "eager grouped GEMM bias",
+            ),
         )
-        if not result.ok:
-            return result
-    if bias is not None and a.ndim == 3:
-        return CheckResult(False, "bias is not supported for the ragged-N layout")
-    if bias is not None:
-        result = first_failure(
-            (
-                check_dtypes((bias,), frozenset({a.dtype}), "eager grouped GEMM bias"),
-                check_shape(
-                    bias,
-                    (offs.numel(), b.shape[-1]),
-                    "eager grouped GEMM bias",
-                ),
-            )
+    )
+    return first_failure(
+        (
+            check_condition(
+                a.ndim != 3 or b.ndim != 3,
+                "3D x 3D has no ragged dimension",
+            ),
+            check_dimension_size_match(
+                ((a, -1), (b, -2)), "eager grouped GEMM contraction dimensions"
+            ),
+            *a_group_results,
+            *b_group_results,
+            *bias_results,
         )
-        if not result.ok:
-            return result
-    return CheckResult(True)
+    )
 
 
 def can_implement_scaled_gemm(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
     del kwargs
-    if len(args) != 8:
-        return CheckResult(
-            False, "eager scaled GEMM requires eight normalized arguments"
-        )
+    result = check_condition(
+        len(args) == 8,
+        "eager scaled GEMM requires eight normalized arguments",
+    )
+    if not result.ok:
+        return result
     aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype = args
+    tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
     result = first_failure(
         (
+            check_same_device(tensors, "eager scaled GEMM"),
             _check_scaled_common(
                 aq,
                 bq,
@@ -173,12 +172,6 @@ def can_implement_scaled_gemm(
                 scale_dtype,
                 "eager scaled GEMM",
             ),
-        )
-    )
-    if not result.ok:
-        return result
-    result = first_failure(
-        (
             check_ndim(aq, frozenset({2}), "eager scaled GEMM A"),
             check_ndim(bq, frozenset({2}), "eager scaled GEMM B"),
             check_ndim(sa, frozenset({2}), "eager scaled GEMM A scale"),
@@ -188,24 +181,21 @@ def can_implement_scaled_gemm(
     if not result.ok:
         return result
     scale_blocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
-    result = first_failure(
+    bias_results = (
+        ()
+        if bias is None
+        else (check_shape(bias, (bq.shape[1],), "eager scaled GEMM bias"),)
+    )
+    return first_failure(
         (
-            check_dimension_sizes_match(
+            check_dimension_size_match(
                 ((aq, -1), (bq, -2)), "eager scaled GEMM contraction dimensions"
             ),
             check_shape(sa, (aq.shape[0], scale_blocks), "eager scaled GEMM A scale"),
             check_shape(sb, (scale_blocks, bq.shape[1]), "eager scaled GEMM B scale"),
+            *bias_results,
         )
     )
-    if not result.ok:
-        return result
-    if bias is not None:
-        result = first_failure(
-            (check_shape(bias, (bq.shape[1],), "eager scaled GEMM bias"),)
-        )
-        if not result.ok:
-            return result
-    return CheckResult(True)
 
 
 def _bounds(offs):
@@ -287,17 +277,17 @@ def can_implement_scaled_grouped_gemm(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
     del kwargs
-    if len(args) != 9:
-        return CheckResult(
-            False, "eager scaled grouped GEMM requires nine normalized arguments"
-        )
-    aq, bq, sa, sb, offs, out_dtype, block_size, bias, scale_dtype = args
-    tensors = (aq, bq, sa, sb, offs) if bias is None else (aq, bq, sa, sb, offs, bias)
-    result = first_failure((check_same_device(tensors, "eager scaled grouped GEMM"),))
+    result = check_condition(
+        len(args) == 9,
+        "eager scaled grouped GEMM requires nine normalized arguments",
+    )
     if not result.ok:
         return result
+    aq, bq, sa, sb, offs, out_dtype, block_size, bias, scale_dtype = args
+    tensors = (aq, bq, sa, sb, offs) if bias is None else (aq, bq, sa, sb, offs, bias)
     result = first_failure(
         (
+            check_same_device(tensors, "eager scaled grouped GEMM"),
             _check_scaled_common(
                 aq,
                 bq,
@@ -309,12 +299,6 @@ def can_implement_scaled_grouped_gemm(
                 scale_dtype,
                 "eager scaled grouped GEMM",
             ),
-        )
-    )
-    if not result.ok:
-        return result
-    result = first_failure(
-        (
             check_ndim(aq, frozenset({2, 3}), "eager scaled grouped GEMM A"),
             check_ndim(bq, frozenset({2, 3}), "eager scaled grouped GEMM B"),
             check_ndim(offs, frozenset({1}), "eager scaled grouped GEMM offsets"),
@@ -324,40 +308,26 @@ def can_implement_scaled_grouped_gemm(
     )
     if not result.ok:
         return result
-    if aq.ndim == 3 and bq.ndim == 3:
-        return CheckResult(False, "3D x 3D has no ragged dimension")
-    result = first_failure(
-        (
-            check_dimension_sizes_match(
-                ((aq, -1), (bq, -2)),
-                "eager scaled grouped GEMM contraction dimensions",
+    a_group_results = (
+        ()
+        if aq.ndim != 3
+        else (
+            check_dimension_size_match(
+                ((aq, 0), (offs, 0)),
+                "eager scaled grouped GEMM A group count",
             ),
         )
     )
-    if not result.ok:
-        return result
-    if aq.ndim == 3:
-        result = first_failure(
-            (
-                check_dimension_sizes_match(
-                    ((aq, 0), (offs, 0)),
-                    "eager scaled grouped GEMM A group count",
-                ),
-            )
+    b_group_results = (
+        ()
+        if bq.ndim != 3
+        else (
+            check_dimension_size_match(
+                ((bq, 0), (offs, 0)),
+                "eager scaled grouped GEMM B group count",
+            ),
         )
-        if not result.ok:
-            return result
-    if bq.ndim == 3:
-        result = first_failure(
-            (
-                check_dimension_sizes_match(
-                    ((bq, 0), (offs, 0)),
-                    "eager scaled grouped GEMM B group count",
-                ),
-            )
-        )
-        if not result.ok:
-            return result
+    )
     if aq.ndim == 2 and bq.ndim == 3:
         scale_blocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
         valid_a_scale = sa.shape == (aq.shape[0], scale_blocks)
@@ -385,29 +355,44 @@ def can_implement_scaled_grouped_gemm(
             scale_blocks,
         )
         valid_b_scale = sb.shape == (scale_blocks, bq.shape[1])
-    if not valid_a_scale:
-        return CheckResult(
-            False, "eager scaled grouped GEMM has invalid A scale layout"
+    bias_results = (
+        ()
+        if bias is None
+        else (
+            check_condition(
+                aq.ndim != 3,
+                "bias is not supported for the ragged-N layout",
+            ),
+            check_shape(
+                bias,
+                (offs.numel(), bq.shape[-1]),
+                "eager scaled grouped GEMM bias",
+            ),
         )
-    if not valid_b_scale:
-        return CheckResult(
-            False, "eager scaled grouped GEMM has invalid B scale layout"
+    )
+    return first_failure(
+        (
+            check_condition(
+                aq.ndim != 3 or bq.ndim != 3,
+                "3D x 3D has no ragged dimension",
+            ),
+            check_dimension_size_match(
+                ((aq, -1), (bq, -2)),
+                "eager scaled grouped GEMM contraction dimensions",
+            ),
+            *a_group_results,
+            *b_group_results,
+            check_condition(
+                valid_a_scale,
+                "eager scaled grouped GEMM has invalid A scale layout",
+            ),
+            check_condition(
+                valid_b_scale,
+                "eager scaled grouped GEMM has invalid B scale layout",
+            ),
+            *bias_results,
         )
-    if bias is not None and aq.ndim == 3:
-        return CheckResult(False, "bias is not supported for the ragged-N layout")
-    if bias is not None:
-        result = first_failure(
-            (
-                check_shape(
-                    bias,
-                    (offs.numel(), bq.shape[-1]),
-                    "eager scaled grouped GEMM bias",
-                ),
-            )
-        )
-        if not result.ok:
-            return result
-    return CheckResult(True)
+    )
 
 
 @register_kernel(

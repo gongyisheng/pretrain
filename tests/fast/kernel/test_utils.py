@@ -11,11 +11,12 @@ from src.kernel.spec import CheckResult
 from src.kernel.utils import (
     check_alignment,
     check_callable,
+    check_condition,
     check_compute_capability_at_least,
     check_compute_capability_in,
     check_contiguous,
     check_cuda_tensors,
-    check_dimension_sizes_match,
+    check_dimension_size_match,
     check_dimension_sizes_multiple_of,
     check_dtypes,
     check_matrix_layout,
@@ -47,6 +48,14 @@ def test_first_failure_returns_first_failed_result():
 
 def test_first_failure_accepts_all_successful_results():
     assert first_failure((CheckResult(True), CheckResult(True))) == CheckResult(True)
+
+
+def test_check_condition_accepts_true_condition():
+    assert check_condition(True, "unused") == CheckResult(True)
+
+
+def test_check_condition_preserves_false_condition_reason():
+    assert check_condition(False, "rejected") == CheckResult(False, "rejected")
 
 
 def test_check_callable_accepts_callable_attribute():
@@ -243,26 +252,26 @@ def test_check_shape_accepts_expected_shape():
     assert check_shape(torch.empty(2, 3), (2, 3), "scaled GEMM A scale").ok
 
 
-def test_check_dimension_sizes_match_accepts_selected_dimensions():
+def test_check_dimension_size_match_accepts_selected_dimensions():
     tensors = ((torch.empty(2, 3), -1), (torch.empty(3, 4), 0))
 
-    assert check_dimension_sizes_match(tensors, "GEMM contraction dimensions").ok
+    assert check_dimension_size_match(tensors, "GEMM contraction dimensions").ok
 
 
-def test_check_dimension_sizes_match_accepts_more_than_two_dimensions():
+def test_check_dimension_size_match_accepts_more_than_two_dimensions():
     tensors = (
         (torch.empty(2, 3), 0),
         (torch.empty(2, 4), 0),
         (torch.empty(5, 2), 1),
     )
 
-    assert check_dimension_sizes_match(tensors, "group counts").ok
+    assert check_dimension_size_match(tensors, "group counts").ok
 
 
-def test_check_dimension_sizes_match_reports_selected_sizes():
+def test_check_dimension_size_match_reports_selected_sizes():
     tensors = ((torch.empty(2, 3), -1), (torch.empty(4, 5), 0))
 
-    result = check_dimension_sizes_match(tensors, "GEMM contraction dimensions")
+    result = check_dimension_size_match(tensors, "GEMM contraction dimensions")
 
     assert not result.ok
     assert result.reason is not None
@@ -272,8 +281,8 @@ def test_check_dimension_sizes_match_reports_selected_sizes():
     assert "matching sizes" in result.reason
 
 
-def test_check_dimension_sizes_match_rejects_invalid_dimension():
-    result = check_dimension_sizes_match(
+def test_check_dimension_size_match_rejects_invalid_dimension():
+    result = check_dimension_size_match(
         ((torch.empty(3), -2), (torch.empty(3, 4), -2)),
         "scaled GEMM contraction dimensions",
     )
@@ -1421,6 +1430,24 @@ def test_gemm_validation_rejects_offset_dtype_or_layout_and_output_or_scale_dtyp
     assert not result.ok
     assert result.reason is not None
     assert reason in result.reason
+
+
+def test_torch_scaled_grouped_preserves_output_dtype_rejection_priority(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def unexpected_query(device: torch.device) -> tuple[int, int]:
+        raise AssertionError(f"unexpected CUDA query for {device}")
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected_query)
+    args = list(_scaled_grouped_metadata())
+    args[5] = torch.float16
+    args[7] = _TensorMeta((2, 48), torch.bfloat16)
+
+    result = torch_gemm.can_implement_scaled_grouped_gemm(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "output dtype" in result.reason
 
 
 @pytest.mark.parametrize(

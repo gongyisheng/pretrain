@@ -21,6 +21,10 @@ def first_failure(results: tuple[CheckResult, ...]) -> CheckResult:
     return CheckResult(True)
 
 
+def check_condition(condition: bool, reason: str) -> CheckResult:
+    return CheckResult(condition, None if condition else reason)
+
+
 def _dtype_name(dtype: torch.dtype) -> str:
     return str(dtype).removeprefix("torch.")
 
@@ -149,7 +153,7 @@ def check_shape(
     )
 
 
-def check_dimension_sizes_match(
+def check_dimension_size_match(
     tensor_dimensions: tuple[tuple[torch.Tensor, int], ...],
     feature: str,
 ) -> CheckResult:
