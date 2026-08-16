@@ -23,9 +23,10 @@ import torch
 
 sys.path.insert(0, ".")
 
-from src.kernel.backends.cublaslt.gemm import _column_major, _swizzle_32_4_4
+from src.kernel.backends.cublaslt.gemm import _swizzle_32_4_4
 from src.kernel.ops.gemm import scaled_gemm
 from src.kernel.selector import KernelSelectionError
+from src.kernel.utils import to_column_major
 from src.quant.quantize import quantize_operand
 
 E4M3 = torch.float8_e4m3fn
@@ -289,7 +290,7 @@ def _bench_scheme(a, b, config):
     result["cublaslt_mismatch_fraction"] = cublaslt_diagnostics["mismatch_fraction"]
     result["cublaslt_speedup"] = result["triton_ms"] / result["cublaslt_ms"]
 
-    native_bq = _column_major(bq)
+    native_bq = to_column_major(bq)
     native_sa = _swizzle_32_4_4(sa)
     native_sb = _swizzle_32_4_4(sb.t())
 
