@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from src.kernel.backends.triton import gemm as triton_gemm
 from src.kernel.spec import CheckResult
 from src.kernel.utils import (
     check_alignment,
+    check_attribute,
     check_callable,
     check_condition,
     check_compute_capability_at_least,
@@ -17,7 +19,7 @@ from src.kernel.utils import (
     check_contiguous,
     check_cuda_tensors,
     check_dimension_size_match,
-    check_dimension_sizes_multiple_of,
+    check_dimension_size_multiple_of,
     check_dtypes,
     check_matrix_layout,
     check_ndim,
@@ -28,12 +30,24 @@ from src.kernel.utils import (
     check_torch_tensors,
     check_values,
     first_failure,
+    to_column_major,
 )
 
 
 class _Owner:
     available = staticmethod(lambda: None)
+    available_value = object()
+    none = None
     not_callable = None
+
+
+def test_block_size_annotation():
+    assert (
+        inspect.signature(eager_gemm._check_scaled_common)
+        .parameters["block_size"]
+        .annotation
+        is int
+    )
 
 
 def test_first_failure_returns_first_failed_result():
@@ -50,6 +64,21 @@ def test_first_failure_accepts_all_successful_results():
     assert first_failure((CheckResult(True), CheckResult(True))) == CheckResult(True)
 
 
+def test_to_column_major_returns_existing_column_major_tensor():
+    tensor = torch.empty(2, 3).t().contiguous().t()
+
+    assert to_column_major(tensor) is tensor
+
+
+def test_to_column_major_converts_row_major_tensor():
+    tensor = torch.randn(2, 3)
+
+    actual = to_column_major(tensor)
+
+    assert actual.stride(0) == 1
+    torch.testing.assert_close(actual, tensor)
+
+
 def test_check_condition_accepts_true_condition():
     assert check_condition(True, "unused") == CheckResult(True)
 
@@ -59,18 +88,39 @@ def test_check_condition_preserves_false_condition_reason():
 
 
 def test_check_callable_accepts_callable_attribute():
-    assert check_callable(_Owner, "test owner", "available").ok
+    assert check_callable(_Owner, "available").ok
 
 
-@pytest.mark.parametrize("attribute", ["missing", "not_callable"])
-def test_check_callable_rejects_missing_or_non_callable_attribute(attribute: str):
-    result = check_callable(_Owner, "test owner", attribute)
+def test_check_callable_reports_owner_name():
+    result = check_callable(_Owner, "missing")
 
-    assert not result.ok
-    assert result.reason is not None
-    assert "test owner" in result.reason
-    assert attribute in result.reason
-    assert "callable" in result.reason
+    assert result == CheckResult(False, "_Owner.missing is unavailable")
+
+
+def test_check_attribute_accepts_non_none_attribute():
+    assert check_attribute(_Owner, "available_value").ok
+
+
+@pytest.mark.parametrize("attribute", ["missing", "none"])
+def test_check_attribute_rejects_missing_or_none_attribute(attribute: str):
+    result = check_attribute(_Owner, attribute)
+
+    assert result == CheckResult(False, f"_Owner.{attribute} is unavailable")
+
+
+def test_check_callable_rejects_missing_attribute():
+    result = check_callable(_Owner, "missing")
+
+    assert result == CheckResult(False, "_Owner.missing is unavailable")
+
+
+def test_check_callable_rejects_non_callable_attribute():
+    result = check_callable(_Owner, "not_callable")
+
+    assert result == CheckResult(
+        False,
+        "_Owner.not_callable is NoneType, requires a callable",
+    )
 
 
 def test_check_torch_tensors_accepts_torch_tensors():
@@ -292,24 +342,22 @@ def test_check_dimension_size_match_rejects_invalid_dimension():
     assert "dimension -2" in result.reason
 
 
-def test_check_dimension_sizes_multiple_of_accepts_selected_dimensions():
+def test_check_dimension_size_multiple_of_accepts_selected_dimensions():
     tensor_dimensions = (
         (torch.empty(2, 16), -1),
         (torch.empty(32, 3), 0),
     )
 
-    assert check_dimension_sizes_multiple_of(
-        tensor_dimensions, 16, "GEMM dimensions"
-    ).ok
+    assert check_dimension_size_multiple_of(tensor_dimensions, 16, "GEMM dimensions").ok
 
 
-def test_check_dimension_sizes_multiple_of_reports_rejected_sizes():
+def test_check_dimension_size_multiple_of_reports_rejected_sizes():
     tensor_dimensions = (
         (torch.empty(2, 15), -1),
         (torch.empty(18, 3), 0),
     )
 
-    result = check_dimension_sizes_multiple_of(tensor_dimensions, 16, "GEMM dimensions")
+    result = check_dimension_size_multiple_of(tensor_dimensions, 16, "GEMM dimensions")
 
     assert not result.ok
     assert result.reason is not None
@@ -319,8 +367,8 @@ def test_check_dimension_sizes_multiple_of_reports_rejected_sizes():
     assert "multiples of 16" in result.reason
 
 
-def test_check_dimension_sizes_multiple_of_rejects_invalid_dimension():
-    result = check_dimension_sizes_multiple_of(
+def test_check_dimension_size_multiple_of_rejects_invalid_dimension():
+    result = check_dimension_size_multiple_of(
         ((torch.empty(3), -2),),
         16,
         "scaled GEMM dimensions",
@@ -710,8 +758,19 @@ def _scaled_metadata(device: str = "cuda:7"):
         torch.bfloat16,
         0,
         None,
-        None,
+        torch.float32,
     )
+
+
+def test_eager_scaled_checks_bias_after_common_validation():
+    args = list(_scaled_metadata())
+    args[4] = torch.float64
+    args[6] = _TensorMeta((48,), torch.int8)
+
+    result = eager_gemm.can_implement_scaled_gemm(tuple(args), {})
+
+    assert result.reason is not None
+    assert "output dtype" in result.reason
 
 
 def _cublaslt_scaled_metadata():
@@ -759,7 +818,7 @@ def _scaled_grouped_metadata(device: str = "cuda:7"):
         torch.bfloat16,
         0,
         None,
-        None,
+        torch.float32,
     )
 
 
@@ -794,7 +853,7 @@ def test_eager_scaled_grouped_rejects_empty_offsets():
         torch.bfloat16,
         0,
         None,
-        None,
+        torch.float32,
     )
 
     result = eager_gemm.can_implement_scaled_grouped_gemm(args, {})
@@ -814,7 +873,7 @@ def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
         torch.float32,
         block_size,
         None,
-        None,
+        torch.float32,
     )
 
 
@@ -1011,7 +1070,7 @@ def test_torch_scaled_gemm_rejects_zero_dimensions(
     )
 
     assert not result.ok
-    assert result.reason == "torch scaled GEMM dimensions must be positive"
+    assert result.reason == "scaled GEMM dimensions must be positive"
 
 
 def test_torch_scaled_gemm_int8_rejects_unaligned_output_rows(
@@ -1031,7 +1090,7 @@ def test_torch_scaled_gemm_int8_rejects_unaligned_output_rows(
 
     assert not result.ok
     assert result.reason is not None
-    assert "torch scaled GEMM INT8 output rows" in result.reason
+    assert "scaled GEMM INT8 output rows" in result.reason
     assert "17" in result.reason
     assert "multiples of 32" in result.reason
 
@@ -1086,7 +1145,7 @@ def test_torch_scaled_gemm_int8_requires_int_mm(
     assert not result.ok
     assert result.reason is not None
     assert "torch._int_mm" in result.reason
-    assert "callable" in result.reason
+    assert "NoneType, requires a callable" in result.reason
 
 
 def test_torch_scaled_gemm_int8_does_not_require_scaled_mm(
@@ -1112,7 +1171,7 @@ def test_torch_scaled_gemm_fp8_requires_scaled_mm(
     assert not result.ok
     assert result.reason is not None
     assert "torch.nn.functional.scaled_mm" in result.reason
-    assert "callable" in result.reason
+    assert "NoneType, requires a callable" in result.reason
 
 
 def test_torch_scaled_gemm_fp8_does_not_require_int_mm(
@@ -1321,7 +1380,7 @@ def test_torch_gemm_validation_requires_callable_functional(
     assert not result.ok
     assert result.reason is not None
     assert attribute in result.reason
-    assert "callable" in result.reason
+    assert "NoneType, requires a callable" in result.reason
 
 
 @pytest.mark.parametrize(
@@ -1341,6 +1400,34 @@ def test_torch_scaled_gemm_validation_requires_rowwise_scaling_enum(
     assert not result.ok
     assert result.reason is not None
     assert "ScalingType.RowWise" in result.reason
+
+
+def test_torch_scaled_gemm_rejects_missing_rowwise_scaling(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delattr(torch.nn.functional.ScalingType, "RowWise", raising=False)
+
+    result = torch_gemm.can_implement_scaled_gemm(_torch_scaled_metadata(), {})
+
+    assert result == CheckResult(
+        False,
+        "torch.nn.functional.ScalingType.RowWise is unavailable",
+    )
+
+
+def test_torch_scaled_grouped_validates_rowwise_before_offset_layout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delattr(torch.nn.functional.ScalingType, "RowWise", raising=False)
+    args = list(_scaled_grouped_metadata())
+    args[4] = _TensorMeta((2,), torch.int32, contiguous=False, strides=(2,))
+
+    result = torch_gemm.can_implement_scaled_grouped_gemm(tuple(args), {})
+
+    assert result == CheckResult(
+        False,
+        "torch.nn.functional.ScalingType.RowWise is unavailable",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1555,7 +1642,7 @@ def test_triton_grouped_gemm_validation_rejects_bias_for_ragged_n(
     result = triton_gemm.can_implement_grouped_gemm(tuple(args), {})
 
     assert not result.ok
-    assert result.reason == "bias is not supported for the ragged-N layout"
+    assert result.reason == "bias not supported for ragged-N"
 
 
 @pytest.mark.parametrize(
@@ -1635,7 +1722,7 @@ def test_triton_scaled_grouped_gemm_validation_rejects_bias_for_ragged_n(
     result = triton_gemm.can_implement_scaled_grouped_gemm(tuple(args), {})
 
     assert not result.ok
-    assert result.reason == "bias is not supported for the ragged-N layout"
+    assert result.reason == "bias not supported for ragged-N"
 
 
 def _prune_scaled_configs(configs, named_args):

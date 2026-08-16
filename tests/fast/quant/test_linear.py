@@ -21,7 +21,7 @@ from src.utils.config import (
 _E4M3 = "fp8_e4m3"
 
 
-def _scaling(gran, bs=0, scale_dtype=None):
+def _scaling(gran, bs=0, scale_dtype="fp32"):
     return {
         "granularity": gran,
         "block_shape": (1, bs) if bs else (0, 0),

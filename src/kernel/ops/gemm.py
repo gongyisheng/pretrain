@@ -17,7 +17,9 @@ _SCALE_DTYPES = {
 
 
 def _normalize_scale_dtype(scale_dtype):
-    if scale_dtype is None or isinstance(scale_dtype, torch.dtype):
+    if scale_dtype is None:
+        return torch.float32
+    if isinstance(scale_dtype, torch.dtype):
         return scale_dtype
     if scale_dtype not in _SCALE_DTYPES:
         raise KernelSelectionError(f"unknown scale_dtype {scale_dtype!r}")

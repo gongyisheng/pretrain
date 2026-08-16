@@ -12,7 +12,7 @@ from src.quant.utils import str_to_qmax
 _E4M3 = "fp8_e4m3"
 
 
-def _scaling(gran, bs=0, scale_dtype=None):
+def _scaling(gran, bs=0, scale_dtype="fp32"):
     return {
         "granularity": gran,
         "block_shape": (1, bs) if bs else (0, 0),
@@ -24,6 +24,16 @@ def _roundtrip(x, contract_dim, fmt, scaling):
     """dequant(quant(x)) — the reconstruction the quantized GEMMs actually see."""
     xq, scale = quantize_operand(x, contract_dim, fmt, scaling)
     return dequantize_operand(xq, scale, contract_dim, scaling)
+
+
+def test_quantize_requires_scale_dtype():
+    with pytest.raises(KeyError, match="scale_dtype"):
+        quantize_operand(
+            torch.ones(2, 2),
+            -1,
+            _E4M3,
+            {"granularity": "rowwise", "block_shape": (0, 0)},
+        )
 
 
 @pytest.mark.parametrize("bs", [16, 32, 128])
@@ -364,7 +374,7 @@ def test_ragged_last_dim_is_the_transpose_of_ragged_first(gran, bs):
 # --- dequantize_operand ---
 
 
-def _manual_dequant(x, contract_dim, bs, fmt, scale_dtype=None):
+def _manual_dequant(x, contract_dim, bs, fmt, scale_dtype="fp32"):
     """Reference dequant using the *true* block size `bs` (never inferred from
     `nkb`/`K`), to regression-test that dequantize_operand's own bs recovery
     matches it even when the last block is partial (K not a multiple of bs)."""

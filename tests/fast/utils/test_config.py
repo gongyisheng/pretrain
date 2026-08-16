@@ -968,15 +968,16 @@ def test_quant_mxfp8_rejects_int_element():
         )
 
 
-def test_quant_rowwise_still_valid_with_blockwise_added():
+@pytest.mark.parametrize("scale_dtype", ({}, {"scale_dtype": None}))
+def test_quant_rowwise_defaults_scale_dtype_to_fp32(scale_dtype):
     # adding blockwise validation must not disturb the existing rowwise path
     q = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3"},
-        scaling={"granularity": "rowwise"},
+        scaling={"granularity": "rowwise", **scale_dtype},
     )
     assert q.scaling["granularity"] == "rowwise"
-    assert "scale_dtype" not in q.scaling
+    assert q.scaling["scale_dtype"] == "fp32"
 
 
 def test_quant_mxfp8_normalizes_through_training_config():

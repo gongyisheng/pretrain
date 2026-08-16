@@ -21,6 +21,12 @@ def first_failure(results: tuple[CheckResult, ...]) -> CheckResult:
     return CheckResult(True)
 
 
+def to_column_major(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.stride(0) == 1:
+        return tensor
+    return tensor.t().contiguous().t()
+
+
 def check_condition(condition: bool, reason: str) -> CheckResult:
     return CheckResult(condition, None if condition else reason)
 
@@ -40,14 +46,27 @@ def _format_major_requirements(majors: frozenset[int]) -> str:
     return ", ".join(requirements[:-1]) + f" or {requirements[-1]}"
 
 
-def check_callable(owner: object, owner_name: str, attribute: str) -> CheckResult:
-    value = getattr(owner, attribute, None)
+def check_callable(owner: object, attribute: str) -> CheckResult:
+    owner_name = getattr(owner, "__name__", type(owner).__name__)
+    missing = object()
+    value = getattr(owner, attribute, missing)
     if callable(value):
         return CheckResult(True)
+    if value is missing:
+        return CheckResult(False, f"{owner_name}.{attribute} is unavailable")
     return CheckResult(
         False,
         f"{owner_name}.{attribute} is {type(value).__name__}, requires a callable",
     )
+
+
+def check_attribute(owner: object, attribute: str) -> CheckResult:
+    owner_name = getattr(owner, "__name__", type(owner).__name__)
+    if getattr(owner, "__module__", None) == "torch.nn.functional":
+        owner_name = f"torch.nn.functional.{owner_name.removeprefix('_')}"
+    if getattr(owner, attribute, None) is not None:
+        return CheckResult(True)
+    return CheckResult(False, f"{owner_name}.{attribute} is unavailable")
 
 
 def check_torch_tensors(tensors: tuple[object, ...], feature: str) -> CheckResult:
@@ -175,7 +194,7 @@ def check_dimension_size_match(
     )
 
 
-def check_dimension_sizes_multiple_of(
+def check_dimension_size_multiple_of(
     tensor_dimensions: tuple[tuple[torch.Tensor, int], ...],
     multiple: int,
     feature: str,

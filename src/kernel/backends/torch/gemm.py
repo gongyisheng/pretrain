@@ -13,6 +13,7 @@ from src.kernel.utils import (
     FP8_E4M3,
     FP8_E8M0,
     INT32,
+    check_attribute,
     check_callable,
     check_condition,
     check_compute_capability_at_least,
@@ -20,7 +21,7 @@ from src.kernel.utils import (
     check_contiguous,
     check_cuda_tensors,
     check_dimension_size_match,
-    check_dimension_sizes_multiple_of,
+    check_dimension_size_multiple_of,
     check_dtypes,
     check_matrix_layout,
     check_ndim,
@@ -29,6 +30,7 @@ from src.kernel.utils import (
     check_shape,
     check_values,
     first_failure,
+    to_column_major,
 )
 
 
@@ -42,25 +44,6 @@ _SCALED_GEMM_DTYPE_PAIRS = frozenset(
 _OUTPUT_DTYPES = BF16 | FP16
 
 
-def _check_functional(attribute: str) -> CheckResult:
-    return check_callable(F, "torch.nn.functional", attribute)
-
-
-def _check_rowwise_scaling_functional(attribute: str) -> CheckResult:
-    result = first_failure(
-        (
-            _check_functional(attribute),
-            check_callable(F, "torch.nn.functional", "ScalingType"),
-        )
-    )
-    if not result.ok:
-        return result
-    return check_condition(
-        getattr(F.ScalingType, "RowWise", None) is not None,
-        "torch.nn.functional.ScalingType.RowWise is unavailable",
-    )
-
-
 def _is_row_major(tensor: torch.Tensor) -> bool:
     return tensor.is_contiguous() and tensor.stride(-1) == 1
 
@@ -71,72 +54,54 @@ def can_implement_grouped_gemm(
     del kwargs
     a, b, offs, bias = args
     tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
-    result = first_failure(
-        (
-            check_same_device(tensors, "torch grouped GEMM"),
-            check_cuda_tensors(tensors, "torch grouped GEMM"),
-            check_dtypes((a, b), BF16, "torch grouped GEMM operands"),
-            check_ndim(a, frozenset({2, 3}), "torch grouped GEMM A"),
-            check_ndim(b, frozenset({2, 3}), "torch grouped GEMM B"),
-            check_ndim(offs, frozenset({1}), "torch grouped GEMM offsets"),
-            check_dtypes((offs,), INT32, "torch grouped GEMM offsets"),
-            _check_functional("grouped_mm"),
-            check_contiguous(offs, "torch grouped GEMM offsets"),
-        )
+    checks = (
+        check_same_device(tensors, "grouped GEMM"),
+        check_cuda_tensors(tensors, "grouped GEMM"),
+        check_dtypes((a, b), BF16, "grouped GEMM operands"),
+        check_ndim(a, frozenset({2, 3}), "grouped GEMM A"),
+        check_ndim(b, frozenset({2, 3}), "grouped GEMM B"),
+        check_ndim(offs, frozenset({1}), "grouped GEMM offsets"),
+        check_dtypes((offs,), INT32, "grouped GEMM offsets"),
+        check_callable(F, "grouped_mm"),
+        check_contiguous(offs, "grouped GEMM offsets"),
     )
+    result = first_failure(checks)
     if not result.ok:
         return result
+    checks = (
+        check_matrix_layout(a, 16, "grouped GEMM A"),
+        check_matrix_layout(b, 16, "grouped GEMM B"),
+        check_nonempty(offs, "grouped GEMM offsets"),
+        check_condition(a.ndim != 3 or b.ndim != 3, "3D x 3D not supported"),
+        check_dimension_size_match(
+            ((a, -1), (b, -2)), "grouped GEMM contraction dimensions"
+        ),
+    )
     if a.ndim == 2 and b.ndim == 3:
-        group_results = (
+        checks += (
             check_dimension_size_match(
-                ((b, 0), (offs, 0)), "torch grouped GEMM B group count"
+                ((b, 0), (offs, 0)), "grouped GEMM B group count"
             ),
         )
     elif a.ndim == 3:
-        group_results = (
+        checks += (
             check_dimension_size_match(
-                ((a, 0), (offs, 0)), "torch grouped GEMM A group count"
+                ((a, 0), (offs, 0)), "grouped GEMM A group count"
             ),
         )
-    else:
-        group_results = ()
-    bias_results = (
-        ()
-        if bias is None
-        else (
-            check_condition(
-                a.ndim != 3,
-                "bias is not supported for the ragged-N layout",
-            ),
-            check_ndim(bias, frozenset({2}), "torch grouped GEMM bias"),
-            check_contiguous(bias, "torch grouped GEMM bias"),
-            check_dtypes((bias,), frozenset({a.dtype}), "torch grouped GEMM bias"),
-            check_shape(
-                bias,
-                (offs.numel(), b.shape[-1]),
-                "torch grouped GEMM bias",
-            ),
+    if bias is not None:
+        expected_bias_shape = (offs.numel(), b.shape[-1])
+        checks += (
+            check_condition(a.ndim != 3, "bias not supported for ragged-N"),
+            check_ndim(bias, frozenset({2}), "grouped GEMM bias"),
+            check_contiguous(bias, "grouped GEMM bias"),
+            check_dtypes((bias,), frozenset({a.dtype}), "grouped GEMM bias"),
+            check_shape(bias, expected_bias_shape, "grouped GEMM bias"),
         )
-    )
-    result = first_failure(
-        (
-            check_matrix_layout(a, 16, "torch grouped GEMM A"),
-            check_matrix_layout(b, 16, "torch grouped GEMM B"),
-            check_nonempty(offs, "torch grouped GEMM offsets"),
-            check_condition(
-                a.ndim != 3 or b.ndim != 3,
-                "3D x 3D has no ragged dimension",
-            ),
-            check_dimension_size_match(
-                ((a, -1), (b, -2)), "torch grouped GEMM contraction dimensions"
-            ),
-            *group_results,
-            *bias_results,
-        )
-    )
+    result = first_failure(checks)
     if not result.ok:
         return result
-    return check_compute_capability_at_least(a.device, (8, 0), "torch grouped GEMM")
+    return check_compute_capability_at_least(a.device, (8, 0), "grouped GEMM")
 
 
 @register_kernel(
@@ -169,72 +134,61 @@ def _scaled_common_checks(
     feature: str,
 ) -> CheckResult:
     tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
-    result = first_failure(
-        (
-            check_same_device(tensors, feature),
-            check_cuda_tensors(tensors, feature),
-            check_ndim(aq, frozenset({2}), f"{feature} A"),
-            check_ndim(bq, frozenset({2}), f"{feature} B"),
-            check_ndim(sa, frozenset({2}), f"{feature} A scale"),
-            check_ndim(sb, frozenset({2}), f"{feature} B scale"),
-            check_dtypes((sa, sb), FP32, f"{feature} scales"),
-            check_contiguous(sa, f"{feature} A scale"),
-            check_contiguous(sb, f"{feature} B scale"),
-            check_condition(
-                type(block_size) is int and block_size >= 0,
-                "block_size must be a non-negative integer",
-            ),
-            check_condition(
-                (aq.dtype, bq.dtype) in _SCALED_GEMM_DTYPE_PAIRS,
-                f"{feature} does not support operand pair {aq.dtype} x {bq.dtype}",
-            ),
-        )
+    checks = (
+        check_same_device(tensors, feature),
+        check_cuda_tensors(tensors, feature),
+        check_ndim(aq, frozenset({2}), f"{feature} A"),
+        check_ndim(bq, frozenset({2}), f"{feature} B"),
+        check_ndim(sa, frozenset({2}), f"{feature} A scale"),
+        check_ndim(sb, frozenset({2}), f"{feature} B scale"),
+        check_dtypes((sa, sb), FP32, f"{feature} scales"),
+        check_contiguous(sa, f"{feature} A scale"),
+        check_contiguous(sb, f"{feature} B scale"),
+        check_condition(block_size >= 0, "block_size must be non-negative"),
+        check_condition(
+            (aq.dtype, bq.dtype) in _SCALED_GEMM_DTYPE_PAIRS,
+            f"{feature} does not support operand pair {aq.dtype} x {bq.dtype}",
+        ),
     )
+    result = first_failure(checks)
     if not result.ok:
         return result
     scale_blocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
-    bias_results = (
-        ()
-        if bias is None
-        else (
+    expected_a_scale_shape = (aq.shape[0], scale_blocks)
+    expected_b_scale_shape = (scale_blocks, bq.shape[1])
+    checks = (
+        check_condition(_is_row_major(aq), f"{feature} requires row-major A"),
+        check_condition(
+            all(dimension > 0 for dimension in (aq.shape[0], aq.shape[1], bq.shape[1])),
+            f"{feature} dimensions must be positive",
+        ),
+        check_condition(
+            scale_blocks <= 1
+            or (block_size >= 16 and (block_size & (block_size - 1)) == 0),
+            "block_size must be a power of two >= 16",
+        ),
+        check_dimension_size_match(
+            ((aq, -1), (bq, -2)), f"{feature} contraction dimensions"
+        ),
+        check_dimension_size_multiple_of(
+            ((aq, -1), (bq, -1)), 16, f"{feature} dimensions"
+        ),
+        check_dtypes((scale_dtype,), FP32 | FP8_E8M0, f"{feature} scale_dtype"),
+    )
+    checks += (
+        check_shape(sa, expected_a_scale_shape, f"{feature} A scale"),
+        check_shape(sb, expected_b_scale_shape, f"{feature} B scale"),
+        check_dtypes((out_dtype,), _OUTPUT_DTYPES, f"{feature} output dtype"),
+    )
+    if bias is not None:
+        expected_bias_shape = (bq.shape[1],)
+        checks += (
             check_dtypes((bias,), frozenset({out_dtype}), f"{feature} bias"),
             check_ndim(bias, frozenset({1}), f"{feature} bias"),
             check_contiguous(bias, f"{feature} bias"),
-            check_shape(bias, (bq.shape[1],), f"{feature} bias"),
+            check_shape(bias, expected_bias_shape, f"{feature} bias"),
         )
-    )
-    return first_failure(
-        (
-            check_condition(_is_row_major(aq), f"{feature} requires row-major A"),
-            check_condition(
-                all(
-                    dimension > 0
-                    for dimension in (aq.shape[0], aq.shape[1], bq.shape[1])
-                ),
-                f"{feature} dimensions must be positive",
-            ),
-            check_condition(
-                scale_blocks <= 1
-                or (block_size >= 16 and (block_size & (block_size - 1)) == 0),
-                "block_size must be a power of two >= 16",
-            ),
-            check_dimension_size_match(
-                ((aq, -1), (bq, -2)), f"{feature} contraction dimensions"
-            ),
-            check_dimension_sizes_multiple_of(
-                ((aq, -1), (bq, -1)), 16, f"{feature} dimensions"
-            ),
-            check_dtypes(
-                () if scale_dtype is None else (scale_dtype,),
-                FP32 | FP8_E8M0,
-                f"{feature} scale_dtype",
-            ),
-            check_shape(sa, (aq.shape[0], scale_blocks), f"{feature} A scale"),
-            check_shape(sb, (scale_blocks, bq.shape[1]), f"{feature} B scale"),
-            check_dtypes((out_dtype,), _OUTPUT_DTYPES, f"{feature} output dtype"),
-            *bias_results,
-        )
-    )
+    return first_failure(checks)
 
 
 def can_implement_scaled_gemm(
@@ -242,47 +196,47 @@ def can_implement_scaled_gemm(
 ) -> CheckResult:
     del kwargs
     aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype = args
+    checks = (
+        _scaled_common_checks(
+            aq,
+            bq,
+            sa,
+            sb,
+            out_dtype,
+            block_size,
+            bias,
+            scale_dtype,
+            "scaled GEMM",
+        ),
+    )
     if aq.dtype == torch.int8 and bq.dtype == torch.int8:
-        implementation_results = (
-            check_dimension_sizes_multiple_of(
-                ((aq, -2),), 32, "torch scaled GEMM INT8 output rows"
+        checks += (
+            check_dimension_size_multiple_of(
+                ((aq, -2),), 32, "scaled GEMM INT8 output rows"
             ),
-            check_callable(torch, "torch", "_int_mm"),
+            check_callable(torch, "_int_mm"),
         )
         minimum_capability = (8, 0)
     else:
-        implementation_results = (_check_rowwise_scaling_functional("scaled_mm"),)
-        minimum_capability = (8, 9)
-    result = first_failure(
-        (
-            _scaled_common_checks(
-                aq,
-                bq,
-                sa,
-                sb,
-                out_dtype,
-                block_size,
-                bias,
-                scale_dtype,
-                "torch scaled GEMM",
-            ),
-            *implementation_results,
+        checks += (
+            check_callable(F, "scaled_mm"),
+            check_attribute(F, "ScalingType"),
         )
-    )
+        minimum_capability = (8, 9)
+    result = first_failure(checks)
     if not result.ok:
         return result
+    if aq.dtype != torch.int8 or bq.dtype != torch.int8:
+        checks += (check_attribute(F.ScalingType, "RowWise"),)
+        result = first_failure(checks)
+        if not result.ok:
+            return result
     return check_compute_capability_at_least(
-        aq.device, minimum_capability, "torch scaled GEMM"
+        aq.device, minimum_capability, "scaled GEMM"
     )
 
 
-def _column_major(tensor: torch.Tensor) -> torch.Tensor:
-    if tensor.stride(0) == 1:
-        return tensor
-    return tensor.t().contiguous().t()
-
-
-def _scaled_int8_mm(aq, bq, sa, sb, out_dtype, block_size, bias):
+def _scaled_gemm_int8(aq, bq, sa, sb, out_dtype, block_size, bias):
     width = block_size or aq.shape[1]
     out = torch.zeros((aq.shape[0], bq.shape[1]), device=aq.device, dtype=torch.float32)
     for index, start in enumerate(range(0, aq.shape[1], width)):
@@ -296,14 +250,14 @@ def _scaled_int8_mm(aq, bq, sa, sb, out_dtype, block_size, bias):
     return out.to(out_dtype)
 
 
-def _scaled_fp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias):
+def _scaled_gemm_fp8(aq, bq, sa, sb, out_dtype, block_size, bias):
     width = block_size or aq.shape[1]
     out = torch.zeros((aq.shape[0], bq.shape[1]), device=aq.device, dtype=torch.float32)
     for index, start in enumerate(range(0, aq.shape[1], width)):
         stop = min(start + width, aq.shape[1])
         partial = F.scaled_mm(
             aq[:, start:stop].contiguous(),
-            _column_major(bq[start:stop]),
+            to_column_major(bq[start:stop]),
             sa[:, index : index + 1].contiguous(),
             F.ScalingType.RowWise,
             sb[index : index + 1],
@@ -332,7 +286,7 @@ def _to_blocked_scale(scale):
     return blocked.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
 
 
-def _scaled_mxfp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias):
+def _scaled_gemm_mxfp8(aq, bq, sa, sb, out_dtype, block_size, bias):
     repeat = block_size // 32
     groups = (aq.shape[1] + 31) // 32
     scale_a = sa.repeat_interleave(repeat, 1)[:, :groups]
@@ -343,7 +297,7 @@ def _scaled_mxfp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias):
     swizzle = F.SwizzleType.SWIZZLE_32_4_4
     return F.scaled_mm(
         aq,
-        _column_major(bq),
+        to_column_major(bq),
         scale_a,
         recipe,
         scale_b,
@@ -386,10 +340,10 @@ def scaled_gemm(
     scale_dtype=None,
 ):
     if aq.dtype == torch.int8 and bq.dtype == torch.int8:
-        return _scaled_int8_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+        return _scaled_gemm_int8(aq, bq, sa, sb, out_dtype, block_size, bias)
     if _can_use_native_mxfp8(aq, bq, block_size, scale_dtype):
-        return _scaled_mxfp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
-    return _scaled_fp8_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+        return _scaled_gemm_mxfp8(aq, bq, sa, sb, out_dtype, block_size, bias)
+    return _scaled_gemm_fp8(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
 def can_implement_scaled_grouped_gemm(
@@ -398,76 +352,76 @@ def can_implement_scaled_grouped_gemm(
     del kwargs
     aq, bq, sa, sb, offs, out_dtype, block_size, bias, scale_dtype = args
     tensors = (aq, bq, sa, sb, offs) if bias is None else (aq, bq, sa, sb, offs, bias)
-    result = first_failure(
-        (
-            check_same_device(tensors, "torch scaled grouped GEMM"),
-            check_cuda_tensors(tensors, "torch scaled grouped GEMM"),
-            check_dtypes(
-                (aq, bq),
-                FP8_E4M3,
-                "torch scaled grouped GEMM operands",
-            ),
-            check_ndim(aq, frozenset({2}), "torch scaled grouped GEMM A"),
-            check_ndim(bq, frozenset({3}), "torch scaled grouped GEMM B"),
-            check_ndim(sa, frozenset({2}), "torch scaled grouped GEMM A scale"),
-            check_ndim(sb, frozenset({3}), "torch scaled grouped GEMM B scale"),
-            check_ndim(offs, frozenset({1}), "torch scaled grouped GEMM offsets"),
-            check_dtypes((sa, sb), FP32, "torch scaled grouped GEMM scales"),
-            check_dtypes((offs,), INT32, "torch scaled grouped GEMM offsets"),
-            check_values(
-                (block_size,),
-                frozenset({0}),
-                "torch scaled grouped GEMM block_size",
-            ),
-            check_dtypes(
-                () if scale_dtype is None else (scale_dtype,),
-                FP32,
-                "torch scaled grouped GEMM scale_dtype",
-            ),
-            _check_rowwise_scaling_functional("scaled_grouped_mm"),
-            check_contiguous(offs, "torch scaled grouped GEMM offsets"),
-            check_contiguous(sa, "torch scaled grouped GEMM A scale"),
-            check_contiguous(sb, "torch scaled grouped GEMM B scale"),
-            check_nonempty(offs, "torch scaled grouped GEMM offsets"),
-        )
+    checks = (
+        check_same_device(tensors, "scaled grouped GEMM"),
+        check_cuda_tensors(tensors, "scaled grouped GEMM"),
+        check_dtypes((aq, bq), FP8_E4M3, "scaled grouped GEMM"),
+        check_ndim(aq, frozenset({2}), "scaled grouped GEMM A"),
+        check_ndim(bq, frozenset({3}), "scaled grouped GEMM B"),
+        check_ndim(sa, frozenset({2}), "scaled grouped GEMM A scale"),
+        check_ndim(sb, frozenset({3}), "scaled grouped GEMM B scale"),
+        check_ndim(offs, frozenset({1}), "scaled grouped GEMM offsets"),
+        check_dtypes((sa, sb), FP32, "scaled grouped GEMM scales"),
+        check_dtypes((offs,), INT32, "scaled grouped GEMM offsets"),
+        check_values(
+            (block_size,),
+            frozenset({0}),
+            "scaled grouped GEMM block_size",
+        ),
+        check_dtypes((scale_dtype,), FP32, "scaled grouped GEMM scale_dtype"),
     )
+    checks += (
+        check_callable(F, "scaled_grouped_mm"),
+        check_attribute(F, "ScalingType"),
+    )
+    result = first_failure(checks)
     if not result.ok:
         return result
-    result = first_failure(
-        (
-            check_condition(
-                _is_row_major(aq),
-                "torch scaled grouped GEMM requires row-major A",
-            ),
-            check_dimension_size_match(
-                ((aq, -1), (bq, -2)),
-                "torch scaled grouped GEMM contraction dimensions",
-            ),
-            check_dimension_size_match(
-                ((bq, 0), (offs, 0)), "torch scaled grouped GEMM B group count"
-            ),
-            check_dimension_sizes_multiple_of(
-                ((aq, -1), (bq, -1)), 16, "torch scaled grouped GEMM dimensions"
-            ),
-            check_shape(sa, (aq.shape[0], 1), "torch scaled grouped GEMM A scale"),
-            check_shape(
-                sb,
-                (bq.shape[0], 1, bq.shape[2]),
-                "torch scaled grouped GEMM B scale",
-            ),
-            check_dtypes((out_dtype,), BF16, "torch scaled grouped GEMM output dtype"),
-            check_condition(
-                bias is None,
-                "torch scaled grouped GEMM does not support bias",
-            ),
-        )
+    checks += (check_attribute(F.ScalingType, "RowWise"),)
+    result = first_failure(checks)
+    if not result.ok:
+        return result
+    checks += (
+        check_contiguous(offs, "scaled grouped GEMM offsets"),
+        check_contiguous(sa, "scaled grouped GEMM A scale"),
+        check_contiguous(sb, "scaled grouped GEMM B scale"),
+        check_nonempty(offs, "scaled grouped GEMM offsets"),
     )
+    result = first_failure(checks)
+    if not result.ok:
+        return result
+    expected_a_scale_shape = (aq.shape[0], 1)
+    expected_b_scale_shape = (bq.shape[0], 1, bq.shape[2])
+    checks = (
+        check_condition(
+            _is_row_major(aq),
+            "scaled grouped GEMM requires row-major A",
+        ),
+        check_dimension_size_match(
+            ((aq, -1), (bq, -2)),
+            "scaled grouped GEMM contraction dimensions",
+        ),
+        check_dimension_size_match(
+            ((bq, 0), (offs, 0)), "scaled grouped GEMM B group count"
+        ),
+        check_dimension_size_multiple_of(
+            ((aq, -1), (bq, -1)), 16, "scaled grouped GEMM dimensions"
+        ),
+        check_shape(sa, expected_a_scale_shape, "scaled grouped GEMM A scale"),
+        check_shape(sb, expected_b_scale_shape, "scaled grouped GEMM B scale"),
+        check_dtypes((out_dtype,), BF16, "scaled grouped GEMM output dtype"),
+        check_condition(
+            bias is None,
+            "scaled grouped GEMM does not support bias",
+        ),
+    )
+    result = first_failure(checks)
     if not result.ok:
         return result
     return check_compute_capability_in(
         aq.device,
         frozenset({9, 10}),
-        "torch scaled grouped GEMM",
+        "scaled grouped GEMM",
     )
 
 

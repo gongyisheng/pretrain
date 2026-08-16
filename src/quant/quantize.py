@@ -45,9 +45,7 @@ def _scale_block_map(offs, n_rows, block_size) -> tuple[torch.Tensor, int]:
     return row_blocks, n_rows // block_size + n_groups
 
 
-def _compute_scale(
-    amax: torch.Tensor, fmt: str, scale_dtype: str | None
-) -> torch.Tensor:
+def _compute_scale(amax: torch.Tensor, fmt: str, scale_dtype: str) -> torch.Tensor:
     """fp32 dequant scale from per-block amax."""
     if scale_dtype == "fp8_e8m0":
         # e8m0 is a bare 8-bit exponent: a power of two, biased to cover +-127.
@@ -284,7 +282,7 @@ def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
     _check_dims(x, contract_dim, ragged_dim, offs)
     granularity = scaling["granularity"]
     block_outer, block_size = scaling["block_shape"]
-    scale_dtype = scaling.get("scale_dtype")
+    scale_dtype = scaling["scale_dtype"]
     xf = x.float()
     if granularity == "tensorwise":
         codes, scale = _quantize_tensorwise(

@@ -45,7 +45,7 @@ def quantized_gemm(
             out_dtype,
             scaling_cfg["block_shape"][1],
             bias=bias,
-            scale_dtype=scaling_cfg.get("scale_dtype"),
+            scale_dtype=scaling_cfg["scale_dtype"],
         )
 
     if aq is not None:

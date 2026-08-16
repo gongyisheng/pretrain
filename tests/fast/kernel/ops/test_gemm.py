@@ -189,6 +189,27 @@ def test_scaled_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPat
     }
 
 
+def test_scaled_gemm_defaults_scale_dtype_to_fp32(monkeypatch: pytest.MonkeyPatch):
+    seen = {}
+
+    def fake_dispatch(op, args, kwargs, backend="auto"):
+        seen["args"] = args
+
+    monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
+    tensor = torch.empty(0)
+
+    gemm_module.scaled_gemm(
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        torch.bfloat16,
+        32,
+    )
+
+    assert seen["args"][-1] == torch.float32
+
+
 def test_scaled_grouped_gemm_forwards_normalized_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ):

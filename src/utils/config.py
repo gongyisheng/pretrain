@@ -341,8 +341,10 @@ class QuantizationConfig:
                 f"expected one of {sorted(QUANT_GRANULARITY)}"
             )
 
-        scale_dtype = self.scaling.get("scale_dtype")
-        if scale_dtype is not None and scale_dtype not in ("fp32", "fp8_e8m0"):
+        if self.scaling.get("scale_dtype") is None:
+            self.scaling["scale_dtype"] = "fp32"
+        scale_dtype = self.scaling["scale_dtype"]
+        if scale_dtype not in ("fp32", "fp8_e8m0"):
             raise ValueError(
                 f"unknown quant scale_dtype: {scale_dtype!r}; "
                 "expected 'fp32' or 'fp8_e8m0'"

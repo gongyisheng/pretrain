@@ -76,7 +76,7 @@ def triton_scaled_gemm(
     out_dtype,
     block_size,
     bias=None,
-    scale_dtype=None,
+    scale_dtype="fp32",
 ):
     return _public_scaled_gemm(
         aq,
@@ -100,7 +100,7 @@ def triton_scaled_grouped_gemm(
     out_dtype,
     block_size,
     bias=None,
-    scale_dtype=None,
+    scale_dtype="fp32",
 ):
     return _public_scaled_grouped_gemm(
         aq,
@@ -125,7 +125,7 @@ E5M2 = torch.float8_e5m2
 FMT = {E4M3: "fp8_e4m3", E5M2: "fp8_e5m2"}
 
 
-def _scaling(gran, bs=0, scale_dtype=None):
+def _scaling(gran, bs=0, scale_dtype="fp32"):
     return {
         "granularity": gran,
         "block_shape": (1, bs) if bs else (0, 0),
@@ -133,7 +133,7 @@ def _scaling(gran, bs=0, scale_dtype=None):
     }
 
 
-def _run(a, b, gran, bs, a_fmt, b_fmt, scale_dtype=None):
+def _run(a, b, gran, bs, a_fmt, b_fmt, scale_dtype="fp32"):
     # the kernel takes the 0-sentinel width; the oracle's pad math takes a count
     scaling = _scaling(gran, bs, scale_dtype)
     aq, sa = quantize_operand(a, -1, a_fmt, scaling)
@@ -549,7 +549,7 @@ _SCALED_TOL = {"ragged_m": 0.02, "ragged_k": 1e-5, "ragged_n": 0.02}
 
 
 def _make_scaled_layout(
-    layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0, scale_dtype=None
+    layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0, scale_dtype="fp32"
 ):
     """Quantized operands + scales for one ragged layout of the scaled grouped GEMM.
 

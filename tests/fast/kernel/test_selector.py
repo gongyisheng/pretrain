@@ -4,8 +4,13 @@ from typing import Any
 import pytest
 import torch
 
-from src.kernel.registry import KernelRegistry, register_kernel
-from src.kernel.selector import KernelSelectionError, dispatch, select_kernel
+from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry, register_kernel
+from src.kernel.selector import (
+    KernelSelectionError,
+    clear_selection_cache,
+    dispatch,
+    select_kernel,
+)
 from src.kernel.spec import CheckResult, KernelSpec
 
 
@@ -33,6 +38,86 @@ def _spec(
         build="eager",
         autograd=autograd,
     )
+
+
+_selection_cache_calls = 0
+
+
+def _count_selection_cache_checks(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    global _selection_cache_calls
+    del args, kwargs
+    _selection_cache_calls += 1
+    return CheckResult(True)
+
+
+KERNEL_REGISTRY.register(
+    KernelSpec(
+        op="test.selection_cache",
+        backend="eager",
+        fn=lambda value: value,
+        can_implement=_count_selection_cache_checks,
+        build="eager",
+        autograd=True,
+    )
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_selection_cache() -> None:
+    global _selection_cache_calls
+    clear_selection_cache()
+    _selection_cache_calls = 0
+
+
+def test_selection_cache_reuses_default_auto_selection_for_identical_calls():
+    tensor = torch.ones(2, 3)
+
+    first = select_kernel("test.selection_cache", (tensor, 4), {"scale": 0.5})
+    second = select_kernel("test.selection_cache", (tensor, 4), {"scale": 0.5})
+
+    assert first is second
+    assert _selection_cache_calls == 1
+
+
+def test_selection_cache_reuses_normalized_dtype_arguments():
+    tensor = torch.ones(2, 3)
+    normalized_args = (tensor, torch.bfloat16, torch.float32)
+
+    select_kernel("test.selection_cache", normalized_args, {})
+    select_kernel("test.selection_cache", normalized_args, {})
+
+    assert _selection_cache_calls == 1
+
+
+def test_selection_cache_rechecks_auto_selection_when_tensor_stride_changes():
+    contiguous = torch.ones(2, 3)
+    transposed = contiguous.t()
+
+    select_kernel("test.selection_cache", (contiguous,), {})
+    select_kernel("test.selection_cache", (transposed,), {})
+
+    assert _selection_cache_calls == 2
+
+
+def test_selection_cache_bypasses_explicit_backend_selection():
+    tensor = torch.ones(2, 3)
+
+    select_kernel("test.selection_cache", (tensor,), {}, backend="eager")
+    select_kernel("test.selection_cache", (tensor,), {}, backend="eager")
+
+    assert _selection_cache_calls == 2
+
+
+def test_clear_selection_cache_forces_another_eligibility_check():
+    tensor = torch.ones(2, 3)
+
+    select_kernel("test.selection_cache", (tensor,), {})
+    clear_selection_cache()
+    select_kernel("test.selection_cache", (tensor,), {})
+
+    assert _selection_cache_calls == 2
 
 
 def test_auto_selects_highest_priority_eligible_backend():
