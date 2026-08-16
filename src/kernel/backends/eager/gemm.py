@@ -20,7 +20,12 @@ def _bounds(offs):
     build="eager",
     autograd=True,
 )
-def grouped_gemm(a, b, offs, bias=None):
+def grouped_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    offs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     a_is_2d = a.ndim == 2
     b_is_2d = b.ndim == 2
     bounds = _bounds(offs)
@@ -67,15 +72,15 @@ def _dequant_b(q, scale, block_size):
     autograd=True,
 )
 def scaled_gemm(
-    aq,
-    bq,
-    sa,
-    sb,
-    out_dtype,
-    block_size,
-    scale_dtype,
-    bias=None,
-):
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    scale_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     del scale_dtype
     out = _dequant_a(aq, sa, block_size) @ _dequant_b(bq, sb, block_size)
     if bias is not None:
@@ -91,16 +96,16 @@ def scaled_gemm(
     autograd=True,
 )
 def scaled_grouped_gemm(
-    aq,
-    bq,
-    sa,
-    sb,
-    offs,
-    out_dtype,
-    block_size,
-    scale_dtype,
-    bias=None,
-):
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    offs: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    scale_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     del scale_dtype
     a_is_2d = aq.ndim == 2
     b_is_2d = bq.ndim == 2

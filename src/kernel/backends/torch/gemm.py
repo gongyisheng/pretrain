@@ -17,7 +17,12 @@ from src.kernel.utils import to_column_major
     build="eager",
     autograd=False,
 )
-def grouped_gemm(a, b, offs, bias=None):
+def grouped_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    offs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     out = F.grouped_mm(a, b, offs=offs, bias=None)
     if bias is None:
         return out
@@ -122,15 +127,15 @@ def _can_use_native_mxfp8(aq, bq, block_size, scale_dtype):
     autograd=False,
 )
 def scaled_gemm(
-    aq,
-    bq,
-    sa,
-    sb,
-    out_dtype,
-    block_size,
-    scale_dtype,
-    bias=None,
-):
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    scale_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     if aq.dtype == torch.int8 and bq.dtype == torch.int8:
         return _scaled_gemm_int8(aq, bq, sa, sb, out_dtype, block_size, bias)
     if _can_use_native_mxfp8(aq, bq, block_size, scale_dtype):
@@ -146,16 +151,16 @@ def scaled_gemm(
     autograd=False,
 )
 def scaled_grouped_gemm(
-    aq,
-    bq,
-    sa,
-    sb,
-    offs,
-    out_dtype,
-    block_size,
-    scale_dtype,
-    bias=None,
-):
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    offs: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    scale_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     del block_size, scale_dtype
     return F.scaled_grouped_mm(
         aq,
