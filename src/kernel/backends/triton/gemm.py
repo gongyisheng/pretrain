@@ -19,6 +19,7 @@ from src.kernel.utils import (
     check_nonempty,
     check_same_device,
     check_shape,
+    check_values,
     first_failure,
 )
 
@@ -615,8 +616,13 @@ def can_implement_scaled_gemm(
     aq, bq, sa, sb, out_dtype, block_size = args[:6]
     bias = args[6] if len(args) > 6 else kwargs.get("bias")
     scale_dtype = args[7] if len(args) > 7 else kwargs.get("scale_dtype")
-    if scale_dtype not in (None, "fp32", "fp8_e8m0"):
-        return CheckResult(False, "unsupported scale_dtype")
+    result = check_values(
+        (scale_dtype,),
+        frozenset({None, "fp32", "fp8_e8m0"}),
+        "Triton scaled GEMM scale_dtype",
+    )
+    if not result.ok:
+        return result
     tensors = (aq, bq, sa, sb) + (() if bias is None else (bias,))
     result = first_failure(
         (
@@ -654,8 +660,13 @@ def can_implement_scaled_gemm(
         return result
     if nblocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
         return CheckResult(False, "block_size must be a power of two >= 16")
-    if out_dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        return CheckResult(False, "unsupported output dtype")
+    result = check_dtypes(
+        (out_dtype,),
+        frozenset({torch.float32, torch.float16, torch.bfloat16}),
+        "Triton scaled GEMM output dtype",
+    )
+    if not result.ok:
+        return result
     if bias is not None:
         result = first_failure(
             (
@@ -1262,8 +1273,13 @@ def can_implement_scaled_grouped_gemm(
     aq, bq, sa, sb, offs, out_dtype, block_size = args[:7]
     bias = args[7] if len(args) > 7 else kwargs.get("bias")
     scale_dtype = args[8] if len(args) > 8 else kwargs.get("scale_dtype")
-    if scale_dtype not in (None, "fp32", "fp8_e8m0"):
-        return CheckResult(False, "unsupported scale_dtype")
+    result = check_values(
+        (scale_dtype,),
+        frozenset({None, "fp32", "fp8_e8m0"}),
+        "Triton scaled grouped GEMM scale_dtype",
+    )
+    if not result.ok:
+        return result
     tensors = (aq, bq, sa, sb, offs) + (() if bias is None else (bias,))
     result = first_failure(
         (
@@ -1362,8 +1378,13 @@ def can_implement_scaled_grouped_gemm(
         )
         if not result.ok:
             return result
-    if out_dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        return CheckResult(False, "unsupported output dtype")
+    result = check_dtypes(
+        (out_dtype,),
+        frozenset({torch.float32, torch.float16, torch.bfloat16}),
+        "Triton scaled grouped GEMM output dtype",
+    )
+    if not result.ok:
+        return result
     return CheckResult(True)
 
 

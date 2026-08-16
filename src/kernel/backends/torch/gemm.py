@@ -19,6 +19,7 @@ from src.kernel.utils import (
     check_nonempty,
     check_same_device,
     check_shape,
+    check_values,
     first_failure,
 )
 
@@ -202,8 +203,13 @@ def _scaled_common_checks(
         return CheckResult(False, f"{feature} dimensions must be multiples of 16")
     if type(block_size) is not int or block_size < 0:
         return CheckResult(False, "block_size must be a non-negative integer")
-    if scale_dtype not in (None, "fp32", "fp8_e8m0"):
-        return CheckResult(False, f"{feature} has unsupported scale_dtype")
+    result = check_values(
+        (scale_dtype,),
+        frozenset({None, "fp32", "fp8_e8m0"}),
+        f"{feature} scale_dtype",
+    )
+    if not result.ok:
+        return result
     scale_blocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
     result = first_failure(
         (
@@ -215,8 +221,9 @@ def _scaled_common_checks(
         return result
     if scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1)):
         return CheckResult(False, "block_size must be a power of two >= 16")
-    if out_dtype not in _OUTPUT_DTYPES:
-        return CheckResult(False, f"{feature} output must be bf16 or fp16")
+    result = check_dtypes((out_dtype,), _OUTPUT_DTYPES, f"{feature} output dtype")
+    if not result.ok:
+        return result
     if bias is not None:
         result = first_failure(
             (
@@ -444,12 +451,18 @@ def can_implement_scaled_grouped_gemm(
         return CheckResult(
             False, "torch scaled grouped GEMM dimensions must be multiples of 16"
         )
-    if block_size != 0:
-        return CheckResult(
-            False, "torch scaled grouped GEMM supports rowwise scales only"
-        )
-    if scale_dtype not in (None, "fp32"):
-        return CheckResult(False, "torch scaled grouped GEMM requires fp32 scales")
+    result = check_values(
+        (block_size,), frozenset({0}), "torch scaled grouped GEMM block_size"
+    )
+    if not result.ok:
+        return result
+    result = check_values(
+        (scale_dtype,),
+        frozenset({None, "fp32"}),
+        "torch scaled grouped GEMM scale_dtype",
+    )
+    if not result.ok:
+        return result
     result = first_failure(
         (
             check_shape(sa, (aq.shape[0], 1), "torch scaled grouped GEMM A scale"),
@@ -462,8 +475,9 @@ def can_implement_scaled_grouped_gemm(
     )
     if not result.ok:
         return result
-    if out_dtype != torch.bfloat16:
-        return CheckResult(False, "torch scaled grouped output must be bf16")
+    result = check_dtypes((out_dtype,), _BF16, "torch scaled grouped GEMM output dtype")
+    if not result.ok:
+        return result
     if bias is not None:
         return CheckResult(False, "torch scaled grouped GEMM does not support bias")
     return check_compute_capability_in(

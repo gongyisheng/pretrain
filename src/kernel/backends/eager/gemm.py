@@ -12,6 +12,7 @@ from src.kernel.utils import (
     check_nonempty,
     check_same_device,
     check_shape,
+    check_values,
     first_failure,
 )
 
@@ -60,16 +61,20 @@ def _check_scaled_common(
     )
     if not result.ok:
         return result
-    if out_dtype not in _FLOAT_DTYPES:
-        return CheckResult(False, f"{feature} has unsupported output dtype {out_dtype}")
+    result = check_dtypes((out_dtype,), _FLOAT_DTYPES, f"{feature} output dtype")
+    if not result.ok:
+        return result
     if type(block_size) is not int or block_size < 0:
         return CheckResult(
             False, f"{feature} block_size must be a non-negative integer"
         )
-    if scale_dtype not in (None, "fp32", "fp8_e8m0"):
-        return CheckResult(
-            False, f"{feature} has unsupported scale_dtype {scale_dtype!r}"
-        )
+    result = check_values(
+        (scale_dtype,),
+        frozenset({None, "fp32", "fp8_e8m0"}),
+        f"{feature} scale_dtype",
+    )
+    if not result.ok:
+        return result
     if bias is not None:
         result = check_dtypes((bias,), _FLOAT_DTYPES, f"{feature} bias")
         if not result.ok:

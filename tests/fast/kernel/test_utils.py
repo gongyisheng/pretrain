@@ -23,6 +23,7 @@ from src.kernel.utils import (
     check_same_device,
     check_shape,
     check_stride,
+    check_values,
     first_failure,
 )
 
@@ -153,6 +154,51 @@ def test_check_dtypes_reports_disallowed_dtype_before_mismatch():
     assert not result.ok
     assert result.reason is not None
     assert "requires one of float32" in result.reason
+
+
+def test_check_dtypes_accepts_dtype_values():
+    assert check_dtypes(
+        (torch.bfloat16,),
+        frozenset({torch.float16, torch.bfloat16}),
+        "output dtype",
+    ).ok
+
+
+def test_check_dtypes_requires_tensor_and_dtype_value_to_match():
+    result = check_dtypes(
+        (torch.empty(1, dtype=torch.float16), torch.bfloat16),
+        frozenset({torch.float16, torch.bfloat16}),
+        "input and output dtypes",
+        require_same=True,
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "same dtype" in result.reason
+
+
+def test_check_values_accepts_allowed_values():
+    assert check_values(
+        (32, "fp8_e8m0"),
+        frozenset({32, "fp8_e8m0"}),
+        "MXFP8 metadata",
+    ).ok
+
+
+def test_check_values_reports_rejected_and_allowed_values():
+    result = check_values(
+        (64, "fp32"),
+        frozenset({32, "fp8_e8m0"}),
+        "MXFP8 metadata",
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "MXFP8 metadata" in result.reason
+    assert "64" in result.reason
+    assert "'fp32'" in result.reason
+    assert "32" in result.reason
+    assert "'fp8_e8m0'" in result.reason
 
 
 def test_check_nonempty_rejects_empty_tensor():
@@ -726,7 +772,7 @@ def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
             lambda args: args.__setitem__(2, _TensorMeta((129, 4), torch.float32)),
             "A scale",
         ),
-        ("fp16_output", lambda args: args.__setitem__(4, torch.float16), "bf16"),
+        ("fp16_output", lambda args: args.__setitem__(4, torch.float16), "bfloat16"),
         (
             "invalid_bias",
             lambda args: args.__setitem__(6, _TensorMeta((160,), torch.float16)),
@@ -1214,14 +1260,14 @@ def test_torch_grouped_gemm_validation_matrix_layouts(
             _scaled_metadata,
             4,
             torch.float32,
-            "output must be bf16 or fp16",
+            "output dtype",
         ),
         (
             torch_gemm.can_implement_scaled_grouped_gemm,
             _scaled_grouped_metadata,
             5,
             torch.float16,
-            "output must be bf16",
+            "output dtype",
         ),
         (
             triton_gemm.can_implement_scaled_grouped_gemm,

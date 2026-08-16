@@ -59,12 +59,14 @@ def check_same_device(tensors: tuple[torch.Tensor, ...], feature: str) -> CheckR
 
 
 def check_dtypes(
-    tensors: tuple[torch.Tensor, ...],
+    values: tuple[torch.Tensor | torch.dtype, ...],
     allowed_dtypes: frozenset[torch.dtype],
     feature: str,
     require_same: bool = False,
 ) -> CheckResult:
-    actual_dtypes = frozenset(tensor.dtype for tensor in tensors)
+    actual_dtypes = frozenset(
+        value if isinstance(value, torch.dtype) else value.dtype for value in values
+    )
     rejected = actual_dtypes.difference(allowed_dtypes)
     if rejected:
         actual = ", ".join(_dtype_name(dtype) for dtype in sorted(rejected, key=str))
@@ -84,6 +86,22 @@ def check_dtypes(
             f"{feature} received dtype(s) {actual}; requires the same dtype",
         )
     return CheckResult(True)
+
+
+def check_values(
+    values: tuple[object, ...],
+    allowed_values: frozenset[object],
+    feature: str,
+) -> CheckResult:
+    rejected = tuple(value for value in values if value not in allowed_values)
+    if not rejected:
+        return CheckResult(True)
+    actual = ", ".join(repr(value) for value in rejected)
+    allowed = ", ".join(repr(value) for value in sorted(allowed_values, key=repr))
+    return CheckResult(
+        False,
+        f"{feature} received value(s) {actual}; requires one of {allowed}",
+    )
 
 
 def check_nonempty(tensor: torch.Tensor, feature: str) -> CheckResult:

@@ -17,6 +17,7 @@ from src.kernel.utils import (
     check_same_device,
     check_shape,
     check_stride,
+    check_values,
     first_failure,
 )
 
@@ -97,10 +98,18 @@ def can_implement_scaled_gemm_mxfp8(
         return CheckResult(
             False, "cuBLASLt MXFP8 GEMM dimensions must be multiples of 16"
         )
-    if block_size != 32:
-        return CheckResult(False, "cuBLASLt MXFP8 GEMM requires block_size 32")
-    if scale_dtype != "fp8_e8m0":
-        return CheckResult(False, "cuBLASLt MXFP8 GEMM requires scale_dtype fp8_e8m0")
+    result = check_values(
+        (block_size,), frozenset({32}), "cuBLASLt MXFP8 GEMM block_size"
+    )
+    if not result.ok:
+        return result
+    result = check_values(
+        (scale_dtype,),
+        frozenset({"fp8_e8m0"}),
+        "cuBLASLt MXFP8 GEMM scale_dtype",
+    )
+    if not result.ok:
+        return result
     scale_blocks = (aq.shape[1] + 31) // 32
     result = first_failure(
         (
@@ -110,8 +119,13 @@ def can_implement_scaled_gemm_mxfp8(
     )
     if not result.ok:
         return result
-    if out_dtype != torch.bfloat16:
-        return CheckResult(False, "cuBLASLt MXFP8 GEMM output must be bf16")
+    result = check_dtypes(
+        (out_dtype,),
+        frozenset({torch.bfloat16}),
+        "cuBLASLt MXFP8 GEMM output dtype",
+    )
+    if not result.ok:
+        return result
     if bias is not None:
         result = first_failure(
             (
