@@ -4,6 +4,10 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+import src.kernel.backends.cublaslt  # noqa: F401
+import src.kernel.backends.eager  # noqa: F401
+import src.kernel.backends.torch  # noqa: F401
+import src.kernel.backends.triton  # noqa: F401
 from src.kernel.registry import register_operation
 from src.kernel.selector import dispatch
 from src.kernel.spec import CheckResult
@@ -42,9 +46,6 @@ __all__ = [
     "grouped_gemm",
     "scaled_gemm",
     "scaled_grouped_gemm",
-    "can_implement_grouped_gemm_shared",
-    "can_implement_scaled_gemm_shared",
-    "can_implement_scaled_grouped_gemm_shared",
     "can_implement_grouped_gemm_eager",
     "can_implement_scaled_gemm_eager",
     "can_implement_scaled_grouped_gemm_eager",
@@ -63,7 +64,7 @@ _QUANTIZED_DTYPES = INT8 | FP8_E4M3 | FP8_E5M2
 _OFFSET_DTYPES = INT32 | INT64
 
 
-def can_implement_grouped_gemm_shared(
+def _validate_grouped_gemm_shared_contract(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
     del kwargs
@@ -116,7 +117,7 @@ def can_implement_grouped_gemm_shared(
     return result
 
 
-def can_implement_scaled_gemm_shared(
+def _validate_scaled_gemm_shared_contract(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
     del kwargs
@@ -176,7 +177,7 @@ def can_implement_scaled_gemm_shared(
     return result
 
 
-def can_implement_scaled_grouped_gemm_shared(
+def _validate_scaled_grouped_gemm_shared_contract(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
     del kwargs
@@ -257,6 +258,9 @@ def can_implement_scaled_grouped_gemm_shared(
 def can_implement_grouped_gemm_eager(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_grouped_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del args, kwargs
     return CheckResult(True)
 
@@ -264,6 +268,9 @@ def can_implement_grouped_gemm_eager(
 def can_implement_scaled_gemm_eager(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_scaled_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del args, kwargs
     return CheckResult(True)
 
@@ -271,6 +278,9 @@ def can_implement_scaled_gemm_eager(
 def can_implement_scaled_grouped_gemm_eager(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del kwargs
     aq, bq, sa, sb, offs, out_dtype, block_size, scale_dtype, bias = args
     checks = ()
@@ -332,6 +342,9 @@ def _is_row_major(tensor: torch.Tensor) -> bool:
 def can_implement_grouped_gemm_torch(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_grouped_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del kwargs
     a, b, offs, bias = args
     tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
@@ -355,6 +368,9 @@ def can_implement_grouped_gemm_torch(
 def can_implement_scaled_gemm_torch(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_scaled_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del kwargs
     aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
@@ -416,6 +432,9 @@ def can_implement_scaled_gemm_torch(
 def can_implement_scaled_grouped_gemm_torch(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del kwargs
     aq, bq, sa, sb, offs, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb, offs) if bias is None else (aq, bq, sa, sb, offs, bias)
@@ -488,6 +507,9 @@ def can_implement_scaled_grouped_gemm_torch(
 def can_implement_grouped_gemm_triton(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_grouped_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del kwargs
     a, b, offs, bias = args
     tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
@@ -515,6 +537,9 @@ def _check_triton_quantized_operands(
 def can_implement_scaled_gemm_triton(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_scaled_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del kwargs
     aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb) + (() if bias is None else (bias,))
@@ -544,6 +569,9 @@ def can_implement_scaled_gemm_triton(
 def can_implement_scaled_grouped_gemm_triton(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del kwargs
     aq, bq, sa, sb, offs, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb, offs) + (() if bias is None else (bias,))
@@ -591,14 +619,17 @@ def can_implement_scaled_grouped_gemm_triton(
 def can_implement_scaled_gemm_cublaslt(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
+    result = _validate_scaled_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
     del kwargs
     aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
+    try:
+        from src.kernel.backends.cublaslt import _C  # noqa: F401
+    except ImportError as error:
+        return CheckResult(False, f"cuBLASLt extension unavailable: {error}")
     checks = (
-        check_condition(
-            _EXTENSION_ERROR is None,
-            str(_EXTENSION_ERROR),
-        ),
         check_cuda_tensors(tensors, "MXFP8 GEMM"),
         check_dtypes((aq, bq), FP8_E4M3, "MXFP8 GEMM operands"),
         check_values((block_size,), frozenset({32}), "MXFP8 GEMM block_size"),
@@ -632,23 +663,31 @@ def can_implement_scaled_gemm_cublaslt(
     return check_compute_capability_at_least(aq.device, (10, 0), "MXFP8 GEMM")
 
 
-register_operation("gemm.grouped", can_implement_grouped_gemm_shared)
-register_operation("gemm.scaled", can_implement_scaled_gemm_shared)
-register_operation("gemm.scaled_grouped", can_implement_scaled_grouped_gemm_shared)
-
-
-try:
-    from src.kernel.backends.cublaslt import _C  # noqa: F401
-except ImportError as error:
-    _EXTENSION_ERROR: str | None = f"cuBLASLt extension unavailable: {error}"
-else:
-    _EXTENSION_ERROR = None
-
-
-from src.kernel.backends import cublaslt as _cublaslt_backend  # noqa: E402, F401
-from src.kernel.backends import eager as _eager_backend  # noqa: E402, F401
-from src.kernel.backends import torch as _torch_backend  # noqa: E402, F401
-from src.kernel.backends import triton as _triton_backend  # noqa: E402, F401
+register_operation(
+    "gemm.grouped",
+    {
+        "eager": can_implement_grouped_gemm_eager,
+        "torch": can_implement_grouped_gemm_torch,
+        "triton": can_implement_grouped_gemm_triton,
+    },
+)
+register_operation(
+    "gemm.scaled",
+    {
+        "eager": can_implement_scaled_gemm_eager,
+        "torch": can_implement_scaled_gemm_torch,
+        "triton": can_implement_scaled_gemm_triton,
+        "cublaslt": can_implement_scaled_gemm_cublaslt,
+    },
+)
+register_operation(
+    "gemm.scaled_grouped",
+    {
+        "eager": can_implement_scaled_grouped_gemm_eager,
+        "torch": can_implement_scaled_grouped_gemm_torch,
+        "triton": can_implement_scaled_grouped_gemm_triton,
+    },
+)
 
 
 def grouped_gemm(a, b, offs, bias=None, backend="auto"):

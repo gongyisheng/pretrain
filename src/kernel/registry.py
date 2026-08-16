@@ -1,49 +1,83 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from src.kernel.spec import (
     BuildMode,
     CanImplementFn,
     KernelSpec,
+    OperationSpec,
 )
 
 
 class KernelRegistry:
     def __init__(self):
         self._specs: dict[str, dict[str, KernelSpec]] = {}
-        self._operation_can_implement: dict[str, CanImplementFn] = {}
+        self._operations: dict[str, OperationSpec] = {}
 
     def register(self, spec: KernelSpec) -> None:
-        by_backend = self._specs.setdefault(spec.op, {})
-        if spec.backend in by_backend:
+        by_backend = self._specs.get(spec.op)
+        if by_backend is not None and spec.backend in by_backend:
             raise ValueError(
                 f"kernel already registered: op={spec.op!r}, backend={spec.backend!r}"
             )
-        by_backend[spec.backend] = spec
+        operation = self._operations.get(spec.op)
+        if operation is not None and spec.backend not in operation.can_implement:
+            raise ValueError(
+                f"kernel has no backend validator: "
+                f"op={spec.op!r}, backend={spec.backend!r}"
+            )
+        if by_backend is None:
+            self._specs[spec.op] = {spec.backend: spec}
+        else:
+            by_backend[spec.backend] = spec
 
     def implementations(self, op: str) -> tuple[KernelSpec, ...]:
         return tuple(self._specs.get(op, {}).values())
 
-    def register_operation(self, op: str, can_implement: CanImplementFn) -> None:
-        if op in self._operation_can_implement:
+    def register_operation(
+        self,
+        op: str,
+        can_implement: Mapping[str, CanImplementFn],
+    ) -> None:
+        if op in self._operations:
             raise ValueError(f"operation already registered: op={op!r}")
-        self._operation_can_implement[op] = can_implement
+        operation = OperationSpec(can_implement)
+        missing = [
+            spec.backend
+            for spec in self.implementations(op)
+            if spec.backend not in operation.can_implement
+        ]
+        if missing:
+            backends = ", ".join(sorted(missing))
+            raise ValueError(
+                f"operation has no backend validator for registered kernels: "
+                f"op={op!r}, backends={backends}"
+            )
+        self._operations[op] = operation
 
-    def operation_can_implement(self, op: str) -> CanImplementFn | None:
-        return self._operation_can_implement.get(op)
+    def operation(self, op: str) -> OperationSpec | None:
+        return self._operations.get(op)
+
+    def can_implement(self, op: str, backend: str) -> CanImplementFn | None:
+        operation = self.operation(op)
+        if operation is None:
+            return None
+        return operation.can_implement.get(backend)
 
 
 KERNEL_REGISTRY = KernelRegistry()
 
 
-def register_operation(op: str, can_implement: CanImplementFn) -> None:
+def register_operation(
+    op: str,
+    can_implement: Mapping[str, CanImplementFn],
+) -> None:
     KERNEL_REGISTRY.register_operation(op, can_implement)
 
 
 def register_kernel(
     op: str,
     backend: str,
-    can_implement: CanImplementFn,
     build: BuildMode,
     autograd: bool,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -53,7 +87,6 @@ def register_kernel(
                 op=op,
                 backend=backend,
                 fn=fn,
-                can_implement=can_implement,
                 build=build,
                 autograd=autograd,
             )

@@ -4,7 +4,6 @@ from typing import Any
 import pytest
 import torch
 
-from src.kernel.ops import gemm as gemm_module
 from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry, register_kernel
 from src.kernel.selector import (
     KernelSelectionError,
@@ -28,17 +27,33 @@ def _no(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
 def _spec(
     backend: str,
     fn: Callable[..., Any],
-    can_implement: Callable[[tuple[Any, ...], Mapping[str, Any]], CheckResult] = _yes,
     autograd: bool = True,
 ) -> KernelSpec:
     return KernelSpec(
         op="test.identity",
         backend=backend,
         fn=fn,
-        can_implement=can_implement,
         build="eager",
         autograd=autograd,
     )
+
+
+def _registry(
+    can_implement: Mapping[
+        str, Callable[[tuple[Any, ...], Mapping[str, Any]], CheckResult]
+    ]
+    | None = None,
+) -> KernelRegistry:
+    if can_implement is None:
+        can_implement = {
+            "eager": _yes,
+            "torch": _yes,
+            "triton": _yes,
+            "cublaslt": _yes,
+        }
+    registry = KernelRegistry()
+    registry.register_operation("test.identity", can_implement)
+    return registry
 
 
 _selection_cache_calls = 0
@@ -53,12 +68,14 @@ def _count_selection_cache_checks(
     return CheckResult(True)
 
 
+KERNEL_REGISTRY.register_operation(
+    "test.selection_cache", {"eager": _count_selection_cache_checks}
+)
 KERNEL_REGISTRY.register(
     KernelSpec(
         op="test.selection_cache",
         backend="eager",
         fn=lambda value: value,
-        can_implement=_count_selection_cache_checks,
         build="eager",
         autograd=True,
     )
@@ -111,244 +128,139 @@ def test_selection_cache_bypasses_explicit_backend_selection():
     assert _selection_cache_calls == 2
 
 
-def test_auto_cache_miss_runs_shared_and_backend_checks_once():
-    calls = {"shared": 0, "backend": 0}
-
-    def shared(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
-        del args, kwargs
-        calls["shared"] += 1
-        return CheckResult(True)
+def test_auto_cache_miss_runs_backend_check_once():
+    calls = 0
 
     def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+        nonlocal calls
         del args, kwargs
-        calls["backend"] += 1
+        calls += 1
         return CheckResult(True)
 
-    KERNEL_REGISTRY.register_operation("test.shared_cache_miss", shared)
+    op = "test.cache_miss"
+    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
     KERNEL_REGISTRY.register(
         KernelSpec(
-            op="test.shared_cache_miss",
-            backend="eager",
-            fn=lambda value: value,
-            can_implement=backend,
-            build="eager",
-            autograd=True,
+            op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
 
-    select_kernel("test.shared_cache_miss", (torch.ones(2),), {})
+    select_kernel(op, (torch.ones(2),), {})
 
-    assert calls == {"shared": 1, "backend": 1}
+    assert calls == 1
 
 
-def test_auto_cache_hit_rechecks_shared_without_backend_check():
-    calls = {"shared": 0, "backend": 0}
-
-    def shared(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
-        del args, kwargs
-        calls["shared"] += 1
-        return CheckResult(True)
+def test_auto_cache_hit_skips_backend_validation():
+    calls = 0
 
     def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+        nonlocal calls
         del args, kwargs
-        calls["backend"] += 1
+        calls += 1
         return CheckResult(True)
 
-    KERNEL_REGISTRY.register_operation("test.shared_cache_hit", shared)
+    op = "test.cache_hit"
+    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
     KERNEL_REGISTRY.register(
         KernelSpec(
-            op="test.shared_cache_hit",
-            backend="eager",
-            fn=lambda value: value,
-            can_implement=backend,
-            build="eager",
-            autograd=True,
+            op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
     tensor = torch.ones(2)
 
-    select_kernel("test.shared_cache_hit", (tensor,), {})
-    select_kernel("test.shared_cache_hit", (tensor,), {})
+    select_kernel(op, (tensor,), {})
+    select_kernel(op, (tensor,), {})
 
-    assert calls == {"shared": 2, "backend": 1}
-
-
-def test_grouped_gemm_warm_cache_rechecks_shared_without_eager_backend(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    calls = {"shared": 0, "backend": 0}
-    operation = "gemm.grouped"
-    shared = KERNEL_REGISTRY.operation_can_implement(operation)
-    eager_spec = next(
-        spec
-        for spec in KERNEL_REGISTRY.implementations(operation)
-        if spec.backend == "eager"
-    )
-
-    assert shared is not None
-
-    def counted_shared(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
-        calls["shared"] += 1
-        return shared(args, kwargs)
-
-    def counted_eager(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
-        calls["backend"] += 1
-        return eager_spec.can_implement(args, kwargs)
-
-    monkeypatch.setattr(
-        gemm_module, "can_implement_grouped_gemm_shared", counted_shared
-    )
-    monkeypatch.setitem(
-        KERNEL_REGISTRY._operation_can_implement, operation, counted_shared
-    )
-    monkeypatch.setitem(
-        KERNEL_REGISTRY._specs,
-        operation,
-        {
-            "eager": KernelSpec(
-                op=eager_spec.op,
-                backend=eager_spec.backend,
-                fn=eager_spec.fn,
-                can_implement=counted_eager,
-                build=eager_spec.build,
-                autograd=eager_spec.autograd,
-            )
-        },
-    )
-    a = torch.ones(2, 3)
-    b = torch.ones(3, 4)
-    offs = torch.tensor([3], dtype=torch.int32)
-    clear_selection_cache()
-
-    try:
-        gemm_module.grouped_gemm(a, b, offs)
-        gemm_module.grouped_gemm(a, b, offs)
-    finally:
-        clear_selection_cache()
-
-    assert calls == {"shared": 2, "backend": 1}
+    assert calls == 1
 
 
 def test_explicit_backend_bypasses_warmed_auto_cache():
     calls: list[str] = []
-
-    def shared(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
-        del args, kwargs
-        calls.append("shared")
-        return CheckResult(True)
 
     def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
         del args, kwargs
         calls.append("backend")
         return CheckResult(True)
 
-    KERNEL_REGISTRY.register_operation("test.explicit_warmed_cache", shared)
+    op = "test.explicit_warmed_cache"
+    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
     KERNEL_REGISTRY.register(
         KernelSpec(
-            op="test.explicit_warmed_cache",
-            backend="eager",
-            fn=lambda value: value,
-            can_implement=backend,
-            build="eager",
-            autograd=True,
+            op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
     tensor = torch.ones(2)
 
-    select_kernel("test.explicit_warmed_cache", (tensor,), {})
-    select_kernel("test.explicit_warmed_cache", (tensor,), {}, backend="eager")
-    select_kernel("test.explicit_warmed_cache", (tensor,), {}, backend="eager")
+    select_kernel(op, (tensor,), {})
+    select_kernel(op, (tensor,), {}, backend="eager")
+    select_kernel(op, (tensor,), {}, backend="eager")
 
-    assert calls == ["shared", "backend", "shared", "backend", "shared", "backend"]
-    assert calls.count("shared") == 3
-    assert calls.count("backend") == 3
+    assert calls == ["backend", "backend", "backend"]
 
 
-def test_shared_failure_rechecks_mutated_tensor_before_cached_selection():
-    calls = {"shared": 0, "backend": 0}
+def test_cache_hit_does_not_rerun_value_dependent_validation():
+    calls = 0
 
-    def shared(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+    def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+        nonlocal calls
         del kwargs
-        calls["shared"] += 1
+        calls += 1
         if bool(torch.all(args[0] >= 0)):
             return CheckResult(True)
         return CheckResult(False, "tensor values must be nonnegative")
 
-    def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
-        del args, kwargs
-        calls["backend"] += 1
-        return CheckResult(True)
-
-    KERNEL_REGISTRY.register_operation("test.shared_mutable_tensor", shared)
+    op = "test.value_dependent_validator"
+    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
     KERNEL_REGISTRY.register(
         KernelSpec(
-            op="test.shared_mutable_tensor",
-            backend="eager",
-            fn=lambda value: value,
-            can_implement=backend,
-            build="eager",
-            autograd=True,
+            op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
     tensor = torch.ones(2)
 
-    select_kernel("test.shared_mutable_tensor", (tensor,), {})
+    select_kernel(op, (tensor,), {})
     tensor[0] = -1
-    with pytest.raises(KernelSelectionError) as error:
-        select_kernel("test.shared_mutable_tensor", (tensor,), {})
+    select_kernel(op, (tensor,), {})
 
-    assert error.value.args == ("tensor values must be nonnegative",)
-    assert str(error.value) == "tensor values must be nonnegative"
-    assert calls == {"shared": 2, "backend": 1}
+    assert calls == 1
 
 
-def test_shared_failure_does_not_populate_auto_selection_cache():
-    calls = {"shared": 0, "backend": 0}
+def test_backend_failure_does_not_populate_auto_selection_cache():
+    calls = 0
     is_valid = False
 
-    def shared(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+    def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+        nonlocal calls
         del args, kwargs
-        calls["shared"] += 1
+        calls += 1
         if is_valid:
             return CheckResult(True)
-        return CheckResult(False, "shared call is invalid")
+        return CheckResult(False, "backend call is invalid")
 
-    def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
-        del args, kwargs
-        calls["backend"] += 1
-        return CheckResult(True)
-
-    KERNEL_REGISTRY.register_operation("test.shared_failure_cache", shared)
+    op = "test.backend_failure_cache"
+    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
     KERNEL_REGISTRY.register(
         KernelSpec(
-            op="test.shared_failure_cache",
-            backend="eager",
-            fn=lambda value: value,
-            can_implement=backend,
-            build="eager",
-            autograd=True,
+            op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
     tensor = torch.ones(2)
 
-    with pytest.raises(KernelSelectionError) as error:
-        select_kernel("test.shared_failure_cache", (tensor,), {})
+    with pytest.raises(KernelSelectionError, match="backend call is invalid"):
+        select_kernel(op, (tensor,), {})
 
-    assert error.value.args == ("shared call is invalid",)
-    assert str(error.value) == "shared call is invalid"
     is_valid = True
-    select_kernel("test.shared_failure_cache", (tensor,), {})
+    select_kernel(op, (tensor,), {})
 
-    assert calls == {"shared": 2, "backend": 1}
+    assert calls == 2
 
 
-def test_local_registry_without_shared_callback_selects_normally():
+def test_selection_requires_operation_metadata():
     registry = KernelRegistry()
     registry.register(_spec("triton", lambda value: value))
 
-    selected = select_kernel("test.identity", (3,), {}, registry=registry)
-
-    assert selected.backend == "triton"
+    with pytest.raises(KernelSelectionError, match="src.kernel.ops"):
+        select_kernel("test.identity", (3,), {}, registry=registry)
 
 
 def test_clear_selection_cache_forces_another_eligibility_check():
@@ -362,7 +274,7 @@ def test_clear_selection_cache_forces_another_eligibility_check():
 
 
 def test_auto_selects_highest_priority_eligible_backend():
-    registry = KernelRegistry()
+    registry = _registry()
     registry.register(_spec("eager", lambda x: ("eager", x)))
     registry.register(_spec("cublaslt", lambda x: ("cublaslt", x)))
     registry.register(_spec("torch", lambda x: ("torch", x)))
@@ -374,22 +286,17 @@ def test_auto_selects_highest_priority_eligible_backend():
 
 
 def test_auto_uses_torch_when_optimized_backend_is_ineligible():
-    registry = KernelRegistry()
+    registry = _registry({"torch": _yes, "triton": _no})
     registry.register(_spec("torch", lambda x: x))
-    registry.register(_spec("triton", lambda x: x, can_implement=_no))
+    registry.register(_spec("triton", lambda x: x))
 
     selected = select_kernel("test.identity", (3,), {}, registry=registry)
 
     assert selected.backend == "torch"
 
 
-def test_auto_runs_shared_once_before_falling_back_to_an_eligible_backend():
-    calls = {"shared": 0, "rejector": 0, "fallback": 0}
-
-    def shared(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
-        del args, kwargs
-        calls["shared"] += 1
-        return CheckResult(True)
+def test_auto_runs_validators_before_falling_back_to_an_eligible_backend():
+    calls = {"rejector": 0, "fallback": 0}
 
     def rejector(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
         del args, kwargs
@@ -401,19 +308,18 @@ def test_auto_runs_shared_once_before_falling_back_to_an_eligible_backend():
         calls["fallback"] += 1
         return CheckResult(True)
 
-    registry = KernelRegistry()
-    registry.register_operation("test.identity", shared)
-    registry.register(_spec("eager", lambda value: value, fallback))
-    registry.register(_spec("triton", lambda value: value, rejector))
+    registry = _registry({"eager": fallback, "triton": rejector})
+    registry.register(_spec("eager", lambda value: value))
+    registry.register(_spec("triton", lambda value: value))
 
     selected = select_kernel("test.identity", (3,), {}, registry=registry)
 
     assert selected.backend == "eager"
-    assert calls == {"shared": 1, "rejector": 1, "fallback": 1}
+    assert calls == {"rejector": 1, "fallback": 1}
 
 
 def test_forced_selection_uses_requested_backend():
-    registry = KernelRegistry()
+    registry = _registry({"torch": _yes, "triton": _yes})
     registry.register(_spec("torch", lambda x: x))
     registry.register(_spec("triton", lambda x: x))
 
@@ -423,8 +329,8 @@ def test_forced_selection_uses_requested_backend():
 
 
 def test_forced_ineligible_backend_raises_reason():
-    registry = KernelRegistry()
-    registry.register(_spec("triton", lambda x: x, can_implement=_no))
+    registry = _registry({"triton": _no})
+    registry.register(_spec("triton", lambda x: x))
 
     with pytest.raises(
         KernelSelectionError, match="test.identity.*triton.*unsupported dtype"
@@ -433,7 +339,6 @@ def test_forced_ineligible_backend_raises_reason():
 
 
 def test_auto_calls_can_implement_once_per_candidate_and_aggregates_reasons():
-    registry = KernelRegistry()
     calls = {"torch": 0, "triton": 0}
 
     def reject_torch(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
@@ -446,8 +351,9 @@ def test_auto_calls_can_implement_once_per_candidate_and_aggregates_reasons():
         calls["triton"] += 1
         return CheckResult(False, "requires SM90")
 
-    registry.register(_spec("torch", lambda x: x, reject_torch))
-    registry.register(_spec("triton", lambda x: x, reject_triton))
+    registry = _registry({"torch": reject_torch, "triton": reject_triton})
+    registry.register(_spec("torch", lambda x: x))
+    registry.register(_spec("triton", lambda x: x))
 
     with pytest.raises(
         KernelSelectionError,
@@ -458,17 +364,17 @@ def test_auto_calls_can_implement_once_per_candidate_and_aggregates_reasons():
     assert calls == {"torch": 1, "triton": 1}
 
 
-def test_autograd_gate_runs_before_can_implement():
-    registry = KernelRegistry()
+def test_autograd_gate_runs_before_backend_validation():
     calls = 0
 
-    def can_implement(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+    def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
         nonlocal calls
         del args, kwargs
         calls += 1
         return CheckResult(True)
 
-    registry.register(_spec("triton", lambda x: x, can_implement, autograd=False))
+    registry = _registry({"triton": backend})
+    registry.register(_spec("triton", lambda x: x, autograd=False))
     x = torch.ones(2, requires_grad=True)
 
     with pytest.raises(
@@ -480,7 +386,7 @@ def test_autograd_gate_runs_before_can_implement():
 
 
 def test_unknown_forced_backend_lists_registered_backends():
-    registry = KernelRegistry()
+    registry = _registry({"torch": _yes, "triton": _yes})
     registry.register(_spec("torch", lambda x: x))
     registry.register(_spec("triton", lambda x: x))
 
@@ -503,7 +409,7 @@ def test_dispatch_does_not_retry_after_selected_kernel_raises():
         calls["triton"] += 1
         raise RuntimeError("kernel defect")
 
-    registry = KernelRegistry()
+    registry = _registry({"torch": _yes, "triton": _yes})
     registry.register(_spec("torch", fallback))
     registry.register(_spec("triton", defect))
 
@@ -513,17 +419,17 @@ def test_dispatch_does_not_retry_after_selected_kernel_raises():
     assert calls == {"torch": 0, "triton": 1}
 
 
-def test_forced_selection_calls_can_implement_exactly_once():
+def test_forced_selection_calls_backend_validation_exactly_once():
     calls = 0
 
-    def can_implement(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+    def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
         nonlocal calls
         del args, kwargs
         calls += 1
         return CheckResult(False, "unsupported test call")
 
-    registry = KernelRegistry()
-    registry.register(_spec("triton", lambda value: value, can_implement=can_implement))
+    registry = _registry({"triton": backend})
+    registry.register(_spec("triton", lambda value: value))
 
     with pytest.raises(KernelSelectionError, match="unsupported test call"):
         select_kernel("test.identity", (3,), {}, "triton", registry)
@@ -532,7 +438,7 @@ def test_forced_selection_calls_can_implement_exactly_once():
 
 
 def test_auto_falls_back_when_optimized_backend_cannot_build_autograd():
-    registry = KernelRegistry()
+    registry = _registry({"torch": _yes, "triton": _yes})
     registry.register(_spec("torch", lambda x: x))
     registry.register(_spec("triton", lambda x: x, autograd=False))
     x = torch.ones(2, device="cpu", requires_grad=True)
@@ -543,7 +449,7 @@ def test_auto_falls_back_when_optimized_backend_cannot_build_autograd():
 
 
 def test_forced_backend_rejects_unsafe_grad_enabled_call():
-    registry = KernelRegistry()
+    registry = _registry({"triton": _yes})
     registry.register(_spec("triton", lambda x: x, autograd=False))
     x = torch.ones(2, device="cpu", requires_grad=True)
 
@@ -555,7 +461,7 @@ def test_forced_backend_rejects_unsafe_grad_enabled_call():
 
 
 def test_non_autograd_backend_is_selectable_without_grad_tracking():
-    registry = KernelRegistry()
+    registry = _registry({"triton": _yes})
     registry.register(_spec("triton", lambda x: x, autograd=False))
     x = torch.ones(2, device="cpu", requires_grad=True)
 
@@ -566,7 +472,7 @@ def test_non_autograd_backend_is_selectable_without_grad_tracking():
 
 
 def test_non_autograd_backend_is_selectable_inside_autograd_function_forward():
-    registry = KernelRegistry()
+    registry = _registry({"triton": _yes})
     registry.register(_spec("triton", lambda x: x * 2, autograd=False))
 
     class ComposedIdentity(torch.autograd.Function):
@@ -593,14 +499,11 @@ def test_kernel_spec_rejects_non_bool_autograd(autograd: Any):
 
 
 def test_register_kernel_rejects_non_bool_autograd():
+    op = "test.invalid_autograd"
+    KERNEL_REGISTRY.register_operation(op, {"eager": _yes})
+
     with pytest.raises(TypeError, match="autograd must be bool"):
 
-        @register_kernel(
-            op="test.invalid_autograd",
-            backend="eager",
-            can_implement=_yes,
-            build="eager",
-            autograd="invalid",
-        )
+        @register_kernel(op=op, backend="eager", build="eager", autograd="invalid")
         def invalid_kernel(x: Any) -> Any:
             return x

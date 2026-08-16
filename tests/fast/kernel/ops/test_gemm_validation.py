@@ -1,10 +1,12 @@
+import ast
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 import torch
 
-from src.kernel.backends.cublaslt import gemm as cublaslt_gemm
-from src.kernel.backends.eager import gemm as eager_gemm
-from src.kernel.backends.torch import gemm as torch_gemm
-from src.kernel.backends.triton import gemm as triton_gemm
+from src.kernel.backends import cublaslt as cublaslt_backend
 from src.kernel.ops import gemm as gemm_module
 from src.kernel.spec import CheckResult
 
@@ -61,44 +63,84 @@ class _TensorMeta(torch.Tensor):
         return total
 
 
-@pytest.mark.parametrize(
-    ("backend_module", "predicate_names"),
-    [
-        (
-            eager_gemm,
-            (
-                "can_implement_grouped_gemm_eager",
-                "can_implement_scaled_gemm_eager",
-                "can_implement_scaled_grouped_gemm_eager",
-            ),
-        ),
-        (
-            torch_gemm,
-            (
-                "can_implement_grouped_gemm_torch",
-                "can_implement_scaled_gemm_torch",
-                "can_implement_scaled_grouped_gemm_torch",
-            ),
-        ),
-        (
-            triton_gemm,
-            (
-                "can_implement_grouped_gemm_triton",
-                "can_implement_scaled_gemm_triton",
-                "can_implement_scaled_grouped_gemm_triton",
-            ),
-        ),
-        (cublaslt_gemm, ("can_implement_scaled_gemm_cublaslt",)),
-    ],
+_REPOSITORY_ROOT = Path(__file__).parents[4]
+_BACKEND_MODULES = (
+    "src/kernel/backends/eager/__init__.py",
+    "src/kernel/backends/eager/gemm.py",
+    "src/kernel/backends/torch/__init__.py",
+    "src/kernel/backends/torch/gemm.py",
+    "src/kernel/backends/triton/__init__.py",
+    "src/kernel/backends/triton/gemm.py",
+    "src/kernel/backends/cublaslt/__init__.py",
+    "src/kernel/backends/cublaslt/gemm.py",
 )
-def test_gemm_capability_predicates_are_owned_by_ops(
-    backend_module, predicate_names: tuple[str, ...]
-):
-    for predicate_name in predicate_names:
-        predicate = getattr(backend_module, predicate_name)
 
-        assert predicate is getattr(gemm_module, predicate_name)
-        assert predicate.__module__ == gemm_module.__name__
+
+@pytest.fixture
+def available_cublaslt_extension(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cublaslt_backend, "_C", object(), raising=False)
+
+
+@pytest.mark.parametrize("relative_path", _BACKEND_MODULES)
+def test_backend_modules_do_not_import_ops(relative_path: str):
+    tree = ast.parse((_REPOSITORY_ROOT / relative_path).read_text())
+    imported_modules = [
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    ]
+    imported_modules.extend(
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    )
+
+    assert not any(
+        module == "src.kernel.ops" or module.startswith("src.kernel.ops.")
+        for module in imported_modules
+    )
+
+
+def test_direct_backend_import_does_not_initialize_operation_metadata():
+    script = """
+import src.kernel.backends.eager.gemm
+from src.kernel.selector import KernelSelectionError, select_kernel
+
+try:
+    select_kernel("gemm.grouped", (), {})
+except KernelSelectionError as error:
+    assert "src.kernel.ops" in str(error)
+else:
+    raise AssertionError("selection unexpectedly succeeded without operation metadata")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_importing_gemm_ops_does_not_load_cublaslt_extension():
+    script = """
+import sys
+import src.kernel.ops.gemm
+
+assert "src.kernel.backends.cublaslt._C" not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _grouped_metadata(layout: str, with_bias: bool):
@@ -138,7 +180,7 @@ def test_eager_grouped_requires_matching_allowed_operand_dtypes():
         None,
     )
 
-    result = gemm_module.can_implement_grouped_gemm_shared(args, {})
+    result = gemm_module.can_implement_grouped_gemm_eager(args, {})
 
     assert not result.ok
     assert result.reason is not None
@@ -148,12 +190,12 @@ def test_eager_grouped_requires_matching_allowed_operand_dtypes():
 @pytest.mark.parametrize(
     ("predicate", "expected_argument_count"),
     [
-        (gemm_module.can_implement_grouped_gemm_shared, 4),
-        (gemm_module.can_implement_scaled_gemm_shared, 8),
-        (gemm_module.can_implement_scaled_grouped_gemm_shared, 9),
+        (gemm_module.can_implement_grouped_gemm_eager, 4),
+        (gemm_module.can_implement_scaled_gemm_eager, 8),
+        (gemm_module.can_implement_scaled_grouped_gemm_eager, 9),
     ],
 )
-def test_shared_gemm_predicates_reject_wrong_argument_count(
+def test_eager_gemm_predicates_reject_wrong_argument_count(
     predicate, expected_argument_count: int
 ):
     result = predicate((), {})
@@ -162,9 +204,32 @@ def test_shared_gemm_predicates_reject_wrong_argument_count(
 
 
 @pytest.mark.parametrize(
+    ("predicate", "expected_argument_count"),
+    [
+        (gemm_module.can_implement_grouped_gemm_eager, 4),
+        (gemm_module.can_implement_grouped_gemm_torch, 4),
+        (gemm_module.can_implement_grouped_gemm_triton, 4),
+        (gemm_module.can_implement_scaled_gemm_eager, 8),
+        (gemm_module.can_implement_scaled_gemm_torch, 8),
+        (gemm_module.can_implement_scaled_gemm_triton, 8),
+        (gemm_module.can_implement_scaled_gemm_cublaslt, 8),
+        (gemm_module.can_implement_scaled_grouped_gemm_eager, 9),
+        (gemm_module.can_implement_scaled_grouped_gemm_torch, 9),
+        (gemm_module.can_implement_scaled_grouped_gemm_triton, 9),
+    ],
+)
+def test_all_gemm_backend_validators_reject_malformed_common_contracts(
+    predicate, expected_argument_count: int
+):
+    assert predicate((), {}) == CheckResult(
+        False, f"expected {expected_argument_count} arguments"
+    )
+
+
+@pytest.mark.parametrize(
     "predicate",
     [
-        gemm_module.can_implement_grouped_gemm_shared,
+        gemm_module.can_implement_grouped_gemm_eager,
     ],
 )
 def test_grouped_backends_reject_empty_offsets(
@@ -189,7 +254,7 @@ def test_eager_grouped_rejects_empty_offsets():
         None,
     )
 
-    result = gemm_module.can_implement_grouped_gemm_shared(args, {})
+    result = gemm_module.can_implement_grouped_gemm_eager(args, {})
 
     assert not result.ok
     assert result.reason is not None
@@ -208,7 +273,7 @@ def test_torch_grouped_accepts_supported_bias_layouts(
 
 def test_torch_grouped_rejects_ragged_n_bias(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-    result = gemm_module.can_implement_grouped_gemm_shared(
+    result = gemm_module.can_implement_grouped_gemm_eager(
         _grouped_metadata(layout="ragged_n", with_bias=True), {}
     )
 
@@ -270,7 +335,7 @@ def test_eager_scaled_checks_bias_after_common_validation():
     args[4] = torch.float64
     args[7] = _TensorMeta((48,), torch.int8)
 
-    result = gemm_module.can_implement_scaled_gemm_shared(tuple(args), {})
+    result = gemm_module.can_implement_scaled_gemm_eager(tuple(args), {})
 
     assert result.reason is not None
     assert "output dtype" in result.reason
@@ -328,7 +393,7 @@ def _scaled_grouped_metadata(device: str = "cuda:7"):
 @pytest.mark.parametrize(
     "predicate",
     [
-        gemm_module.can_implement_scaled_grouped_gemm_shared,
+        gemm_module.can_implement_scaled_grouped_gemm_eager,
     ],
 )
 def test_scaled_grouped_backends_reject_empty_offsets(
@@ -358,7 +423,7 @@ def test_eager_scaled_grouped_rejects_empty_offsets():
         None,
     )
 
-    result = gemm_module.can_implement_scaled_grouped_gemm_shared(args, {})
+    result = gemm_module.can_implement_scaled_grouped_gemm_eager(args, {})
 
     assert not result.ok
     assert result.reason is not None
@@ -382,9 +447,9 @@ def _triton_scaled_metadata(block_size: int = 0, k: int = 64):
 @pytest.mark.parametrize(
     ("predicate_name", "args_factory"),
     [
-        ("can_implement_grouped_gemm_shared", _default_grouped_metadata),
-        ("can_implement_scaled_gemm_shared", _scaled_metadata),
-        ("can_implement_scaled_grouped_gemm_shared", _scaled_grouped_metadata),
+        ("can_implement_grouped_gemm_eager", _default_grouped_metadata),
+        ("can_implement_scaled_gemm_eager", _scaled_metadata),
+        ("can_implement_scaled_grouped_gemm_eager", _scaled_grouped_metadata),
     ],
 )
 def test_shared_gemm_capability_predicates_accept_valid_contracts(
@@ -399,9 +464,9 @@ def test_shared_gemm_capability_predicates_accept_valid_contracts(
 @pytest.mark.parametrize(
     ("predicate", "args_factory", "scale_dtype_index"),
     [
-        (gemm_module.can_implement_scaled_gemm_shared, _scaled_metadata, 6),
+        (gemm_module.can_implement_scaled_gemm_eager, _scaled_metadata, 6),
         (
-            gemm_module.can_implement_scaled_grouped_gemm_shared,
+            gemm_module.can_implement_scaled_grouped_gemm_eager,
             _scaled_grouped_metadata,
             7,
         ),
@@ -445,9 +510,12 @@ def test_shared_scaled_gemm_predicates_reject_invalid_scale_dtype(
     ],
 )
 def test_cublaslt_scaled_gemm_rejects_invalid_contracts(
-    monkeypatch: pytest.MonkeyPatch, name: str, mutate, expected_reason: str
+    monkeypatch: pytest.MonkeyPatch,
+    available_cublaslt_extension: None,
+    name: str,
+    mutate,
+    expected_reason: str,
 ):
-    monkeypatch.setattr(gemm_module, "_EXTENSION_ERROR", None)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
     args = list(_cublaslt_scaled_metadata())
     mutate(args)
@@ -461,8 +529,8 @@ def test_cublaslt_scaled_gemm_rejects_invalid_contracts(
 
 def test_cublaslt_scaled_gemm_accepts_sm120_contract(
     monkeypatch: pytest.MonkeyPatch,
+    available_cublaslt_extension: None,
 ):
-    monkeypatch.setattr(gemm_module, "_EXTENSION_ERROR", None)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
 
     result = gemm_module.can_implement_scaled_gemm_cublaslt(
@@ -473,9 +541,8 @@ def test_cublaslt_scaled_gemm_accepts_sm120_contract(
 
 
 def test_cublaslt_scaled_gemm_requires_block_size_32(
-    monkeypatch: pytest.MonkeyPatch,
+    available_cublaslt_extension: None,
 ):
-    monkeypatch.setattr(gemm_module, "_EXTENSION_ERROR", None)
     args = list(_cublaslt_scaled_metadata())
     args[2] = _TensorMeta((129, 3), torch.float32)
     args[3] = _TensorMeta((3, 160), torch.float32)
@@ -495,7 +562,7 @@ def test_shared_scaled_gemm_rejects_invalid_ndim_before_backend_selection(
     args = list(_cublaslt_scaled_metadata())
     args[0] = _TensorMeta((144,), torch.float8_e4m3fn)
 
-    result = gemm_module.can_implement_scaled_gemm_shared(tuple(args), {})
+    result = gemm_module.can_implement_scaled_gemm_eager(tuple(args), {})
 
     assert not result.ok
     assert result.reason is not None
@@ -505,20 +572,22 @@ def test_shared_scaled_gemm_rejects_invalid_ndim_before_backend_selection(
 def test_cublaslt_scaled_gemm_rejects_missing_extension(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(gemm_module, "_EXTENSION_ERROR", "extension unavailable")
+    monkeypatch.delattr(cublaslt_backend, "_C", raising=False)
+    monkeypatch.setitem(sys.modules, "src.kernel.backends.cublaslt._C", None)
 
     result = gemm_module.can_implement_scaled_gemm_cublaslt(
         _cublaslt_scaled_metadata(), {}
     )
 
     assert not result.ok
-    assert result.reason == "extension unavailable"
+    assert result.reason is not None
+    assert result.reason.startswith("cuBLASLt extension unavailable:")
 
 
 def test_cublaslt_scaled_gemm_checks_contract_before_sm100(
     monkeypatch: pytest.MonkeyPatch,
+    available_cublaslt_extension: None,
 ):
-    monkeypatch.setattr(gemm_module, "_EXTENSION_ERROR", None)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (9, 0))
     args = list(_cublaslt_scaled_metadata())
     args[0] = _TensorMeta((129, 144), torch.int8)
@@ -880,6 +949,7 @@ def test_torch_gemm_validation_architecture_matrix(
 )
 def test_gemm_validation_checks_compute_capability_last(
     monkeypatch: pytest.MonkeyPatch,
+    available_cublaslt_extension: None,
     predicate,
     args_factory,
     index: int,
@@ -888,7 +958,6 @@ def test_gemm_validation_checks_compute_capability_last(
     def unexpected_query(device: torch.device) -> tuple[int, int]:
         raise AssertionError(f"unexpected CUDA query for {device}")
 
-    monkeypatch.setattr(gemm_module, "_EXTENSION_ERROR", None)
     monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected_query)
     args = list(args_factory())
     args[index] = replacement
@@ -1082,28 +1151,28 @@ def test_torch_scaled_grouped_preserves_output_dtype_rejection_priority(
     ("predicate", "args_factory", "index", "replacement", "reason"),
     [
         (
-            gemm_module.can_implement_grouped_gemm_shared,
+            gemm_module.can_implement_grouped_gemm_eager,
             _default_grouped_metadata,
             1,
             _TensorMeta((2, 32, 48), torch.bfloat16),
             "contraction",
         ),
         (
-            gemm_module.can_implement_scaled_gemm_shared,
+            gemm_module.can_implement_scaled_gemm_eager,
             _scaled_metadata,
             1,
             _TensorMeta((32, 48), torch.float8_e4m3fn),
             "contraction",
         ),
         (
-            gemm_module.can_implement_scaled_gemm_shared,
+            gemm_module.can_implement_scaled_gemm_eager,
             _scaled_metadata,
             2,
             _TensorMeta((64, 2), torch.float32),
             "A scale",
         ),
         (
-            gemm_module.can_implement_scaled_gemm_shared,
+            gemm_module.can_implement_scaled_gemm_eager,
             _scaled_metadata,
             5,
             32,
@@ -1117,7 +1186,7 @@ def test_torch_scaled_grouped_preserves_output_dtype_rejection_priority(
             "dtype",
         ),
         (
-            gemm_module.can_implement_grouped_gemm_shared,
+            gemm_module.can_implement_grouped_gemm_eager,
             _default_grouped_metadata,
             3,
             _TensorMeta((2, 47), torch.bfloat16),
@@ -1148,7 +1217,7 @@ def test_triton_scaled_gemm_validation_requires_same_device():
     args = list(_scaled_metadata())
     args[2] = _TensorMeta((64, 1), torch.float32, "cuda:6")
 
-    result = gemm_module.can_implement_scaled_gemm_shared(tuple(args), {})
+    result = gemm_module.can_implement_scaled_gemm_eager(tuple(args), {})
 
     assert not result.ok
     assert result.reason is not None
@@ -1192,7 +1261,7 @@ def test_triton_grouped_gemm_validation_rejects_bias_for_ragged_n(
     args[1] = _TensorMeta((64, 48), torch.bfloat16)
     args[3] = _TensorMeta((2, 48), torch.bfloat16)
 
-    result = gemm_module.can_implement_grouped_gemm_shared(tuple(args), {})
+    result = gemm_module.can_implement_grouped_gemm_eager(tuple(args), {})
 
     assert not result.ok
     assert result.reason == "bias not supported for ragged-N"
@@ -1243,7 +1312,7 @@ def test_triton_scaled_gemm_validation_rejects_malformed_metadata(
     predicate = (
         gemm_module.can_implement_scaled_gemm_triton
         if case == "cross_family_dtype"
-        else gemm_module.can_implement_scaled_gemm_shared
+        else gemm_module.can_implement_scaled_gemm_eager
     )
     result = predicate(tuple(args), {})
 
@@ -1277,7 +1346,7 @@ def test_triton_scaled_grouped_gemm_validation_rejects_bias_for_ragged_n(
     args[3] = _TensorMeta((1, 48), torch.float32)
     args[8] = _TensorMeta((2, 48), torch.bfloat16)
 
-    result = gemm_module.can_implement_scaled_grouped_gemm_shared(tuple(args), {})
+    result = gemm_module.can_implement_scaled_grouped_gemm_eager(tuple(args), {})
 
     assert not result.ok
     assert result.reason == "bias not supported for ragged-N"

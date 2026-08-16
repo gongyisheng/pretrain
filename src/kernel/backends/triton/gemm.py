@@ -4,11 +4,6 @@ import triton
 import triton.language as tl
 from torch._library.triton import triton_op, wrap_triton
 
-from src.kernel.ops.gemm import (
-    can_implement_grouped_gemm_triton,
-    can_implement_scaled_gemm_triton,
-    can_implement_scaled_grouped_gemm_triton,
-)
 from src.kernel.registry import register_kernel
 
 # ---------------------------------------------------------------------------
@@ -242,7 +237,6 @@ def _grouped_gemm(
 @register_kernel(
     op="gemm.grouped",
     backend="triton",
-    can_implement=can_implement_grouped_gemm_triton,
     build="jit",
     autograd=False,
 )
@@ -523,7 +517,6 @@ def _scaled_gemm_mxfp8_kernel(
 @register_kernel(
     op="gemm.scaled",
     backend="triton",
-    can_implement=can_implement_scaled_gemm_triton,
     build="jit",
     autograd=False,
 )
@@ -1106,7 +1099,6 @@ def _scaled_grouped_gemm_mxfp8_kernel(
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="triton",
-    can_implement=can_implement_scaled_grouped_gemm_triton,
     build="jit",
     autograd=False,
 )

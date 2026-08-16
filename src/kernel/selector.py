@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry
-from src.kernel.spec import BACKEND_PRIORITIES, CheckResult, KernelSpec
+from src.kernel.spec import BACKEND_PRIORITIES, CanImplementFn, CheckResult, KernelSpec
 
 
 class KernelSelectionError(RuntimeError):
@@ -54,7 +54,10 @@ def _selection_cache_key(
 
 
 def _check(
-    spec: KernelSpec, args: tuple[Any, ...], kwargs: Mapping[str, Any]
+    spec: KernelSpec,
+    can_implement: CanImplementFn,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
 ) -> CheckResult:
     tensor_requires_grad = any(
         isinstance(value, torch.Tensor) and value.requires_grad for value in args
@@ -68,13 +71,16 @@ def _check(
             "backend does not support ordinary autograd for a grad-enabled call "
             "with tensor inputs requiring grad",
         )
-    return spec.can_implement(args, kwargs)
+    return can_implement(args, kwargs)
 
 
 def _require_implementation(
-    spec: KernelSpec, args: tuple[Any, ...], kwargs: Mapping[str, Any]
+    spec: KernelSpec,
+    can_implement: CanImplementFn,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
 ) -> None:
-    result = _check(spec, args, kwargs)
+    result = _check(spec, can_implement, args, kwargs)
     if not result.ok:
         raise KernelSelectionError(
             f"operation {spec.op!r} backend {spec.backend!r} cannot implement "
@@ -93,12 +99,12 @@ def select_kernel(
     if not specs:
         raise KernelSelectionError(f"no kernels registered for operation {op!r}")
 
-    operation_can_implement = registry.operation_can_implement(op)
-    if operation_can_implement is not None:
-        result = operation_can_implement(args, kwargs)
-        if not result.ok:
-            raise KernelSelectionError(result.reason)
-
+    operation = registry.operation(op)
+    if operation is None:
+        raise KernelSelectionError(
+            f"operation {op!r} has no registered metadata; import its public "
+            "src.kernel.ops entry point before dispatch"
+        )
     if backend != "auto":
         matches = [spec for spec in specs if spec.backend == backend]
         if not matches:
@@ -107,7 +113,12 @@ def select_kernel(
                 f"operation {op!r} has no backend {backend!r}; registered: {registered}"
             )
         spec = matches[0]
-        _require_implementation(spec, args, kwargs)
+        can_implement = operation.can_implement.get(spec.backend)
+        if can_implement is None:
+            raise KernelSelectionError(
+                f"operation {op!r} backend {spec.backend!r} has no registered validator"
+            )
+        _require_implementation(spec, can_implement, args, kwargs)
         return spec
 
     cache_key = None
@@ -125,7 +136,12 @@ def select_kernel(
         key=lambda item: BACKEND_PRIORITIES[item.backend],
         reverse=True,
     ):
-        result = _check(spec, args, kwargs)
+        can_implement = operation.can_implement.get(spec.backend)
+        if can_implement is None:
+            raise KernelSelectionError(
+                f"operation {op!r} backend {spec.backend!r} has no registered validator"
+            )
+        result = _check(spec, can_implement, args, kwargs)
         if result.ok:
             if cache_key is not None:
                 _selection_cache[cache_key] = spec

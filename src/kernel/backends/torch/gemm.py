@@ -1,19 +1,13 @@
 import torch
 import torch.nn.functional as F
 
-from src.kernel.ops.gemm import (
-    can_implement_grouped_gemm_torch,
-    can_implement_scaled_gemm_torch,
-    can_implement_scaled_grouped_gemm_torch,
-)
 from src.kernel.registry import register_kernel
-from src.kernel.utils import to_column_major
+from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 
 
 @register_kernel(
     op="gemm.grouped",
     backend="torch",
-    can_implement=can_implement_grouped_gemm_torch,
     build="eager",
     autograd=False,
 )
@@ -68,28 +62,13 @@ def _scaled_gemm_fp8(aq, bq, sa, sb, out_dtype, block_size, bias):
     return out.to(out_dtype)
 
 
-def _to_blocked_scale(scale):
-    rows, columns = scale.shape
-    row_tiles = (rows + 127) // 128
-    column_tiles = (columns + 3) // 4
-    padded = torch.zeros(
-        (row_tiles * 128, column_tiles * 4),
-        device=scale.device,
-        dtype=scale.dtype,
-    )
-    padded[:rows, :columns] = scale
-    blocked = padded.view(row_tiles, 128, column_tiles, 4)
-    blocked = blocked.permute(0, 2, 1, 3)
-    return blocked.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
-
-
 def _scaled_gemm_mxfp8(aq, bq, sa, sb, out_dtype, block_size, bias):
     repeat = block_size // 32
     groups = (aq.shape[1] + 31) // 32
     scale_a = sa.repeat_interleave(repeat, 1)[:, :groups]
     scale_b = sb.repeat_interleave(repeat, 0)[:groups]
-    scale_a = _to_blocked_scale(scale_a.to(torch.float8_e8m0fnu))
-    scale_b = _to_blocked_scale(scale_b.t().contiguous().to(torch.float8_e8m0fnu))
+    scale_a = to_swizzle_32_4_4(scale_a)
+    scale_b = to_swizzle_32_4_4(scale_b.t())
     recipe = F.ScalingType.BlockWise1x32
     swizzle = F.SwizzleType.SWIZZLE_32_4_4
     return F.scaled_mm(
@@ -122,7 +101,6 @@ def _can_use_native_mxfp8(aq, bq, block_size, scale_dtype):
 @register_kernel(
     op="gemm.scaled",
     backend="torch",
-    can_implement=can_implement_scaled_gemm_torch,
     build="eager",
     autograd=False,
 )
@@ -146,7 +124,6 @@ def scaled_gemm(
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="torch",
-    can_implement=can_implement_scaled_grouped_gemm_torch,
     build="eager",
     autograd=False,
 )

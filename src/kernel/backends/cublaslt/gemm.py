@@ -1,6 +1,5 @@
 import torch
 
-from src.kernel.ops.gemm import can_implement_scaled_gemm_cublaslt
 from src.kernel.registry import register_kernel
 from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 
@@ -8,7 +7,6 @@ from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 @register_kernel(
     op="gemm.scaled",
     backend="cublaslt",
-    can_implement=can_implement_scaled_gemm_cublaslt,
     build="aot",
     autograd=False,
 )

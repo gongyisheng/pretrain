@@ -19,8 +19,10 @@ cuda_mxfp8_only = pytest.mark.skipif(
 
 
 def _require_mxfp8_device() -> None:
-    if gemm_module._EXTENSION_ERROR is not None:
-        pytest.skip(gemm_module._EXTENSION_ERROR)
+    try:
+        from src.kernel.backends.cublaslt import _C  # noqa: F401
+    except ImportError as error:
+        pytest.skip(f"cuBLASLt extension unavailable: {error}")
     if torch.cuda.get_device_capability()[0] < 10:
         pytest.skip("cuBLASLt MXFP8 GEMM requires SM100 or newer")
 

@@ -1,5 +1,6 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal
 
 BuildMode = Literal["eager", "jit", "aot"]
@@ -26,7 +27,6 @@ class KernelSpec:
     op: str
     backend: str
     fn: Callable[..., Any]
-    can_implement: CanImplementFn
     build: BuildMode
     autograd: bool
 
@@ -40,3 +40,24 @@ class KernelSpec:
             raise ValueError(
                 f"unknown kernel backend {self.backend!r}; supported: {supported}"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class OperationSpec:
+    can_implement: Mapping[str, CanImplementFn]
+
+    def __post_init__(self) -> None:
+        callbacks = dict(self.can_implement)
+        if not callbacks:
+            raise ValueError("can_implement must be nonempty")
+        for backend, callback in callbacks.items():
+            if backend not in BACKEND_PRIORITIES:
+                supported = ", ".join(BACKEND_PRIORITIES)
+                raise ValueError(
+                    f"unknown kernel backend {backend!r}; supported: {supported}"
+                )
+            if not callable(callback):
+                raise TypeError(
+                    f"backend can_implement must be callable: backend={backend!r}"
+                )
+        object.__setattr__(self, "can_implement", MappingProxyType(callbacks))

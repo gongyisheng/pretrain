@@ -191,7 +191,9 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - run: uv sync --frozen
+      # Rebuild the checkout-local CUDA extension; actions/checkout removes the
+      # previously built .so while the shared uv environment remains installed.
+      - run: uv sync --frozen --reinstall-package pretrain
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 

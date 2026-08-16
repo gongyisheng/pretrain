@@ -1,10 +1,5 @@
 import torch
 
-from src.kernel.ops.gemm import (
-    can_implement_grouped_gemm_eager,
-    can_implement_scaled_gemm_eager,
-    can_implement_scaled_grouped_gemm_eager,
-)
 from src.kernel.registry import register_kernel
 
 
@@ -16,7 +11,6 @@ def _bounds(offs):
 @register_kernel(
     op="gemm.grouped",
     backend="eager",
-    can_implement=can_implement_grouped_gemm_eager,
     build="eager",
     autograd=True,
 )
@@ -67,7 +61,6 @@ def _dequant_b(q, scale, block_size):
 @register_kernel(
     op="gemm.scaled",
     backend="eager",
-    can_implement=can_implement_scaled_gemm_eager,
     build="eager",
     autograd=True,
 )
@@ -91,7 +84,6 @@ def scaled_gemm(
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="eager",
-    can_implement=can_implement_scaled_grouped_gemm_eager,
     build="eager",
     autograd=True,
 )
