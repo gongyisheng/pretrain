@@ -174,8 +174,8 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
         offs_,
         out_dtype,
         block_size,
+        scale_dtype,
         bias=None,
-        scale_dtype=None,
         backend="auto",
     ):
         # one op serves every layout now; 2D x 2D is ragged-K, i.e. the wgrad
@@ -189,8 +189,8 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
             offs_,
             out_dtype,
             block_size,
+            scale_dtype,
             bias=bias,
-            scale_dtype=scale_dtype,
             backend=backend,
         )
 
@@ -297,8 +297,8 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
         offs_,
         out_dtype,
         block_size,
+        scale_dtype,
         bias=None,
-        scale_dtype=None,
         backend="auto",
     ):
         if gq.ndim == 2:  # ragged-K layout, i.e. the wgrad
@@ -313,8 +313,8 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
             offs_,
             out_dtype,
             block_size,
+            scale_dtype,
             bias=bias,
-            scale_dtype=scale_dtype,
             backend=backend,
         )
 

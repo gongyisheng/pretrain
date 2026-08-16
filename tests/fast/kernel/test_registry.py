@@ -5,7 +5,12 @@ from typing import Any
 import pytest
 
 from src.kernel.ops import gemm as _gemm  # noqa: F401
-from src.kernel.registry import KERNEL_REGISTRY, register_kernel
+from src.kernel.registry import (
+    KERNEL_REGISTRY,
+    KernelRegistry,
+    register_kernel,
+    register_operation,
+)
 from src.kernel import spec as kernel_spec
 from src.kernel.spec import CheckResult, KernelSpec
 
@@ -62,19 +67,34 @@ def test_register_kernel_records_can_implement_callback():
 
 
 @pytest.mark.parametrize(
-    ("op", "expected_backends"),
+    ("op", "expected_backends", "shared_can_implement"),
     [
-        ("gemm.grouped", {"eager", "torch", "triton"}),
-        ("gemm.scaled", {"cublaslt", "eager", "torch", "triton"}),
-        ("gemm.scaled_grouped", {"eager", "torch", "triton"}),
+        (
+            "gemm.grouped",
+            {"eager", "torch", "triton"},
+            _gemm.can_implement_grouped_gemm_shared,
+        ),
+        (
+            "gemm.scaled",
+            {"cublaslt", "eager", "torch", "triton"},
+            _gemm.can_implement_scaled_gemm_shared,
+        ),
+        (
+            "gemm.scaled_grouped",
+            {"eager", "torch", "triton"},
+            _gemm.can_implement_scaled_grouped_gemm_shared,
+        ),
     ],
 )
-def test_registered_gemm_backends(op: str, expected_backends: set[str]):
+def test_registered_gemm_backends(
+    op: str, expected_backends: set[str], shared_can_implement
+):
     implementations = KERNEL_REGISTRY.implementations(op)
     by_backend = {spec.backend: spec for spec in implementations}
 
     assert set(by_backend) == expected_backends
     assert all(callable(spec.can_implement) for spec in implementations)
+    assert KERNEL_REGISTRY.operation_can_implement(op) is shared_can_implement
 
 
 def test_backend_priorities_are_defined_once_per_backend():
@@ -126,3 +146,34 @@ def test_duplicate_registration_raises_value_error():
 
     with pytest.raises(ValueError, match="kernel already registered"):
         registry.register(spec)
+
+
+def test_register_operation_records_shared_can_implement_callback():
+    registry = KernelRegistry()
+
+    registry.register_operation("test.operation", _can_implement)
+
+    assert registry.operation_can_implement("test.operation") is _can_implement
+
+
+def test_register_operation_rejects_duplicate_callback():
+    registry = KernelRegistry()
+    registry.register_operation("test.operation", _can_implement)
+
+    with pytest.raises(ValueError, match="operation already registered"):
+        registry.register_operation("test.operation", _can_implement)
+
+
+def test_operation_without_callback_remains_compatible():
+    registry = KernelRegistry()
+
+    assert registry.operation_can_implement("test.operation") is None
+
+
+def test_global_register_operation_registers_shared_callback():
+    register_operation("test.global_operation", _can_implement)
+
+    assert (
+        KERNEL_REGISTRY.operation_can_implement("test.global_operation")
+        is _can_implement
+    )

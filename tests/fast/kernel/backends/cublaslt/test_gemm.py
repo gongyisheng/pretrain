@@ -12,7 +12,7 @@ from src.quant.quantize import quantize_operand
 _MXFP8_SCALING = {
     "granularity": "blockwise",
     "block_shape": (1, 32),
-    "scale_dtype": "fp8_e8m0",
+    "scale_dtype": torch.float8_e8m0fnu,
 }
 
 cuda_mxfp8_only = pytest.mark.skipif(
@@ -64,8 +64,8 @@ def _assert_matches_eager(
         scale_b,
         torch.bfloat16,
         32,
+        torch.float8_e8m0fnu,
         bias=bias,
-        scale_dtype="fp8_e8m0",
         backend="eager",
     )
     actual = scaled_gemm(
@@ -75,8 +75,8 @@ def _assert_matches_eager(
         scale_b,
         torch.bfloat16,
         32,
+        torch.float8_e8m0fnu,
         bias=bias,
-        scale_dtype="fp8_e8m0",
         backend="cublaslt",
     )
     assert actual.dtype == torch.bfloat16
@@ -110,7 +110,7 @@ def test_cublaslt_mxfp8_bias_matches_eager_bitwise():
         scale_b,
         torch.bfloat16,
         32,
-        scale_dtype="fp8_e8m0",
+        torch.float8_e8m0fnu,
         backend="eager",
     )
     with_bias = scaled_gemm(
@@ -120,8 +120,8 @@ def test_cublaslt_mxfp8_bias_matches_eager_bitwise():
         scale_b,
         torch.bfloat16,
         32,
+        torch.float8_e8m0fnu,
         bias=bias,
-        scale_dtype="fp8_e8m0",
         backend="eager",
     )
     assert not torch.equal(with_bias, without_bias)
@@ -140,7 +140,7 @@ def test_cublaslt_adapter_has_meta_implementation():
         scale_b,
         torch.bfloat16,
         32,
-        scale_dtype=torch.float8_e8m0fnu,
+        torch.float8_e8m0fnu,
     )
     assert out.shape == (129, 160)
     assert out.dtype == torch.bfloat16

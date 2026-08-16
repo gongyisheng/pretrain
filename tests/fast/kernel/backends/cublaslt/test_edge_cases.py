@@ -8,7 +8,7 @@ import setuptools
 import torch
 
 from benchmarks.gemm.bench_scaled_gemm import _require_mxfp8_precision
-from src.kernel.backends.cublaslt import gemm as cublaslt_gemm
+from src.kernel.ops import gemm as gemm_module
 from src.kernel.ops.gemm import scaled_gemm
 from src.kernel.selector import KernelSelectionError, select_kernel
 
@@ -19,8 +19,8 @@ cuda_mxfp8_only = pytest.mark.skipif(
 
 
 def _require_mxfp8_device() -> None:
-    if cublaslt_gemm._EXTENSION_ERROR is not None:
-        pytest.skip(cublaslt_gemm._EXTENSION_ERROR)
+    if gemm_module._EXTENSION_ERROR is not None:
+        pytest.skip(gemm_module._EXTENSION_ERROR)
     if torch.cuda.get_device_capability()[0] < 10:
         pytest.skip("cuBLASLt MXFP8 GEMM requires SM100 or newer")
 
@@ -48,7 +48,7 @@ def _view_operands(case: str) -> tuple[object, ...]:
         assert b.data_ptr() % 16 != 0
     scale_a = torch.ones((m, 1), device="cuda", dtype=torch.float32)
     scale_b = torch.ones((1, n), device="cuda", dtype=torch.float32)
-    return a, b, scale_a, scale_b, torch.bfloat16, 32, None, torch.float8_e8m0fnu
+    return a, b, scale_a, scale_b, torch.bfloat16, 32, torch.float8_e8m0fnu, None
 
 
 @cuda_mxfp8_only
@@ -77,7 +77,7 @@ def test_forced_backend_rejects_unsafe_operand_view(case: str, reason: str):
     _require_mxfp8_device()
     args = _view_operands(case)
 
-    eligibility = cublaslt_gemm.can_implement_scaled_gemm_mxfp8(args, {})
+    eligibility = gemm_module.can_implement_scaled_gemm_cublaslt(args, {})
 
     assert not eligibility.ok
     assert eligibility.reason is not None
@@ -93,7 +93,7 @@ def test_misaligned_operand_executes_with_cublaslt(case: str, backend: str):
     _require_mxfp8_device()
     args = _view_operands(case)
 
-    eligibility = cublaslt_gemm.can_implement_scaled_gemm_mxfp8(args, {})
+    eligibility = gemm_module.can_implement_scaled_gemm_cublaslt(args, {})
     selected = select_kernel("gemm.scaled", args, {}, backend=backend)
     expected = scaled_gemm(*args, backend="eager")
     actual = scaled_gemm(*args, backend=backend)
@@ -122,8 +122,8 @@ def _zero_operands(shape: tuple[int, int, int], with_bias: bool) -> tuple[object
         scale_b,
         torch.bfloat16,
         32,
-        bias,
         torch.float8_e8m0fnu,
+        bias,
     )
 
 

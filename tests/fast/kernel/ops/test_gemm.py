@@ -37,8 +37,8 @@ def test_public_gemm_import_surface():
                 ("sb", inspect.Parameter.empty),
                 ("out_dtype", inspect.Parameter.empty),
                 ("block_size", inspect.Parameter.empty),
+                ("scale_dtype", inspect.Parameter.empty),
                 ("bias", None),
-                ("scale_dtype", None),
                 ("backend", "auto"),
             ],
         ),
@@ -52,8 +52,8 @@ def test_public_gemm_import_surface():
                 ("offs", inspect.Parameter.empty),
                 ("out_dtype", inspect.Parameter.empty),
                 ("block_size", inspect.Parameter.empty),
+                ("scale_dtype", inspect.Parameter.empty),
                 ("bias", None),
-                ("scale_dtype", None),
                 ("backend", "auto"),
             ],
         ),
@@ -66,6 +66,24 @@ def test_public_gemm_signatures(function, parameters):
         (parameter.name, parameter.default)
         for parameter in signature.parameters.values()
     ] == parameters
+
+
+def test_scaled_gemm_requires_scale_dtype():
+    aq = bq = sa = sb = object()
+
+    with pytest.raises(TypeError, match="scale_dtype"):
+        inspect.signature(gemm_module.scaled_gemm).bind(
+            aq, bq, sa, sb, torch.bfloat16, 0
+        )
+
+
+def test_scaled_grouped_gemm_requires_scale_dtype():
+    aq = bq = sa = sb = offs = object()
+
+    with pytest.raises(TypeError, match="scale_dtype"):
+        inspect.signature(gemm_module.scaled_grouped_gemm).bind(
+            aq, bq, sa, sb, offs, torch.bfloat16, 0
+        )
 
 
 def test_grouped_gemm_rejects_input_without_tensor_metadata():
@@ -95,8 +113,40 @@ def test_scaled_gemm_rejects_input_without_tensor_metadata():
             tensor,
             torch.float32,
             0,
+            torch.float32,
             bias=object(),
             backend="eager",
+        )
+
+
+def test_scaled_gemm_rejects_non_tensor_before_invalid_scale_dtype():
+    tensor = torch.empty(1, 1)
+
+    with pytest.raises(
+        KernelSelectionError,
+        match=r"scaled GEMM received object; requires torch\.Tensor inputs",
+    ):
+        gemm_module.scaled_gemm(
+            object(),
+            tensor,
+            tensor,
+            tensor,
+            torch.float32,
+            0,
+            scale_dtype="invalid",
+        )
+
+
+def test_scaled_gemm_rejects_invalid_scale_dtype_after_tensor_validation():
+    with pytest.raises(KernelSelectionError, match="scale_dtype must be torch.dtype"):
+        gemm_module.scaled_gemm(
+            torch.empty(2, 4, dtype=torch.int8),
+            torch.empty(4, 3, dtype=torch.int8),
+            torch.empty(2, 1),
+            torch.empty(1, 3),
+            torch.bfloat16,
+            0,
+            scale_dtype="invalid",
         )
 
 
@@ -115,6 +165,91 @@ def test_scaled_grouped_gemm_rejects_input_without_tensor_metadata():
             object(),
             torch.float32,
             0,
+            torch.float32,
+            backend="eager",
+        )
+
+
+def test_scaled_grouped_gemm_rejects_non_tensor_before_invalid_scale_dtype():
+    tensor = torch.empty(1, 1)
+
+    with pytest.raises(
+        KernelSelectionError,
+        match=r"scaled grouped GEMM received object; requires torch\.Tensor inputs",
+    ):
+        gemm_module.scaled_grouped_gemm(
+            tensor,
+            tensor,
+            tensor,
+            tensor,
+            object(),
+            torch.float32,
+            0,
+            scale_dtype="invalid",
+        )
+
+
+def test_scaled_grouped_gemm_rejects_invalid_scale_dtype_after_tensor_validation():
+    with pytest.raises(KernelSelectionError, match="scale_dtype must be torch.dtype"):
+        gemm_module.scaled_grouped_gemm(
+            torch.empty(2, 4, dtype=torch.int8),
+            torch.empty(1, 4, 3, dtype=torch.int8),
+            torch.empty(2, 1),
+            torch.empty(1, 1, 3),
+            torch.tensor([1], dtype=torch.int32),
+            torch.bfloat16,
+            0,
+            scale_dtype="invalid",
+        )
+
+
+def test_grouped_gemm_rejects_contract_failure_through_selector():
+    with pytest.raises(KernelSelectionError, match="contraction dimensions"):
+        gemm_module.grouped_gemm(
+            torch.empty(2, 3),
+            torch.empty(4, 5),
+            torch.tensor([2], dtype=torch.int64),
+        )
+
+
+def test_scaled_gemm_rejects_contract_failure_through_selector():
+    with pytest.raises(KernelSelectionError, match="A scale"):
+        gemm_module.scaled_gemm(
+            torch.empty(2, 4, dtype=torch.int8),
+            torch.empty(4, 3, dtype=torch.int8),
+            torch.empty(2, 2),
+            torch.empty(1, 3),
+            torch.float32,
+            0,
+            torch.float32,
+        )
+
+
+def test_scaled_grouped_gemm_rejects_contract_failure_through_selector():
+    with pytest.raises(KernelSelectionError, match="3D x 3D"):
+        gemm_module.scaled_grouped_gemm(
+            torch.empty(2, 3, 4, dtype=torch.int8),
+            torch.empty(2, 4, 5, dtype=torch.int8),
+            torch.empty(2, 3, 1),
+            torch.empty(2, 1, 5),
+            torch.tensor([3, 3], dtype=torch.int64),
+            torch.float32,
+            0,
+            torch.float32,
+        )
+
+
+def test_scaled_grouped_gemm_rejects_rank_one_a_scale_through_selector():
+    with pytest.raises(KernelSelectionError, match="scaled grouped GEMM A scale"):
+        gemm_module.scaled_grouped_gemm(
+            torch.empty(2, 4, dtype=torch.int8),
+            torch.empty(4, 3, dtype=torch.int8),
+            torch.empty(2),
+            torch.empty(1, 3),
+            torch.tensor([4], dtype=torch.int32),
+            torch.float32,
+            0,
+            torch.float32,
             backend="eager",
         )
 
@@ -128,10 +263,10 @@ def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPa
         return sentinel
 
     monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
-    a = torch.empty(0)
-    b = torch.empty(0)
-    offs = torch.empty(0, dtype=torch.int32)
-    bias = torch.empty(0)
+    a = torch.empty(2, 3)
+    b = torch.empty(3, 4)
+    offs = torch.tensor([3], dtype=torch.int32)
+    bias = torch.empty(1, 4)
 
     result = gemm_module.grouped_gemm(a, b, offs, bias=bias, backend="torch")
 
@@ -144,7 +279,7 @@ def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPa
     }
 
 
-def test_scaled_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPatch):
+def test_scaled_gemm_forwards_arguments(monkeypatch: pytest.MonkeyPatch):
     seen = {}
     sentinel = object()
 
@@ -153,11 +288,11 @@ def test_scaled_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPat
         return sentinel
 
     monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
-    aq = torch.empty(0)
-    bq = torch.empty(0)
-    sa = torch.empty(0)
-    sb = torch.empty(0)
-    bias = torch.empty(0)
+    aq = torch.empty(2, 4, dtype=torch.int8)
+    bq = torch.empty(4, 3, dtype=torch.int8)
+    sa = torch.empty(2, 1)
+    sb = torch.empty(1, 3)
+    bias = torch.empty(3)
 
     result = gemm_module.scaled_gemm(
         aq,
@@ -165,9 +300,9 @@ def test_scaled_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPat
         sa,
         sb,
         torch.bfloat16,
-        32,
+        0,
+        torch.float8_e8m0fnu,
         bias=bias,
-        scale_dtype="fp8_e8m0",
         backend="triton",
     )
 
@@ -180,37 +315,16 @@ def test_scaled_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPat
             sa,
             sb,
             torch.bfloat16,
-            32,
-            bias,
+            0,
             torch.float8_e8m0fnu,
+            bias,
         ),
         "kwargs": {},
         "backend": "triton",
     }
 
 
-def test_scaled_gemm_defaults_scale_dtype_to_fp32(monkeypatch: pytest.MonkeyPatch):
-    seen = {}
-
-    def fake_dispatch(op, args, kwargs, backend="auto"):
-        seen["args"] = args
-
-    monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
-    tensor = torch.empty(0)
-
-    gemm_module.scaled_gemm(
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        torch.bfloat16,
-        32,
-    )
-
-    assert seen["args"][-1] == torch.float32
-
-
-def test_scaled_grouped_gemm_forwards_normalized_arguments(
+def test_scaled_grouped_gemm_forwards_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ):
     seen = {}
@@ -221,12 +335,12 @@ def test_scaled_grouped_gemm_forwards_normalized_arguments(
         return sentinel
 
     monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
-    aq = torch.empty(0)
-    bq = torch.empty(0)
-    sa = torch.empty(0)
-    sb = torch.empty(0)
-    offs = torch.empty(0, dtype=torch.int32)
-    bias = torch.empty(0)
+    aq = torch.empty(2, 4, dtype=torch.int8)
+    bq = torch.empty(1, 4, 3, dtype=torch.int8)
+    sa = torch.empty(2, 1)
+    sb = torch.empty(1, 1, 3)
+    offs = torch.tensor([1], dtype=torch.int32)
+    bias = torch.empty(1, 3)
 
     result = gemm_module.scaled_grouped_gemm(
         aq,
@@ -235,9 +349,9 @@ def test_scaled_grouped_gemm_forwards_normalized_arguments(
         sb,
         offs,
         torch.bfloat16,
-        32,
+        0,
+        torch.float8_e8m0fnu,
         bias=bias,
-        scale_dtype="fp8_e8m0",
         backend="triton",
     )
 
@@ -251,9 +365,9 @@ def test_scaled_grouped_gemm_forwards_normalized_arguments(
             sb,
             offs,
             torch.bfloat16,
-            32,
-            bias,
+            0,
             torch.float8_e8m0fnu,
+            bias,
         ),
         "kwargs": {},
         "backend": "triton",

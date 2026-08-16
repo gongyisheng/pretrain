@@ -102,12 +102,13 @@ def _bench_point(E, K, N, scheme):
         offs,
         torch.bfloat16,
         bs,
+        torch.float32,
         backend="eager",
     )
 
     def triton_fn():
         return scaled_grouped_gemm(
-            aq, bq, sa, sb, offs, torch.bfloat16, bs, backend="triton"
+            aq, bq, sa, sb, offs, torch.bfloat16, bs, torch.float32, backend="triton"
         )
 
     triton_out = triton_fn()
@@ -116,7 +117,7 @@ def _bench_point(E, K, N, scheme):
 
     def torch_fn():
         return scaled_grouped_gemm(
-            aq, bq, sa, sb, offs, torch.bfloat16, bs, backend="torch"
+            aq, bq, sa, sb, offs, torch.bfloat16, bs, torch.float32, backend="torch"
         )
 
     try:
@@ -155,6 +156,7 @@ def _bench_wgrad_point(E, K, N, scheme):
         offs,
         torch.bfloat16,
         0,
+        torch.float32,
         backend="eager",
     )
 
@@ -167,6 +169,7 @@ def _bench_wgrad_point(E, K, N, scheme):
             offs,
             torch.bfloat16,
             0,
+            torch.float32,
             backend="triton",
         )
 

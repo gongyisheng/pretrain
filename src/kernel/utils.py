@@ -23,9 +23,9 @@ def first_failure(results: tuple[CheckResult, ...]) -> CheckResult:
 
 
 def to_column_major(tensor: torch.Tensor) -> torch.Tensor:
-    if tensor.stride(0) == 1:
+    if tensor.stride(-2) == 1:
         return tensor
-    return tensor.t().contiguous().t()
+    return tensor.transpose(-1, -2).contiguous().transpose(-1, -2)
 
 
 def to_swizzle_32_4_4(scale: torch.Tensor) -> torch.Tensor:

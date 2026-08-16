@@ -559,7 +559,14 @@ class TrainConfig:
             )
 
     def to_dict(self):
-        return asdict(self)
+        config = asdict(self)
+        for rule in config["training"]["quantization"]:
+            scale_dtype = rule["scaling"].get("scale_dtype")
+            for name, dtype in _SCALE_DTYPES.items():
+                if scale_dtype is dtype:
+                    rule["scaling"]["scale_dtype"] = name
+                    break
+        return config
 
 
 def _apply_overrides(config: TrainConfig, overrides: List[str]):

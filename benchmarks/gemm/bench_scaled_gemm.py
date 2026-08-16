@@ -218,7 +218,7 @@ def _bench_scheme(a, b, config):
         sb,
         torch.bfloat16,
         block_size,
-        scale_dtype=scale_dtype,
+        scale_dtype,
         backend="eager",
     )
 
@@ -230,7 +230,7 @@ def _bench_scheme(a, b, config):
             sb,
             torch.bfloat16,
             block_size,
-            scale_dtype=scale_dtype,
+            scale_dtype,
             backend="triton",
         )
 
@@ -246,7 +246,7 @@ def _bench_scheme(a, b, config):
             sb,
             torch.bfloat16,
             block_size,
-            scale_dtype=scale_dtype,
+            scale_dtype,
             backend="torch",
         )
 
@@ -270,7 +270,7 @@ def _bench_scheme(a, b, config):
             sb,
             torch.bfloat16,
             block_size,
-            scale_dtype=scale_dtype,
+            scale_dtype,
             backend="cublaslt",
         )
 

@@ -93,6 +93,12 @@ def select_kernel(
     if not specs:
         raise KernelSelectionError(f"no kernels registered for operation {op!r}")
 
+    operation_can_implement = registry.operation_can_implement(op)
+    if operation_can_implement is not None:
+        result = operation_can_implement(args, kwargs)
+        if not result.ok:
+            raise KernelSelectionError(result.reason)
+
     if backend != "auto":
         matches = [spec for spec in specs if spec.backend == backend]
         if not matches:

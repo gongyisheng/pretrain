@@ -1,6 +1,7 @@
-import glob
-import tempfile
 import os
+import glob
+import json
+import tempfile
 import pytest
 import torch
 import yaml
@@ -127,6 +128,87 @@ def test_config_to_dict_roundtrip():
         assert d["max_seq_len"] == 128
         assert d["model"]["attn"][0]["attn_cls"] == "gqa"
         assert d["model"]["attn"][0]["attn_kwargs"]["n_heads"] == 4
+
+
+@pytest.mark.parametrize(
+    ("scaling", "scale_dtype"),
+    [
+        ({"granularity": "rowwise", "scale_dtype": "fp32"}, "fp32"),
+        (
+            {
+                "granularity": "blockwise",
+                "block_shape": [1, 32],
+                "scale_dtype": "fp8_e8m0",
+            },
+            "fp8_e8m0",
+        ),
+    ],
+)
+def test_config_to_dict_serializes_quant_scale_dtype(scaling, scale_dtype):
+    config = TrainConfig(
+        training=TrainingConfig(
+            mixed_precision="no",
+            quantization={
+                "enabled": True,
+                "dtype": {"weight": "fp8_e4m3"},
+                "scaling": scaling,
+            },
+        )
+    )
+
+    exported = config.to_dict()
+
+    assert (
+        exported["training"]["quantization"][0]["scaling"]["scale_dtype"] == scale_dtype
+    )
+    json_export = json.dumps(exported)
+    yaml_export = yaml.safe_dump(exported)
+    assert (
+        json.loads(json_export)["training"]["quantization"][0]["scaling"]["scale_dtype"]
+        == scale_dtype
+    )
+    assert (
+        yaml.safe_load(yaml_export)["training"]["quantization"][0]["scaling"][
+            "scale_dtype"
+        ]
+        == scale_dtype
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "config.yaml")
+        with open(path, "w") as f:
+            f.write(yaml_export)
+        restored = load_config(path)
+    assert _only_rule(restored.training).scaling["scale_dtype"] is getattr(
+        torch, "float32" if scale_dtype == "fp32" else "float8_e8m0fnu"
+    )
+
+
+@pytest.mark.parametrize(
+    ("runtime_dtype", "scale_dtype"),
+    [
+        (torch.float32, "fp32"),
+        (torch.float8_e8m0fnu, "fp8_e8m0"),
+    ],
+)
+def test_config_to_dict_serializes_disabled_quant_scale_dtype(
+    runtime_dtype, scale_dtype
+):
+    config = TrainConfig(
+        training=TrainingConfig(
+            quantization={
+                "enabled": False,
+                "scaling": {"scale_dtype": runtime_dtype},
+            },
+        )
+    )
+
+    exported = config.to_dict()
+
+    assert (
+        exported["training"]["quantization"][0]["scaling"]["scale_dtype"] == scale_dtype
+    )
+    json.dumps(exported)
+    yaml.safe_dump(exported)
 
 
 # ==================== CLI overrides ====================

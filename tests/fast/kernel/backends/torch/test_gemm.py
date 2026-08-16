@@ -82,14 +82,14 @@ def test_scaled_gemm_precision(
     if format_pair.a_format.startswith("fp8") and capability < (8, 9):
         pytest.skip("Torch FP8 scaled GEMM requires SM89+")
 
-    aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype = make_scaled_gemm_inputs(
+    aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias = make_scaled_gemm_inputs(
         workload, format_pair, scaling_case, scale_dtype, with_bias
     )
     actual = torch_gemm.scaled_gemm(
-        aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype
+        aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias
     )
     expected = eager_gemm.scaled_gemm(
-        aq, bq, sa, sb, out_dtype, block_size, bias, scale_dtype
+        aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias
     )
 
     assert actual.shape == expected.shape
@@ -114,7 +114,7 @@ def _make_scaled_route_inputs(
     scaling = {
         "granularity": "blockwise" if block_size else "rowwise",
         "block_shape": (1, block_size) if block_size else (1, 0),
-        "scale_dtype": scale_dtype,
+        "scale_dtype": SCALE_DTYPE_VALUES[scale_dtype],
     }
     aq, sa = quantize_operand(a, -1, a_format, scaling)
     bq, sb = quantize_operand(b, -2, b_format, scaling)
@@ -130,8 +130,8 @@ def _make_scaled_route_inputs(
         sb,
         torch.bfloat16,
         block_size,
-        bias,
         SCALE_DTYPE_VALUES[scale_dtype],
+        bias,
     )
 
 
