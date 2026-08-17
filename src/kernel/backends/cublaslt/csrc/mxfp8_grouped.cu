@@ -82,6 +82,10 @@ __global__ void pack_and_build_metadata(
     m[group] = effective_m;
     n_array[group] = n;
     k_array[group] = k;
+    // Naming here is swapped relative to gemm.cpp's cuBLASLt layout calls (its
+    // "A" layout -- our bq -- reads ldb below; its "B" layout -- our aq --
+    // reads lda). Harmless today since both leading dimensions equal k, but
+    // don't rely on that if either ever diverges.
     lda[group] = bq_stride_n;
     ldb[group] = aq_stride_m;
     ldc[group] = out_stride_m;
@@ -225,8 +229,8 @@ Mxfp8GroupedMetadata build_mxfp8_grouped_metadata(
       at::empty({group_count}, int_options),
       at::empty({group_count * padded_n * padded_blocks}, byte_options),
       at::empty({(m_total + (kScaleRows - 1) * group_count) * padded_blocks}, byte_options),
-      at::zeros({k}, byte_options),
-      at::zeros({n}, byte_options),
+      at::zeros({k}, aq.options()),
+      at::zeros({n}, out.options()),
       at::empty({kScaleRows * padded_blocks}, byte_options),
   };
 
@@ -250,8 +254,8 @@ Mxfp8GroupedMetadata build_mxfp8_grouped_metadata(
       out.stride(0),
       metadata.packed_a_scales.data_ptr<uint8_t>(),
       metadata.packed_b_scales.data_ptr<uint8_t>(),
-      metadata.empty_a.data_ptr<uint8_t>(),
-      metadata.empty_out.data_ptr<uint8_t>(),
+      static_cast<const uint8_t*>(metadata.empty_a.data_ptr()),
+      static_cast<uint8_t*>(metadata.empty_out.data_ptr()),
       metadata.empty_b_scale.data_ptr<uint8_t>(),
       metadata.m.data_ptr<int64_t>(),
       metadata.n.data_ptr<int64_t>(),
