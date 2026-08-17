@@ -1,4 +1,3 @@
-from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
@@ -10,46 +9,6 @@ from src.kernel.spec import BACKEND_PRIORITIES, CanImplementFn, CheckResult, Ker
 
 class KernelSelectionError(RuntimeError):
     pass
-
-
-_SELECTION_CACHE_MAX_ENTRIES = 256
-_selection_cache: OrderedDict[tuple[Any, ...], KernelSpec] = OrderedDict()
-
-
-def clear_selection_cache() -> None:
-    _selection_cache.clear()
-
-
-def _value_cache_key(value: Any) -> tuple[Any, ...] | None:
-    if isinstance(value, torch.Tensor):
-        return (
-            "tensor",
-            tuple(value.shape),
-            tuple(value.stride()),
-            value.dtype,
-            value.device,
-            value.requires_grad,
-        )
-    if isinstance(value, torch.dtype):
-        return ("dtype", value)
-    if type(value) in {bool, bytes, complex, float, int, str, type(None)}:
-        return ("scalar", type(value), value)
-    return None
-
-
-def _selection_cache_key(
-    op: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]
-) -> tuple[Any, ...] | None:
-    arg_keys = tuple(_value_cache_key(value) for value in args)
-    if any(value is None for value in arg_keys):
-        return None
-    keyword_keys: list[tuple[str, tuple[Any, ...]]] = []
-    for name, value in kwargs.items():
-        value_key = _value_cache_key(value)
-        if not isinstance(name, str) or value_key is None:
-            return None
-        keyword_keys.append((name, value_key))
-    return op, arg_keys, tuple(sorted(keyword_keys)), torch.is_grad_enabled()
 
 
 def _check(
@@ -87,6 +46,18 @@ def _require_implementation(
         )
 
 
+def _require_valid_contract(
+    validate: CanImplementFn | None,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+) -> None:
+    if validate is None:
+        return
+    result = validate(args, kwargs)
+    if not result.ok:
+        raise KernelSelectionError(result.reason)
+
+
 def select_kernel(
     op: str,
     args: tuple[Any, ...],
@@ -117,18 +88,11 @@ def select_kernel(
             raise KernelSelectionError(
                 f"operation {op!r} backend {spec.backend!r} has no registered validator"
             )
+        _require_valid_contract(operation.validate, args, kwargs)
         _require_implementation(spec, can_implement, args, kwargs)
         return spec
 
-    cache_key = None
-    if registry is KERNEL_REGISTRY and not torch.compiler.is_compiling():
-        cache_key = _selection_cache_key(op, args, kwargs)
-        if cache_key is not None:
-            cached = _selection_cache.get(cache_key)
-            if cached is not None:
-                _selection_cache.move_to_end(cache_key)
-                return cached
-
+    _require_valid_contract(operation.validate, args, kwargs)
     rejected: list[str] = []
     for spec in sorted(
         specs,
@@ -142,11 +106,6 @@ def select_kernel(
             )
         result = _check(spec, can_implement, args, kwargs)
         if result.ok:
-            if cache_key is not None:
-                _selection_cache[cache_key] = spec
-                _selection_cache.move_to_end(cache_key)
-                if len(_selection_cache) > _SELECTION_CACHE_MAX_ENTRIES:
-                    _selection_cache.popitem(last=False)
             return spec
         rejected.append(f"{spec.backend}: {result.reason}")
     raise KernelSelectionError(

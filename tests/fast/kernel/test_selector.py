@@ -7,7 +7,6 @@ import torch
 from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry, register_kernel
 from src.kernel.selector import (
     KernelSelectionError,
-    clear_selection_cache,
     dispatch,
     select_kernel,
 )
@@ -55,90 +54,7 @@ def _registry(
     return registry
 
 
-_selection_cache_calls = 0
-
-
-def _count_selection_cache_checks(
-    args: tuple[Any, ...], kwargs: Mapping[str, Any]
-) -> CheckResult:
-    global _selection_cache_calls
-    del args, kwargs
-    _selection_cache_calls += 1
-    return CheckResult(True)
-
-
-KERNEL_REGISTRY.register_operation(
-    "test.selection_cache", {"eager": _count_selection_cache_checks}
-)
-KERNEL_REGISTRY.register(
-    KernelSpec(
-        op="test.selection_cache",
-        backend="eager",
-        fn=lambda value: value,
-        build="eager",
-        autograd=True,
-    )
-)
-
-
-@pytest.fixture(autouse=True)
-def _reset_selection_cache() -> None:
-    global _selection_cache_calls
-    clear_selection_cache()
-    _selection_cache_calls = 0
-
-
-def test_selection_cache_reuses_default_auto_selection_for_identical_calls():
-    tensor = torch.ones(2, 3)
-
-    first = select_kernel("test.selection_cache", (tensor, 4), {"scale": 0.5})
-    second = select_kernel("test.selection_cache", (tensor, 4), {"scale": 0.5})
-
-    assert first is second
-    assert _selection_cache_calls == 1
-
-
-def test_selection_cache_reuses_normalized_dtype_arguments():
-    tensor = torch.ones(2, 3)
-    normalized_args = (tensor, torch.bfloat16, torch.float32)
-
-    select_kernel("test.selection_cache", normalized_args, {})
-    select_kernel("test.selection_cache", normalized_args, {})
-
-    assert _selection_cache_calls == 1
-
-
-def test_selection_cache_rechecks_auto_selection_when_tensor_stride_changes():
-    contiguous = torch.ones(2, 3)
-    transposed = contiguous.t()
-
-    select_kernel("test.selection_cache", (contiguous,), {})
-    select_kernel("test.selection_cache", (transposed,), {})
-
-    assert _selection_cache_calls == 2
-
-
-def test_selection_cache_bypasses_explicit_backend_selection():
-    tensor = torch.ones(2, 3)
-
-    select_kernel("test.selection_cache", (tensor,), {}, backend="eager")
-    select_kernel("test.selection_cache", (tensor,), {}, backend="eager")
-
-    assert _selection_cache_calls == 2
-
-
-def test_selection_cache_bypasses_compilation():
-    tensor = torch.ones(2, 3)
-
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
-        select_kernel("test.selection_cache", (tensor,), {})
-        select_kernel("test.selection_cache", (tensor,), {})
-
-    assert _selection_cache_calls == 2
-
-
-def test_auto_cache_miss_runs_backend_check_once():
+def test_auto_runs_backend_check_once_per_selection():
     calls = 0
 
     def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
@@ -147,20 +63,21 @@ def test_auto_cache_miss_runs_backend_check_once():
         calls += 1
         return CheckResult(True)
 
-    op = "test.cache_miss"
-    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
-    KERNEL_REGISTRY.register(
+    op = "test.backend_check_once"
+    registry = KernelRegistry()
+    registry.register_operation(op, {"eager": backend})
+    registry.register(
         KernelSpec(
             op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
 
-    select_kernel(op, (torch.ones(2),), {})
+    select_kernel(op, (torch.ones(2),), {}, registry=registry)
 
     assert calls == 1
 
 
-def test_auto_cache_hit_skips_backend_validation():
+def test_auto_revalidates_backend_on_every_selection():
     calls = 0
 
     def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
@@ -169,22 +86,94 @@ def test_auto_cache_hit_skips_backend_validation():
         calls += 1
         return CheckResult(True)
 
-    op = "test.cache_hit"
-    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
-    KERNEL_REGISTRY.register(
+    op = "test.backend_revalidation"
+    registry = KernelRegistry()
+    registry.register_operation(op, {"eager": backend})
+    registry.register(
         KernelSpec(
             op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
     tensor = torch.ones(2)
 
-    select_kernel(op, (tensor,), {})
-    select_kernel(op, (tensor,), {})
+    select_kernel(op, (tensor,), {}, registry=registry)
+    select_kernel(op, (tensor,), {}, registry=registry)
 
-    assert calls == 1
+    assert calls == 2
 
 
-def test_explicit_backend_bypasses_warmed_auto_cache():
+def test_auto_contract_runs_once_before_backend_checks():
+    calls: list[str] = []
+
+    def validate(args, kwargs):
+        del args, kwargs
+        calls.append("contract")
+        return CheckResult(True)
+
+    def reject(args, kwargs):
+        del args, kwargs
+        calls.append("cublaslt")
+        return CheckResult(False, "unsupported")
+
+    def accept(args, kwargs):
+        del args, kwargs
+        calls.append("eager")
+        return CheckResult(True)
+
+    op = "test.contract_once"
+    registry = KernelRegistry()
+    registry.register_operation(op, {"cublaslt": reject, "eager": accept}, validate)
+    registry.register(
+        KernelSpec(
+            op=op,
+            backend="cublaslt",
+            fn=lambda value: value,
+            build="eager",
+            autograd=True,
+        )
+    )
+    registry.register(
+        KernelSpec(
+            op=op,
+            backend="eager",
+            fn=lambda value: value,
+            build="eager",
+            autograd=True,
+        )
+    )
+
+    selected = select_kernel(op, (torch.ones(2),), {}, registry=registry)
+
+    assert selected.backend == "eager"
+    assert calls == ["contract", "cublaslt", "eager"]
+
+
+def test_auto_revalidates_operation_contract_on_every_selection():
+    calls = 0
+
+    def validate(args, kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return CheckResult(True)
+
+    op = "test.contract_revalidation"
+    registry = KernelRegistry()
+    registry.register_operation(op, {"eager": _yes}, validate)
+    registry.register(
+        KernelSpec(
+            op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
+        )
+    )
+    tensor = torch.ones(2)
+
+    select_kernel(op, (tensor,), {}, registry=registry)
+    select_kernel(op, (tensor,), {}, registry=registry)
+
+    assert calls == 2
+
+
+def test_explicit_backend_revalidates_every_selection():
     calls: list[str] = []
 
     def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
@@ -192,23 +181,24 @@ def test_explicit_backend_bypasses_warmed_auto_cache():
         calls.append("backend")
         return CheckResult(True)
 
-    op = "test.explicit_warmed_cache"
-    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
-    KERNEL_REGISTRY.register(
+    op = "test.explicit_revalidation"
+    registry = KernelRegistry()
+    registry.register_operation(op, {"eager": backend})
+    registry.register(
         KernelSpec(
             op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
     tensor = torch.ones(2)
 
-    select_kernel(op, (tensor,), {})
-    select_kernel(op, (tensor,), {}, backend="eager")
-    select_kernel(op, (tensor,), {}, backend="eager")
+    select_kernel(op, (tensor,), {}, registry=registry)
+    select_kernel(op, (tensor,), {}, backend="eager", registry=registry)
+    select_kernel(op, (tensor,), {}, backend="eager", registry=registry)
 
     assert calls == ["backend", "backend", "backend"]
 
 
-def test_cache_hit_does_not_rerun_value_dependent_validation():
+def test_auto_rechecks_value_dependent_validation():
     calls = 0
 
     def backend(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
@@ -220,22 +210,24 @@ def test_cache_hit_does_not_rerun_value_dependent_validation():
         return CheckResult(False, "tensor values must be nonnegative")
 
     op = "test.value_dependent_validator"
-    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
-    KERNEL_REGISTRY.register(
+    registry = KernelRegistry()
+    registry.register_operation(op, {"eager": backend})
+    registry.register(
         KernelSpec(
             op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
     )
     tensor = torch.ones(2)
 
-    select_kernel(op, (tensor,), {})
+    select_kernel(op, (tensor,), {}, registry=registry)
     tensor[0] = -1
-    select_kernel(op, (tensor,), {})
+    with pytest.raises(KernelSelectionError, match="tensor values must be nonnegative"):
+        select_kernel(op, (tensor,), {}, registry=registry)
 
-    assert calls == 1
+    assert calls == 2
 
 
-def test_backend_failure_does_not_populate_auto_selection_cache():
+def test_auto_rechecks_backend_after_failure():
     calls = 0
     is_valid = False
 
@@ -247,9 +239,10 @@ def test_backend_failure_does_not_populate_auto_selection_cache():
             return CheckResult(True)
         return CheckResult(False, "backend call is invalid")
 
-    op = "test.backend_failure_cache"
-    KERNEL_REGISTRY.register_operation(op, {"eager": backend})
-    KERNEL_REGISTRY.register(
+    op = "test.backend_failure_recheck"
+    registry = KernelRegistry()
+    registry.register_operation(op, {"eager": backend})
+    registry.register(
         KernelSpec(
             op=op, backend="eager", fn=lambda value: value, build="eager", autograd=True
         )
@@ -257,10 +250,10 @@ def test_backend_failure_does_not_populate_auto_selection_cache():
     tensor = torch.ones(2)
 
     with pytest.raises(KernelSelectionError, match="backend call is invalid"):
-        select_kernel(op, (tensor,), {})
+        select_kernel(op, (tensor,), {}, registry=registry)
 
     is_valid = True
-    select_kernel(op, (tensor,), {})
+    select_kernel(op, (tensor,), {}, registry=registry)
 
     assert calls == 2
 
@@ -271,16 +264,6 @@ def test_selection_requires_operation_metadata():
 
     with pytest.raises(KernelSelectionError, match="src.kernel.ops"):
         select_kernel("test.identity", (3,), {}, registry=registry)
-
-
-def test_clear_selection_cache_forces_another_eligibility_check():
-    tensor = torch.ones(2, 3)
-
-    select_kernel("test.selection_cache", (tensor,), {})
-    clear_selection_cache()
-    select_kernel("test.selection_cache", (tensor,), {})
-
-    assert _selection_cache_calls == 2
 
 
 def test_auto_selects_highest_priority_eligible_backend():

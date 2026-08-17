@@ -350,8 +350,9 @@ def test_cublaslt_scaled_grouped_gemm_accepts_ragged_m_sm100(
     ("mutation", "reason"),
     [
         (
-            lambda args: args.__setitem__(
-                1, _TensorMeta((64, 48), torch.float8_e4m3fn)
+            lambda args: (
+                args.__setitem__(1, _TensorMeta((64, 48), torch.float8_e4m3fn)),
+                args.__setitem__(3, _TensorMeta((2, 48), torch.float32)),
             ),
             "requires rank in {3}",
         ),
@@ -359,7 +360,14 @@ def test_cublaslt_scaled_grouped_gemm_accepts_ragged_m_sm100(
             lambda args: args.__setitem__(4, _TensorMeta((2,), torch.int64)),
             "offsets received dtype",
         ),
-        (lambda args: args.__setitem__(6, 64), "block_size"),
+        (
+            lambda args: (
+                args.__setitem__(2, _TensorMeta((64, 1), torch.float32)),
+                args.__setitem__(3, _TensorMeta((2, 1, 48), torch.float32)),
+                args.__setitem__(6, 64),
+            ),
+            "block_size",
+        ),
         (lambda args: args.__setitem__(5, torch.float16), "output dtype"),
         (
             lambda args: args.__setitem__(8, _TensorMeta((2, 48), torch.bfloat16)),
@@ -744,7 +752,7 @@ def test_triton_scaled_grouped_gemm_validation_rejects_malformed_scale_layout(
     result = gemm_module.can_implement_scaled_grouped_gemm_triton(tuple(args), {})
 
     assert not result.ok
-    assert result.reason == "invalid scale layout"
+    assert result.reason == "scaled grouped GEMM has invalid A scale layout"
 
 
 def test_triton_grouped_gemm_validation_rejects_bias_for_ragged_n(

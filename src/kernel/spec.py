@@ -44,12 +44,15 @@ class KernelSpec:
 @dataclass(frozen=True, slots=True)
 class OperationSpec:
     can_implement: Mapping[str, CanImplementFn]
+    validate: CanImplementFn | None = None
     _callbacks: dict[str, CanImplementFn] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         callbacks = dict(self.can_implement)
         if not callbacks:
             raise ValueError("can_implement must be nonempty")
+        if self.validate is not None and not callable(self.validate):
+            raise TypeError("operation validate must be callable")
         for backend, callback in callbacks.items():
             if backend not in BACKEND_PRIORITIES:
                 supported = ", ".join(BACKEND_PRIORITIES)

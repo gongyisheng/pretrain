@@ -38,10 +38,11 @@ class KernelRegistry:
         self,
         op: str,
         can_implement: Mapping[str, CanImplementFn],
+        validate: CanImplementFn | None = None,
     ) -> None:
         if op in self._operations:
             raise ValueError(f"operation already registered: op={op!r}")
-        operation = OperationSpec(can_implement)
+        operation = OperationSpec(can_implement, validate)
         missing = [
             spec.backend
             for spec in self.implementations(op)
@@ -71,8 +72,9 @@ KERNEL_REGISTRY = KernelRegistry()
 def register_operation(
     op: str,
     can_implement: Mapping[str, CanImplementFn],
+    validate: CanImplementFn | None = None,
 ) -> None:
-    KERNEL_REGISTRY.register_operation(op, can_implement)
+    KERNEL_REGISTRY.register_operation(op, can_implement, validate)
 
 
 def register_kernel(

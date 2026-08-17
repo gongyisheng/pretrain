@@ -247,38 +247,8 @@ def _validate_scaled_grouped_gemm_shared_contract(
             check_shape(bias, (offs.numel(), bq.shape[-1]), "scaled grouped GEMM bias"),
         )
     result = first_failure(checks)
-    return result
-
-
-def can_implement_grouped_gemm_eager(
-    args: tuple[Any, ...], kwargs: Mapping[str, Any]
-) -> CheckResult:
-    result = _validate_grouped_gemm_shared_contract(args, kwargs)
     if not result.ok:
         return result
-    del args, kwargs
-    return CheckResult(True)
-
-
-def can_implement_scaled_gemm_eager(
-    args: tuple[Any, ...], kwargs: Mapping[str, Any]
-) -> CheckResult:
-    result = _validate_scaled_gemm_shared_contract(args, kwargs)
-    if not result.ok:
-        return result
-    del args, kwargs
-    return CheckResult(True)
-
-
-def can_implement_scaled_grouped_gemm_eager(
-    args: tuple[Any, ...], kwargs: Mapping[str, Any]
-) -> CheckResult:
-    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
-    if not result.ok:
-        return result
-    del kwargs
-    aq, bq, sa, sb, offs, out_dtype, block_size, scale_dtype, bias = args
-    checks = ()
     if aq.ndim == 2 and bq.ndim == 3:
         scale_blocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
         valid_a_scale = sa.shape == (aq.shape[0], scale_blocks)
@@ -306,26 +276,44 @@ def can_implement_scaled_grouped_gemm_eager(
             scale_blocks,
         )
         valid_b_scale = sb.shape == (scale_blocks, bq.shape[1])
-    checks += (
-        check_condition(
-            valid_a_scale,
-            "scaled grouped GEMM has invalid A scale layout",
-        ),
-        check_condition(
-            valid_b_scale,
-            "scaled grouped GEMM has invalid B scale layout",
-        ),
+    return first_failure(
+        (
+            check_condition(
+                valid_a_scale,
+                "scaled grouped GEMM has invalid A scale layout",
+            ),
+            check_condition(
+                valid_b_scale,
+                "scaled grouped GEMM has invalid B scale layout",
+            ),
+        )
     )
-    result = first_failure(checks)
-    return result
 
 
-def can_implement_grouped_gemm_triton(
+def _can_implement_grouped_gemm_eager(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
-    result = _validate_grouped_gemm_shared_contract(args, kwargs)
-    if not result.ok:
-        return result
+    del args, kwargs
+    return CheckResult(True)
+
+
+def _can_implement_scaled_gemm_eager(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    del args, kwargs
+    return CheckResult(True)
+
+
+def _can_implement_scaled_grouped_gemm_eager(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    del args, kwargs
+    return CheckResult(True)
+
+
+def _can_implement_grouped_gemm_triton(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
     del kwargs
     a, b, offs, bias = args
     tensors = (a, b, offs) if bias is None else (a, b, offs, bias)
@@ -350,12 +338,9 @@ def _check_triton_quantized_operands(
     )
 
 
-def can_implement_scaled_gemm_triton(
+def _can_implement_scaled_gemm_triton(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
-    result = _validate_scaled_gemm_shared_contract(args, kwargs)
-    if not result.ok:
-        return result
     del kwargs
     aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb) + (() if bias is None else (bias,))
@@ -382,12 +367,9 @@ def can_implement_scaled_gemm_triton(
     )
 
 
-def can_implement_scaled_grouped_gemm_triton(
+def _can_implement_scaled_grouped_gemm_triton(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
-    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
-    if not result.ok:
-        return result
     del kwargs
     aq, bq, sa, sb, offs, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb, offs) + (() if bias is None else (bias,))
@@ -400,44 +382,15 @@ def can_implement_scaled_grouped_gemm_triton(
     result = first_failure(checks)
     if not result.ok:
         return result
-    checks = ()
-    if aq.ndim == 2 and bq.ndim == 3:
-        nblocks = (aq.shape[1] + block_size - 1) // block_size if block_size else 1
-        valid_scales = sa.shape == (aq.shape[0], nblocks) and sb.shape == (
-            bq.shape[0],
-            nblocks,
-            bq.shape[2],
-        )
-    elif aq.ndim == 2 and bq.ndim == 2:
-        valid_scales = (
-            sa.ndim == 2
-            and sb.ndim == 2
-            and sa.shape[0] == aq.shape[0]
-            and sa.shape[1] == sb.shape[0]
-            and sb.shape[1] == bq.shape[1]
-        )
-    else:
-        nblocks = (aq.shape[2] + block_size - 1) // block_size if block_size else 1
-        valid_scales = sa.shape == (aq.shape[0], aq.shape[1], nblocks) and sb.shape == (
-            nblocks,
-            bq.shape[1],
-        )
-    checks += (check_condition(valid_scales, "invalid scale layout"),)
-    result = first_failure(checks)
-    if not result.ok:
-        return result
     minimum_capability = (8, 9) if aq.dtype.is_floating_point else (8, 0)
     return check_compute_capability_at_least(
         aq.device, minimum_capability, "scaled grouped GEMM"
     )
 
 
-def can_implement_scaled_gemm_cublaslt(
+def _can_implement_scaled_gemm_cublaslt(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
-    result = _validate_scaled_gemm_shared_contract(args, kwargs)
-    if not result.ok:
-        return result
     del kwargs
     aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
@@ -479,12 +432,9 @@ def can_implement_scaled_gemm_cublaslt(
     return check_compute_capability_at_least(aq.device, (10, 0), "MXFP8 GEMM")
 
 
-def can_implement_scaled_grouped_gemm_cublaslt(
+def _can_implement_scaled_grouped_gemm_cublaslt(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> CheckResult:
-    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
-    if not result.ok:
-        return result
     del kwargs
     aq, bq, sa, sb, offs, out_dtype, block_size, scale_dtype, bias = args
     if not _CUBLASLT_EXTENSION_AVAILABLE:
@@ -545,28 +495,101 @@ def can_implement_scaled_grouped_gemm_cublaslt(
     )
 
 
+def can_implement_grouped_gemm_eager(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_grouped_gemm_shared_contract(args, kwargs)
+    return result if not result.ok else _can_implement_grouped_gemm_eager(args, kwargs)
+
+
+def can_implement_scaled_gemm_eager(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_scaled_gemm_shared_contract(args, kwargs)
+    return result if not result.ok else _can_implement_scaled_gemm_eager(args, kwargs)
+
+
+def can_implement_scaled_grouped_gemm_eager(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
+    return (
+        result
+        if not result.ok
+        else _can_implement_scaled_grouped_gemm_eager(args, kwargs)
+    )
+
+
+def can_implement_grouped_gemm_triton(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_grouped_gemm_shared_contract(args, kwargs)
+    return result if not result.ok else _can_implement_grouped_gemm_triton(args, kwargs)
+
+
+def can_implement_scaled_gemm_triton(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_scaled_gemm_shared_contract(args, kwargs)
+    return result if not result.ok else _can_implement_scaled_gemm_triton(args, kwargs)
+
+
+def can_implement_scaled_grouped_gemm_triton(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
+    return (
+        result
+        if not result.ok
+        else _can_implement_scaled_grouped_gemm_triton(args, kwargs)
+    )
+
+
+def can_implement_scaled_gemm_cublaslt(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_scaled_gemm_shared_contract(args, kwargs)
+    return (
+        result if not result.ok else _can_implement_scaled_gemm_cublaslt(args, kwargs)
+    )
+
+
+def can_implement_scaled_grouped_gemm_cublaslt(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
+    return (
+        result
+        if not result.ok
+        else _can_implement_scaled_grouped_gemm_cublaslt(args, kwargs)
+    )
+
+
 register_operation(
     "gemm.grouped",
     {
-        "eager": can_implement_grouped_gemm_eager,
-        "triton": can_implement_grouped_gemm_triton,
+        "eager": _can_implement_grouped_gemm_eager,
+        "triton": _can_implement_grouped_gemm_triton,
     },
+    validate=_validate_grouped_gemm_shared_contract,
 )
 register_operation(
     "gemm.scaled",
     {
-        "eager": can_implement_scaled_gemm_eager,
-        "triton": can_implement_scaled_gemm_triton,
-        "cublaslt": can_implement_scaled_gemm_cublaslt,
+        "eager": _can_implement_scaled_gemm_eager,
+        "triton": _can_implement_scaled_gemm_triton,
+        "cublaslt": _can_implement_scaled_gemm_cublaslt,
     },
+    validate=_validate_scaled_gemm_shared_contract,
 )
 register_operation(
     "gemm.scaled_grouped",
     {
-        "eager": can_implement_scaled_grouped_gemm_eager,
-        "triton": can_implement_scaled_grouped_gemm_triton,
-        "cublaslt": can_implement_scaled_grouped_gemm_cublaslt,
+        "eager": _can_implement_scaled_grouped_gemm_eager,
+        "triton": _can_implement_scaled_grouped_gemm_triton,
+        "cublaslt": _can_implement_scaled_grouped_gemm_cublaslt,
     },
+    validate=_validate_scaled_grouped_gemm_shared_contract,
 )
 
 

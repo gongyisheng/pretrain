@@ -499,6 +499,36 @@ _SCALED_COUNTS = [64, 0, 130, 46]  # sums to 240; the empty group is deliberate
 _SCALED_TOL = {"ragged_m": 0.02, "ragged_k": 1e-5, "ragged_n": 0.02}
 
 
+def test_direct_entries_raise_value_error_for_invalid_contracts():
+    with pytest.raises(ValueError, match="2-D or 3-D"):
+        triton_gemm.grouped_gemm(
+            torch.empty(4),
+            torch.empty(4, 4),
+            torch.empty(1, dtype=torch.int32),
+        )
+    with pytest.raises(ValueError, match="must be 2-D"):
+        triton_gemm.scaled_gemm(
+            torch.empty(4, 4, dtype=torch.int8),
+            torch.empty(4, 4, dtype=torch.int8),
+            torch.empty(4),
+            torch.empty(1, 4),
+            torch.float32,
+            0,
+            torch.float32,
+        )
+    with pytest.raises(ValueError, match="must be 2-D or 3-D"):
+        triton_gemm.scaled_grouped_gemm(
+            torch.empty(4, dtype=torch.int8),
+            torch.empty(4, 4, dtype=torch.int8),
+            torch.empty(4, 1),
+            torch.empty(1, 4),
+            torch.empty(1, dtype=torch.int32),
+            torch.float32,
+            0,
+            torch.float32,
+        )
+
+
 def _make_scaled_layout(
     layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0, scale_dtype=torch.float32
 ):

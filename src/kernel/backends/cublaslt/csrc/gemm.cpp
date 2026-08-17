@@ -171,15 +171,121 @@ void set_grouped_dimension_width(cublasLtMatrixLayout_t layout) {
       "scaled_grouped_gemm_mxfp8: failed to set grouped leading-dimension integer width");
 }
 
+int64_t round_up(int64_t value, int64_t multiple) {
+  return ((value + multiple - 1) / multiple) * multiple;
+}
+
+int64_t required_scale_elements(int64_t rows, int64_t k) {
+  const int64_t blocks = (k + 31) / 32;
+  return round_up(rows, 128) * round_up(blocks, 4);
+}
+
+void check_scaled_gemm_mxfp8_meta_inputs(
+    const at::Tensor& a,
+    const at::Tensor& b,
+    const at::Tensor& scale_a,
+    const at::Tensor& scale_b,
+    const std::optional<at::Tensor>& bias) {
+  TORCH_CHECK(a.dim() == 2, "scaled_gemm_mxfp8: A must be rank 2");
+  TORCH_CHECK(b.dim() == 2, "scaled_gemm_mxfp8: B must be rank 2");
+  TORCH_CHECK(
+      a.size(1) == b.size(0),
+      "scaled_gemm_mxfp8: A and B contraction dimensions must match");
+  TORCH_CHECK(
+      a.size(1) % 16 == 0 && b.size(1) % 16 == 0,
+      "scaled_gemm_mxfp8: K and N must be multiples of 16");
+  TORCH_CHECK(
+      a.scalar_type() == at::ScalarType::Float8_e4m3fn,
+      "scaled_gemm_mxfp8: A must have float8_e4m3fn dtype");
+  TORCH_CHECK(
+      b.scalar_type() == at::ScalarType::Float8_e4m3fn,
+      "scaled_gemm_mxfp8: B must have float8_e4m3fn dtype");
+  TORCH_CHECK(
+      scale_a.scalar_type() == at::ScalarType::Float8_e8m0fnu,
+      "scaled_gemm_mxfp8: A scale must have float8_e8m0fnu dtype");
+  TORCH_CHECK(
+      scale_b.scalar_type() == at::ScalarType::Float8_e8m0fnu,
+      "scaled_gemm_mxfp8: B scale must have float8_e8m0fnu dtype");
+
+  const int64_t M = a.size(0);
+  const int64_t K = a.size(1);
+  const int64_t N = b.size(1);
+  TORCH_CHECK(
+      scale_a.dim() == 1 && scale_a.is_contiguous(),
+      "scaled_gemm_mxfp8: A scale must be a contiguous rank-1 swizzled buffer");
+  TORCH_CHECK(
+      scale_b.dim() == 1 && scale_b.is_contiguous(),
+      "scaled_gemm_mxfp8: B scale must be a contiguous rank-1 swizzled buffer");
+  TORCH_CHECK(
+      scale_a.numel() >= required_scale_elements(M, K),
+      "scaled_gemm_mxfp8: A scale buffer is too small for the swizzled layout");
+  TORCH_CHECK(
+      scale_b.numel() >= required_scale_elements(N, K),
+      "scaled_gemm_mxfp8: B scale buffer is too small for the swizzled layout");
+  if (bias.has_value()) {
+    TORCH_CHECK(
+        bias->dim() == 1 && bias->size(0) == N,
+        "scaled_gemm_mxfp8: bias must have shape (N,)");
+    TORCH_CHECK(
+        bias->scalar_type() == at::ScalarType::BFloat16,
+        "scaled_gemm_mxfp8: bias must have bfloat16 dtype");
+    TORCH_CHECK(
+        bias->is_contiguous(), "scaled_gemm_mxfp8: bias must be contiguous");
+  }
+}
+
+void check_scaled_gemm_mxfp8_cuda_inputs(
+    const at::Tensor& a,
+    const at::Tensor& b,
+    const at::Tensor& scale_a,
+    const at::Tensor& scale_b,
+    const std::optional<at::Tensor>& bias) {
+  check_scaled_gemm_mxfp8_meta_inputs(a, b, scale_a, scale_b, bias);
+
+  TORCH_CHECK(a.is_cuda(), "scaled_gemm_mxfp8: A must be a CUDA tensor");
+  TORCH_CHECK(b.is_cuda(), "scaled_gemm_mxfp8: B must be a CUDA tensor");
+  TORCH_CHECK(
+      scale_a.is_cuda(), "scaled_gemm_mxfp8: A scale must be a CUDA tensor");
+  TORCH_CHECK(
+      scale_b.is_cuda(), "scaled_gemm_mxfp8: B scale must be a CUDA tensor");
+  TORCH_CHECK(
+      a.device() == b.device() && a.device() == scale_a.device() &&
+          a.device() == scale_b.device(),
+      "scaled_gemm_mxfp8: A, B, and scales must be on the same CUDA device");
+  const auto* properties = at::cuda::getDeviceProperties(a.get_device());
+  TORCH_CHECK(
+      properties->major >= 10,
+      "scaled_gemm_mxfp8: requires SM100 or newer, got SM",
+      properties->major,
+      properties->minor);
+  if (bias.has_value()) {
+    TORCH_CHECK(
+        bias->is_cuda(), "scaled_gemm_mxfp8: bias must be a CUDA tensor");
+    TORCH_CHECK(
+        bias->device() == a.device(),
+        "scaled_gemm_mxfp8: bias must be on the same CUDA device as A");
+  }
+
+  const int64_t M = a.size(0);
+  const int64_t K = a.size(1);
+  const int64_t N = b.size(1);
+  if (M != 0 && N != 0 && K != 0) {
+    TORCH_CHECK(
+        a.stride(0) == K && a.stride(1) == 1,
+        "scaled_gemm_mxfp8: A must be row-major contiguous");
+    TORCH_CHECK(
+        b.stride(0) == 1 && b.stride(1) == K,
+        "scaled_gemm_mxfp8: B must be column-major contiguous");
+  }
+}
+
 at::Tensor scaled_gemm_mxfp8_cublaslt_meta(
     const at::Tensor& a,
     const at::Tensor& b,
     const at::Tensor& scale_a,
     const at::Tensor& scale_b,
     const std::optional<at::Tensor>& bias) {
-  static_cast<void>(scale_a);
-  static_cast<void>(scale_b);
-  static_cast<void>(bias);
+  check_scaled_gemm_mxfp8_meta_inputs(a, b, scale_a, scale_b, bias);
   return at::empty_symint(
       {a.sym_size(0), b.sym_size(1)}, a.options().dtype(at::kBFloat16));
 }
@@ -190,6 +296,7 @@ at::Tensor scaled_gemm_mxfp8_cublaslt_cuda(
     const at::Tensor& scale_a,
     const at::Tensor& scale_b,
     const std::optional<at::Tensor>& bias) {
+  check_scaled_gemm_mxfp8_cuda_inputs(a, b, scale_a, scale_b, bias);
   c10::cuda::CUDAGuard device_guard(a.device());
 
   const int64_t M = a.size(0);

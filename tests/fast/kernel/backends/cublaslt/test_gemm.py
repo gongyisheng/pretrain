@@ -7,6 +7,7 @@ import src.kernel.backends.cublaslt._C  # noqa: F401
 from src.kernel.backends.cublaslt import gemm as cublaslt_gemm
 from src.kernel.ops.gemm import scaled_gemm, scaled_grouped_gemm
 from src.quant.quantize import quantize_operand
+from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 
 
 _MXFP8_SCALING = {
@@ -229,3 +230,72 @@ def test_cublaslt_grouped_mxfp8_matches_eager_with_empty_expert():
     assert actual.shape == (rows, n)
     assert actual.dtype == torch.bfloat16
     assert torch.equal(actual, eager)
+
+
+def test_cublaslt_meta_rejects_invalid_contraction():
+    a = torch.empty((128, 128), device="meta", dtype=torch.float8_e4m3fn)
+    b = torch.empty((64, 128), device="meta", dtype=torch.float8_e4m3fn)
+    scale_a = torch.empty((512,), device="meta", dtype=torch.float8_e8m0fnu)
+    scale_b = torch.empty((512,), device="meta", dtype=torch.float8_e8m0fnu)
+    with pytest.raises(RuntimeError, match="contraction dimensions"):
+        torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(a, b, scale_a, scale_b)
+
+
+@pytest.mark.parametrize(
+    ("invalid_input", "error"),
+    [
+        ("scale_dtype", "A scale must have float8_e8m0fnu dtype"),
+        ("short_scale", "A scale buffer is too small"),
+        ("invalid_bias", "bias must have shape"),
+    ],
+)
+def test_cublaslt_meta_rejects_invalid_transformed_abi(invalid_input: str, error: str):
+    a = torch.empty((128, 128), device="meta", dtype=torch.float8_e4m3fn)
+    b = torch.empty((128, 128), device="meta", dtype=torch.float8_e4m3fn)
+    scale_a = torch.empty((512,), device="meta", dtype=torch.float8_e8m0fnu)
+    scale_b = torch.empty((512,), device="meta", dtype=torch.float8_e8m0fnu)
+    bias = None
+    if invalid_input == "scale_dtype":
+        scale_a = scale_a.float()
+    elif invalid_input == "short_scale":
+        scale_a = scale_a[:-1]
+    else:
+        bias = torch.empty((127,), device="meta", dtype=torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match=error):
+        torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(a, b, scale_a, scale_b, bias)
+
+
+@cuda_mxfp8_only
+@pytest.mark.parametrize(
+    ("invalid_input", "error"),
+    [
+        ("row_major_b", "B must be column-major contiguous"),
+        ("short_scale", "A scale buffer is too small"),
+        ("rank_two_scale", "A scale must be a contiguous rank-1"),
+        ("invalid_bias", "bias must have shape"),
+    ],
+)
+def test_cublaslt_native_operator_rejects_invalid_transformed_abi(
+    invalid_input: str, error: str
+):
+    _require_mxfp8_device()
+    aq, bq, scale_a, scale_b = _mxfp8_operands((128, 128, 128), "varying")
+    b = to_column_major(bq)
+    swizzled_a = to_swizzle_32_4_4(scale_a)
+    swizzled_b = to_swizzle_32_4_4(scale_b.t())
+    bias = None
+
+    if invalid_input == "row_major_b":
+        b = b.contiguous()
+    elif invalid_input == "short_scale":
+        swizzled_a = swizzled_a[:-1]
+    elif invalid_input == "rank_two_scale":
+        swizzled_a = swizzled_a.reshape(1, -1)
+    else:
+        bias = torch.empty(127, device="cuda", dtype=torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match=error):
+        torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
+            aq, b, swizzled_a, swizzled_b, bias
+        )

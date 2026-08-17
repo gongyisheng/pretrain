@@ -68,32 +68,35 @@ def test_register_kernel_records_implementation_metadata():
 
 
 @pytest.mark.parametrize(
-    ("op", "expected_backends", "can_implement"),
+    ("op", "expected_backends", "validate", "can_implement"),
     [
         (
             "gemm.grouped",
             {"eager", "triton"},
+            _gemm._validate_grouped_gemm_shared_contract,
             {
-                "eager": _gemm.can_implement_grouped_gemm_eager,
-                "triton": _gemm.can_implement_grouped_gemm_triton,
+                "eager": _gemm._can_implement_grouped_gemm_eager,
+                "triton": _gemm._can_implement_grouped_gemm_triton,
             },
         ),
         (
             "gemm.scaled",
             {"cublaslt", "eager", "triton"},
+            _gemm._validate_scaled_gemm_shared_contract,
             {
-                "eager": _gemm.can_implement_scaled_gemm_eager,
-                "triton": _gemm.can_implement_scaled_gemm_triton,
-                "cublaslt": _gemm.can_implement_scaled_gemm_cublaslt,
+                "eager": _gemm._can_implement_scaled_gemm_eager,
+                "triton": _gemm._can_implement_scaled_gemm_triton,
+                "cublaslt": _gemm._can_implement_scaled_gemm_cublaslt,
             },
         ),
         (
             "gemm.scaled_grouped",
             {"cublaslt", "eager", "triton"},
+            _gemm._validate_scaled_grouped_gemm_shared_contract,
             {
-                "eager": _gemm.can_implement_scaled_grouped_gemm_eager,
-                "triton": _gemm.can_implement_scaled_grouped_gemm_triton,
-                "cublaslt": _gemm.can_implement_scaled_grouped_gemm_cublaslt,
+                "eager": _gemm._can_implement_scaled_grouped_gemm_eager,
+                "triton": _gemm._can_implement_scaled_grouped_gemm_triton,
+                "cublaslt": _gemm._can_implement_scaled_grouped_gemm_cublaslt,
             },
         ),
     ],
@@ -101,6 +104,7 @@ def test_register_kernel_records_implementation_metadata():
 def test_registered_gemm_backends(
     op: str,
     expected_backends: set[str],
+    validate,
     can_implement: Mapping[str, Any],
 ):
     implementations = KERNEL_REGISTRY.implementations(op)
@@ -109,6 +113,7 @@ def test_registered_gemm_backends(
     assert operation is not None
     assert {spec.backend for spec in implementations} == expected_backends
     assert set(operation.can_implement) == expected_backends
+    assert operation.validate is validate
     for backend, validator in can_implement.items():
         assert KERNEL_REGISTRY.can_implement(op, backend) is validator
 
@@ -207,6 +212,17 @@ def test_register_operation_rejects_non_callable_checks(op, backends):
         registry.register_operation(op, backends)
 
     assert registry.operation(op) is None
+
+
+def test_register_operation_rejects_non_callable_contract():
+    registry = KernelRegistry()
+
+    with pytest.raises(TypeError, match="validate must be callable"):
+        registry.register_operation(
+            "test.contract", {"eager": _can_implement}, object()
+        )
+
+    assert registry.operation("test.contract") is None
 
 
 def test_operation_first_registration_requires_a_mapped_backend_validator():
