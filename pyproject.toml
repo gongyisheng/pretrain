@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "pybind11>=2.11", "torch>=2.11,<2.12", "wheel"]
+requires = ["setuptools>=64", "pybind11>=2.11", "torch>=2.12.1,<2.13", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Pretraining experiments — different architectures, datasets, hyperparameters"
 requires-python = ">=3.12"
 dependencies = [
-    "torch>=2.11,<2.12",
+    "torch>=2.12.1,<2.13",
     "tokenizers>=0.22",
     "regex>=2024.0",
     "datasets>=4.5",
@@ -40,12 +40,12 @@ dev = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu132" }
 
 [tool.uv]
 no-build-isolation-package = ["pretrain"]
