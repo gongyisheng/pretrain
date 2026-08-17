@@ -72,29 +72,26 @@ def test_register_kernel_records_implementation_metadata():
     [
         (
             "gemm.grouped",
-            {"eager", "torch", "triton"},
+            {"eager", "triton"},
             {
                 "eager": _gemm.can_implement_grouped_gemm_eager,
-                "torch": _gemm.can_implement_grouped_gemm_torch,
                 "triton": _gemm.can_implement_grouped_gemm_triton,
             },
         ),
         (
             "gemm.scaled",
-            {"cublaslt", "eager", "torch", "triton"},
+            {"cublaslt", "eager", "triton"},
             {
                 "eager": _gemm.can_implement_scaled_gemm_eager,
-                "torch": _gemm.can_implement_scaled_gemm_torch,
                 "triton": _gemm.can_implement_scaled_gemm_triton,
                 "cublaslt": _gemm.can_implement_scaled_gemm_cublaslt,
             },
         ),
         (
             "gemm.scaled_grouped",
-            {"eager", "torch", "triton"},
+            {"eager", "triton"},
             {
                 "eager": _gemm.can_implement_scaled_grouped_gemm_eager,
-                "torch": _gemm.can_implement_scaled_grouped_gemm_torch,
                 "triton": _gemm.can_implement_scaled_grouped_gemm_triton,
             },
         ),
@@ -118,9 +115,8 @@ def test_registered_gemm_backends(
 def test_backend_priorities_are_defined_once_per_backend():
     assert kernel_spec.BACKEND_PRIORITIES == {
         "eager": 0,
-        "torch": 1,
-        "triton": 2,
-        "cublaslt": 3,
+        "triton": 1,
+        "cublaslt": 2,
     }
 
 
@@ -167,15 +163,15 @@ def test_register_operation_copies_backend_mapping():
     registry = KernelRegistry()
     callbacks = {"eager": _can_implement}
     registry.register_operation("test.immutable", callbacks)
-    callbacks["torch"] = _can_implement
+    callbacks["triton"] = _can_implement
     operation = registry.operation("test.immutable")
 
     assert operation is not None
     with pytest.raises(TypeError):
-        operation.can_implement["torch"] = _can_implement
+        operation.can_implement["triton"] = _can_implement
 
     with pytest.raises(ValueError, match="validator"):
-        registry.register(_spec("test.immutable", "torch"))
+        registry.register(_spec("test.immutable", "triton"))
 
 
 def test_register_operation_rejects_duplicate_metadata():
@@ -214,7 +210,7 @@ def test_register_operation_rejects_non_callable_checks(op, backends):
 
 def test_operation_first_registration_requires_a_mapped_backend_validator():
     registry = KernelRegistry()
-    registry.register_operation("test.operation_first", {"torch": _can_implement})
+    registry.register_operation("test.operation_first", {"triton": _can_implement})
 
     with pytest.raises(ValueError, match="validator"):
         registry.register(_spec("test.operation_first", "eager"))
@@ -227,7 +223,7 @@ def test_kernel_first_registration_requires_a_mapped_backend_validator():
     registry.register(_spec("test.kernel_first", "eager"))
 
     with pytest.raises(ValueError, match="validator"):
-        registry.register_operation("test.kernel_first", {"torch": _can_implement})
+        registry.register_operation("test.kernel_first", {"triton": _can_implement})
 
     assert registry.operation("test.kernel_first") is None
     assert {spec.backend for spec in registry.implementations("test.kernel_first")} == {

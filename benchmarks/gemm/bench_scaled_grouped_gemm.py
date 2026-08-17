@@ -1,10 +1,10 @@
-"""Scaled grouped GEMM latency: Triton vs optimized Torch.
+"""Scaled grouped GEMM latency: Triton vs native PyTorch.
 
 Sweeps the expert-GEMM shapes of the latent-MoE configs (gate_up over K, down
 over N) at two expert counts E in {64, 256}, holding total rows M fixed, under
 fp8-rowwise and int8-rowwise quantization. Accuracy is relative error against
-the eager backend for identical quantized operands. Unsupported
-Torch contracts are reported as `n/a`, never timed through auto fallback.
+the eager backend for identical quantized operands. Unsupported native PyTorch
+contracts are reported as `n/a`.
 
     uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py
     uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py --no-plot
@@ -16,11 +16,12 @@ import sys
 import time
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
 from src.kernel.ops.gemm import scaled_grouped_gemm
-from src.kernel.selector import KernelSelectionError
+from src.kernel.utils import to_column_major
 from src.quant.quantize import quantize_operand
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
@@ -42,7 +43,7 @@ SCHEMES = ["fp8_rowwise", "int8_rowwise"]
 DEFAULT_OUT = "benchmarks/results/scaled_grouped_gemm.png"
 
 # blue/orange pair (validated colorblind-safe, matches sibling benchmarks)
-_IMPL_COLOR = {"torch": "#eb6834", "triton": "#2a78d6"}
+_IMPL_COLOR = {"pytorch": "#eb6834", "triton": "#2a78d6"}
 
 
 def _fmt(scheme):
@@ -90,6 +91,20 @@ def _relerr(out, ref):
     return ((out.float() - ref).norm() / ref.norm()).item()
 
 
+def _pytorch_scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype):
+    return F.scaled_grouped_mm(
+        aq,
+        to_column_major(bq),
+        sa.squeeze(1),
+        F.ScalingType.RowWise,
+        sb.squeeze(1),
+        F.ScalingType.RowWise,
+        bias=None,
+        offs=offs,
+        output_dtype=out_dtype,
+    )
+
+
 def _bench_point(E, K, N, scheme):
     """Return optimized latency and error for one forward benchmark point."""
     a, b, offs = _make(E, M_FIXED, K, N)
@@ -115,24 +130,22 @@ def _bench_point(E, K, N, scheme):
     triton_ms = _time(triton_fn)
     triton_relerr = _relerr(triton_out, ref)
 
-    def torch_fn():
-        return scaled_grouped_gemm(
-            aq, bq, sa, sb, offs, torch.bfloat16, bs, torch.float32, backend="torch"
-        )
+    def pytorch_fn():
+        return _pytorch_scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16)
 
     try:
-        torch_out = torch_fn()
-    except KernelSelectionError:
-        torch_ms = None
-        torch_relerr = None
+        pytorch_out = pytorch_fn()
+    except (AttributeError, NotImplementedError, RuntimeError, ValueError):
+        pytorch_ms = None
+        pytorch_relerr = None
     else:
-        torch_ms = _time(torch_fn)
-        torch_relerr = _relerr(torch_out, ref)
+        pytorch_ms = _time(pytorch_fn)
+        pytorch_relerr = _relerr(pytorch_out, ref)
     return dict(
         triton_ms=triton_ms,
-        torch_ms=torch_ms,
+        pytorch_ms=pytorch_ms,
         triton_relerr=triton_relerr,
-        torch_relerr=torch_relerr,
+        pytorch_relerr=pytorch_relerr,
     )
 
 
@@ -141,7 +154,7 @@ def _bench_wgrad_point(E, K, N, scheme):
 
     Both operands are indexed by the same ragged token axis, so one block mapping
     covers them -- matching what src/quant/moe.py does. The bf16 baseline is the
-    ragged-K contract is intentionally unsupported by the optimized Torch backend.
+    ragged-K contract is intentionally unsupported by native PyTorch.
     """
     a, _, offs = _make(E, M_FIXED, K, N)
     g = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16) * 0.1
@@ -177,16 +190,16 @@ def _bench_wgrad_point(E, K, N, scheme):
     triton_ms = _time(triton_fn)
     return dict(
         triton_ms=triton_ms,
-        torch_ms=None,
+        pytorch_ms=None,
         triton_relerr=_relerr(triton_out, ref),
-        torch_relerr=None,
+        pytorch_relerr=None,
     )
 
 
 def plot(results, path, device=""):
     """Write a grouped-bar chart (rows = scheme, cols = E) from `results`.
 
-    Each result: {"role","K","N","E","scheme","triton_ms","torch_ms",...}.
+    Each result: {"role","K","N","E","scheme","triton_ms","pytorch_ms",...}.
     Import-safe without CUDA.
     """
     import matplotlib
@@ -206,7 +219,7 @@ def plot(results, path, device=""):
     for ri, scheme in enumerate(SCHEMES):
         for ci, E in enumerate(E_LIST):
             ax = axes[ri][ci]
-            for j, impl in enumerate(("torch", "triton")):
+            for j, impl in enumerate(("pytorch", "triton")):
                 key = f"{impl}_ms"
                 vals = [
                     (lut.get((role, K, N, E, scheme)) or {}).get(key, 0.0)
@@ -234,7 +247,7 @@ def plot(results, path, device=""):
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside upper right", ncol=2, fontsize=10)
-    sup = "Scaled grouped GEMM latency — optimized Torch vs Triton"
+    sup = "Scaled grouped GEMM latency — native PyTorch vs Triton"
     sub = f"eager oracle · M = {M_FIXED:,} rows · lower is faster"
     if device:
         sub += f" · {device}"
@@ -272,8 +285,8 @@ def main():
     print(device)
     print(f"fixed M = {M_FIXED:,} rows\n")
     hdr = (
-        f"{'shape':22s} {'E':>4s} {'scheme':13s} {'torch_ms':>9s} {'triton_ms':>10s} "
-        f"{'torch_relerr':>13s} {'triton_relerr':>14s}"
+        f"{'shape':22s} {'E':>4s} {'scheme':13s} {'pytorch_ms':>10s} {'triton_ms':>10s} "
+        f"{'pytorch_relerr':>14s} {'triton_relerr':>14s}"
     )
     print(hdr)
     point = _bench_wgrad_point if args.direction == "wgrad" else _bench_point
@@ -285,8 +298,8 @@ def main():
                 label = f"{role} K{K} N{N}"
                 print(
                     f"{label:22s} {E:>4d} {scheme:13s} "
-                    f"{_display(r['torch_ms']):>9s} {r['triton_ms']:>10.3f} "
-                    f"{_display(r['torch_relerr'], 4):>13s} "
+                    f"{_display(r['pytorch_ms']):>10s} {r['triton_ms']:>10.3f} "
+                    f"{_display(r['pytorch_relerr'], 4):>14s} "
                     f"{r['triton_relerr']:>14.4f}"
                 )
                 results.append(

@@ -1,11 +1,11 @@
-"""Grouped GEMM latency: optimized Torch vs Triton, forward and backward.
+"""Grouped GEMM latency: native PyTorch vs Triton, forward and backward.
 
 Sweeps the eight expert-GEMM shapes of the latent-MoE configs (gate_up over
 K in {64,128,256,512}; down over N in {64,128,256,512}) at two expert counts
-E in {64, 256}, holding total rows M fixed. Both implementations run through
-`grouped_gemm(a, b, offs, backend=...)` for forward and the production explicit
-autograd composition for backward. The eager backend is the correctness
-oracle and is not timed. Prints a table and (unless --no-plot) writes a chart.
+E in {64, 256}, holding total rows M fixed. Triton runs through the public
+operation and PyTorch calls `F.grouped_mm` directly. The eager backend is the
+correctness oracle and is not timed. Prints a table and (unless --no-plot)
+writes a chart.
 
     uv run python benchmarks/gemm/bench_grouped_gemm.py
     uv run python benchmarks/gemm/bench_grouped_gemm.py --out /tmp/gg.png
@@ -18,11 +18,11 @@ import sys
 import time
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
 from src.kernel.ops.gemm import grouped_gemm
-from src.kernel.selector import KernelSelectionError
 from src.layers.mlp import grouped_gemm_fn
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
@@ -46,11 +46,37 @@ SHAPES = [
 DEFAULT_OUT = "benchmarks/results/grouped_gemm.png"
 
 # blue/orange pair (validated colorblind-safe)
-_BACKEND_COLOR = {"torch": "#eb6834", "triton": "#2a78d6"}
+_BACKEND_COLOR = {"pytorch": "#eb6834", "triton": "#2a78d6"}
 
 
-def _grouped_gemm_with_autograd(a, b, offs, bias=None, backend="auto"):
-    return grouped_gemm_fn(a, b, offs, bias, None, backend)
+def _pytorch_grouped_gemm(a, b, offs, bias=None):
+    out = F.grouped_mm(a, b, offs=offs, bias=None)
+    if bias is None:
+        return out
+    if out.ndim == 3:
+        return out + bias[:, None, :]
+    rows = torch.arange(out.shape[0], device=offs.device)
+    return out + bias[torch.searchsorted(offs, rows, right=True)]
+
+
+class _PyTorchGroupedGemmFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a, b, offs):
+        ctx.save_for_backward(a, b, offs)
+        return _pytorch_grouped_gemm(a, b, offs)
+
+    @staticmethod
+    def backward(ctx, grad_c):
+        a, b, offs = ctx.saved_tensors
+        return (
+            _pytorch_grouped_gemm(grad_c, b.mT, offs),
+            _pytorch_grouped_gemm(a.mT, grad_c, offs),
+            None,
+        )
+
+
+def _pytorch_grouped_gemm_with_autograd(a, b, offs):
+    return _PyTorchGroupedGemmFn.apply(a, b, offs)
 
 
 def _make(E, M, K, N, requires_grad=False):
@@ -108,28 +134,21 @@ def _bench_point(E, K, N):
         out[("triton", "fwd")] = _time(
             lambda: grouped_gemm(a, b, offs, backend="triton")
         )
-        try:
-            torch_out = grouped_gemm(a, b, offs, backend="torch")
-        except KernelSelectionError:
-            out[("torch", "fwd")] = None
-            out[("torch", "relerr")] = None
-        else:
-            _assert_parity(torch_out, eager)
-            out[("torch", "relerr")] = _relative_error(torch_out, eager)
-            out[("torch", "fwd")] = _time(
-                lambda: grouped_gemm(a, b, offs, backend="torch")
-            )
-    for backend in ("torch", "triton"):
+        pytorch_out = _pytorch_grouped_gemm(a, b, offs)
+        _assert_parity(pytorch_out, eager)
+        out[("pytorch", "relerr")] = _relative_error(pytorch_out, eager)
+        out[("pytorch", "fwd")] = _time(lambda: _pytorch_grouped_gemm(a, b, offs))
+    for backend in ("pytorch", "triton"):
         if out[(backend, "fwd")] is None:
             out[(backend, "bwd")] = None
             continue
         ag, bg, offg = _make(E, M_FIXED, K, N, requires_grad=True)
         go = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16)
-        try:
-            res = _grouped_gemm_with_autograd(ag, bg, offg, backend=backend)
-        except KernelSelectionError:
-            out[(backend, "bwd")] = None
-            continue
+        res = (
+            _pytorch_grouped_gemm_with_autograd(ag, bg, offg)
+            if backend == "pytorch"
+            else grouped_gemm_fn(ag, bg, offg, backend=backend)
+        )
         # backward-only: forward already ran; time repeated grad passes (retain_graph)
         out[(backend, "bwd")] = _time(lambda: res.backward(go, retain_graph=True))
     return out
@@ -160,7 +179,7 @@ def plot(results, path, device=""):
     for ri, (pass_, pass_lbl) in enumerate(passes):
         for ci, E in enumerate(E_LIST):
             ax = axes[ri][ci]
-            for j, backend in enumerate(("torch", "triton")):
+            for j, backend in enumerate(("pytorch", "triton")):
                 vals = [
                     lut.get((role, K, N, E, backend, pass_), 0.0) or 0.0
                     for role, K, N in SHAPES
@@ -207,7 +226,7 @@ def plot(results, path, device=""):
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside upper right", ncol=2, fontsize=10)
-    sup = "Grouped GEMM latency — torch vs Triton"
+    sup = "Grouped GEMM latency — PyTorch vs Triton"
     sub = f"M = {M_FIXED:,} rows · lower is faster"
     if device:
         sub += f" · {device}"
@@ -238,8 +257,8 @@ def main():
     print(device)
     print(f"fixed M = {M_FIXED:,} rows\n")
     hdr = (
-        f"{'shape':22s} {'E':>4s} {'rows/grp':>9s} {'torch_fwd':>10s} {'triton_fwd':>11s} "
-        f"{'torch_bwd':>10s} {'triton_bwd':>11s} {'torch_err':>10s} {'triton_err':>11s}"
+        f"{'shape':22s} {'E':>4s} {'rows/grp':>9s} {'pytorch_fwd':>11s} {'triton_fwd':>11s} "
+        f"{'pytorch_bwd':>11s} {'triton_bwd':>11s} {'pytorch_err':>11s} {'triton_err':>11s}"
     )
     print(hdr)
     results = []
@@ -249,9 +268,9 @@ def main():
             label = f"{role} K{K} N{N}"
             print(
                 f"{label:22s} {E:>4d} {M_FIXED // E:>9d} "
-                f"{_fmt(t[('torch', 'fwd')]):>10s} {_fmt(t[('triton', 'fwd')]):>11s} "
-                f"{_fmt(t[('torch', 'bwd')]):>10s} {_fmt(t[('triton', 'bwd')]):>11s} "
-                f"{_fmt(t[('torch', 'relerr')], 4):>10s} "
+                f"{_fmt(t[('pytorch', 'fwd')]):>11s} {_fmt(t[('triton', 'fwd')]):>11s} "
+                f"{_fmt(t[('pytorch', 'bwd')]):>11s} {_fmt(t[('triton', 'bwd')]):>11s} "
+                f"{_fmt(t[('pytorch', 'relerr')], 4):>11s} "
                 f"{_fmt(t[('triton', 'relerr')], 4):>11s}"
             )
             for (backend, pass_), ms in t.items():

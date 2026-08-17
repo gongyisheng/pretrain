@@ -2,10 +2,10 @@
 
 Sweeps tensorwise, rowwise, blockwise-1D, and blockwise-2D configurations
 across three representative transformer linear shapes (d_model=512,
-intermediate=1536) at two token counts M in {4096, 16384}. Optimized backends are
-called only through `scaled_gemm(..., backend=...)`; unsupported Torch contracts
-print `n/a` instead of silently falling back. Accuracy is relative error against
-the eager backend for the same quantized operands. Prints a table and
+intermediate=1536) at two token counts M in {4096, 16384}. Triton and cuBLASLt
+run through `scaled_gemm(..., backend=...)`; native PyTorch is called directly.
+Unsupported native PyTorch contracts print `n/a`. Accuracy is relative error
+against the eager backend for the same quantized operands. Prints a table and
 (unless --no-plot) writes a matplotlib grouped-bar chart.
 
     uv run python benchmarks/gemm/bench_scaled_gemm.py
@@ -20,6 +20,7 @@ import sys
 import time
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
@@ -90,7 +91,7 @@ SCHEMES = [config["label"] for config in _scheme_configs()]
 DEFAULT_OUT = "benchmarks/results/scaled_gemm.png"
 
 # Implementation colors aligned with bench_grouped_gemm.py's palette.
-_SCHEME_COLOR = {"triton": "#2a78d6", "torch": "#eb6834"}
+_SCHEME_COLOR = {"triton": "#2a78d6", "pytorch": "#eb6834"}
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +180,67 @@ def _scaling_for_config(config):
     }
 
 
+def _pytorch_scaled_gemm(aq, bq, sa, sb, out_dtype, block_size, scale_dtype):
+    if aq.dtype == torch.int8:
+        width = block_size or aq.shape[1]
+        out = torch.zeros(
+            (aq.shape[0], bq.shape[1]), device=aq.device, dtype=torch.float32
+        )
+        for start in range(0, aq.shape[1], width):
+            stop = min(start + width, aq.shape[1])
+            index = start // width
+            out += (
+                torch._int_mm(
+                    aq[:, start:stop].contiguous(), bq[start:stop].contiguous()
+                ).float()
+                * sa[:, index : index + 1]
+                * sb[index : index + 1]
+            )
+        return out.to(out_dtype)
+
+    scaling_type = getattr(F, "ScalingType", None)
+    if (
+        scale_dtype == torch.float8_e8m0fnu
+        and block_size in (32, 64, 128)
+        and torch.cuda.get_device_capability(aq.device)[0] in (10, 12)
+        and getattr(scaling_type, "BlockWise1x32", None) is not None
+        and getattr(F, "SwizzleType", None) is not None
+    ):
+        repeat = block_size // 32
+        groups = (aq.shape[1] + 31) // 32
+        scale_a = to_swizzle_32_4_4(sa.repeat_interleave(repeat, 1)[:, :groups])
+        scale_b = to_swizzle_32_4_4(sb.repeat_interleave(repeat, 0)[:groups].t())
+        return F.scaled_mm(
+            aq,
+            to_column_major(bq),
+            scale_a,
+            F.ScalingType.BlockWise1x32,
+            scale_b,
+            F.ScalingType.BlockWise1x32,
+            swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
+            swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
+            bias=None,
+            output_dtype=out_dtype,
+        )
+
+    width = block_size or aq.shape[1]
+    out = torch.zeros((aq.shape[0], bq.shape[1]), device=aq.device, dtype=torch.float32)
+    for start in range(0, aq.shape[1], width):
+        stop = min(start + width, aq.shape[1])
+        index = start // width
+        out += F.scaled_mm(
+            aq[:, start:stop].contiguous(),
+            to_column_major(bq[start:stop]),
+            sa[:, index : index + 1].contiguous(),
+            F.ScalingType.RowWise,
+            sb[index : index + 1],
+            F.ScalingType.RowWise,
+            bias=None,
+            output_dtype=torch.bfloat16,
+        ).float()
+    return out.to(out_dtype)
+
+
 def _bench_scheme(a, b, config):
     """Benchmark one quantization contract with preparation outside timed closures."""
     result = {
@@ -187,10 +249,10 @@ def _bench_scheme(a, b, config):
         "block_size": config["block_size"],
         "scheme": config["label"],
         "triton_ms": None,
-        "torch_ms": None,
+        "pytorch_ms": None,
         "triton_relerr": None,
-        "torch_relerr": None,
-        "torch_supported": False,
+        "pytorch_relerr": None,
+        "pytorch_supported": False,
         "cublaslt_ms": None,
         "cublaslt_native_ms": None,
         "cublaslt_relerr": None,
@@ -238,26 +300,19 @@ def _bench_scheme(a, b, config):
     result["triton_ms"] = _time(triton_fn)
     result["triton_relerr"] = _relerr(triton_out, ref)
 
-    def torch_fn():
-        return scaled_gemm(
-            aq,
-            bq,
-            sa,
-            sb,
-            torch.bfloat16,
-            block_size,
-            scale_dtype,
-            backend="torch",
+    def pytorch_fn():
+        return _pytorch_scaled_gemm(
+            aq, bq, sa, sb, torch.bfloat16, block_size, scale_dtype
         )
 
     try:
-        torch_out = torch_fn()
-    except KernelSelectionError:
+        pytorch_out = pytorch_fn()
+    except (AttributeError, NotImplementedError, RuntimeError, ValueError):
         pass
     else:
-        result["torch_supported"] = True
-        result["torch_ms"] = _time(torch_fn)
-        result["torch_relerr"] = _relerr(torch_out, ref)
+        result["pytorch_supported"] = True
+        result["pytorch_ms"] = _time(pytorch_fn)
+        result["pytorch_relerr"] = _relerr(pytorch_out, ref)
 
     if config["label"] != "mxfp8":
         return result
@@ -339,7 +394,7 @@ def _bench_shape(name, M, K, N):
 def plot(results, path, device=""):
     """Write a grouped-bar chart (rows = M, cols = shape) from `results`.
 
-    Each result: {"shape","M","K","N","scheme","triton_ms","torch_ms",...}.
+    Each result: {"shape","M","K","N","scheme","triton_ms","pytorch_ms",...}.
     Import-safe without CUDA.
     """
     import matplotlib
@@ -359,7 +414,7 @@ def plot(results, path, device=""):
     for ri, M in enumerate(M_LIST):
         for ci, shape_name in enumerate(shape_names):
             ax = axes[ri][ci]
-            for j, impl in enumerate(("triton", "torch")):
+            for j, impl in enumerate(("triton", "pytorch")):
                 key = f"{impl}_ms"
                 vals = []
                 for scheme in SCHEMES:
@@ -387,7 +442,7 @@ def plot(results, path, device=""):
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside upper right", ncol=3, fontsize=10)
-    sup = "Scaled GEMM latency — Triton vs optimized Torch"
+    sup = "Scaled GEMM latency — Triton vs native PyTorch"
     sub = "eager oracle · lower is faster · n/a = unsupported contract"
     if device:
         sub += f" · {device}"
@@ -426,9 +481,9 @@ def main():
 
     hdr = (
         f"{'shape':12s} {'M':>7s} {'scheme':16s} {'triton_ms':>10s} "
-        f"{'torch_ms':>10s} {'cublaslt':>8s} {'cublaslt_ms':>12s} {'native_ms':>10s} "
+        f"{'pytorch_ms':>10s} {'cublaslt':>8s} {'cublaslt_ms':>12s} {'native_ms':>10s} "
         f"{'e2e_x':>8s} {'native_x':>8s} {'triton_relerr':>14s} "
-        f"{'torch_relerr':>14s} {'cublaslt_relerr':>16s}"
+        f"{'pytorch_relerr':>14s} {'cublaslt_relerr':>16s}"
     )
     print(hdr)
     results = []
@@ -438,14 +493,14 @@ def main():
             for r in rows:
                 print(
                     f"{r['shape']:12s} {r['M']:>7d} {r['scheme']:16s} "
-                    f"{_fmt(r['triton_ms']):>10s} {_fmt(r['torch_ms']):>10s} "
+                    f"{_fmt(r['triton_ms']):>10s} {_fmt(r['pytorch_ms']):>10s} "
                     f"{str(r['cublaslt_supported']):>8s} "
                     f"{_fmt(r['cublaslt_ms']):>12s} "
                     f"{_fmt(r['cublaslt_native_ms']):>10s} "
                     f"{_fmt(r['cublaslt_speedup']):>8s} "
                     f"{_fmt(r['cublaslt_native_speedup']):>8s} "
                     f"{_fmt(r['triton_relerr'], 4):>14s} "
-                    f"{_fmt(r['torch_relerr'], 4):>14s} "
+                    f"{_fmt(r['pytorch_relerr'], 4):>14s} "
                     f"{_fmt(r['cublaslt_relerr'], 4):>16s}"
                 )
                 results.append(r)

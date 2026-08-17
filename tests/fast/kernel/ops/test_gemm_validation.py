@@ -66,8 +66,6 @@ _REPOSITORY_ROOT = Path(__file__).parents[4]
 _BACKEND_MODULES = (
     "src/kernel/backends/eager/__init__.py",
     "src/kernel/backends/eager/gemm.py",
-    "src/kernel/backends/torch/__init__.py",
-    "src/kernel/backends/torch/gemm.py",
     "src/kernel/backends/triton/__init__.py",
     "src/kernel/backends/triton/gemm.py",
     "src/kernel/backends/cublaslt/__init__.py",
@@ -208,14 +206,11 @@ def test_eager_gemm_predicates_reject_wrong_argument_count(
     ("predicate", "expected_argument_count"),
     [
         (gemm_module.can_implement_grouped_gemm_eager, 4),
-        (gemm_module.can_implement_grouped_gemm_torch, 4),
         (gemm_module.can_implement_grouped_gemm_triton, 4),
         (gemm_module.can_implement_scaled_gemm_eager, 8),
-        (gemm_module.can_implement_scaled_gemm_torch, 8),
         (gemm_module.can_implement_scaled_gemm_triton, 8),
         (gemm_module.can_implement_scaled_gemm_cublaslt, 8),
         (gemm_module.can_implement_scaled_grouped_gemm_eager, 9),
-        (gemm_module.can_implement_scaled_grouped_gemm_torch, 9),
         (gemm_module.can_implement_scaled_grouped_gemm_triton, 9),
     ],
 )
@@ -262,18 +257,7 @@ def test_eager_grouped_rejects_empty_offsets():
     assert "nonempty" in result.reason
 
 
-@pytest.mark.parametrize("layout", ["ragged_m", "ragged_k"])
-def test_torch_grouped_accepts_supported_bias_layouts(
-    monkeypatch: pytest.MonkeyPatch, layout: str
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-    args = _grouped_metadata(layout=layout, with_bias=True)
-
-    assert gemm_module.can_implement_grouped_gemm_torch(args, {}).ok
-
-
-def test_torch_grouped_rejects_ragged_n_bias(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+def test_eager_grouped_rejects_ragged_n_bias():
     result = gemm_module.can_implement_grouped_gemm_eager(
         _grouped_metadata(layout="ragged_n", with_bias=True), {}
     )
@@ -281,41 +265,6 @@ def test_torch_grouped_rejects_ragged_n_bias(monkeypatch: pytest.MonkeyPatch):
     assert not result.ok
     assert result.reason is not None
     assert "ragged-N" in result.reason
-
-
-def test_torch_grouped_gemm_accepts_column_major_contract_valid_inputs():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for the torch grouped GEMM eligibility check")
-    a = torch.empty(32, 32, device="cuda", dtype=torch.bfloat16).t()
-    b = torch.empty(32, 32, device="cuda", dtype=torch.bfloat16)
-    offs = torch.tensor([32], device="cuda", dtype=torch.int32)
-
-    result = gemm_module.can_implement_grouped_gemm_torch((a, b, offs, None), {})
-
-    assert result.ok, result.reason
-
-
-@pytest.mark.parametrize(
-    ("bias", "reason"),
-    [
-        (
-            _TensorMeta((2, 48), torch.bfloat16, contiguous=False),
-            "contiguous",
-        ),
-    ],
-)
-def test_torch_grouped_requires_contiguous_bf16_grouped_bias(
-    monkeypatch: pytest.MonkeyPatch, bias: _TensorMeta, reason: str
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-    args = list(_grouped_metadata(layout="ragged_m", with_bias=False))
-    args[3] = bias
-
-    result = gemm_module.can_implement_grouped_gemm_torch(tuple(args), {})
-
-    assert not result.ok
-    assert result.reason is not None
-    assert reason in result.reason
 
 
 def _scaled_metadata(device: str = "cuda:7"):
@@ -351,28 +300,6 @@ def _cublaslt_scaled_metadata():
         torch.bfloat16,
         32,
         torch.float8_e8m0fnu,
-        None,
-    )
-
-
-def _torch_scaled_metadata(
-    a_dtype: torch.dtype = torch.float8_e4m3fn,
-    b_dtype: torch.dtype = torch.float8_e4m3fn,
-    block_size: int = 0,
-    scale_dtype: torch.dtype = torch.float32,
-    m: int = 64,
-    n: int = 48,
-    k: int = 64,
-):
-    scale_blocks = (k + block_size - 1) // block_size if block_size else 1
-    return (
-        _TensorMeta((m, k), a_dtype),
-        _TensorMeta((k, n), b_dtype),
-        _TensorMeta((m, scale_blocks), torch.float32),
-        _TensorMeta((scale_blocks, n), torch.float32),
-        torch.bfloat16,
-        block_size,
-        scale_dtype,
         None,
     )
 
@@ -601,319 +528,6 @@ def test_cublaslt_scaled_gemm_checks_contract_before_sm100(
 
 
 @pytest.mark.parametrize(
-    ("a_dtype", "b_dtype"),
-    [
-        (torch.int8, torch.int8),
-        (torch.float8_e4m3fn, torch.float8_e4m3fn),
-        (torch.float8_e5m2, torch.float8_e4m3fn),
-    ],
-)
-def test_torch_scaled_gemm_accepts_supported_operand_pairs(
-    monkeypatch: pytest.MonkeyPatch,
-    a_dtype: torch.dtype,
-    b_dtype: torch.dtype,
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(a_dtype=a_dtype, b_dtype=b_dtype), {}
-    )
-
-    assert result.ok, result.reason
-
-
-@pytest.mark.parametrize(
-    ("a_dtype", "b_dtype"),
-    [
-        (torch.float8_e4m3fn, torch.float8_e5m2),
-        (torch.float8_e5m2, torch.float8_e5m2),
-        (torch.float8_e4m3fn, torch.int8),
-    ],
-)
-def test_torch_scaled_gemm_rejects_unsupported_operand_pairs(
-    monkeypatch: pytest.MonkeyPatch,
-    a_dtype: torch.dtype,
-    b_dtype: torch.dtype,
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(a_dtype=a_dtype, b_dtype=b_dtype), {}
-    )
-
-    assert not result.ok
-    assert result.reason is not None
-    assert "operand pair" in result.reason
-
-
-@pytest.mark.parametrize("block_size", [0, 16, 32, 64, 128])
-def test_torch_scaled_gemm_accepts_supported_block_sizes(
-    monkeypatch: pytest.MonkeyPatch, block_size: int
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(block_size=block_size, k=256), {}
-    )
-
-    assert result.ok, result.reason
-
-
-@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float8_e8m0fnu])
-def test_torch_scaled_gemm_accepts_supported_scale_dtypes(
-    monkeypatch: pytest.MonkeyPatch, scale_dtype: torch.dtype
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(scale_dtype=scale_dtype), {}
-    )
-
-    assert result.ok, result.reason
-
-
-@pytest.mark.parametrize(
-    ("m", "n", "k"),
-    [(0, 48, 64), (64, 0, 64), (64, 48, 0)],
-)
-def test_torch_scaled_gemm_rejects_zero_dimensions(
-    monkeypatch: pytest.MonkeyPatch, m: int, n: int, k: int
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(
-            a_dtype=torch.int8,
-            b_dtype=torch.int8,
-            m=m,
-            n=n,
-            k=k,
-        ),
-        {},
-    )
-
-    assert not result.ok
-    assert result.reason == "scaled GEMM dimensions must be positive"
-
-
-def test_torch_scaled_gemm_int8_rejects_unaligned_output_rows(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(
-            a_dtype=torch.int8,
-            b_dtype=torch.int8,
-            block_size=16,
-            m=17,
-        ),
-        {},
-    )
-
-    assert not result.ok
-    assert result.reason is not None
-    assert "scaled GEMM INT8 output rows" in result.reason
-    assert "17" in result.reason
-    assert "multiples of 32" in result.reason
-
-
-@pytest.mark.parametrize(
-    ("n", "k"),
-    [(512, 512), (3072, 512), (512, 1536), (384, 512), (512, 192)],
-)
-def test_torch_scaled_gemm_int8_accepts_shared_model_shapes(
-    monkeypatch: pytest.MonkeyPatch, n: int, k: int
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(
-            a_dtype=torch.int8,
-            b_dtype=torch.int8,
-            block_size=16,
-            m=8192,
-            n=n,
-            k=k,
-        ),
-        {},
-    )
-
-    assert result.ok, result.reason
-
-
-@pytest.mark.parametrize(("block_size", "k"), [(8, 64), (96, 256)])
-def test_torch_scaled_gemm_rejects_unusable_tiling_block_size(
-    monkeypatch: pytest.MonkeyPatch, block_size: int, k: int
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(block_size=block_size, k=k), {}
-    )
-
-    assert not result.ok
-    assert result.reason == "block_size must be a power of two >= 16"
-
-
-def test_torch_scaled_gemm_int8_requires_int_mm(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(torch, "_int_mm", None)
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(a_dtype=torch.int8, b_dtype=torch.int8), {}
-    )
-
-    assert not result.ok
-    assert result.reason is not None
-    assert "torch._int_mm" in result.reason
-    assert "NoneType, requires a callable" in result.reason
-
-
-def test_torch_scaled_gemm_int8_does_not_require_scaled_mm(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(torch.nn.functional, "scaled_mm", None)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(a_dtype=torch.int8, b_dtype=torch.int8), {}
-    )
-
-    assert result.ok, result.reason
-
-
-def test_torch_scaled_gemm_fp8_requires_scaled_mm(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(torch.nn.functional, "scaled_mm", None)
-
-    result = gemm_module.can_implement_scaled_gemm_torch(_torch_scaled_metadata(), {})
-
-    assert not result.ok
-    assert result.reason is not None
-    assert "torch.nn.functional.scaled_mm" in result.reason
-    assert "NoneType, requires a callable" in result.reason
-
-
-def test_torch_scaled_gemm_fp8_does_not_require_int_mm(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(torch, "_int_mm", None)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-
-    result = gemm_module.can_implement_scaled_gemm_torch(_torch_scaled_metadata(), {})
-
-    assert result.ok, result.reason
-
-
-@pytest.mark.parametrize(
-    ("actual", "expected"),
-    [((7, 5), False), ((8, 0), True), ((8, 9), True), ((12, 0), True)],
-)
-def test_torch_scaled_gemm_int8_requires_sm80(
-    monkeypatch: pytest.MonkeyPatch,
-    actual: tuple[int, int],
-    expected: bool,
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: actual)
-
-    result = gemm_module.can_implement_scaled_gemm_torch(
-        _torch_scaled_metadata(a_dtype=torch.int8, b_dtype=torch.int8), {}
-    )
-
-    assert result.ok is expected
-    if not expected:
-        assert result.reason is not None
-        assert "SM80 or newer" in result.reason
-
-
-@pytest.mark.parametrize(
-    ("predicate", "args_factory", "actual", "expected"),
-    [
-        (
-            gemm_module.can_implement_grouped_gemm_torch,
-            _default_grouped_metadata,
-            (8, 9),
-            True,
-        ),
-        (
-            gemm_module.can_implement_grouped_gemm_torch,
-            _default_grouped_metadata,
-            (9, 0),
-            True,
-        ),
-        (
-            gemm_module.can_implement_grouped_gemm_torch,
-            _default_grouped_metadata,
-            (10, 0),
-            True,
-        ),
-        (
-            gemm_module.can_implement_grouped_gemm_torch,
-            _default_grouped_metadata,
-            (12, 0),
-            True,
-        ),
-        (gemm_module.can_implement_scaled_gemm_torch, _scaled_metadata, (8, 9), True),
-        (gemm_module.can_implement_scaled_gemm_torch, _scaled_metadata, (9, 0), True),
-        (gemm_module.can_implement_scaled_gemm_torch, _scaled_metadata, (10, 0), True),
-        (gemm_module.can_implement_scaled_gemm_torch, _scaled_metadata, (12, 0), True),
-        (
-            gemm_module.can_implement_scaled_grouped_gemm_torch,
-            _scaled_grouped_metadata,
-            (8, 9),
-            False,
-        ),
-        (
-            gemm_module.can_implement_scaled_grouped_gemm_torch,
-            _scaled_grouped_metadata,
-            (9, 0),
-            True,
-        ),
-        (
-            gemm_module.can_implement_scaled_grouped_gemm_torch,
-            _scaled_grouped_metadata,
-            (10, 0),
-            True,
-        ),
-        (
-            gemm_module.can_implement_scaled_grouped_gemm_torch,
-            _scaled_grouped_metadata,
-            (12, 0),
-            False,
-        ),
-    ],
-)
-def test_torch_gemm_validation_architecture_matrix(
-    monkeypatch: pytest.MonkeyPatch,
-    predicate,
-    args_factory,
-    actual: tuple[int, int],
-    expected: bool,
-):
-    seen = []
-    monkeypatch.setattr(
-        torch.cuda,
-        "get_device_capability",
-        lambda device: seen.append(device) or actual,
-    )
-
-    result = predicate(args_factory(), {})
-
-    assert result.ok is expected
-    assert seen == [torch.device("cuda:7")]
-    if (
-        actual == (12, 0)
-        and predicate is gemm_module.can_implement_scaled_grouped_gemm_torch
-    ):
-        assert result.reason is not None
-        assert "SM120" in result.reason
-        assert "SM90 or SM100" in result.reason
-
-
-@pytest.mark.parametrize(
     ("predicate", "args_factory", "index", "replacement"),
     [
         (
@@ -921,24 +535,6 @@ def test_torch_gemm_validation_architecture_matrix(
             _cublaslt_scaled_metadata,
             6,
             torch.float32,
-        ),
-        (
-            gemm_module.can_implement_grouped_gemm_torch,
-            _default_grouped_metadata,
-            2,
-            _TensorMeta((2,), torch.int64),
-        ),
-        (
-            gemm_module.can_implement_scaled_gemm_torch,
-            _scaled_metadata,
-            4,
-            torch.float32,
-        ),
-        (
-            gemm_module.can_implement_scaled_grouped_gemm_torch,
-            _scaled_grouped_metadata,
-            5,
-            torch.float16,
         ),
         (
             gemm_module.can_implement_grouped_gemm_triton,
@@ -966,186 +562,6 @@ def test_gemm_validation_checks_compute_capability_last(
     result = predicate(tuple(args), {})
 
     assert not result.ok
-
-
-@pytest.mark.parametrize(
-    ("attribute", "predicate", "args_factory"),
-    [
-        (
-            "grouped_mm",
-            gemm_module.can_implement_grouped_gemm_torch,
-            _default_grouped_metadata,
-        ),
-        ("scaled_mm", gemm_module.can_implement_scaled_gemm_torch, _scaled_metadata),
-        (
-            "scaled_grouped_mm",
-            gemm_module.can_implement_scaled_grouped_gemm_torch,
-            _scaled_grouped_metadata,
-        ),
-    ],
-)
-def test_torch_gemm_validation_requires_callable_functional(
-    monkeypatch: pytest.MonkeyPatch, attribute: str, predicate, args_factory
-):
-    monkeypatch.setattr(torch.nn.functional, attribute, None)
-
-    result = predicate(args_factory(), {})
-
-    assert not result.ok
-    assert result.reason is not None
-    assert attribute in result.reason
-    assert "NoneType, requires a callable" in result.reason
-
-
-@pytest.mark.parametrize(
-    ("predicate", "args_factory"),
-    [
-        (gemm_module.can_implement_scaled_gemm_torch, _scaled_metadata),
-        (gemm_module.can_implement_scaled_grouped_gemm_torch, _scaled_grouped_metadata),
-    ],
-)
-def test_torch_scaled_gemm_validation_requires_rowwise_scaling_enum(
-    monkeypatch: pytest.MonkeyPatch, predicate, args_factory
-):
-    monkeypatch.setattr(torch.nn.functional, "ScalingType", type("ScalingType", (), {}))
-
-    result = predicate(args_factory(), {})
-
-    assert not result.ok
-    assert result.reason is not None
-    assert "ScalingType.RowWise" in result.reason
-
-
-def test_torch_scaled_gemm_rejects_missing_rowwise_scaling(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.delattr(torch.nn.functional.ScalingType, "RowWise", raising=False)
-
-    result = gemm_module.can_implement_scaled_gemm_torch(_torch_scaled_metadata(), {})
-
-    assert result == CheckResult(
-        False,
-        "torch.nn.functional.ScalingType.RowWise is unavailable",
-    )
-
-
-def test_torch_scaled_grouped_validates_rowwise_before_offset_layout(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.delattr(torch.nn.functional.ScalingType, "RowWise", raising=False)
-    args = list(_scaled_grouped_metadata())
-    args[4] = _TensorMeta((2,), torch.int32, contiguous=False, strides=(2,))
-
-    result = gemm_module.can_implement_scaled_grouped_gemm_torch(tuple(args), {})
-
-    assert result == CheckResult(
-        False,
-        "torch.nn.functional.ScalingType.RowWise is unavailable",
-    )
-
-
-@pytest.mark.parametrize(
-    ("a_strides", "a_contiguous", "b_strides", "b_contiguous", "expected_reason"),
-    [
-        ((64, 1), True, (3072, 48, 1), True, None),
-        ((1, 64), False, (3072, 1, 64), False, None),
-        ((512, 8), False, (3072, 48, 1), True, "grouped GEMM A"),
-        ((64, 1), True, (3072, 512, 8), False, "grouped GEMM B"),
-    ],
-)
-def test_torch_grouped_gemm_validation_matrix_layouts(
-    monkeypatch: pytest.MonkeyPatch,
-    a_strides: tuple[int, ...],
-    a_contiguous: bool,
-    b_strides: tuple[int, ...],
-    b_contiguous: bool,
-    expected_reason: str | None,
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-    args = list(_default_grouped_metadata())
-    args[0] = _TensorMeta(
-        (64, 64), torch.bfloat16, contiguous=a_contiguous, strides=a_strides
-    )
-    args[1] = _TensorMeta(
-        (2, 64, 48), torch.bfloat16, contiguous=b_contiguous, strides=b_strides
-    )
-
-    result = gemm_module.can_implement_grouped_gemm_torch(tuple(args), {})
-
-    assert result.ok is (expected_reason is None)
-    if expected_reason is not None:
-        assert result.reason is not None
-        assert expected_reason in result.reason
-
-
-@pytest.mark.parametrize(
-    ("predicate", "args_factory", "index", "replacement", "reason"),
-    [
-        (
-            gemm_module.can_implement_grouped_gemm_torch,
-            _default_grouped_metadata,
-            2,
-            _TensorMeta((2,), torch.int64),
-            "int32",
-        ),
-        (
-            gemm_module.can_implement_scaled_grouped_gemm_torch,
-            _scaled_grouped_metadata,
-            4,
-            _TensorMeta((2,), torch.int32, contiguous=False, strides=(2,)),
-            "contiguous",
-        ),
-        (
-            gemm_module.can_implement_scaled_gemm_torch,
-            _scaled_metadata,
-            4,
-            torch.float32,
-            "output dtype",
-        ),
-        (
-            gemm_module.can_implement_scaled_grouped_gemm_torch,
-            _scaled_grouped_metadata,
-            5,
-            torch.float16,
-            "output dtype",
-        ),
-    ],
-)
-def test_gemm_validation_rejects_offset_dtype_or_layout_and_output_or_scale_dtype(
-    monkeypatch: pytest.MonkeyPatch,
-    predicate,
-    args_factory,
-    index: int,
-    replacement,
-    reason: str,
-):
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
-    args = list(args_factory())
-    args[index] = replacement
-
-    result = predicate(tuple(args), {})
-
-    assert not result.ok
-    assert result.reason is not None
-    assert reason in result.reason
-
-
-def test_torch_scaled_grouped_preserves_output_dtype_rejection_priority(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    def unexpected_query(device: torch.device) -> tuple[int, int]:
-        raise AssertionError(f"unexpected CUDA query for {device}")
-
-    monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected_query)
-    args = list(_scaled_grouped_metadata())
-    args[5] = torch.float16
-    args[8] = _TensorMeta((2, 48), torch.bfloat16)
-
-    result = gemm_module.can_implement_scaled_grouped_gemm_torch(tuple(args), {})
-
-    assert not result.ok
-    assert result.reason is not None
-    assert "output dtype" in result.reason
 
 
 @pytest.mark.parametrize(
@@ -1178,13 +594,6 @@ def test_torch_scaled_grouped_preserves_output_dtype_rejection_priority(
             5,
             32,
             "A scale",
-        ),
-        (
-            gemm_module.can_implement_scaled_gemm_torch,
-            _scaled_metadata,
-            7,
-            _TensorMeta((48,), torch.float32),
-            "dtype",
         ),
         (
             gemm_module.can_implement_grouped_gemm_eager,

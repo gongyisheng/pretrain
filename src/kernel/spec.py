@@ -7,9 +7,8 @@ BuildMode = Literal["eager", "jit", "aot"]
 
 BACKEND_PRIORITIES = {
     "eager": 0,
-    "torch": 1,
-    "triton": 2,
-    "cublaslt": 3,
+    "triton": 1,
+    "cublaslt": 2,
 }
 
 

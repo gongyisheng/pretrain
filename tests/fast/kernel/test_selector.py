@@ -47,7 +47,6 @@ def _registry(
     if can_implement is None:
         can_implement = {
             "eager": _yes,
-            "torch": _yes,
             "triton": _yes,
             "cublaslt": _yes,
         }
@@ -288,7 +287,6 @@ def test_auto_selects_highest_priority_eligible_backend():
     registry = _registry()
     registry.register(_spec("eager", lambda x: ("eager", x)))
     registry.register(_spec("cublaslt", lambda x: ("cublaslt", x)))
-    registry.register(_spec("torch", lambda x: ("torch", x)))
     registry.register(_spec("triton", lambda x: ("triton", x)))
 
     selected = select_kernel("test.identity", (3,), {}, registry=registry)
@@ -296,14 +294,14 @@ def test_auto_selects_highest_priority_eligible_backend():
     assert selected.backend == "cublaslt"
 
 
-def test_auto_uses_torch_when_optimized_backend_is_ineligible():
-    registry = _registry({"torch": _yes, "triton": _no})
-    registry.register(_spec("torch", lambda x: x))
+def test_auto_uses_eager_when_optimized_backend_is_ineligible():
+    registry = _registry({"eager": _yes, "triton": _no})
+    registry.register(_spec("eager", lambda x: x))
     registry.register(_spec("triton", lambda x: x))
 
     selected = select_kernel("test.identity", (3,), {}, registry=registry)
 
-    assert selected.backend == "torch"
+    assert selected.backend == "eager"
 
 
 def test_auto_runs_validators_before_falling_back_to_an_eligible_backend():
@@ -330,13 +328,13 @@ def test_auto_runs_validators_before_falling_back_to_an_eligible_backend():
 
 
 def test_forced_selection_uses_requested_backend():
-    registry = _registry({"torch": _yes, "triton": _yes})
-    registry.register(_spec("torch", lambda x: x))
+    registry = _registry({"eager": _yes, "triton": _yes})
+    registry.register(_spec("eager", lambda x: x))
     registry.register(_spec("triton", lambda x: x))
 
-    selected = select_kernel("test.identity", (3,), {}, "torch", registry)
+    selected = select_kernel("test.identity", (3,), {}, "eager", registry)
 
-    assert selected.backend == "torch"
+    assert selected.backend == "eager"
 
 
 def test_forced_ineligible_backend_raises_reason():
@@ -350,29 +348,29 @@ def test_forced_ineligible_backend_raises_reason():
 
 
 def test_auto_calls_can_implement_once_per_candidate_and_aggregates_reasons():
-    calls = {"torch": 0, "triton": 0}
+    calls = {"eager": 0, "triton": 0}
 
-    def reject_torch(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
+    def reject_eager(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
         del args, kwargs
-        calls["torch"] += 1
-        return CheckResult(False, "requires callable grouped_mm")
+        calls["eager"] += 1
+        return CheckResult(False, "unsupported fallback")
 
     def reject_triton(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> CheckResult:
         del args, kwargs
         calls["triton"] += 1
         return CheckResult(False, "requires SM90")
 
-    registry = _registry({"torch": reject_torch, "triton": reject_triton})
-    registry.register(_spec("torch", lambda x: x))
+    registry = _registry({"eager": reject_eager, "triton": reject_triton})
+    registry.register(_spec("eager", lambda x: x))
     registry.register(_spec("triton", lambda x: x))
 
     with pytest.raises(
         KernelSelectionError,
-        match="triton: requires SM90; torch: requires callable grouped_mm",
+        match="triton: requires SM90; eager: unsupported fallback",
     ):
         select_kernel("test.identity", (3,), {}, registry=registry)
 
-    assert calls == {"torch": 1, "triton": 1}
+    assert calls == {"eager": 1, "triton": 1}
 
 
 def test_autograd_gate_runs_before_backend_validation():
@@ -397,22 +395,22 @@ def test_autograd_gate_runs_before_backend_validation():
 
 
 def test_unknown_forced_backend_lists_registered_backends():
-    registry = _registry({"torch": _yes, "triton": _yes})
-    registry.register(_spec("torch", lambda x: x))
+    registry = _registry({"eager": _yes, "triton": _yes})
+    registry.register(_spec("eager", lambda x: x))
     registry.register(_spec("triton", lambda x: x))
 
     with pytest.raises(
         KernelSelectionError,
-        match="test.identity.*cuda.*registered: torch, triton",
+        match="test.identity.*cuda.*registered: eager, triton",
     ):
         select_kernel("test.identity", (3,), {}, "cuda", registry)
 
 
 def test_dispatch_does_not_retry_after_selected_kernel_raises():
-    calls = {"torch": 0, "triton": 0}
+    calls = {"eager": 0, "triton": 0}
 
     def fallback(x: Any) -> Any:
-        calls["torch"] += 1
+        calls["eager"] += 1
         return x
 
     def defect(x: Any) -> Any:
@@ -420,14 +418,14 @@ def test_dispatch_does_not_retry_after_selected_kernel_raises():
         calls["triton"] += 1
         raise RuntimeError("kernel defect")
 
-    registry = _registry({"torch": _yes, "triton": _yes})
-    registry.register(_spec("torch", fallback))
+    registry = _registry({"eager": _yes, "triton": _yes})
+    registry.register(_spec("eager", fallback))
     registry.register(_spec("triton", defect))
 
     with pytest.raises(RuntimeError, match="kernel defect"):
         dispatch("test.identity", (3,), {}, registry=registry)
 
-    assert calls == {"torch": 0, "triton": 1}
+    assert calls == {"eager": 0, "triton": 1}
 
 
 def test_forced_selection_calls_backend_validation_exactly_once():
@@ -449,14 +447,14 @@ def test_forced_selection_calls_backend_validation_exactly_once():
 
 
 def test_auto_falls_back_when_optimized_backend_cannot_build_autograd():
-    registry = _registry({"torch": _yes, "triton": _yes})
-    registry.register(_spec("torch", lambda x: x))
+    registry = _registry({"eager": _yes, "triton": _yes})
+    registry.register(_spec("eager", lambda x: x))
     registry.register(_spec("triton", lambda x: x, autograd=False))
     x = torch.ones(2, device="cpu", requires_grad=True)
 
     selected = select_kernel("test.identity", (x,), {}, registry=registry)
 
-    assert selected.backend == "torch"
+    assert selected.backend == "eager"
 
 
 def test_forced_backend_rejects_unsafe_grad_enabled_call():

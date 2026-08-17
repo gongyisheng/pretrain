@@ -268,14 +268,14 @@ def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPa
     offs = torch.tensor([3], dtype=torch.int32)
     bias = torch.empty(1, 4)
 
-    result = gemm_module.grouped_gemm(a, b, offs, bias=bias, backend="torch")
+    result = gemm_module.grouped_gemm(a, b, offs, bias=bias, backend="triton")
 
     assert result is sentinel
     assert seen == {
         "op": "gemm.grouped",
         "args": (a, b, offs, bias),
         "kwargs": {},
-        "backend": "torch",
+        "backend": "triton",
     }
 
 

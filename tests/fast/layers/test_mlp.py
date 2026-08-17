@@ -1393,7 +1393,7 @@ def _run_grouped_gemm_apply(a0, b0, offs, grad, backend, include_backend):
 )
 @pytest.mark.parametrize(
     ("backend", "include_backend"),
-    [(None, False), ("torch", True)],
+    [(None, False), ("triton", True)],
     ids=["four_inputs", "forced_backend"],
 )
 def test_grouped_gemm_fn_apply_backward_arity(backend, include_backend):
