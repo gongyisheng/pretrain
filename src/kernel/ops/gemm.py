@@ -5,6 +5,28 @@ import src.kernel.backends.eager  # noqa: F401
 import src.kernel.backends.triton  # noqa: F401
 from src.kernel.selector import dispatch
 
+
+def _check_offs(offs: torch.Tensor) -> None:
+    if not offs.is_contiguous():
+        raise ValueError("offs must be contiguous")
+
+
+def _check_scaled(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    block_size: int,
+) -> None:
+    if not (sa.is_contiguous() and sb.is_contiguous()):
+        raise ValueError("scales must be contiguous")
+    blocks = -(-aq.shape[-1] // block_size) if block_size else 1
+    if sa.shape[-1] != blocks or sb.shape[-2] != blocks:
+        raise ValueError(f"scale block count {sa.shape[-1]}/{sb.shape[-2]} != {blocks}")
+    if aq.shape[-1] != bq.shape[-2]:
+        raise ValueError(f"contraction mismatch: aq {aq.shape[-1]}, bq {bq.shape[-2]}")
+
+
 __all__ = [
     "grouped_mm",
     "int8_scaled_mm",
@@ -38,6 +60,7 @@ _MXFP8_GROUPED_BACKEND = "triton"
 
 
 def grouped_mm(a, b, offs, bias=None, backend=None):
+    _check_offs(offs)
     # Triton's grouped kernel is bf16-only; every other dtype takes the reference.
     if backend is None and a.dtype is not torch.bfloat16:
         backend = "eager"
@@ -45,6 +68,7 @@ def grouped_mm(a, b, offs, bias=None, backend=None):
 
 
 def int8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
+    _check_scaled(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.int8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
@@ -55,6 +79,7 @@ def int8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=Non
 
 
 def fp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
+    _check_scaled(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.fp8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
@@ -65,6 +90,7 @@ def fp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None
 
 
 def mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
+    _check_scaled(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.mxfp8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
@@ -77,6 +103,8 @@ def mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=No
 def int8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
+    _check_offs(offs)
+    _check_scaled(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.int8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
@@ -89,6 +117,8 @@ def int8_scaled_grouped_mm(
 def fp8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
+    _check_offs(offs)
+    _check_scaled(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.fp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
@@ -101,6 +131,8 @@ def fp8_scaled_grouped_mm(
 def mxfp8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
+    _check_offs(offs)
+    _check_scaled(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.mxfp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
