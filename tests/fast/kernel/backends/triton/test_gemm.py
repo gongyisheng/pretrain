@@ -49,7 +49,6 @@ def _run(a, b, gran, bs, a_fmt, b_fmt, scale_dtype=torch.float32):
         sb,
         torch.float32,
         bs or a.shape[1],
-        scale_dtype,
     )
     return out, oracle
 
@@ -99,7 +98,7 @@ def test_grouped_gemm_precision(projection, layout, with_bias):
     a, b, offs, bias = make_grouped_inputs(projection, layout, with_bias)
 
     actual = triton_gemm.grouped_gemm(a, b, offs, bias)
-    expected = eager_gemm.grouped_gemm(a, b, offs, bias)
+    expected = eager_gemm.grouped_mm(a, b, offs, bias)
 
     assert actual.shape == expected.shape
     assert actual.dtype == torch.bfloat16
@@ -127,9 +126,7 @@ def test_scaled_gemm_precision(
     actual = triton_gemm.scaled_gemm(
         aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias
     )
-    expected = eager_gemm.scaled_gemm(
-        aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias
-    )
+    expected = eager_gemm.scaled_gemm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
     assert actual.shape == expected.shape
     assert actual.dtype == out_dtype
@@ -142,7 +139,7 @@ def test_scaled_gemm_precision(
 def test_output_stride_is_dense_in_the_last_dimension():
     a, b, offs = _make_layout("ragged_m", N=51)
     got = triton_gemm.grouped_gemm(a, b, offs)
-    eager = eager_gemm.grouped_gemm(a, b, offs)
+    eager = eager_gemm.grouped_mm(a, b, offs)
     assert got.stride(-1) == 1
     assert got.stride(-2) >= got.shape[-1]
     torch.testing.assert_close(got.float(), eager.float(), rtol=2e-2, atol=2e-2)
@@ -153,7 +150,7 @@ def test_parity_empty_and_uneven_groups():
     a, b, offs = _make([5, 0, 130, 41, 1], K=64, N=48)
     got = triton_gemm.grouped_gemm(a, b, offs)
     torch.testing.assert_close(
-        got.float(), eager_gemm.grouped_gemm(a, b, offs).float(), rtol=2e-2, atol=2e-2
+        got.float(), eager_gemm.grouped_mm(a, b, offs).float(), rtol=2e-2, atol=2e-2
     )
 
 
@@ -161,7 +158,7 @@ def test_parity_single_group():
     a, b, offs = _make([200], K=192, N=64)
     got = triton_gemm.grouped_gemm(a, b, offs)
     torch.testing.assert_close(
-        got.float(), eager_gemm.grouped_gemm(a, b, offs).float(), rtol=2e-2, atol=2e-2
+        got.float(), eager_gemm.grouped_mm(a, b, offs).float(), rtol=2e-2, atol=2e-2
     )
 
 
@@ -178,7 +175,7 @@ def test_parity_config_shapes(K, N):
     a, b, offs = _make(counts, K=K, N=N, seed=1)
     got = triton_gemm.grouped_gemm(a, b, offs)
     torch.testing.assert_close(
-        got.float(), eager_gemm.grouped_gemm(a, b, offs).float(), rtol=2e-2, atol=2e-2
+        got.float(), eager_gemm.grouped_mm(a, b, offs).float(), rtol=2e-2, atol=2e-2
     )
 
 
@@ -189,7 +186,7 @@ def test_wgrad_parity_uneven_and_empty():
     a = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    ref = eager_gemm.grouped_gemm(a.mT, grad_c, offs)
+    ref = eager_gemm.grouped_mm(a.mT, grad_c, offs)
     got = triton_gemm.grouped_gemm(a.mT, grad_c, offs)
     assert got.shape == (len(counts), K, N)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
@@ -212,7 +209,7 @@ def test_wgrad_parity_config_shapes(K, N):
     # exceeds atol=2e-2 and a handful of near-zero elements trip element-wise.
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16) * 0.1
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    ref = eager_gemm.grouped_gemm(a.mT, grad_c, offs)
+    ref = eager_gemm.grouped_mm(a.mT, grad_c, offs)
     got = triton_gemm.grouped_gemm(a.mT, grad_c, offs)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
@@ -274,9 +271,7 @@ def test_scaled_gemm_mx_matches_oracle(a_dtype, b_dtype, shape):
     out = triton_gemm.scaled_gemm(
         aq, bq, sa, sb, torch.float32, 32, torch.float8_e8m0fnu
     )
-    oracle = eager_gemm.scaled_gemm(
-        aq, bq, sa, sb, torch.float32, 32, torch.float8_e8m0fnu
-    )
+    oracle = eager_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
 
@@ -317,9 +312,7 @@ def test_scaled_gemm_mx_bias_lands_once():
         torch.float8_e8m0fnu,
         bias=bias,
     )
-    oracle = eager_gemm.scaled_gemm(
-        aq, bq, sa, sb, torch.float32, 32, torch.float8_e8m0fnu
-    )
+    oracle = eager_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
     oracle = oracle + bias.float()
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
@@ -346,9 +339,7 @@ def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
     got = triton_gemm.scaled_gemm(
         aq, bq, sa, sb, torch.float32, 32, torch.float8_e8m0fnu
     )
-    oracle = eager_gemm.scaled_gemm(
-        aq, bq, sa, sb, torch.float32, 32, torch.float8_e8m0fnu
-    )
+    oracle = eager_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
     rel = (got - oracle).norm() / oracle.norm()
     assert rel < 1e-6, rel
 
@@ -409,7 +400,7 @@ def test_scaled_gemm_mx_declines_unsupported_combinations(fmt, bs, scale_dtype):
     aq, sa = quantize_operand(a, -1, fmt, scaling)
     bq, sb = quantize_operand(b, -2, fmt, scaling)
     out = triton_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype)
-    oracle = eager_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, bs, scale_dtype)
+    oracle = eager_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
 
@@ -585,9 +576,7 @@ def test_scaled_grouped_gemm_oracle_agrees_with_dequant():
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
         "ragged_m", counts, "rowwise", 0, "fp8_e4m3"
     )
-    oracle = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32
-    )
+    oracle = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
     K = aq.shape[1]
     a_deq = eager_gemm._dequant_a(aq, sa, kbs or K)
     # per-expert B (E,K,N), each slice dequantized against its own (nkb,N) scale
@@ -621,9 +610,7 @@ def test_scaled_grouped_layouts_match_oracle(layout, gran, bs, fmt):
     got = triton_gemm.scaled_grouped_gemm(
         aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32
     )
-    ref = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32
-    )
+    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert got.shape == _expected_shape(layout, _SCALED_COUNTS)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL[layout], rel
@@ -649,9 +636,7 @@ def test_scaled_grouped_mxfp8_layouts_match_oracle(layout):
     got = triton_gemm.scaled_grouped_gemm(
         aq, bq, sa, sb, offs, torch.float32, kbs, torch.float8_e8m0fnu
     )
-    ref = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float8_e8m0fnu
-    )
+    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert got.shape == _expected_shape(layout, _SCALED_COUNTS)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL[layout], rel
@@ -680,9 +665,7 @@ def test_scaled_grouped_mxfp8_ragged_m_matches_oracle_when_k_is_not_a_multiple_o
     got = triton_gemm.scaled_grouped_gemm(
         aq, bq, sa, sb, offs, torch.float32, kbs, torch.float8_e8m0fnu
     )
-    ref = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float8_e8m0fnu
-    )
+    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert torch.isfinite(got).all(), got
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL["ragged_m"], rel
@@ -730,9 +713,7 @@ def test_scaled_grouped_mxfp8_adds_no_error_over_dequantizing(layout):
     got = triton_gemm.scaled_grouped_gemm(
         aq, bq, sa, sb, offs, torch.float32, kbs, torch.float8_e8m0fnu
     )
-    oracle = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float8_e8m0fnu
-    )
+    oracle = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
     rel = (got.float() - oracle).norm() / oracle.norm().clamp_min(1e-12)
     assert rel < 1e-6, rel
 
@@ -771,9 +752,7 @@ def test_scaled_grouped_mxfp8_declines_int8():
     got = triton_gemm.scaled_grouped_gemm(
         aq, bq, sa, sb, offs, torch.float32, kbs, torch.float8_e8m0fnu
     )
-    ref = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float8_e8m0fnu
-    )
+    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL["ragged_m"], rel
 
@@ -787,9 +766,7 @@ def test_scaled_grouped_layouts_uneven_groups(layout):
     got = triton_gemm.scaled_grouped_gemm(
         aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32
     )
-    ref = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32
-    )
+    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL[layout], rel
 
@@ -804,9 +781,7 @@ def test_scaled_grouped_ragged_n_shape_and_group_isolation():
     got = triton_gemm.scaled_grouped_gemm(
         aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32
     )
-    ref = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32
-    )
+    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert got.shape == (32, sum(counts))
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < 0.02, rel
@@ -856,7 +831,7 @@ def test_scaled_grouped_bias_matches_oracle(layout, gran, bs):
         aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32, bias=bias
     )
     ref = eager_gemm.scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs, torch.float32, bias=bias
+        aq, bq, sa, sb, offs, torch.float32, kbs, bias=bias
     )
     rel = (got.float() - ref).norm() / ref.norm()
     assert rel < _SCALED_TOL[layout], rel

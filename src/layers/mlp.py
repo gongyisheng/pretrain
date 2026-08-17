@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.kernel.ops.gemm import grouped_gemm
+from src.kernel.ops.gemm import grouped_mm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
@@ -9,7 +9,7 @@ class GroupedGemmFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b, bias, offs, backend: str | None = None):
         ctx.has_backend_arg = len(ctx.needs_input_grad) == 5
-        y = grouped_gemm(a, b, offs, bias=bias, backend=backend)
+        y = grouped_mm(a, b, offs, bias=bias, backend=backend)
         ctx.save_for_backward(a, b, offs)
         ctx.bias_needs_grad = ctx.needs_input_grad[2]
         ctx.backend = backend
@@ -24,12 +24,12 @@ class GroupedGemmFn(torch.autograd.Function):
                 grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
             else:
                 ones = grad_c.new_ones(1, grad_c.shape[0])
-                grad_bias = grouped_gemm(
-                    ones, grad_c, offs, backend=ctx.backend
-                ).squeeze(1)
+                grad_bias = grouped_mm(ones, grad_c, offs, backend=ctx.backend).squeeze(
+                    1
+                )
         grads = (
-            grouped_gemm(grad_c, b.mT, offs, backend=ctx.backend),
-            grouped_gemm(a.mT, grad_c, offs, backend=ctx.backend),
+            grouped_mm(grad_c, b.mT, offs, backend=ctx.backend),
+            grouped_mm(a.mT, grad_c, offs, backend=ctx.backend),
             grad_bias,
             None,
         )
@@ -397,7 +397,7 @@ class SparseMoEBlock(nn.Module):
         expert_counts = torch.bincount(expert_ids_sorted, minlength=E)
         self.expert_load.record_load(expert_counts.detach(), self.training)
         # offs[-1] == R (all rows counted exactly once across experts) — the
-        # precondition grouped_gemm relies on; rows past offs[-1] would be uninitialized.
+        # precondition grouped_mm relies on; rows past offs[-1] would be uninitialized.
         offs = expert_counts.cumsum(0).to(torch.int32)
         x_sorted = tokens[token_ids_sorted]
 

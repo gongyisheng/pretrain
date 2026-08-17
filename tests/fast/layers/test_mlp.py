@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.kernel.ops.gemm import grouped_gemm
+from src.kernel.ops.gemm import grouped_mm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.mlp import (
     DenseMLPBlock,
@@ -27,7 +27,7 @@ from tests.fast.layers._refs import (
 
 
 def grouped_gemm_eager(a, b, offs, bias=None):
-    return grouped_gemm(a, b, offs, bias=bias, backend="eager")
+    return grouped_mm(a, b, offs, bias=bias, backend="eager")
 
 
 ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
@@ -1346,7 +1346,7 @@ def test_moe_expert_mm_seam_is_pluggable():
 
     def spy(a, b, offs, bias=None, projection=None):
         seen.append(projection)
-        return grouped_gemm(a, b, offs, bias=bias)
+        return grouped_mm(a, b, offs, bias=bias)
 
     blk.expert_mm = spy
     x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16)

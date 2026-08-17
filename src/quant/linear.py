@@ -5,10 +5,10 @@ import copy
 import torch
 import torch.nn as nn
 
-from src.kernel.ops.gemm import scaled_gemm
+from src.kernel.selector import dispatch
 from src.metrics.quant import record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
-from src.quant.utils import is_fp8, is_int8s, is_quantized
+from src.quant.utils import is_quantized, scaled_mm_op
 from src.utils.config import QuantizationConfig
 
 
@@ -24,9 +24,7 @@ def quantized_gemm(
     epilogue, so it never passes through the scales. Both paths add it before the
     downcast to `out_dtype`, matching what cuBLAS does for an unquantized addmm.
     """
-    same_family = (is_fp8(a_fmt) and is_fp8(b_fmt)) or (
-        is_int8s(a_fmt) and is_int8s(b_fmt)
-    )
+    op = scaled_mm_op(a_fmt, b_fmt, scaling_cfg.get("scale_dtype"), grouped=False)
 
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
@@ -36,16 +34,17 @@ def quantized_gemm(
         bq, sb = quantize_operand(b, -2, b_fmt, scaling_cfg)
         record_operand(b_stats, b, bq, sb, -2, scaling_cfg)
 
-    if same_family and a.is_cuda and b.is_cuda:
-        return scaled_gemm(
-            aq,
-            bq,
-            sa,
-            sb,
-            out_dtype,
-            scaling_cfg["block_shape"][1],
-            scaling_cfg["scale_dtype"],
-            bias=bias,
+    if op is not None and a.is_cuda and b.is_cuda:
+        # cuBLASLt's mxfp8 kernel demands block_size=32 and 16-byte-aligned strides;
+        # quantized_gemm must support every block_size and arbitrary shapes (e.g. the
+        # transposed, unaligned-token wgrad), so it always asks Triton for mxfp8.
+        backend = "triton" if op == "gemm.mxfp8_scaled_mm" else None
+        return dispatch(
+            op,
+            (aq, bq, sa, sb, out_dtype, scaling_cfg["block_shape"][1], bias),
+            {},
+            backend,
+            device=a.device,
         )
 
     if aq is not None:

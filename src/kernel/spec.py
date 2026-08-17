@@ -64,6 +64,7 @@ class KernelSpec:
     build: BuildMode
     autograd: bool
     capabilities: frozenset[CapabilityRequirement] = frozenset()
+    reference: bool = False
 
     def __post_init__(self) -> None:
         if type(self.autograd) is not bool:

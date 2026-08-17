@@ -10,7 +10,7 @@ SM100 = PlatformInfo("cuda", (10, 0))
 HOST = PlatformInfo()
 
 
-def _spec(op, backend, capabilities=frozenset(), fn=None):
+def _spec(op, backend, capabilities=frozenset(), fn=None, reference=False):
     return KernelSpec(
         op=op,
         backend=backend,
@@ -18,6 +18,7 @@ def _spec(op, backend, capabilities=frozenset(), fn=None):
         build="jit",
         autograd=False,
         capabilities=capabilities,
+        reference=reference,
     )
 
 
@@ -64,7 +65,7 @@ def test_multi_spec_without_a_platform_is_a_programming_error():
 
 def test_disjoint_capabilities_resolve_to_one_backend():
     registry = _registry(
-        _spec("test.op", "eager", frozenset({CPU})),
+        _spec("test.op", "eager", frozenset(), reference=True),
         _spec("test.op", "triton", frozenset({cuda((8, 0))})),
     )
 
@@ -72,8 +73,11 @@ def test_disjoint_capabilities_resolve_to_one_backend():
 
 
 def test_no_eligible_backend_names_the_platform():
+    # No reference spec here on purpose: a reference is always eligible (empty
+    # capabilities), so it would never let this scenario -- nothing eligible at
+    # all -- occur.
     registry = _registry(
-        _spec("test.op", "eager", frozenset({CPU})),
+        _spec("test.op", "triton", frozenset({cuda((8, 0), (8, 5))})),
         _spec("test.op", "cublaslt", frozenset({cuda((10, 0), (11, 0))})),
     )
 
@@ -83,6 +87,46 @@ def test_no_eligible_backend_names_the_platform():
 
 def test_two_eligible_backends_demand_an_explicit_choice():
     registry = _registry(
+        _spec("test.op", "triton", frozenset({cuda((8, 9))})),
+        _spec("test.op", "cublaslt", frozenset({cuda((10, 0), (11, 0))})),
+    )
+
+    with pytest.raises(KernelSelectionError, match="pass backend="):
+        select_kernel("test.op", registry=registry, platform=SM100)
+
+
+def test_reference_backend_yields_to_an_eligible_optimized_backend():
+    registry = _registry(
+        _spec("test.op", "eager", frozenset(), reference=True),
+        _spec("test.op", "triton", frozenset({cuda((8, 0))})),
+    )
+
+    assert (
+        select_kernel("test.op", registry=registry, platform=SM89).backend == "triton"
+    )
+
+
+def test_reference_backend_is_used_when_no_optimized_backend_is_eligible():
+    registry = _registry(
+        _spec("test.op", "eager", frozenset(), reference=True),
+        _spec("test.op", "cublaslt", frozenset({cuda((10, 0), (11, 0))})),
+    )
+
+    assert select_kernel("test.op", registry=registry, platform=SM89).backend == "eager"
+
+
+def test_reference_backend_serves_cpu():
+    registry = _registry(
+        _spec("test.op", "eager", frozenset(), reference=True),
+        _spec("test.op", "triton", frozenset({cuda((8, 0))})),
+    )
+
+    assert select_kernel("test.op", registry=registry, platform=HOST).backend == "eager"
+
+
+def test_two_eligible_optimized_backends_still_demand_a_choice():
+    registry = _registry(
+        _spec("test.op", "eager", frozenset(), reference=True),
         _spec("test.op", "triton", frozenset({cuda((8, 9))})),
         _spec("test.op", "cublaslt", frozenset({cuda((10, 0), (11, 0))})),
     )
@@ -130,8 +174,8 @@ def test_resolve_caches_the_callable_per_op_and_backend():
 
     selector.clear_cache()
     try:
-        first = selector._resolve("gemm.grouped", "eager", "cpu", None)
-        second = selector._resolve("gemm.grouped", "eager", "cpu", None)
+        first = selector._resolve("gemm.grouped_mm", "eager", "cpu", None)
+        second = selector._resolve("gemm.grouped_mm", "eager", "cpu", None)
         info = selector._resolve.cache_info()
     finally:
         selector.clear_cache()
@@ -217,8 +261,8 @@ def test_cpu_device_call_resolves_to_eager_even_when_cuda_is_visible():
 
     selector.clear_cache()
     try:
-        fn = selector._resolve("gemm.grouped", None, "cpu", None)
+        fn = selector._resolve("gemm.grouped_mm", None, "cpu", None)
     finally:
         selector.clear_cache()
 
-    assert fn is eager_gemm.grouped_gemm
+    assert fn is eager_gemm.grouped_mm

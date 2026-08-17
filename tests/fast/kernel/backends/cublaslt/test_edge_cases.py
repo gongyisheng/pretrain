@@ -8,7 +8,7 @@ import setuptools
 import torch
 
 from benchmarks.gemm.bench_scaled_gemm import _require_mxfp8_precision
-from src.kernel.ops.gemm import scaled_gemm, scaled_grouped_gemm
+from src.kernel.ops.gemm import mxfp8_scaled_grouped_mm, mxfp8_scaled_mm
 from src.kernel.selector import select_kernel
 
 
@@ -49,7 +49,7 @@ def _view_operands(case: str) -> tuple[object, ...]:
         assert b.data_ptr() % 16 != 0
     scale_a = torch.ones((m, 1), device="cuda", dtype=torch.float32)
     scale_b = torch.ones((1, n), device="cuda", dtype=torch.float32)
-    return a, b, scale_a, scale_b, torch.bfloat16, 32, torch.float8_e8m0fnu, None
+    return a, b, scale_a, scale_b, torch.bfloat16, 32, None
 
 
 @cuda_mxfp8_only
@@ -65,69 +65,47 @@ def test_forced_backend_rejects_unsafe_operand_view(case: str, reason: str):
     args = _view_operands(case)
 
     with pytest.raises(ValueError, match=reason):
-        scaled_gemm(*args, backend="cublaslt")
+        mxfp8_scaled_mm(*args, backend="cublaslt")
 
 
-def _valid_dense_operands(
-    block_size: int, scale_dtype: torch.dtype
-) -> tuple[object, ...]:
+def _valid_dense_operands(block_size: int) -> tuple[object, ...]:
     m, k, n = 16, 32, 16
     a = _fp8_values(m * k).view(m, k)
     b = _fp8_values(k * n).view(k, n)
     scale_a = torch.ones((m, 1), device="cuda", dtype=torch.float32)
     scale_b = torch.ones((1, n), device="cuda", dtype=torch.float32)
-    return a, b, scale_a, scale_b, torch.bfloat16, block_size, scale_dtype, None
+    return a, b, scale_a, scale_b, torch.bfloat16, block_size, None
 
 
-def _valid_grouped_operands(
-    block_size: int, scale_dtype: torch.dtype
-) -> tuple[object, ...]:
+def _valid_grouped_operands(block_size: int) -> tuple[object, ...]:
     m, k, n = 16, 32, 16
     a = _fp8_values(m * k).view(m, k)
     b = _fp8_values(k * n).view(1, k, n)
     scale_a = torch.ones((m, 1), device="cuda", dtype=torch.float32)
     scale_b = torch.ones((1, 1, n), device="cuda", dtype=torch.float32)
     offs = torch.tensor([m], device="cuda", dtype=torch.int32)
-    return a, b, scale_a, scale_b, offs, torch.bfloat16, block_size, scale_dtype, None
+    return a, b, scale_a, scale_b, offs, torch.bfloat16, block_size, None
 
 
 @cuda_mxfp8_only
-@pytest.mark.parametrize(
-    ("block_size", "scale_dtype", "reason"),
-    [
-        (64, torch.float8_e8m0fnu, "requires block_size=32"),
-        (32, torch.float32, "requires scale_dtype"),
-    ],
-)
-def test_forced_backend_rejects_bad_scale_config(
-    block_size: int, scale_dtype: torch.dtype, reason: str
-):
+def test_forced_backend_rejects_bad_scale_config():
     """cuBLASLt reads scales as bare 32-wide e8m0 blocks -- unlike Triton it does
-    not replicate a wider scale across blocks, so block_size/scale_dtype must be
-    checked explicitly rather than left to silently miscompute."""
+    not replicate a wider scale across blocks, so block_size must be checked
+    explicitly rather than left to silently miscompute."""
     _require_mxfp8_device()
-    args = _valid_dense_operands(block_size, scale_dtype)
+    args = _valid_dense_operands(64)
 
-    with pytest.raises(ValueError, match=reason):
-        scaled_gemm(*args, backend="cublaslt")
+    with pytest.raises(ValueError, match="requires block_size=32"):
+        mxfp8_scaled_mm(*args, backend="cublaslt")
 
 
 @cuda_mxfp8_only
-@pytest.mark.parametrize(
-    ("block_size", "scale_dtype", "reason"),
-    [
-        (64, torch.float8_e8m0fnu, "requires block_size=32"),
-        (32, torch.float32, "requires scale_dtype"),
-    ],
-)
-def test_forced_backend_rejects_bad_grouped_scale_config(
-    block_size: int, scale_dtype: torch.dtype, reason: str
-):
+def test_forced_backend_rejects_bad_grouped_scale_config():
     _require_mxfp8_device()
-    args = _valid_grouped_operands(block_size, scale_dtype)
+    args = _valid_grouped_operands(64)
 
-    with pytest.raises(ValueError, match=reason):
-        scaled_grouped_gemm(*args, backend="cublaslt")
+    with pytest.raises(ValueError, match="requires block_size=32"):
+        mxfp8_scaled_grouped_mm(*args, backend="cublaslt")
 
 
 @cuda_mxfp8_only
@@ -137,9 +115,9 @@ def test_misaligned_operand_executes_with_cublaslt(case: str, backend: str):
     _require_mxfp8_device()
     args = _view_operands(case)
 
-    selected = select_kernel("gemm.scaled", backend=backend)
-    expected = scaled_gemm(*args, backend="eager")
-    actual = scaled_gemm(*args, backend=backend)
+    selected = select_kernel("gemm.mxfp8_scaled_mm", backend=backend)
+    expected = mxfp8_scaled_mm(*args, backend="eager")
+    actual = mxfp8_scaled_mm(*args, backend=backend)
 
     assert selected.backend == "cublaslt"
     _require_mxfp8_precision(f"misaligned {case} {backend}", actual, expected)
@@ -164,7 +142,6 @@ def _zero_operands(shape: tuple[int, int, int], with_bias: bool) -> tuple[object
         scale_b,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
         bias,
     )
 
@@ -186,8 +163,8 @@ def test_zero_size_gemm_matches_eager(
     _require_mxfp8_device()
     args = _zero_operands(shape, with_bias)
 
-    expected = scaled_gemm(*args, backend="eager")
-    actual = scaled_gemm(*args, backend=backend)
+    expected = mxfp8_scaled_mm(*args, backend="eager")
+    actual = mxfp8_scaled_mm(*args, backend=backend)
 
     assert actual.shape == expected.shape
     assert actual.dtype == torch.bfloat16

@@ -96,7 +96,7 @@ def test_expert_mm_bias_is_additive(scaling):
 def test_moe_block_quantized_forward_backward_runs(bias):
     import torch.nn as nn
 
-    from src.kernel.ops.gemm import grouped_gemm
+    from src.kernel.ops.gemm import grouped_mm
     from src.layers.mlp import SparseMoEBlock
     from src.quant.convert import apply_quantization
     from src.utils.config import (
@@ -138,7 +138,7 @@ def test_moe_block_quantized_forward_backward_runs(bias):
         ),
     )
     apply_quantization(m, cfg)
-    assert m.mlp.expert_mm is not grouped_gemm  # confirms the quantized seam installed
+    assert m.mlp.expert_mm is not grouped_mm  # confirms the quantized seam installed
     x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     out, _ = m.mlp(x)
     out.sum().backward()
@@ -164,37 +164,16 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
     cfg = _cfg("fp8", scaling)
 
     wgrad_calls = []
-    real_gemm = moe.scaled_grouped_gemm
+    real_dispatch = moe.dispatch
 
-    def spy(
-        aq,
-        bq,
-        sa,
-        sb,
-        offs_,
-        out_dtype,
-        block_size,
-        scale_dtype,
-        bias=None,
-        backend=None,
-    ):
+    def spy(op, args, kwargs, backend=None, *, device):
         # one op serves every layout now; 2D x 2D is ragged-K, i.e. the wgrad
+        bq, block_size = args[1], args[6]
         if bq.ndim == 2:
             wgrad_calls.append(block_size)
-        return real_gemm(
-            aq,
-            bq,
-            sa,
-            sb,
-            offs_,
-            out_dtype,
-            block_size,
-            scale_dtype,
-            bias=bias,
-            backend=backend,
-        )
+        return real_dispatch(op, args, kwargs, backend, device=device)
 
-    monkeypatch.setattr(moe, "scaled_grouped_gemm", spy)
+    monkeypatch.setattr(moe, "dispatch", spy)
 
     a_q = a.clone().requires_grad_(True)
     b_q = b.clone().requires_grad_(True)
@@ -208,8 +187,7 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
 
     # Reference: identical quantization, but dequantized and multiplied in bf16.
     # Comparing against this isolates the kernel from the quantization error itself.
-    monkeypatch.setattr(moe, "is_fp8", lambda _: False)
-    monkeypatch.setattr(moe, "is_int8s", lambda _: False)
+    monkeypatch.setattr(moe, "scaled_mm_op", lambda *a, **k: None)
     a_f = a.clone().requires_grad_(True)
     b_f = b.clone().requires_grad_(True)
     y_f = moe.scaled_grouped_gemm_fn(cfg)(a_f, b_f, offs)
@@ -287,38 +265,17 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
     rowwise back to one block — and a scale row per expert to match."""
     a, b, offs = _make([8, 0, 24], K=64, N=48)
     seen = {}
-    real = moe.scaled_grouped_gemm
+    real_dispatch = moe.dispatch
 
-    def spy(
-        aq,
-        gq,
-        sa,
-        sg,
-        offs_,
-        out_dtype,
-        block_size,
-        scale_dtype,
-        bias=None,
-        backend=None,
-    ):
+    def spy(op, args, kwargs, backend=None, *, device):
+        gq, sa, block_size = args[1], args[2], args[6]
         if gq.ndim == 2:  # ragged-K layout, i.e. the wgrad
             seen["block_size"] = block_size
             # sa arrives transposed (K,nrb) with the contraction axis last
             seen["n_scale_rows"] = sa.shape[-1]
-        return real(
-            aq,
-            gq,
-            sa,
-            sg,
-            offs_,
-            out_dtype,
-            block_size,
-            scale_dtype,
-            bias=bias,
-            backend=backend,
-        )
+        return real_dispatch(op, args, kwargs, backend, device=device)
 
-    monkeypatch.setattr(moe, "scaled_grouped_gemm", spy)
+    monkeypatch.setattr(moe, "dispatch", spy)
     a_q = a.clone().requires_grad_(True)
     moe.scaled_grouped_gemm_fn(_cfg("fp8", "rowwise"))(
         a_q, b.clone(), offs

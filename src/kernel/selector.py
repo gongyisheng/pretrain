@@ -45,14 +45,20 @@ def select_kernel(
             "platform was supplied to choose among them"
         )
     eligible = [spec for spec in specs if spec.is_available(platform)]
-    if len(eligible) == 1:
-        return eligible[0]
-    if not eligible:
-        raise KernelSelectionError(
-            f"operation {op!r} has no backend for {platform.device_type} "
-            f"{platform.arch}; registered: {registered}"
-        )
-    names = ", ".join(sorted(spec.backend for spec in eligible))
+    optimized = [spec for spec in eligible if not spec.reference]
+    if len(optimized) == 1:
+        return optimized[0]
+    if not optimized:
+        reference = [spec for spec in eligible if spec.reference]
+        if len(reference) == 1:
+            return reference[0]
+        if not reference:
+            raise KernelSelectionError(
+                f"operation {op!r} has no backend for {platform.device_type} "
+                f"{platform.arch}; registered: {registered}"
+            )
+        optimized = reference
+    names = ", ".join(sorted(spec.backend for spec in optimized))
     raise KernelSelectionError(
         f"operation {op!r} has multiple eligible backends ({names}) on "
         f"{platform.device_type} {platform.arch}; pass backend=... to choose one"

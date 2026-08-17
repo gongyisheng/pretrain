@@ -81,6 +81,19 @@ def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:
     return not matches(cfg.exclude)
 
 
+def scaled_mm_op(
+    a_fmt: str, b_fmt: str, scale_dtype: torch.dtype, grouped: bool
+) -> str | None:
+    if is_fp8(a_fmt) and is_fp8(b_fmt):
+        family = "mxfp8" if scale_dtype == torch.float8_e8m0fnu else "fp8"
+    elif is_int8s(a_fmt) and is_int8s(b_fmt):
+        family = "int8"
+    else:
+        return None
+    suffix = "scaled_grouped_mm" if grouped else "scaled_mm"
+    return f"gemm.{family}_{suffix}"
+
+
 def resolve_quantization_config(
     fqn: str, quantization_configs: list[QuantizationConfig]
 ) -> Optional[QuantizationConfig]:

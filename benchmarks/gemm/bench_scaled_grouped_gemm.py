@@ -20,9 +20,10 @@ import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
-from src.kernel.ops.gemm import scaled_grouped_gemm
+from src.kernel.selector import dispatch
 from src.kernel.utils import to_column_major
 from src.quant.quantize import quantize_operand
+from src.quant.utils import scaled_mm_op
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
 M_FIXED = 8 * 1024 * 8
@@ -91,6 +92,17 @@ def _relerr(out, ref):
     return ((out.float() - ref).norm() / ref.norm()).item()
 
 
+def _scaled_grouped_gemm(fmt, aq, bq, sa, sb, offs, out_dtype, block_size, backend=None):
+    op = scaled_mm_op(fmt, fmt, torch.float32, grouped=True)
+    return dispatch(
+        op,
+        (aq, bq, sa, sb, offs, out_dtype, block_size, None),
+        {},
+        backend,
+        device=aq.device,
+    )
+
+
 def _pytorch_scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype):
     return F.scaled_grouped_mm(
         aq,
@@ -109,21 +121,14 @@ def _bench_point(E, K, N, scheme):
     """Return optimized latency and error for one forward benchmark point."""
     a, b, offs = _make(E, M_FIXED, K, N)
     aq, bq, sa, sb, bs = _quant(a, b, scheme)
-    ref = scaled_grouped_gemm(
-        aq,
-        bq,
-        sa,
-        sb,
-        offs,
-        torch.bfloat16,
-        bs,
-        torch.float32,
-        backend="eager",
+    fmt = _fmt(scheme)
+    ref = _scaled_grouped_gemm(
+        fmt, aq, bq, sa, sb, offs, torch.bfloat16, bs, backend="eager"
     )
 
     def triton_fn():
-        return scaled_grouped_gemm(
-            aq, bq, sa, sb, offs, torch.bfloat16, bs, torch.float32, backend="triton"
+        return _scaled_grouped_gemm(
+            fmt, aq, bq, sa, sb, offs, torch.bfloat16, bs, backend="triton"
         )
 
     triton_out = triton_fn()
@@ -161,29 +166,13 @@ def _bench_wgrad_point(E, K, N, scheme):
     fmt = _fmt(scheme)
     aq, sa = quantize_operand(a, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
     gq, sg = quantize_operand(g, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
-    ref = scaled_grouped_gemm(
-        aq.mT,
-        gq,
-        sa.mT,
-        sg,
-        offs,
-        torch.bfloat16,
-        0,
-        torch.float32,
-        backend="eager",
+    ref = _scaled_grouped_gemm(
+        fmt, aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0, backend="eager"
     )
 
     def triton_fn():
-        return scaled_grouped_gemm(
-            aq.mT,
-            gq,
-            sa.mT,
-            sg,
-            offs,
-            torch.bfloat16,
-            0,
-            torch.float32,
-            backend="triton",
+        return _scaled_grouped_gemm(
+            fmt, aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0, backend="triton"
         )
 
     triton_out = triton_fn()

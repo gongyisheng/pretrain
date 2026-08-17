@@ -275,7 +275,7 @@ def quantize_operand(x, contract_dim, fmt, scaling, offs=None, ragged_dim=None):
 
     Returns codes in `fmt`'s dtype and an fp32 dequant scale whose outer axis is at full
     length and whose contract axis is the number of scale blocks -- the layout
-    `scaled_gemm` reads.
+    the scaled GEMM kernels read.
 
     A 2D (square) `block_shape` pools amax over a `T x T` tile and then expands the
     scale along the outer axis, so the returned layout is the same either way -- the

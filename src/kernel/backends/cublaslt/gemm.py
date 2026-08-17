@@ -40,19 +40,12 @@ def _check_block_size(block_size: int, feature: str) -> None:
         raise ValueError(f"{feature} requires block_size=32, got {block_size}")
 
 
-def _check_scale_dtype(scale_dtype: torch.dtype, feature: str) -> None:
-    if scale_dtype is not torch.float8_e8m0fnu:
-        raise ValueError(
-            f"{feature} requires scale_dtype=torch.float8_e8m0fnu, got {scale_dtype}"
-        )
-
-
 @register_kernel(
-    op="gemm.scaled",
+    op="gemm.mxfp8_scaled_mm",
     backend="cublaslt",
     build="aot",
     autograd=False,
-    capabilities=frozenset({cuda(min_arch=(10, 0), max_arch=(11, 0))}),
+    capabilities=frozenset({cuda(min_arch=(10, 0))}),
 )
 def scaled_gemm_mxfp8(
     aq: torch.Tensor,
@@ -61,13 +54,11 @@ def scaled_gemm_mxfp8(
     sb: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
-    scale_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     del out_dtype
     _check_block_size(block_size, "MXFP8 GEMM")
-    _check_scale_dtype(scale_dtype, "MXFP8 GEMM")
-    del block_size, scale_dtype
+    del block_size
     _check_layout(aq, ((aq.shape[1], 1),), "MXFP8 GEMM A")
     _check_layout(bq, ((bq.shape[1], 1), (1, bq.shape[0])), "MXFP8 GEMM B")
     _check_dimension_multiple_of_16(aq, "MXFP8 GEMM A")
@@ -82,7 +73,7 @@ def scaled_gemm_mxfp8(
 
 
 @register_kernel(
-    op="gemm.scaled_grouped",
+    op="gemm.mxfp8_scaled_grouped_mm",
     backend="cublaslt",
     build="aot",
     autograd=False,
@@ -96,13 +87,11 @@ def scaled_grouped_gemm_mxfp8(
     offs: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
-    scale_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     del out_dtype
     _check_block_size(block_size, "MXFP8 grouped GEMM")
-    _check_scale_dtype(scale_dtype, "MXFP8 grouped GEMM")
-    del block_size, scale_dtype
+    del block_size
     if bias is not None:
         raise ValueError("cuBLASLt MXFP8 grouped GEMM does not support bias")
     _check_layout(aq, ((aq.shape[1], 1),), "MXFP8 grouped GEMM A")

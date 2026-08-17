@@ -1,7 +1,6 @@
 import torch
 
 from src.kernel.registry import register_kernel
-from src.kernel.spec import CPU
 
 
 def _to_bounds(offs):
@@ -10,13 +9,14 @@ def _to_bounds(offs):
 
 
 @register_kernel(
-    op="gemm.grouped",
+    op="gemm.grouped_mm",
     backend="eager",
     build="eager",
     autograd=True,
-    capabilities=frozenset({CPU}),
+    capabilities=frozenset(),
+    reference=True,
 )
-def grouped_gemm(
+def grouped_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     offs: torch.Tensor,
@@ -61,11 +61,28 @@ def _dequant_b(q, scale, block_size):
 
 
 @register_kernel(
-    op="gemm.scaled",
+    op="gemm.int8_scaled_mm",
     backend="eager",
     build="eager",
     autograd=True,
-    capabilities=frozenset({CPU}),
+    capabilities=frozenset(),
+    reference=True,
+)
+@register_kernel(
+    op="gemm.fp8_scaled_mm",
+    backend="eager",
+    build="eager",
+    autograd=True,
+    capabilities=frozenset(),
+    reference=True,
+)
+@register_kernel(
+    op="gemm.mxfp8_scaled_mm",
+    backend="eager",
+    build="eager",
+    autograd=True,
+    capabilities=frozenset(),
+    reference=True,
 )
 def scaled_gemm(
     aq: torch.Tensor,
@@ -74,10 +91,8 @@ def scaled_gemm(
     sb: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
-    scale_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    del scale_dtype
     out = _dequant_a(aq, sa, block_size) @ _dequant_b(bq, sb, block_size)
     if bias is not None:
         out = out + bias.float()
@@ -85,11 +100,28 @@ def scaled_gemm(
 
 
 @register_kernel(
-    op="gemm.scaled_grouped",
+    op="gemm.int8_scaled_grouped_mm",
     backend="eager",
     build="eager",
     autograd=True,
-    capabilities=frozenset({CPU}),
+    capabilities=frozenset(),
+    reference=True,
+)
+@register_kernel(
+    op="gemm.fp8_scaled_grouped_mm",
+    backend="eager",
+    build="eager",
+    autograd=True,
+    capabilities=frozenset(),
+    reference=True,
+)
+@register_kernel(
+    op="gemm.mxfp8_scaled_grouped_mm",
+    backend="eager",
+    build="eager",
+    autograd=True,
+    capabilities=frozenset(),
+    reference=True,
 )
 def scaled_grouped_gemm(
     aq: torch.Tensor,
@@ -99,10 +131,8 @@ def scaled_grouped_gemm(
     offs: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
-    scale_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    del scale_dtype
     a_is_2d = aq.ndim == 2
     b_is_2d = bq.ndim == 2
     bounds = _to_bounds(offs)

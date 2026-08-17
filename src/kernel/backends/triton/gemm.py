@@ -315,7 +315,7 @@ def grouped_gemm(
 # bf16-only dtype routing in src/kernel/ops/gemm.py. `grouped_gemm` above is a
 # separate, unused-by-dispatch reference kept for direct callers and tests.
 @register_kernel(
-    op="gemm.grouped",
+    op="gemm.grouped_mm",
     backend="triton",
     build="jit",
     autograd=False,
@@ -629,39 +629,55 @@ def scaled_gemm(
         capability >= minimum,
         f"scaled GEMM requires SM{minimum[0]}{minimum[1]} or newer, got SM{capability[0]}{capability[1]}",
     )
-    return _scaled_gemm_unchecked(
-        aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias
-    )
+    # `scale_dtype=torch.float8_e8m0fnu` with fp8 operands and `block_size` any multiple
+    # of 32 is mxfp8: the hardware's block-scaled MMA reads a 32-wide scale vector
+    # natively, and a wider block is the same scale replicated across consecutive
+    # 32-wide groups. Everything else -- a non-multiple-of-32 width, fp32 scales, int8
+    # -- keeps the epilogue-scaling kernel, which is where those recipes are fastest
+    # anyway. Dispatch never runs this branch: it reaches `_epilogue_scaled_mm` or
+    # `_mxfp8_scaled_mm` directly through the op name; this wrapper is kept for direct
+    # callers and tests where `scale_dtype` alone must still pick the kernel.
+    if (
+        scale_dtype == torch.float8_e8m0fnu
+        # block_size 0 is the "one block spans all of K" sentinel, not a real width --
+        # 0 % 32 == 0 in Python, so it must be excluded explicitly or it would collapse
+        # rep_k to 0 below and hand the kernel a zero-width scale tensor.
+        and block_size != 0
+        and block_size % _MXFP8_BLOCK_SIZE == 0
+        and aq.dtype in _MXFP8_FORMAT
+        and bq.dtype in _MXFP8_FORMAT
+    ):
+        return _mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+    return _epilogue_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
 # Dispatch reaches this entry directly, gated only by device/SM capability; see the
 # entry's own docstring for what it still checks and why.
 @register_kernel(
-    op="gemm.scaled",
+    op="gemm.int8_scaled_mm",
     backend="triton",
     build="jit",
     autograd=False,
     capabilities=frozenset({cuda(min_arch=(8, 0))}),
 )
-@triton_op("jit_kernel::scaled_gemm", mutates_args={})
-def _scaled_gemm_unchecked(
+@register_kernel(
+    op="gemm.fp8_scaled_mm",
+    backend="triton",
+    build="jit",
+    autograd=False,
+    capabilities=frozenset({cuda(min_arch=(8, 9))}),
+)
+@triton_op("jit_kernel::epilogue_scaled_mm", mutates_args={})
+def _epilogue_scaled_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
     sb: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
-    scale_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
-
-    `scale_dtype=torch.float8_e8m0fnu` with fp8 operands and `block_size` any multiple of 32 is
-    mxfp8: the hardware's block-scaled MMA reads a 32-wide scale vector natively, and a
-    wider block is the same scale replicated across consecutive 32-wide groups, so it
-    routes to `_scaled_gemm_mxfp8_kernel` too. Everything else -- a non-multiple-of-32
-    width, fp32 scales, int8 -- keeps the epilogue-scaling kernel, which is where those
-    recipes are fastest anyway.
 
     `block_size` 0 means one scale block spanning the whole contraction.
     `SCALE_BLOCK_SIZE` below is derived from `n_scale_blocks` rather than from that
@@ -693,58 +709,6 @@ def _scaled_gemm_unchecked(
     def grid(meta):
         return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
 
-    if (
-        scale_dtype == torch.float8_e8m0fnu
-        # block_size 0 is the "one block spans all of K" sentinel, not a real width --
-        # 0 % 32 == 0 in Python, so it must be excluded explicitly or it would collapse
-        # rep_k to 0 below and hand the kernel a zero-width scale tensor.
-        and block_size != 0
-        and block_size % _MXFP8_BLOCK_SIZE == 0
-        and aq.dtype in _MXFP8_FORMAT
-        and bq.dtype in _MXFP8_FORMAT
-    ):
-        # The MMA's scale vector is fixed at 32. A wider scale block is the same scale
-        # repeated across consecutive 32-wide groups, so replicating here reaches the
-        # block-scaled MMA rather than falling back to epilogue scaling. block_size 32
-        # leaves both repeats as no-ops.
-        rep_k = block_size // _MXFP8_BLOCK_SIZE
-        # ceil, not floor: the quantizer pads a trailing partial block whenever
-        # block_size does not divide K, and sa/sb legitimately carry that column.
-        n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
-        sa_mx = sa.repeat_interleave(rep_k, 1)[:, :n_mx]
-        sb_mx = sb.repeat_interleave(rep_k, 0)[:n_mx]
-        # e8m0 holds a bare exponent, so `_compute_scale` already produced exact powers
-        # of two and this cast is lossless; the kernel wants those bytes, not floats.
-        sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
-        sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
-        wrap_triton(_scaled_gemm_mxfp8_kernel)[grid](
-            aq,
-            bq,
-            c,
-            sa8,
-            sb8,
-            bias,
-            M,
-            N,
-            K,
-            n_mx,
-            aq.stride(0),
-            aq.stride(1),
-            bq.stride(0),
-            bq.stride(1),
-            c.stride(0),
-            c.stride(1),
-            sa8.stride(0),
-            sa8.stride(1),
-            sb8.stride(0),
-            sb8.stride(1),
-            0 if bias is None else bias.stride(0),
-            A_FORMAT=_MXFP8_FORMAT[aq.dtype],
-            B_FORMAT=_MXFP8_FORMAT[bq.dtype],
-            HAS_BIAS=bias is not None,
-        )
-        return c
-
     wrap_triton(_scaled_gemm_kernel)[grid](
         aq,
         bq,
@@ -768,6 +732,79 @@ def _scaled_gemm_unchecked(
         sb.stride(1),
         0 if bias is None else bias.stride(0),
         SCALE_BLOCK_SIZE=SCALE_BLOCK_SIZE,
+        HAS_BIAS=bias is not None,
+    )
+    return c
+
+
+@register_kernel(
+    op="gemm.mxfp8_scaled_mm",
+    backend="triton",
+    build="jit",
+    autograd=False,
+    capabilities=frozenset({cuda(min_arch=(10, 0))}),
+)
+@triton_op("jit_kernel::mxfp8_scaled_mm", mutates_args={})
+def _mxfp8_scaled_mm(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Scaled GEMM, (M,K) x (K,N) -> (M,N), mxfp8 only; see `scaled_gemm` for routing.
+
+    Dispatch reaches this entry directly, gated only by device/SM capability; the
+    `scaled_gemm` function above is a separate, unused-by-dispatch reference kept for
+    direct callers and tests.
+    """
+    M, K = aq.shape
+    N = bq.shape[1]
+    c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
+
+    def grid(meta):
+        return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
+
+    # The MMA's scale vector is fixed at 32. A wider scale block is the same scale
+    # repeated across consecutive 32-wide groups, so replicating here reaches the
+    # block-scaled MMA rather than falling back to epilogue scaling. block_size 32
+    # leaves both repeats as no-ops.
+    rep_k = block_size // _MXFP8_BLOCK_SIZE
+    # ceil, not floor: the quantizer pads a trailing partial block whenever
+    # block_size does not divide K, and sa/sb legitimately carry that column.
+    n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
+    sa_mx = sa.repeat_interleave(rep_k, 1)[:, :n_mx]
+    sb_mx = sb.repeat_interleave(rep_k, 0)[:n_mx]
+    # e8m0 holds a bare exponent, so `_compute_scale` already produced exact powers
+    # of two and this cast is lossless; the kernel wants those bytes, not floats.
+    sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
+    sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
+    wrap_triton(_scaled_gemm_mxfp8_kernel)[grid](
+        aq,
+        bq,
+        c,
+        sa8,
+        sb8,
+        bias,
+        M,
+        N,
+        K,
+        n_mx,
+        aq.stride(0),
+        aq.stride(1),
+        bq.stride(0),
+        bq.stride(1),
+        c.stride(0),
+        c.stride(1),
+        sa8.stride(0),
+        sa8.stride(1),
+        sb8.stride(0),
+        sb8.stride(1),
+        0 if bias is None else bias.stride(0),
+        A_FORMAT=_MXFP8_FORMAT[aq.dtype],
+        B_FORMAT=_MXFP8_FORMAT[bq.dtype],
         HAS_BIAS=bias is not None,
     )
     return c
@@ -1288,22 +1325,52 @@ def scaled_grouped_gemm(
         capability >= minimum,
         f"scaled grouped GEMM requires SM{minimum[0]}{minimum[1]} or newer, got SM{capability[0]}{capability[1]}",
     )
-    return _scaled_grouped_gemm_unchecked(
-        aq, bq, sa, sb, offs, out_dtype, block_size, scale_dtype, bias
+    # The ragged-K layout re-tiles its scale blocks *inside* each group at runtime --
+    # group g's blocks start where group g-1's ended, sized off `offs` via
+    # cdiv(k_size_g, 32) -- so a flat repeat_interleave over the whole scale-block axis
+    # would smear a replicated scale across a group boundary. Keep that layout locked
+    # to the kernel's native 32-wide block; the other two layouts (ragged M, ragged N)
+    # have a single non-ragged K shared by every group, where one repeat_interleave
+    # over the whole axis is exact, so they get the generalized multiple-of-32
+    # condition. Do not simplify this to one shared condition. Dispatch never runs this
+    # branch: it reaches `_epilogue_scaled_grouped_mm` or `_mxfp8_scaled_grouped_mm`
+    # directly through the op name; this wrapper is kept for direct callers and tests
+    # where `scale_dtype` alone must still pick the kernel.
+    is_ragged_k = aq.ndim == 2 and bq.ndim == 2
+    mxfp8_ok = (
+        scale_dtype == torch.float8_e8m0fnu
+        and aq.dtype in _MXFP8_FORMAT
+        and bq.dtype in _MXFP8_FORMAT
+        and (
+            block_size == _MXFP8_BLOCK_SIZE
+            if is_ragged_k
+            # block_size 0 is the "one block spans the whole segment" sentinel, not a
+            # real width -- 0 % 32 == 0 in Python, so it must be excluded explicitly or
+            # it would collapse rep_k to 0 below and hand the kernel a zero-width
+            # scale tensor.
+            else block_size != 0 and block_size % _MXFP8_BLOCK_SIZE == 0
+        )
+    )
+    if mxfp8_ok:
+        return _mxfp8_scaled_grouped_mm(
+            aq, bq, sa, sb, offs, out_dtype, block_size, bias
+        )
+    return _epilogue_scaled_grouped_mm(
+        aq, bq, sa, sb, offs, out_dtype, block_size, bias
     )
 
 
 # Dispatch reaches this entry directly, gated only by device/SM capability; see the
 # entry's own docstring for what it still checks and why.
 @register_kernel(
-    op="gemm.scaled_grouped",
+    op="gemm.mxfp8_scaled_grouped_mm",
     backend="triton",
     build="jit",
     autograd=False,
-    capabilities=frozenset({cuda(min_arch=(8, 0))}),
+    capabilities=frozenset({cuda(min_arch=(10, 0))}),
 )
-@triton_op("jit_kernel::scaled_grouped_gemm", mutates_args={})
-def _scaled_grouped_gemm_unchecked(
+@triton_op("jit_kernel::mxfp8_scaled_grouped_mm", mutates_args={})
+def _mxfp8_scaled_grouped_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -1311,15 +1378,126 @@ def _scaled_grouped_gemm_unchecked(
     offs: torch.Tensor,
     out_dtype: torch.dtype,
     block_size: int,
-    scale_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Ragged scaled grouped GEMM, layout picked from the operand ranks, mxfp8 only.
+
+    At `block_size` 32 always and any multiple of 32 for the ragged-M/ragged-N layouts
+    (see `scaled_grouped_gemm`'s ragged-K note for why ragged-K is locked to 32).
+
+    Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
+        (M,K) x (E,K,N) -> (M,N)    ragged M
+        (M,K) x (K,N)   -> (E,M,N)  ragged K
+        (E,M,K) x (K,N) -> (M,N)    ragged N
+
+    `sa`/`sb` mirror their operand's axis order with the contraction axis replaced by
+    the scale-block axis, so transposing an operand transposes its scale too.
+
+    `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
+    the fp32 accumulator in the epilogue so it never passes through the scales.
+
+    Dispatch reaches this entry directly, gated only by device/SM capability; the
+    `scaled_grouped_gemm` function above is a separate, unused-by-dispatch reference
+    kept for direct callers and tests.
+    """
+    a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
+    E = offs.shape[0]
+    # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
+    if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
+        M, N, K = 0, bq.shape[2], aq.shape[1]
+        output_size = (aq.shape[0], N)
+    elif a_is_2d and b_is_2d:  # (M,K) x (K,N) -> (E,M,N), ragged K
+        M, N, K = aq.shape[0], bq.shape[1], 0
+        output_size = (E, M, N)
+    else:  # (E,M,K) x (K,N) -> (M,N), ragged N
+        M, N, K = aq.shape[1], 0, aq.shape[2]
+        output_size = (M, bq.shape[1])
+
+    c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
+    num_sms = _num_sms(aq.device)
+
+    is_ragged_k = a_is_2d and b_is_2d
+    if is_ragged_k:
+        sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
+        sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
+    else:
+        # Same replication trick as `_mxfp8_scaled_mm`: K is shared by every group here,
+        # so one repeat_interleave over the whole scale-block axis is exact. The
+        # axis is always last for sa and second-to-last for sb, in both the 2-D
+        # and 3-D (E, ...) shapes, so this covers ragged M and ragged N alike.
+        rep_k = block_size // _MXFP8_BLOCK_SIZE
+        # ceil, not floor: the quantizer pads a trailing partial block whenever
+        # block_size does not divide K, and sa/sb legitimately carry that column.
+        n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
+        sa_mx = sa.repeat_interleave(rep_k, dim=-1).narrow(-1, 0, n_mx)
+        sb_mx = sb.repeat_interleave(rep_k, dim=-2).narrow(-2, 0, n_mx)
+        sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
+        sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
+    wrap_triton(_scaled_grouped_gemm_mxfp8_kernel)[(num_sms,)](
+        aq,
+        bq,
+        c,
+        sa8,
+        sb8,
+        bias,
+        offs,
+        E,
+        M,
+        N,
+        K,
+        0 if a_is_2d else aq.stride(0),
+        aq.stride(-2),
+        aq.stride(-1),
+        0 if b_is_2d else bq.stride(0),
+        bq.stride(-2),
+        bq.stride(-1),
+        c.stride(0) if c.ndim == 3 else 0,
+        c.stride(-2),
+        c.stride(-1),
+        0 if a_is_2d else sa8.stride(0),
+        sa8.stride(-2),
+        sa8.stride(-1),
+        0 if b_is_2d else sb8.stride(0),
+        sb8.stride(-2),
+        sb8.stride(-1),
+        0 if bias is None else bias.stride(0),
+        0 if bias is None else bias.stride(1),
+        NUM_SMS=num_sms,
+        A_IS_2D=a_is_2d,
+        B_IS_2D=b_is_2d,
+        A_FORMAT=_MXFP8_FORMAT[aq.dtype],
+        B_FORMAT=_MXFP8_FORMAT[bq.dtype],
+        HAS_BIAS=bias is not None,
+    )
+    return c
+
+
+@register_kernel(
+    op="gemm.int8_scaled_grouped_mm",
+    backend="triton",
+    build="jit",
+    autograd=False,
+    capabilities=frozenset({cuda(min_arch=(8, 0))}),
+)
+@register_kernel(
+    op="gemm.fp8_scaled_grouped_mm",
+    backend="triton",
+    build="jit",
+    autograd=False,
+    capabilities=frozenset({cuda(min_arch=(8, 9))}),
+)
+@triton_op("jit_kernel::epilogue_scaled_grouped_mm", mutates_args={})
+def _epilogue_scaled_grouped_mm(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    offs: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Ragged scaled grouped GEMM, layout picked from the operand ranks.
-
-    `scale_dtype=torch.float8_e8m0fnu` with fp8 operands routes to `_scaled_grouped_gemm_mxfp8_kernel`,
-    which lets the MMA apply the scales, at `block_size` 32 always and any multiple of 32
-    for the ragged-M/ragged-N layouts (see the ragged-K note below `is_ragged_k` in the
-    body). Every other combination keeps the epilogue-scaling kernel -- see `scaled_gemm`.
 
     Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
         (M,K) x (E,K,N) -> (M,N)    ragged M
@@ -1335,7 +1513,7 @@ def _scaled_grouped_gemm_unchecked(
 
     Dispatch reaches this entry directly, gated only by device/SM capability; the
     `scaled_grouped_gemm` function above is a separate, unused-by-dispatch reference
-    kept for direct callers and tests. Unlike the dense `_scaled_gemm_unchecked`, this
+    kept for direct callers and tests. Unlike the dense `_epilogue_scaled_mm`, this
     kernel has no numerically-fragile constraint to re-check here: it masks the
     reduction to each scale block's end rather than clamping BLOCK_K to it, so a
     non-power-of-two `block_size` (e.g. 48) is exercised and correct, not just
@@ -1356,84 +1534,6 @@ def _scaled_grouped_gemm_unchecked(
 
     c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
-
-    # The ragged-K layout (a_is_2d and b_is_2d) re-tiles its scale blocks *inside* each
-    # group at runtime -- group g's blocks start where group g-1's ended, sized off
-    # `offs` via cdiv(k_size_g, 32) -- so a flat repeat_interleave over the whole
-    # scale-block axis would smear a replicated scale across a group boundary. Keep
-    # that layout locked to the kernel's native 32-wide block; the other two layouts
-    # (ragged M, ragged N) have a single non-ragged K shared by every group, where one
-    # repeat_interleave over the whole axis is exact, so they get the generalized
-    # multiple-of-32 condition. Do not simplify this to one shared condition.
-    is_ragged_k = a_is_2d and b_is_2d
-    mxfp8_ok = (
-        scale_dtype == torch.float8_e8m0fnu
-        and aq.dtype in _MXFP8_FORMAT
-        and bq.dtype in _MXFP8_FORMAT
-        and (
-            block_size == _MXFP8_BLOCK_SIZE
-            if is_ragged_k
-            # block_size 0 is the "one block spans the whole segment" sentinel, not a
-            # real width -- 0 % 32 == 0 in Python, so it must be excluded explicitly or
-            # it would collapse rep_k to 0 below and hand the kernel a zero-width
-            # scale tensor.
-            else block_size != 0 and block_size % _MXFP8_BLOCK_SIZE == 0
-        )
-    )
-    if mxfp8_ok:
-        if is_ragged_k:
-            sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
-            sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
-        else:
-            # Same replication trick as scaled_gemm: K is shared by every group here,
-            # so one repeat_interleave over the whole scale-block axis is exact. The
-            # axis is always last for sa and second-to-last for sb, in both the 2-D
-            # and 3-D (E, ...) shapes, so this covers ragged M and ragged N alike.
-            rep_k = block_size // _MXFP8_BLOCK_SIZE
-            # ceil, not floor: the quantizer pads a trailing partial block whenever
-            # block_size does not divide K, and sa/sb legitimately carry that column.
-            n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
-            sa_mx = sa.repeat_interleave(rep_k, dim=-1).narrow(-1, 0, n_mx)
-            sb_mx = sb.repeat_interleave(rep_k, dim=-2).narrow(-2, 0, n_mx)
-            sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
-            sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
-        wrap_triton(_scaled_grouped_gemm_mxfp8_kernel)[(num_sms,)](
-            aq,
-            bq,
-            c,
-            sa8,
-            sb8,
-            bias,
-            offs,
-            E,
-            M,
-            N,
-            K,
-            0 if a_is_2d else aq.stride(0),
-            aq.stride(-2),
-            aq.stride(-1),
-            0 if b_is_2d else bq.stride(0),
-            bq.stride(-2),
-            bq.stride(-1),
-            c.stride(0) if c.ndim == 3 else 0,
-            c.stride(-2),
-            c.stride(-1),
-            0 if a_is_2d else sa8.stride(0),
-            sa8.stride(-2),
-            sa8.stride(-1),
-            0 if b_is_2d else sb8.stride(0),
-            sb8.stride(-2),
-            sb8.stride(-1),
-            0 if bias is None else bias.stride(0),
-            0 if bias is None else bias.stride(1),
-            NUM_SMS=num_sms,
-            A_IS_2D=a_is_2d,
-            B_IS_2D=b_is_2d,
-            A_FORMAT=_MXFP8_FORMAT[aq.dtype],
-            B_FORMAT=_MXFP8_FORMAT[bq.dtype],
-            HAS_BIAS=bias is not None,
-        )
-        return c
 
     wrap_triton(_scaled_grouped_gemm_kernel)[(num_sms,)](
         aq,

@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
-from src.kernel.ops.gemm import grouped_gemm
+from src.kernel.ops.gemm import grouped_mm
 from src.layers.mlp import grouped_gemm_fn
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
@@ -127,12 +127,12 @@ def _bench_point(E, K, N):
     out = {}
     a, b, offs = _make(E, M_FIXED, K, N)
     with torch.no_grad():
-        eager = grouped_gemm(a, b, offs, backend="eager")
-        triton_out = grouped_gemm(a, b, offs, backend="triton")
+        eager = grouped_mm(a, b, offs, backend="eager")
+        triton_out = grouped_mm(a, b, offs, backend="triton")
         _assert_parity(triton_out, eager)
         out[("triton", "relerr")] = _relative_error(triton_out, eager)
         out[("triton", "fwd")] = _time(
-            lambda: grouped_gemm(a, b, offs, backend="triton")
+            lambda: grouped_mm(a, b, offs, backend="triton")
         )
         pytorch_out = _pytorch_grouped_gemm(a, b, offs)
         _assert_parity(pytorch_out, eager)

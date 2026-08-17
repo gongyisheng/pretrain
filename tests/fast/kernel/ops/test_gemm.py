@@ -7,18 +7,54 @@ from src.kernel.ops import gemm as gemm_module
 
 
 def test_public_gemm_import_surface():
-    from src.kernel.ops import grouped_gemm, scaled_gemm, scaled_grouped_gemm
+    from src.kernel.ops import (
+        fp8_scaled_grouped_mm,
+        fp8_scaled_mm,
+        grouped_mm,
+        int8_scaled_grouped_mm,
+        int8_scaled_mm,
+        mxfp8_scaled_grouped_mm,
+        mxfp8_scaled_mm,
+    )
 
-    assert callable(grouped_gemm)
-    assert callable(scaled_gemm)
-    assert callable(scaled_grouped_gemm)
+    assert callable(grouped_mm)
+    assert callable(int8_scaled_mm)
+    assert callable(fp8_scaled_mm)
+    assert callable(mxfp8_scaled_mm)
+    assert callable(int8_scaled_grouped_mm)
+    assert callable(fp8_scaled_grouped_mm)
+    assert callable(mxfp8_scaled_grouped_mm)
+
+
+_DENSE_SCALED_PARAMETERS = [
+    ("aq", inspect.Parameter.empty),
+    ("bq", inspect.Parameter.empty),
+    ("sa", inspect.Parameter.empty),
+    ("sb", inspect.Parameter.empty),
+    ("out_dtype", inspect.Parameter.empty),
+    ("block_size", inspect.Parameter.empty),
+    ("bias", None),
+    ("backend", None),
+]
+
+_GROUPED_SCALED_PARAMETERS = [
+    ("aq", inspect.Parameter.empty),
+    ("bq", inspect.Parameter.empty),
+    ("sa", inspect.Parameter.empty),
+    ("sb", inspect.Parameter.empty),
+    ("offs", inspect.Parameter.empty),
+    ("out_dtype", inspect.Parameter.empty),
+    ("block_size", inspect.Parameter.empty),
+    ("bias", None),
+    ("backend", None),
+]
 
 
 @pytest.mark.parametrize(
     ("function", "parameters"),
     [
         (
-            gemm_module.grouped_gemm,
+            gemm_module.grouped_mm,
             [
                 ("a", inspect.Parameter.empty),
                 ("b", inspect.Parameter.empty),
@@ -27,35 +63,12 @@ def test_public_gemm_import_surface():
                 ("backend", None),
             ],
         ),
-        (
-            gemm_module.scaled_gemm,
-            [
-                ("aq", inspect.Parameter.empty),
-                ("bq", inspect.Parameter.empty),
-                ("sa", inspect.Parameter.empty),
-                ("sb", inspect.Parameter.empty),
-                ("out_dtype", inspect.Parameter.empty),
-                ("block_size", inspect.Parameter.empty),
-                ("scale_dtype", inspect.Parameter.empty),
-                ("bias", None),
-                ("backend", None),
-            ],
-        ),
-        (
-            gemm_module.scaled_grouped_gemm,
-            [
-                ("aq", inspect.Parameter.empty),
-                ("bq", inspect.Parameter.empty),
-                ("sa", inspect.Parameter.empty),
-                ("sb", inspect.Parameter.empty),
-                ("offs", inspect.Parameter.empty),
-                ("out_dtype", inspect.Parameter.empty),
-                ("block_size", inspect.Parameter.empty),
-                ("scale_dtype", inspect.Parameter.empty),
-                ("bias", None),
-                ("backend", None),
-            ],
-        ),
+        (gemm_module.int8_scaled_mm, _DENSE_SCALED_PARAMETERS),
+        (gemm_module.fp8_scaled_mm, _DENSE_SCALED_PARAMETERS),
+        (gemm_module.mxfp8_scaled_mm, _DENSE_SCALED_PARAMETERS),
+        (gemm_module.int8_scaled_grouped_mm, _GROUPED_SCALED_PARAMETERS),
+        (gemm_module.fp8_scaled_grouped_mm, _GROUPED_SCALED_PARAMETERS),
+        (gemm_module.mxfp8_scaled_grouped_mm, _GROUPED_SCALED_PARAMETERS),
     ],
 )
 def test_public_gemm_signatures(function, parameters):
@@ -65,24 +78,6 @@ def test_public_gemm_signatures(function, parameters):
         (parameter.name, parameter.default)
         for parameter in signature.parameters.values()
     ] == parameters
-
-
-def test_scaled_gemm_requires_scale_dtype():
-    aq = bq = sa = sb = object()
-
-    with pytest.raises(TypeError, match="scale_dtype"):
-        inspect.signature(gemm_module.scaled_gemm).bind(
-            aq, bq, sa, sb, torch.bfloat16, 0
-        )
-
-
-def test_scaled_grouped_gemm_requires_scale_dtype():
-    aq = bq = sa = sb = offs = object()
-
-    with pytest.raises(TypeError, match="scale_dtype"):
-        inspect.signature(gemm_module.scaled_grouped_gemm).bind(
-            aq, bq, sa, sb, offs, torch.bfloat16, 0
-        )
 
 
 def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPatch):
@@ -99,11 +94,11 @@ def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPa
     offs = torch.tensor([3], dtype=torch.int32)
     bias = torch.empty(1, 4)
 
-    result = gemm_module.grouped_gemm(a, b, offs, bias=bias, backend="triton")
+    result = gemm_module.grouped_mm(a, b, offs, bias=bias, backend="triton")
 
     assert result is sentinel
     assert seen == {
-        "op": "gemm.grouped",
+        "op": "gemm.grouped_mm",
         "args": (a, b, offs, bias),
         "kwargs": {},
         "backend": "triton",
@@ -131,12 +126,21 @@ def test_grouped_gemm_routes_non_bf16_to_eager_by_default(
     b = torch.empty(3, 4, dtype=dtype)
     offs = torch.tensor([2], dtype=torch.int32)
 
-    gemm_module.grouped_gemm(a, b, offs)
+    gemm_module.grouped_mm(a, b, offs)
 
     assert seen["backend"] == expected_backend
 
 
-def test_scaled_gemm_forwards_arguments(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    ("function", "op"),
+    [
+        (gemm_module.int8_scaled_mm, "gemm.int8_scaled_mm"),
+        (gemm_module.fp8_scaled_mm, "gemm.fp8_scaled_mm"),
+    ],
+)
+def test_dense_scaled_mm_forwards_arguments(
+    monkeypatch: pytest.MonkeyPatch, function, op
+):
     seen = {}
     sentinel = object()
 
@@ -151,39 +155,68 @@ def test_scaled_gemm_forwards_arguments(monkeypatch: pytest.MonkeyPatch):
     sb = torch.empty(1, 3)
     bias = torch.empty(3)
 
-    result = gemm_module.scaled_gemm(
-        aq,
-        bq,
-        sa,
-        sb,
-        torch.bfloat16,
-        0,
-        torch.float8_e8m0fnu,
-        bias=bias,
-        backend="triton",
-    )
+    result = function(aq, bq, sa, sb, torch.bfloat16, 0, bias=bias, backend="triton")
 
     assert result is sentinel
     assert seen == {
-        "op": "gemm.scaled",
-        "args": (
-            aq,
-            bq,
-            sa,
-            sb,
-            torch.bfloat16,
-            0,
-            torch.float8_e8m0fnu,
-            bias,
-        ),
+        "op": op,
+        "args": (aq, bq, sa, sb, torch.bfloat16, 0, bias),
         "kwargs": {},
         "backend": "triton",
         "device": aq.device,
     }
 
 
-def test_scaled_grouped_gemm_forwards_arguments(
+def test_mxfp8_scaled_mm_defaults_to_the_pinned_dense_backend(
     monkeypatch: pytest.MonkeyPatch,
+):
+    seen = {}
+
+    def fake_dispatch(op, args, kwargs, backend=None, device=None):
+        seen.update(backend=backend)
+        return None
+
+    monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
+    aq = torch.empty(2, 4, dtype=torch.float8_e4m3fn)
+    bq = torch.empty(4, 3, dtype=torch.float8_e4m3fn)
+    sa = torch.empty(2, 1)
+    sb = torch.empty(1, 3)
+
+    gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32)
+
+    assert seen["backend"] == gemm_module._MXFP8_DENSE_BACKEND
+
+
+def test_mxfp8_scaled_mm_explicit_backend_overrides_the_pinned_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seen = {}
+
+    def fake_dispatch(op, args, kwargs, backend=None, device=None):
+        seen.update(backend=backend)
+        return None
+
+    monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
+    aq = torch.empty(2, 4, dtype=torch.float8_e4m3fn)
+    bq = torch.empty(4, 3, dtype=torch.float8_e4m3fn)
+    sa = torch.empty(2, 1)
+    sb = torch.empty(1, 3)
+
+    gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32, backend="triton")
+
+    assert seen["backend"] == "triton"
+
+
+@pytest.mark.parametrize(
+    ("function", "op"),
+    [
+        (gemm_module.int8_scaled_grouped_mm, "gemm.int8_scaled_grouped_mm"),
+        (gemm_module.fp8_scaled_grouped_mm, "gemm.fp8_scaled_grouped_mm"),
+        (gemm_module.mxfp8_scaled_grouped_mm, "gemm.mxfp8_scaled_grouped_mm"),
+    ],
+)
+def test_grouped_scaled_mm_forwards_arguments(
+    monkeypatch: pytest.MonkeyPatch, function, op
 ):
     seen = {}
     sentinel = object()
@@ -200,33 +233,14 @@ def test_scaled_grouped_gemm_forwards_arguments(
     offs = torch.tensor([1], dtype=torch.int32)
     bias = torch.empty(1, 3)
 
-    result = gemm_module.scaled_grouped_gemm(
-        aq,
-        bq,
-        sa,
-        sb,
-        offs,
-        torch.bfloat16,
-        0,
-        torch.float8_e8m0fnu,
-        bias=bias,
-        backend="triton",
+    result = function(
+        aq, bq, sa, sb, offs, torch.bfloat16, 0, bias=bias, backend="triton"
     )
 
     assert result is sentinel
     assert seen == {
-        "op": "gemm.scaled_grouped",
-        "args": (
-            aq,
-            bq,
-            sa,
-            sb,
-            offs,
-            torch.bfloat16,
-            0,
-            torch.float8_e8m0fnu,
-            bias,
-        ),
+        "op": op,
+        "args": (aq, bq, sa, sb, offs, torch.bfloat16, 0, bias),
         "kwargs": {},
         "backend": "triton",
         "device": aq.device,

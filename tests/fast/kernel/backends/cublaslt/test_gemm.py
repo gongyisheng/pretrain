@@ -5,7 +5,7 @@ import torch
 
 import src.kernel.backends.cublaslt._C  # noqa: F401
 from src.kernel.backends.cublaslt import gemm as cublaslt_gemm
-from src.kernel.ops.gemm import scaled_gemm, scaled_grouped_gemm
+from src.kernel.ops.gemm import mxfp8_scaled_grouped_mm, mxfp8_scaled_mm
 from src.quant.quantize import quantize_operand
 from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 
@@ -64,25 +64,23 @@ def _assert_matches_eager(
     scale_b: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> None:
-    eager = scaled_gemm(
+    eager = mxfp8_scaled_mm(
         aq,
         bq,
         scale_a,
         scale_b,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
         bias=bias,
         backend="eager",
     )
-    actual = scaled_gemm(
+    actual = mxfp8_scaled_mm(
         aq,
         bq,
         scale_a,
         scale_b,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
         bias=bias,
         backend="cublaslt",
     )
@@ -110,24 +108,22 @@ def test_cublaslt_mxfp8_bias_matches_eager_bitwise():
     _require_mxfp8_device()
     aq, bq, scale_a, scale_b = _mxfp8_operands((129, 144, 160), "varying")
     bias = torch.linspace(-128.0, 128.0, 160, device="cuda", dtype=torch.bfloat16)
-    without_bias = scaled_gemm(
+    without_bias = mxfp8_scaled_mm(
         aq,
         bq,
         scale_a,
         scale_b,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
         backend="eager",
     )
-    with_bias = scaled_gemm(
+    with_bias = mxfp8_scaled_mm(
         aq,
         bq,
         scale_a,
         scale_b,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
         bias=bias,
         backend="eager",
     )
@@ -147,7 +143,6 @@ def test_cublaslt_adapter_has_meta_implementation():
         scale_b,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
     )
     assert out.shape == (129, 160)
     assert out.dtype == torch.bfloat16
@@ -169,7 +164,6 @@ def test_cublaslt_grouped_adapter_has_meta_implementation():
         offsets,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
     )
 
     assert out.shape == (299, 160)
@@ -204,7 +198,7 @@ def test_cublaslt_grouped_mxfp8_matches_eager_with_empty_expert():
     bq, scale_b = quantize_operand(b, -2, "fp8_e4m3", _MXFP8_SCALING)
     offsets = torch.tensor(counts, device="cuda", dtype=torch.int32).cumsum(0)
 
-    eager = scaled_grouped_gemm(
+    eager = mxfp8_scaled_grouped_mm(
         aq,
         bq,
         scale_a,
@@ -212,10 +206,9 @@ def test_cublaslt_grouped_mxfp8_matches_eager_with_empty_expert():
         offsets,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
         backend="eager",
     )
-    actual = scaled_grouped_gemm(
+    actual = mxfp8_scaled_grouped_mm(
         aq,
         bq,
         scale_a,
@@ -223,7 +216,6 @@ def test_cublaslt_grouped_mxfp8_matches_eager_with_empty_expert():
         offsets,
         torch.bfloat16,
         32,
-        torch.float8_e8m0fnu,
         backend="cublaslt",
     )
 

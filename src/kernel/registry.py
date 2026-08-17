@@ -29,6 +29,7 @@ def register_kernel(
     build: BuildMode,
     autograd: bool,
     capabilities: frozenset[CapabilityRequirement] = frozenset(),
+    reference: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         KERNEL_REGISTRY.register(
@@ -39,6 +40,7 @@ def register_kernel(
                 build=build,
                 autograd=autograd,
                 capabilities=capabilities,
+                reference=reference,
             )
         )
         return fn

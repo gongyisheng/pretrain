@@ -4,11 +4,12 @@ import copy
 
 import torch
 
-from src.kernel.ops.gemm import grouped_gemm, scaled_grouped_gemm
+from src.kernel.ops.gemm import grouped_mm
+from src.kernel.selector import dispatch
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
-from src.quant.utils import is_fp8, is_int8s, is_quantized
+from src.quant.utils import is_quantized, scaled_mm_op
 from src.utils.config import QuantizationConfig
 
 
@@ -27,9 +28,7 @@ def quantized_grouped_gemm(
     never quantized -- it rides the epilogue, past the scales.
     """
     block_size = scaling["block_shape"][1]
-    same_family = (is_fp8(a_fmt) and is_fp8(b_fmt)) or (
-        is_int8s(a_fmt) and is_int8s(b_fmt)
-    )
+    op = scaled_mm_op(a_fmt, b_fmt, scaling["scale_dtype"], grouped=True)
     if a.ndim != 2:
         raise NotImplementedError("the ragged-N layout (3D x 2D) is not supported")
     ragged_k = b.ndim == 2
@@ -83,17 +82,25 @@ def quantized_grouped_gemm(
             ragged_dim=b_ragged_dim,
         )
 
-    if same_family and a.is_cuda:
-        y = scaled_grouped_gemm(
-            aq.mT if ragged_k else aq,
-            bq,
-            sa.mT if ragged_k else sa,
-            sb,
-            offs,
-            out_dtype,
-            block_size,
-            scaling["scale_dtype"],
-            bias=bias,
+    if op is not None and a.is_cuda:
+        # cuBLASLt's mxfp8 kernel demands block_size=32 and 16-byte-aligned strides;
+        # ragged expert groups can't guarantee either, so mxfp8 always asks Triton.
+        backend = "triton" if op == "gemm.mxfp8_scaled_grouped_mm" else None
+        y = dispatch(
+            op,
+            (
+                aq.mT if ragged_k else aq,
+                bq,
+                sa.mT if ragged_k else sa,
+                sb,
+                offs,
+                out_dtype,
+                block_size,
+                bias,
+            ),
+            {},
+            backend,
+            device=a.device,
         )
         return y
 
@@ -105,7 +112,7 @@ def quantized_grouped_gemm(
         b = dequantize_operand(
             bq, sb, -2, scaling, offs=b_offs, ragged_dim=b_ragged_dim
         ).to(b.dtype)
-    y = grouped_gemm(
+    y = grouped_mm(
         (src_a.mT if ragged_k else src_a).to(out_dtype),
         b.to(out_dtype),
         offs,

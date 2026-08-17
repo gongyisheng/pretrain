@@ -3,7 +3,8 @@
 Sweeps tensorwise, rowwise, blockwise-1D, and blockwise-2D configurations
 across three representative transformer linear shapes (d_model=512,
 intermediate=1536) at two token counts M in {4096, 16384}. Triton and cuBLASLt
-run through `scaled_gemm(..., backend=...)`; native PyTorch is called directly.
+run through the per-format scaled GEMM op (backend=...); native PyTorch is called
+directly.
 Unsupported native PyTorch contracts print `n/a`. Accuracy is relative error
 against the eager backend for the same quantized operands. Prints a table and
 (unless --no-plot) writes a matplotlib grouped-bar chart.
@@ -24,10 +25,10 @@ import torch.nn.functional as F
 
 sys.path.insert(0, ".")
 
-from src.kernel.ops.gemm import scaled_gemm
-from src.kernel.selector import KernelSelectionError
+from src.kernel.selector import KernelSelectionError, dispatch
 from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 from src.quant.quantize import quantize_operand
+from src.quant.utils import scaled_mm_op
 
 E4M3 = torch.float8_e4m3fn
 E5M2 = torch.float8_e5m2
@@ -180,6 +181,13 @@ def _scaling_for_config(config):
     }
 
 
+def _scaled_gemm(fmt, aq, bq, sa, sb, out_dtype, block_size, scale_dtype, backend=None):
+    op = scaled_mm_op(fmt, fmt, scale_dtype, grouped=False)
+    return dispatch(
+        op, (aq, bq, sa, sb, out_dtype, block_size, None), {}, backend, device=aq.device
+    )
+
+
 def _pytorch_scaled_gemm(aq, bq, sa, sb, out_dtype, block_size, scale_dtype):
     if aq.dtype == torch.int8:
         width = block_size or aq.shape[1]
@@ -273,7 +281,8 @@ def _bench_scheme(a, b, config):
     bq, sb = quantize_operand(b, -2, fmt, scaling)
     scale_dtype = scaling["scale_dtype"]
 
-    ref = scaled_gemm(
+    ref = _scaled_gemm(
+        fmt,
         aq,
         bq,
         sa,
@@ -285,7 +294,8 @@ def _bench_scheme(a, b, config):
     )
 
     def triton_fn():
-        return scaled_gemm(
+        return _scaled_gemm(
+            fmt,
             aq,
             bq,
             sa,
@@ -318,7 +328,8 @@ def _bench_scheme(a, b, config):
         return result
 
     def cublaslt_fn():
-        return scaled_gemm(
+        return _scaled_gemm(
+            fmt,
             aq,
             bq,
             sa,

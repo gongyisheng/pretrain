@@ -52,7 +52,7 @@ def _fp8_capable():
 
 fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
 # mxfp8 is a scaling scheme (power-of-two blockwise), not Blackwell-only anymore;
-# it now runs through the generic scaled_gemm kernel like any other CUDA fp8/int path.
+# it now runs through the same per-format scaled GEMM ops as any other CUDA fp8/int path.
 mxfp8_only = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="mxfp8 needs CUDA"
 )
@@ -241,7 +241,7 @@ def test_gemm_applies_bias_on_the_fallback_path():
 
 @fp8_only
 def test_gemm_applies_bias_in_the_fused_kernel():
-    """fp8 x fp8 on CUDA takes scaled_gemm, so the bias rides its epilogue."""
+    """fp8 x fp8 on CUDA takes fp8_scaled_mm, so the bias rides its epilogue."""
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)

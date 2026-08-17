@@ -5,6 +5,7 @@ from src.utils.config import QuantizationConfig
 from src.quant.utils import (
     is_fp8,
     is_supported,
+    scaled_mm_op,
     should_quantize,
     resolve_quantization_config,
     str_to_dtype,
@@ -104,3 +105,34 @@ def test_resolve_quantization_config_first_match_wins():
 def test_resolve_quantization_config_skips_disabled():
     disabled = QuantizationConfig(enabled=False, include=["*"])
     assert resolve_quantization_config("blocks.0.mlp.down_proj", [disabled]) is None
+
+
+def test_int8_pair_resolves_to_the_int8_op():
+    assert scaled_mm_op("int8", "int8", torch.float32, False) == "gemm.int8_scaled_mm"
+
+
+def test_fp8_pair_with_fp32_scales_resolves_to_the_fp8_op():
+    assert scaled_mm_op("fp8_e4m3", "fp8_e4m3", torch.float32, False) == (
+        "gemm.fp8_scaled_mm"
+    )
+
+
+def test_fp8_pair_with_e8m0_scales_resolves_to_the_mxfp8_op():
+    assert (
+        scaled_mm_op("fp8_e4m3", "fp8_e4m3", torch.float8_e8m0fnu, False)
+        == "gemm.mxfp8_scaled_mm"
+    )
+
+
+def test_grouped_flag_selects_the_grouped_op():
+    assert scaled_mm_op("int8", "int8", torch.float32, True) == (
+        "gemm.int8_scaled_grouped_mm"
+    )
+
+
+def test_mixed_family_pair_has_no_op():
+    assert scaled_mm_op("int8", "fp8_e4m3", torch.float32, False) is None
+
+
+def test_unquantized_pair_has_no_op():
+    assert scaled_mm_op("bf16", "bf16", torch.float32, False) is None
