@@ -6,7 +6,6 @@ import sys
 import pytest
 import torch
 
-from src.kernel.backends import cublaslt as cublaslt_backend
 from src.kernel.ops import gemm as gemm_module
 from src.kernel.spec import CheckResult
 
@@ -78,7 +77,8 @@ _BACKEND_MODULES = (
 
 @pytest.fixture
 def available_cublaslt_extension(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cublaslt_backend, "_C", object(), raising=False)
+    monkeypatch.setattr(gemm_module, "_CUBLASLT_EXTENSION_AVAILABLE", True)
+    monkeypatch.setattr(gemm_module, "_CUBLASLT_EXTENSION_ERROR", None)
 
 
 @pytest.mark.parametrize("relative_path", _BACKEND_MODULES)
@@ -125,12 +125,13 @@ else:
     assert result.returncode == 0, result.stderr
 
 
-def test_importing_gemm_ops_does_not_load_cublaslt_extension():
+def test_importing_gemm_ops_preloads_cublaslt_extension_status():
     script = """
-import sys
-import src.kernel.ops.gemm
+from src.kernel.backends import cublaslt as cublaslt_backend
+from src.kernel.ops import gemm
 
-assert "src.kernel.backends.cublaslt._C" not in sys.modules
+assert gemm._CUBLASLT_EXTENSION_AVAILABLE == (cublaslt_backend._C is not None)
+assert gemm._CUBLASLT_EXTENSION_ERROR == cublaslt_backend._C_IMPORT_ERROR
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -572,8 +573,8 @@ def test_shared_scaled_gemm_rejects_invalid_ndim_before_backend_selection(
 def test_cublaslt_scaled_gemm_rejects_missing_extension(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.delattr(cublaslt_backend, "_C", raising=False)
-    monkeypatch.setitem(sys.modules, "src.kernel.backends.cublaslt._C", None)
+    monkeypatch.setattr(gemm_module, "_CUBLASLT_EXTENSION_AVAILABLE", False)
+    monkeypatch.setattr(gemm_module, "_CUBLASLT_EXTENSION_ERROR", "not installed")
 
     result = gemm_module.can_implement_scaled_gemm_cublaslt(
         _cublaslt_scaled_metadata(), {}
@@ -581,7 +582,7 @@ def test_cublaslt_scaled_gemm_rejects_missing_extension(
 
     assert not result.ok
     assert result.reason is not None
-    assert result.reason.startswith("cuBLASLt extension unavailable:")
+    assert result.reason == "cuBLASLt extension unavailable: not installed"
 
 
 def test_cublaslt_scaled_gemm_checks_contract_before_sm100(

@@ -4,7 +4,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-import src.kernel.backends.cublaslt  # noqa: F401
+import src.kernel.backends.cublaslt as cublaslt_backend
 import src.kernel.backends.eager  # noqa: F401
 import src.kernel.backends.torch  # noqa: F401
 import src.kernel.backends.triton  # noqa: F401
@@ -62,6 +62,8 @@ __all__ = [
 _FLOAT_DTYPES = FP32 | BF16 | FP16
 _QUANTIZED_DTYPES = INT8 | FP8_E4M3 | FP8_E5M2
 _OFFSET_DTYPES = INT32 | INT64
+_CUBLASLT_EXTENSION_AVAILABLE = cublaslt_backend._C is not None
+_CUBLASLT_EXTENSION_ERROR = cublaslt_backend._C_IMPORT_ERROR
 
 
 def _validate_grouped_gemm_shared_contract(
@@ -625,10 +627,10 @@ def can_implement_scaled_gemm_cublaslt(
     del kwargs
     aq, bq, sa, sb, out_dtype, block_size, scale_dtype, bias = args
     tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
-    try:
-        from src.kernel.backends.cublaslt import _C  # noqa: F401
-    except ImportError as error:
-        return CheckResult(False, f"cuBLASLt extension unavailable: {error}")
+    if not _CUBLASLT_EXTENSION_AVAILABLE:
+        return CheckResult(
+            False, f"cuBLASLt extension unavailable: {_CUBLASLT_EXTENSION_ERROR}"
+        )
     checks = (
         check_cuda_tensors(tensors, "MXFP8 GEMM"),
         check_dtypes((aq, bq), FP8_E4M3, "MXFP8 GEMM operands"),

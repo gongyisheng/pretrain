@@ -21,7 +21,7 @@ class KernelRegistry:
                 f"kernel already registered: op={spec.op!r}, backend={spec.backend!r}"
             )
         operation = self._operations.get(spec.op)
-        if operation is not None and spec.backend not in operation.can_implement:
+        if operation is not None and not operation.supports(spec.backend):
             raise ValueError(
                 f"kernel has no backend validator: "
                 f"op={spec.op!r}, backend={spec.backend!r}"
@@ -45,7 +45,7 @@ class KernelRegistry:
         missing = [
             spec.backend
             for spec in self.implementations(op)
-            if spec.backend not in operation.can_implement
+            if not operation.supports(spec.backend)
         ]
         if missing:
             backends = ", ".join(sorted(missing))
@@ -62,7 +62,7 @@ class KernelRegistry:
         operation = self.operation(op)
         if operation is None:
             return None
-        return operation.can_implement.get(backend)
+        return operation.validator(backend)
 
 
 KERNEL_REGISTRY = KernelRegistry()

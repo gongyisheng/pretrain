@@ -128,6 +128,17 @@ def test_selection_cache_bypasses_explicit_backend_selection():
     assert _selection_cache_calls == 2
 
 
+def test_selection_cache_bypasses_compilation():
+    tensor = torch.ones(2, 3)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+        select_kernel("test.selection_cache", (tensor,), {})
+        select_kernel("test.selection_cache", (tensor,), {})
+
+    assert _selection_cache_calls == 2
+
+
 def test_auto_cache_miss_runs_backend_check_once():
     calls = 0
 

@@ -27,7 +27,6 @@ def _value_cache_key(value: Any) -> tuple[Any, ...] | None:
             tuple(value.shape),
             tuple(value.stride()),
             value.dtype,
-            value.layout,
             value.device,
             value.requires_grad,
         )
@@ -113,7 +112,7 @@ def select_kernel(
                 f"operation {op!r} has no backend {backend!r}; registered: {registered}"
             )
         spec = matches[0]
-        can_implement = operation.can_implement.get(spec.backend)
+        can_implement = registry.can_implement(op, spec.backend)
         if can_implement is None:
             raise KernelSelectionError(
                 f"operation {op!r} backend {spec.backend!r} has no registered validator"
@@ -122,7 +121,7 @@ def select_kernel(
         return spec
 
     cache_key = None
-    if registry is KERNEL_REGISTRY:
+    if registry is KERNEL_REGISTRY and not torch.compiler.is_compiling():
         cache_key = _selection_cache_key(op, args, kwargs)
         if cache_key is not None:
             cached = _selection_cache.get(cache_key)
@@ -136,7 +135,7 @@ def select_kernel(
         key=lambda item: BACKEND_PRIORITIES[item.backend],
         reverse=True,
     ):
-        can_implement = operation.can_implement.get(spec.backend)
+        can_implement = registry.can_implement(op, spec.backend)
         if can_implement is None:
             raise KernelSelectionError(
                 f"operation {op!r} backend {spec.backend!r} has no registered validator"

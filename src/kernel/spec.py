@@ -1,5 +1,5 @@
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -45,6 +45,7 @@ class KernelSpec:
 @dataclass(frozen=True, slots=True)
 class OperationSpec:
     can_implement: Mapping[str, CanImplementFn]
+    _callbacks: dict[str, CanImplementFn] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         callbacks = dict(self.can_implement)
@@ -60,4 +61,11 @@ class OperationSpec:
                 raise TypeError(
                     f"backend can_implement must be callable: backend={backend!r}"
                 )
+        object.__setattr__(self, "_callbacks", callbacks)
         object.__setattr__(self, "can_implement", MappingProxyType(callbacks))
+
+    def supports(self, backend: str) -> bool:
+        return backend in self._callbacks
+
+    def validator(self, backend: str) -> CanImplementFn | None:
+        return self._callbacks.get(backend)
