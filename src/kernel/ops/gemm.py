@@ -48,6 +48,7 @@ __all__ = [
     "can_implement_scaled_gemm_triton",
     "can_implement_scaled_grouped_gemm_triton",
     "can_implement_scaled_gemm_cublaslt",
+    "can_implement_scaled_grouped_gemm_cublaslt",
 ]
 
 
@@ -478,6 +479,72 @@ def can_implement_scaled_gemm_cublaslt(
     return check_compute_capability_at_least(aq.device, (10, 0), "MXFP8 GEMM")
 
 
+def can_implement_scaled_grouped_gemm_cublaslt(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> CheckResult:
+    result = _validate_scaled_grouped_gemm_shared_contract(args, kwargs)
+    if not result.ok:
+        return result
+    del kwargs
+    aq, bq, sa, sb, offs, out_dtype, block_size, scale_dtype, bias = args
+    if not _CUBLASLT_EXTENSION_AVAILABLE:
+        return CheckResult(
+            False, f"cuBLASLt extension unavailable: {_CUBLASLT_EXTENSION_ERROR}"
+        )
+    tensors = (aq, bq, sa, sb, offs)
+    checks = (
+        check_condition(bias is None, "MXFP8 grouped GEMM does not support bias"),
+        check_cuda_tensors(tensors, "MXFP8 grouped GEMM"),
+        check_dtypes((aq, bq), FP8_E4M3, "MXFP8 grouped GEMM operands"),
+        check_values((block_size,), frozenset({32}), "MXFP8 grouped GEMM block_size"),
+        check_dtypes((scale_dtype,), FP8_E8M0, "MXFP8 grouped GEMM scale_dtype"),
+        check_dtypes((out_dtype,), BF16, "MXFP8 grouped GEMM output dtype"),
+        check_dtypes((offs,), INT32, "MXFP8 grouped GEMM offsets"),
+        check_ndim(aq, frozenset({2}), "MXFP8 grouped GEMM A"),
+        check_ndim(bq, frozenset({3}), "MXFP8 grouped GEMM B"),
+        check_ndim(sa, frozenset({2}), "MXFP8 grouped GEMM A scale"),
+        check_ndim(sb, frozenset({3}), "MXFP8 grouped GEMM B scale"),
+        check_contiguous(sa, "MXFP8 grouped GEMM A scale"),
+        check_contiguous(sb, "MXFP8 grouped GEMM B scale"),
+        check_contiguous(offs, "MXFP8 grouped GEMM offsets"),
+    )
+    result = first_failure(checks)
+    if not result.ok:
+        return result
+    blocks = (aq.shape[1] + 31) // 32
+    checks = (
+        check_shape(sa, (aq.shape[0], blocks), "MXFP8 grouped GEMM A scale"),
+        check_shape(
+            sb,
+            (bq.shape[0], blocks, bq.shape[2]),
+            "MXFP8 grouped GEMM B scale",
+        ),
+        check_matrix_layout(aq, 16, "MXFP8 grouped GEMM A"),
+        check_matrix_layout(bq, 16, "MXFP8 grouped GEMM B"),
+        check_stride(aq, ((aq.shape[1], 1),), "MXFP8 grouped GEMM A"),
+        check_stride(
+            bq,
+            (
+                (bq.shape[1] * bq.shape[2], bq.shape[2], 1),
+                (bq.shape[1] * bq.shape[2], 1, bq.shape[1]),
+            ),
+            "MXFP8 grouped GEMM B",
+        ),
+        check_dimension_size_multiple_of(
+            ((aq, -1), (bq, -1)), 16, "MXFP8 grouped GEMM dimensions"
+        ),
+    )
+    result = first_failure(checks)
+    if not result.ok:
+        return result
+    capability = torch.cuda.get_device_capability(aq.device)
+    return check_condition(
+        capability[0] == 10 or capability == (11, 0),
+        f"MXFP8 grouped GEMM runs on SM{capability[0]}{capability[1]} at "
+        f"{aq.device}; requires SM10x or SM110",
+    )
+
+
 register_operation(
     "gemm.grouped",
     {
@@ -498,6 +565,7 @@ register_operation(
     {
         "eager": can_implement_scaled_grouped_gemm_eager,
         "triton": can_implement_scaled_grouped_gemm_triton,
+        "cublaslt": can_implement_scaled_grouped_gemm_cublaslt,
     },
 )
 

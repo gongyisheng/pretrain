@@ -28,3 +28,32 @@ def scaled_gemm_mxfp8(
         to_swizzle_32_4_4(sb.t()),
         bias,
     )
+
+
+@register_kernel(
+    op="gemm.scaled_grouped",
+    backend="cublaslt",
+    build="aot",
+    autograd=False,
+)
+def scaled_grouped_gemm_mxfp8(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    offs: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    scale_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    del out_dtype, block_size, scale_dtype
+    if bias is not None:
+        raise ValueError("cuBLASLt MXFP8 grouped GEMM does not support bias")
+    return torch.ops.aot_kernel._scaled_grouped_gemm_mxfp8_cublaslt(
+        aq,
+        to_column_major(bq),
+        sa,
+        sb,
+        offs,
+    )

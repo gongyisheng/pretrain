@@ -59,4 +59,5 @@ cache-keys = [
     { file = "src/data/bpe/**/*.cpp" },
     { file = "src/data/bpe/**/*.h" },
     { file = "src/kernel/backends/cublaslt/csrc/**/*.cpp" },
+    { file = "src/kernel/backends/cublaslt/csrc/**/*.cu" },
 ]

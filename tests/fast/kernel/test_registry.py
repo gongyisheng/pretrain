@@ -89,10 +89,11 @@ def test_register_kernel_records_implementation_metadata():
         ),
         (
             "gemm.scaled_grouped",
-            {"eager", "triton"},
+            {"cublaslt", "eager", "triton"},
             {
                 "eager": _gemm.can_implement_scaled_grouped_gemm_eager,
                 "triton": _gemm.can_implement_scaled_grouped_gemm_triton,
+                "cublaslt": _gemm.can_implement_scaled_grouped_gemm_cublaslt,
             },
         ),
     ],

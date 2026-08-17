@@ -212,6 +212,7 @@ def test_eager_gemm_predicates_reject_wrong_argument_count(
         (gemm_module.can_implement_scaled_gemm_cublaslt, 8),
         (gemm_module.can_implement_scaled_grouped_gemm_eager, 9),
         (gemm_module.can_implement_scaled_grouped_gemm_triton, 9),
+        (gemm_module.can_implement_scaled_grouped_gemm_cublaslt, 9),
     ],
 )
 def test_all_gemm_backend_validators_reject_malformed_common_contracts(
@@ -316,6 +317,90 @@ def _scaled_grouped_metadata(device: str = "cuda:7"):
         torch.float32,
         None,
     )
+
+
+def _cublaslt_scaled_grouped_metadata(device: str = "cuda:7"):
+    return (
+        _TensorMeta((64, 64), torch.float8_e4m3fn, device),
+        _TensorMeta((2, 64, 48), torch.float8_e4m3fn, device),
+        _TensorMeta((64, 2), torch.float32, device),
+        _TensorMeta((2, 2, 48), torch.float32, device),
+        _TensorMeta((2,), torch.int32, device),
+        torch.bfloat16,
+        32,
+        torch.float8_e8m0fnu,
+        None,
+    )
+
+
+def test_cublaslt_scaled_grouped_gemm_accepts_ragged_m_sm100(
+    monkeypatch: pytest.MonkeyPatch,
+    available_cublaslt_extension: None,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (10, 0))
+
+    result = gemm_module.can_implement_scaled_grouped_gemm_cublaslt(
+        _cublaslt_scaled_grouped_metadata(), {}
+    )
+
+    assert result.ok, result.reason
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (
+            lambda args: args.__setitem__(
+                1, _TensorMeta((64, 48), torch.float8_e4m3fn)
+            ),
+            "requires rank in {3}",
+        ),
+        (
+            lambda args: args.__setitem__(4, _TensorMeta((2,), torch.int64)),
+            "offsets received dtype",
+        ),
+        (lambda args: args.__setitem__(6, 64), "block_size"),
+        (lambda args: args.__setitem__(5, torch.float16), "output dtype"),
+        (
+            lambda args: args.__setitem__(8, _TensorMeta((2, 48), torch.bfloat16)),
+            "does not support bias",
+        ),
+        (
+            lambda args: args.__setitem__(3, _TensorMeta((2, 1, 48), torch.float32)),
+            "B scale",
+        ),
+    ],
+)
+def test_cublaslt_scaled_grouped_gemm_rejects_unsupported_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+    available_cublaslt_extension: None,
+    mutation,
+    reason: str,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (10, 0))
+    args = list(_cublaslt_scaled_grouped_metadata())
+    mutation(args)
+
+    result = gemm_module.can_implement_scaled_grouped_gemm_cublaslt(tuple(args), {})
+
+    assert not result.ok
+    assert result.reason is not None
+    assert reason in result.reason
+
+
+def test_cublaslt_scaled_grouped_gemm_rejects_unverified_sm120(
+    monkeypatch: pytest.MonkeyPatch,
+    available_cublaslt_extension: None,
+):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (12, 0))
+
+    result = gemm_module.can_implement_scaled_grouped_gemm_cublaslt(
+        _cublaslt_scaled_grouped_metadata(), {}
+    )
+
+    assert not result.ok
+    assert result.reason is not None
+    assert "SM10x or SM110" in result.reason
 
 
 @pytest.mark.parametrize(

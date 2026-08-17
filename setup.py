@@ -30,6 +30,7 @@ if CUDA_HOME is not None:
             [
                 "src/kernel/backends/cublaslt/csrc/gemm.cpp",
                 "src/kernel/backends/cublaslt/csrc/cuda_build_sentinel.cu",
+                "src/kernel/backends/cublaslt/csrc/mxfp8_grouped.cu",
             ],
             libraries=["cublasLt"],
             extra_compile_args={"cxx": ["-O3"]},
