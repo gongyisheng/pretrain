@@ -5,7 +5,7 @@ import copy
 import torch
 import torch.nn as nn
 
-from src.kernel.ops.gemm import _MXFP8_DENSE_BACKEND_FOR_QUANT
+from src.kernel.ops.gemm import _MXFP8_DENSE_BACKEND
 from src.kernel.selector import dispatch
 from src.metrics.quant import record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
@@ -36,11 +36,9 @@ def quantized_gemm(
         record_operand(b_stats, b, bq, sb, -2, scaling_cfg)
 
     if op is not None and a.is_cuda and b.is_cuda:
-        # see _MXFP8_DENSE_BACKEND_FOR_QUANT's definition for why mxfp8 overrides
-        # the ops-layer pin here instead of trusting dispatch's default.
-        backend = (
-            _MXFP8_DENSE_BACKEND_FOR_QUANT if op == "gemm.mxfp8_scaled_mm" else None
-        )
+        # dispatch() has no capability-based default; only mxfp8_scaled_mm()'s own
+        # wrapper does. See _MXFP8_DENSE_BACKEND's definition for why it's Triton.
+        backend = _MXFP8_DENSE_BACKEND if op == "gemm.mxfp8_scaled_mm" else None
         return dispatch(
             op,
             (aq, bq, sa, sb, out_dtype, scaling_cfg["block_shape"][1], bias),
