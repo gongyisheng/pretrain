@@ -4,8 +4,7 @@ import copy
 
 import torch
 
-from src.kernel.ops.gemm import _MXFP8_GROUPED_BACKEND, grouped_mm
-from src.kernel.selector import dispatch
+from src.kernel.ops.gemm import SCALED_MM_OPS, grouped_mm
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
@@ -83,28 +82,16 @@ def quantized_grouped_gemm(
         )
 
     if op is not None and a.is_cuda:
-        # see _MXFP8_GROUPED_BACKEND's definition for why mxfp8 overrides the
-        # ops-layer default here instead of trusting dispatch's default.
-        backend = (
-            _MXFP8_GROUPED_BACKEND if op == "gemm.mxfp8_scaled_grouped_mm" else None
+        return SCALED_MM_OPS[op](
+            aq.mT if ragged_k else aq,
+            bq,
+            sa.mT if ragged_k else sa,
+            sb,
+            offs,
+            out_dtype,
+            block_size,
+            bias=bias,
         )
-        y = dispatch(
-            op,
-            (
-                aq.mT if ragged_k else aq,
-                bq,
-                sa.mT if ragged_k else sa,
-                sb,
-                offs,
-                out_dtype,
-                block_size,
-                bias,
-            ),
-            {},
-            backend,
-            device=a.device,
-        )
-        return y
 
     if aq is not None:
         src_a = dequantize_operand(

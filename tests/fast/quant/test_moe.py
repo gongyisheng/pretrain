@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from src.kernel.ops import gemm as gemm_module
 from src.quant import moe
 from src.quant.utils import is_supported
 from src.utils.config import QuantizationConfig
@@ -164,16 +165,19 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
     cfg = _cfg("fp8", scaling)
 
     wgrad_calls = []
-    real_dispatch = moe.dispatch
+    real_dispatch = gemm_module.dispatch
 
     def spy(op, args, kwargs, backend=None, *, device):
-        # one op serves every layout now; 2D x 2D is ragged-K, i.e. the wgrad
-        bq, block_size = args[1], args[6]
-        if bq.ndim == 2:
-            wgrad_calls.append(block_size)
+        # one op serves every layout now; 2D x 2D is ragged-K, i.e. the wgrad. Plain
+        # gemm.grouped_mm (the dequant fallback's bf16 reference path) shares this
+        # dispatch name but takes a shorter (a, b, offs, bias) args tuple -- skip it.
+        if op.endswith("scaled_grouped_mm"):
+            bq, block_size = args[1], args[6]
+            if bq.ndim == 2:
+                wgrad_calls.append(block_size)
         return real_dispatch(op, args, kwargs, backend, device=device)
 
-    monkeypatch.setattr(moe, "dispatch", spy)
+    monkeypatch.setattr(gemm_module, "dispatch", spy)
 
     a_q = a.clone().requires_grad_(True)
     b_q = b.clone().requires_grad_(True)
@@ -265,7 +269,7 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
     rowwise back to one block — and a scale row per expert to match."""
     a, b, offs = _make([8, 0, 24], K=64, N=48)
     seen = {}
-    real_dispatch = moe.dispatch
+    real_dispatch = gemm_module.dispatch
 
     def spy(op, args, kwargs, backend=None, *, device):
         gq, sa, block_size = args[1], args[2], args[6]
@@ -275,7 +279,7 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
             seen["n_scale_rows"] = sa.shape[-1]
         return real_dispatch(op, args, kwargs, backend, device=device)
 
-    monkeypatch.setattr(moe, "dispatch", spy)
+    monkeypatch.setattr(gemm_module, "dispatch", spy)
     a_q = a.clone().requires_grad_(True)
     moe.scaled_grouped_gemm_fn(_cfg("fp8", "rowwise"))(
         a_q, b.clone(), offs
