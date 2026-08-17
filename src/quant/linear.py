@@ -5,6 +5,7 @@ import copy
 import torch
 import torch.nn as nn
 
+from src.kernel.ops.gemm import _MXFP8_DENSE_BACKEND_FOR_QUANT
 from src.kernel.selector import dispatch
 from src.metrics.quant import record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
@@ -35,10 +36,11 @@ def quantized_gemm(
         record_operand(b_stats, b, bq, sb, -2, scaling_cfg)
 
     if op is not None and a.is_cuda and b.is_cuda:
-        # cuBLASLt's mxfp8 kernel demands block_size=32 and 16-byte-aligned strides;
-        # quantized_gemm must support every block_size and arbitrary shapes (e.g. the
-        # transposed, unaligned-token wgrad), so it always asks Triton for mxfp8.
-        backend = "triton" if op == "gemm.mxfp8_scaled_mm" else None
+        # see _MXFP8_DENSE_BACKEND_FOR_QUANT's definition for why mxfp8 overrides
+        # the ops-layer pin here instead of trusting dispatch's default.
+        backend = (
+            _MXFP8_DENSE_BACKEND_FOR_QUANT if op == "gemm.mxfp8_scaled_mm" else None
+        )
         return dispatch(
             op,
             (aq, bq, sa, sb, out_dtype, scaling_cfg["block_shape"][1], bias),

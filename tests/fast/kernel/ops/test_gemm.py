@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from src.kernel.ops import gemm as gemm_module
+from src.kernel.registry import KernelRegistry
+from src.kernel.spec import KernelSpec
 
 
 def test_public_gemm_import_surface():
@@ -205,6 +207,36 @@ def test_mxfp8_scaled_mm_explicit_backend_overrides_the_pinned_default(
     gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32, backend="triton")
 
     assert seen["backend"] == "triton"
+
+
+def _fake_spec(op, backend):
+    return KernelSpec(
+        op=op, backend=backend, fn=lambda *a, **k: None, build="jit", autograd=False
+    )
+
+
+def test_resolve_mxfp8_dense_backend_picks_cublaslt_when_registered():
+    registry = KernelRegistry()
+    registry.register(_fake_spec("gemm.mxfp8_scaled_mm", "triton"))
+    registry.register(_fake_spec("gemm.mxfp8_scaled_mm", "cublaslt"))
+
+    assert gemm_module._resolve_mxfp8_dense_backend(registry) == "cublaslt"
+
+
+def test_resolve_mxfp8_dense_backend_falls_back_to_triton_without_the_aot_extension():
+    # Simulates a build where the cuBLASLt AOT extension never registered its spec
+    # (e.g. not built) -- pinning "cublaslt" anyway would make every
+    # mxfp8_scaled_mm() call raise KernelSelectionError.
+    registry = KernelRegistry()
+    registry.register(_fake_spec("gemm.mxfp8_scaled_mm", "triton"))
+
+    assert gemm_module._resolve_mxfp8_dense_backend(registry) == "triton"
+
+
+def test_resolve_mxfp8_dense_backend_falls_back_to_triton_when_unregistered():
+    registry = KernelRegistry()
+
+    assert gemm_module._resolve_mxfp8_dense_backend(registry) == "triton"
 
 
 @pytest.mark.parametrize(

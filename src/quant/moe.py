@@ -4,7 +4,7 @@ import copy
 
 import torch
 
-from src.kernel.ops.gemm import grouped_mm
+from src.kernel.ops.gemm import _MXFP8_GROUPED_BACKEND, grouped_mm
 from src.kernel.selector import dispatch
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import record_operand
@@ -83,9 +83,11 @@ def quantized_grouped_gemm(
         )
 
     if op is not None and a.is_cuda:
-        # cuBLASLt's mxfp8 kernel demands block_size=32 and 16-byte-aligned strides;
-        # ragged expert groups can't guarantee either, so mxfp8 always asks Triton.
-        backend = "triton" if op == "gemm.mxfp8_scaled_grouped_mm" else None
+        # see _MXFP8_GROUPED_BACKEND's definition for why mxfp8 overrides the
+        # ops-layer default here instead of trusting dispatch's default.
+        backend = (
+            _MXFP8_GROUPED_BACKEND if op == "gemm.mxfp8_scaled_grouped_mm" else None
+        )
         y = dispatch(
             op,
             (
