@@ -40,6 +40,13 @@ def _check_block_size(block_size: int, feature: str) -> None:
         raise ValueError(f"{feature} requires block_size=32, got {block_size}")
 
 
+def _check_out_dtype(out_dtype: torch.dtype, feature: str) -> None:
+    """The kernel always returns bf16; unlike Triton it does not cast, so any other
+    request is silently wrong rather than rejected."""
+    if out_dtype is not torch.bfloat16:
+        raise ValueError(f"{feature} requires out_dtype=bfloat16, got {out_dtype}")
+
+
 @register_kernel(
     op="gemm.mxfp8_scaled_mm",
     backend="cublaslt",
@@ -56,6 +63,7 @@ def scaled_gemm_mxfp8(
     block_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    _check_out_dtype(out_dtype, "MXFP8 GEMM")
     del out_dtype
     _check_block_size(block_size, "MXFP8 GEMM")
     del block_size
@@ -89,6 +97,7 @@ def scaled_grouped_gemm_mxfp8(
     block_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    _check_out_dtype(out_dtype, "MXFP8 grouped GEMM")
     del out_dtype
     _check_block_size(block_size, "MXFP8 grouped GEMM")
     del block_size

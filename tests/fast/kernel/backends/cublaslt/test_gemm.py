@@ -149,6 +149,29 @@ def test_cublaslt_adapter_has_meta_implementation():
     assert out.device.type == "meta"
 
 
+def test_cublaslt_rejects_non_bf16_out_dtype():
+    a = torch.empty((129, 144), device="meta", dtype=torch.float8_e4m3fn)
+    b = torch.empty((144, 160), device="meta", dtype=torch.float8_e4m3fn)
+    scale_a = torch.empty((129, 5), device="meta")
+    scale_b = torch.empty((5, 160), device="meta")
+
+    with pytest.raises(ValueError, match="requires out_dtype=bfloat16"):
+        cublaslt_gemm.scaled_gemm_mxfp8(a, b, scale_a, scale_b, torch.float32, 32)
+
+
+def test_cublaslt_grouped_rejects_non_bf16_out_dtype():
+    aq = torch.empty((299, 144), device="meta", dtype=torch.float8_e4m3fn)
+    bq = torch.empty((4, 144, 160), device="meta", dtype=torch.float8_e4m3fn)
+    scale_a = torch.empty((299, 5), device="meta")
+    scale_b = torch.empty((4, 5, 160), device="meta")
+    offsets = torch.empty((4,), device="meta", dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="requires out_dtype=bfloat16"):
+        cublaslt_gemm.scaled_grouped_gemm_mxfp8(
+            aq, bq, scale_a, scale_b, offsets, torch.float32, 32
+        )
+
+
 def test_cublaslt_grouped_adapter_has_meta_implementation():
     aq = torch.empty((299, 144), device="meta", dtype=torch.float8_e4m3fn)
     bq = torch.empty((4, 144, 160), device="meta", dtype=torch.float8_e4m3fn)
