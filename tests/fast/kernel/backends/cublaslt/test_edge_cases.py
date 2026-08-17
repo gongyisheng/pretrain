@@ -8,7 +8,7 @@ import setuptools
 import torch
 
 from benchmarks.gemm.bench_scaled_gemm import _require_mxfp8_precision
-from src.kernel.ops.gemm import scaled_gemm
+from src.kernel.ops.gemm import scaled_gemm, scaled_grouped_gemm
 from src.kernel.selector import select_kernel
 
 
@@ -66,6 +66,68 @@ def test_forced_backend_rejects_unsafe_operand_view(case: str, reason: str):
 
     with pytest.raises(ValueError, match=reason):
         scaled_gemm(*args, backend="cublaslt")
+
+
+def _valid_dense_operands(
+    block_size: int, scale_dtype: torch.dtype
+) -> tuple[object, ...]:
+    m, k, n = 16, 32, 16
+    a = _fp8_values(m * k).view(m, k)
+    b = _fp8_values(k * n).view(k, n)
+    scale_a = torch.ones((m, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, n), device="cuda", dtype=torch.float32)
+    return a, b, scale_a, scale_b, torch.bfloat16, block_size, scale_dtype, None
+
+
+def _valid_grouped_operands(
+    block_size: int, scale_dtype: torch.dtype
+) -> tuple[object, ...]:
+    m, k, n = 16, 32, 16
+    a = _fp8_values(m * k).view(m, k)
+    b = _fp8_values(k * n).view(1, k, n)
+    scale_a = torch.ones((m, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1, n), device="cuda", dtype=torch.float32)
+    offs = torch.tensor([m], device="cuda", dtype=torch.int32)
+    return a, b, scale_a, scale_b, offs, torch.bfloat16, block_size, scale_dtype, None
+
+
+@cuda_mxfp8_only
+@pytest.mark.parametrize(
+    ("block_size", "scale_dtype", "reason"),
+    [
+        (64, torch.float8_e8m0fnu, "requires block_size=32"),
+        (32, torch.float32, "requires scale_dtype"),
+    ],
+)
+def test_forced_backend_rejects_bad_scale_config(
+    block_size: int, scale_dtype: torch.dtype, reason: str
+):
+    """cuBLASLt reads scales as bare 32-wide e8m0 blocks -- unlike Triton it does
+    not replicate a wider scale across blocks, so block_size/scale_dtype must be
+    checked explicitly rather than left to silently miscompute."""
+    _require_mxfp8_device()
+    args = _valid_dense_operands(block_size, scale_dtype)
+
+    with pytest.raises(ValueError, match=reason):
+        scaled_gemm(*args, backend="cublaslt")
+
+
+@cuda_mxfp8_only
+@pytest.mark.parametrize(
+    ("block_size", "scale_dtype", "reason"),
+    [
+        (64, torch.float8_e8m0fnu, "requires block_size=32"),
+        (32, torch.float32, "requires scale_dtype"),
+    ],
+)
+def test_forced_backend_rejects_bad_grouped_scale_config(
+    block_size: int, scale_dtype: torch.dtype, reason: str
+):
+    _require_mxfp8_device()
+    args = _valid_grouped_operands(block_size, scale_dtype)
+
+    with pytest.raises(ValueError, match=reason):
+        scaled_grouped_gemm(*args, backend="cublaslt")
 
 
 @cuda_mxfp8_only

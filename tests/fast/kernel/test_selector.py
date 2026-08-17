@@ -1,8 +1,8 @@
 import pytest
 import torch
 
-from src.kernel.registry import KernelRegistry
-from src.kernel.selector import KernelSelectionError, select_kernel
+from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry
+from src.kernel.selector import KernelSelectionError, dispatch, select_kernel
 from src.kernel.spec import CPU, KernelSpec, PlatformInfo, cuda
 
 SM89 = PlatformInfo("cuda", (8, 9))
@@ -138,6 +138,71 @@ def test_resolve_caches_the_callable_per_op_and_backend():
 
     assert first is second
     assert (info.hits, info.misses) == (1, 1)
+
+
+def test_dispatch_forwards_device_and_returns_the_kernel_result():
+    KERNEL_REGISTRY.register(
+        _spec("test.dispatch_forward", "eager", frozenset({CPU}), fn=lambda x, y: x + y)
+    )
+
+    from src.kernel import selector
+
+    selector.clear_cache()
+    try:
+        result = dispatch(
+            "test.dispatch_forward", (2, 3), {}, device=torch.device("cpu")
+        )
+    finally:
+        selector.clear_cache()
+
+    assert result == 5
+
+
+def test_dispatch_repeat_call_with_same_op_backend_device_is_a_cache_hit():
+    KERNEL_REGISTRY.register(
+        _spec("test.dispatch_cache", "eager", frozenset({CPU}), fn=lambda: "ran")
+    )
+
+    from src.kernel import selector
+
+    selector.clear_cache()
+    try:
+        dispatch("test.dispatch_cache", (), {}, device=torch.device("cpu"))
+        dispatch("test.dispatch_cache", (), {}, device=torch.device("cpu"))
+        info = selector._resolve.cache_info()
+    finally:
+        selector.clear_cache()
+
+    assert (info.hits, info.misses) == (1, 1)
+
+
+def test_dispatch_resolves_different_kernels_for_different_device_types(monkeypatch):
+    KERNEL_REGISTRY.register(
+        _spec("test.dispatch_split", "eager", frozenset({CPU}), fn=lambda: "eager")
+    )
+    KERNEL_REGISTRY.register(
+        _spec(
+            "test.dispatch_split",
+            "triton",
+            frozenset({cuda((8, 0))}),
+            fn=lambda: "triton",
+        )
+    )
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=None: (8, 9))
+
+    from src.kernel import selector
+
+    selector.clear_cache()
+    try:
+        cpu_result = dispatch("test.dispatch_split", (), {}, device=torch.device("cpu"))
+        cuda_result = dispatch(
+            "test.dispatch_split", (), {}, device=torch.device("cuda", 0)
+        )
+    finally:
+        selector.clear_cache()
+
+    assert cpu_result == "eager"
+    assert cuda_result == "triton"
 
 
 def test_cpu_device_call_resolves_to_eager_even_when_cuda_is_visible():

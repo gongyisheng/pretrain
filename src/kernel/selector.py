@@ -77,6 +77,7 @@ def dispatch(
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
     backend: str | None = None,
-    device: torch.device | None = None,
+    *,
+    device: torch.device,
 ) -> Any:
     return _resolve(op, backend, device.type, device.index)(*args, **kwargs)

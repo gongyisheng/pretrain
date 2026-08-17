@@ -90,5 +90,10 @@ def test_unknown_backend_is_rejected():
         KernelSpec(op="test.op", backend="cutlass", fn=_fn, build="jit", autograd=False)
 
 
+def test_non_bool_autograd_is_rejected():
+    with pytest.raises(TypeError, match="autograd must be bool, got int"):
+        KernelSpec(op="test.op", backend="triton", fn=_fn, build="jit", autograd=1)
+
+
 def test_backends_set_is_exactly_the_three_supported_names():
     assert BACKENDS == frozenset({"eager", "triton", "cublaslt"})
