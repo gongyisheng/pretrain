@@ -36,30 +36,47 @@ def _eligible(op, device):
     ]
 
 
+def _pow2_scale(shape, device):
+    # Power-of-two scales, unlike torch.ones, actually exercise the swizzle
+    # permutation, transposes and block indexing: a wrong one still multiplies out
+    # to the right answer when every scale is 1.0.
+    return 2.0 ** torch.randint(-2, 3, shape, device=device, dtype=torch.float32)
+
+
 def _scaled_inputs(op, device, grouped):
     dtype = _operand_dtype(op)
     block_size = _block_size(op)
     blocks = -(-K // block_size) if block_size else 1
     aq = torch.randint(-8, 8, (M, K), device=device).to(dtype)
     bq = torch.randint(-8, 8, (E, K, N) if grouped else (K, N), device=device).to(dtype)
-    sa = torch.ones(M, blocks, device=device)
-    sb = torch.ones(*((E, blocks, N) if grouped else (blocks, N)), device=device)
+    sa = _pow2_scale((M, blocks), device)
+    sb = _pow2_scale((E, blocks, N) if grouped else (blocks, N), device)
     args = [aq, bq, sa, sb]
     if grouped:
         args.append(torch.arange(1, E + 1, device=device, dtype=torch.int32) * (M // E))
     return tuple(args) + (torch.bfloat16, block_size, None)
 
 
-@pytest.mark.parametrize("op", SCALED_OPS + GROUPED_SCALED_OPS)
-def test_every_eligible_backend_matches_eager(op):
-    # cuda when present, cpu otherwise: every optimized spec requires cuda
-    # capabilities, so a CPU-only platform is simply never eligible and this
-    # skips below rather than erroring on an unavailable device.
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    specs = _eligible(op, device)
+def _ragged_k_scaled_inputs(op, device):
+    # 2D x 2D: the contraction itself is ragged (the wgrad layout), the third of
+    # the three grouped scale layouts and, until now, untested by this harness.
+    dtype = _operand_dtype(op)
+    block_size = _block_size(op)
+    group_k = K // E
+    blocks_per_group = -(-group_k // block_size) if block_size else 1
+    total_blocks = blocks_per_group * E
+    aq = torch.randint(-8, 8, (M, K), device=device).to(dtype)
+    bq = torch.randint(-8, 8, (K, N), device=device).to(dtype)
+    sa = _pow2_scale((M, total_blocks), device)
+    sb = _pow2_scale((total_blocks, N), device)
+    offs = torch.arange(1, E + 1, device=device, dtype=torch.int32) * group_k
+    return aq, bq, sa, sb, offs, torch.bfloat16, block_size, None
+
+
+def _assert_all_eligible_match_eager(op, args):
+    specs = _eligible(op, args[0].device)
     if not specs:
         pytest.skip(f"{op} has no eligible non-eager backend on this platform")
-    args = _scaled_inputs(op, device, op in GROUPED_SCALED_OPS)
     eager = {s.backend: s for s in KERNEL_REGISTRY.implementations(op)}["eager"]
     reference = eager.fn(*args)
 
@@ -72,6 +89,23 @@ def test_every_eligible_backend_matches_eager(op):
             atol=2e-2,
             msg=lambda m, b=spec.backend: f"{op} backend {b} diverges from eager:\n{m}",
         )
+
+
+@pytest.mark.parametrize("op", SCALED_OPS + GROUPED_SCALED_OPS)
+def test_every_eligible_backend_matches_eager(op):
+    # cuda when present, cpu otherwise: every optimized spec requires cuda
+    # capabilities, so a CPU-only platform is simply never eligible and this
+    # skips below rather than erroring on an unavailable device.
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args = _scaled_inputs(op, device, op in GROUPED_SCALED_OPS)
+    _assert_all_eligible_match_eager(op, args)
+
+
+@pytest.mark.parametrize("op", GROUPED_SCALED_OPS)
+def test_every_eligible_backend_matches_eager_ragged_k(op):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args = _ragged_k_scaled_inputs(op, device)
+    _assert_all_eligible_match_eager(op, args)
 
 
 def test_cublaslt_is_absent_from_the_registry_when_the_extension_is_missing():
