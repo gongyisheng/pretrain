@@ -11,20 +11,74 @@ def _check_offs(offs: torch.Tensor) -> None:
         raise ValueError("offs must be contiguous")
 
 
-def _check_scaled(
+def _check_contraction(a: torch.Tensor, b: torch.Tensor) -> None:
+    if a.shape[-1] != b.shape[-2]:
+        raise ValueError(f"contraction mismatch: a {a.shape[-1]}, b {b.shape[-2]}")
+
+
+def _check_scaled_dense(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
     sb: torch.Tensor,
     block_size: int,
 ) -> None:
-    if not (sa.is_contiguous() and sb.is_contiguous()):
-        raise ValueError("scales must be contiguous")
+    _check_contraction(aq, bq)
     blocks = -(-aq.shape[-1] // block_size) if block_size else 1
-    if sa.shape[-1] != blocks or sb.shape[-2] != blocks:
-        raise ValueError(f"scale block count {sa.shape[-1]}/{sb.shape[-2]} != {blocks}")
-    if aq.shape[-1] != bq.shape[-2]:
-        raise ValueError(f"contraction mismatch: aq {aq.shape[-1]}, bq {bq.shape[-2]}")
+    if sa.shape[-1] != blocks:
+        raise ValueError(f"sa block count {sa.shape[-1]} != {blocks}")
+    if sb.shape[-2] != blocks:
+        raise ValueError(f"sb block count {sb.shape[-2]} != {blocks}")
+
+
+def _check_scaled_grouped(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    offs: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Mirrors `_grouped_scales_are_valid` (triton/gemm.py) -- the scale-block axis
+    depends on which operand rank carries the ragged dim, not just on block_size.
+    """
+    _check_contraction(aq, bq)
+    if aq.ndim == 2 and bq.ndim == 3:  # ragged-M: A's row axis, dense contraction
+        blocks = -(-aq.shape[-1] // block_size) if block_size else 1
+        expected_sa, expected_sb = (
+            (aq.shape[0], blocks),
+            (bq.shape[0], blocks, bq.shape[2]),
+        )
+    elif aq.ndim == 3 and bq.ndim == 2:  # ragged-N: B's column axis
+        blocks = -(-aq.shape[-1] // block_size) if block_size else 1
+        expected_sa, expected_sb = (
+            (aq.shape[0], aq.shape[1], blocks),
+            (blocks, bq.shape[1]),
+        )
+    else:  # ragged-K: the contraction itself, e.g. the wgrad -- block count is
+        # per-group (Σ_g cdiv(k_g, block_size)) and unknowable without a host sync
+        # on offs, so sa/sb are only checked for mutual consistency.
+        if sa.shape[0] != aq.shape[0]:
+            raise ValueError(f"sa rows {sa.shape[0]} != aq rows {aq.shape[0]}")
+        if sb.shape[-1] != bq.shape[-1]:
+            raise ValueError(f"sb cols {sb.shape[-1]} != bq cols {bq.shape[-1]}")
+        if sa.shape[-1] != sb.shape[0]:
+            raise ValueError(
+                f"sa block count {sa.shape[-1]} != sb block count {sb.shape[0]}"
+            )
+        if block_size == 0 and sa.shape[-1] != offs.numel():
+            raise ValueError(
+                f"sa block count {sa.shape[-1]} != offs groups {offs.numel()}"
+            )
+        return
+    if sa.shape != expected_sa:
+        raise ValueError(
+            f"sa block count {sa.shape[-1]} shape {tuple(sa.shape)} != {expected_sa}"
+        )
+    if sb.shape != expected_sb:
+        raise ValueError(
+            f"sb block count {sb.shape[-2]} shape {tuple(sb.shape)} != {expected_sb}"
+        )
 
 
 __all__ = [
@@ -35,6 +89,7 @@ __all__ = [
     "int8_scaled_grouped_mm",
     "fp8_scaled_grouped_mm",
     "mxfp8_scaled_grouped_mm",
+    "SCALED_MM_OPS",
 ]
 
 # cuBLASLt measured ~5% faster than Triton for gemm.mxfp8_scaled_mm on this hardware
@@ -61,6 +116,7 @@ _MXFP8_GROUPED_BACKEND = "triton"
 
 def grouped_mm(a, b, offs, bias=None, backend=None):
     _check_offs(offs)
+    _check_contraction(a, b)
     # Triton's grouped kernel is bf16-only; every other dtype takes the reference.
     if backend is None and a.dtype is not torch.bfloat16:
         backend = "eager"
@@ -68,7 +124,7 @@ def grouped_mm(a, b, offs, bias=None, backend=None):
 
 
 def int8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
-    _check_scaled(aq, bq, sa, sb, block_size)
+    _check_scaled_dense(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.int8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
@@ -79,7 +135,7 @@ def int8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=Non
 
 
 def fp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
-    _check_scaled(aq, bq, sa, sb, block_size)
+    _check_scaled_dense(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.fp8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
@@ -90,7 +146,7 @@ def fp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None
 
 
 def mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
-    _check_scaled(aq, bq, sa, sb, block_size)
+    _check_scaled_dense(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.mxfp8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
@@ -104,7 +160,7 @@ def int8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
     _check_offs(offs)
-    _check_scaled(aq, bq, sa, sb, block_size)
+    _check_scaled_grouped(aq, bq, sa, sb, offs, block_size)
     return dispatch(
         "gemm.int8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
@@ -118,7 +174,7 @@ def fp8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
     _check_offs(offs)
-    _check_scaled(aq, bq, sa, sb, block_size)
+    _check_scaled_grouped(aq, bq, sa, sb, offs, block_size)
     return dispatch(
         "gemm.fp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
@@ -132,11 +188,21 @@ def mxfp8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
     _check_offs(offs)
-    _check_scaled(aq, bq, sa, sb, block_size)
+    _check_scaled_grouped(aq, bq, sa, sb, offs, block_size)
     return dispatch(
         "gemm.mxfp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
         {},
-        backend,
+        backend or _MXFP8_GROUPED_BACKEND,
         device=aq.device,
     )
+
+
+SCALED_MM_OPS = {
+    "gemm.int8_scaled_mm": int8_scaled_mm,
+    "gemm.fp8_scaled_mm": fp8_scaled_mm,
+    "gemm.mxfp8_scaled_mm": mxfp8_scaled_mm,
+    "gemm.int8_scaled_grouped_mm": int8_scaled_grouped_mm,
+    "gemm.fp8_scaled_grouped_mm": fp8_scaled_grouped_mm,
+    "gemm.mxfp8_scaled_grouped_mm": mxfp8_scaled_grouped_mm,
+}

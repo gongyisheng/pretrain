@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from src.kernel.ops import gemm as gemm_module
+from src.kernel.selector import select_kernel
+from src.kernel.spec import PlatformInfo
 
 
 def test_public_gemm_import_surface():
@@ -78,6 +80,39 @@ def test_public_gemm_signatures(function, parameters):
         (parameter.name, parameter.default)
         for parameter in signature.parameters.values()
     ] == parameters
+
+
+_ALL_OPS = (
+    "gemm.grouped_mm",
+    "gemm.int8_scaled_mm",
+    "gemm.fp8_scaled_mm",
+    "gemm.mxfp8_scaled_mm",
+    "gemm.int8_scaled_grouped_mm",
+    "gemm.fp8_scaled_grouped_mm",
+    "gemm.mxfp8_scaled_grouped_mm",
+)
+
+_WRAPPER_DEFAULT_BACKEND = {
+    "gemm.mxfp8_scaled_mm": gemm_module._MXFP8_DENSE_BACKEND,
+    "gemm.mxfp8_scaled_grouped_mm": gemm_module._MXFP8_GROUPED_BACKEND,
+}
+
+
+@pytest.mark.parametrize("arch", [(8, 0), (8, 9), (10, 0), (11, 0), (12, 0)])
+@pytest.mark.parametrize("op", _ALL_OPS)
+def test_every_op_resolves_without_ambiguity_on_cuda(op, arch):
+    """Each wrapper must resolve to exactly one backend on every arch, using the
+    registry directly (no GPU needed): its own pinned default for mxfp8, or the
+    sole eligible optimized backend otherwise. A raise here means a wrapper forgot
+    to apply its default -- the gap that let mxfp8_scaled_grouped_mm raise
+    KernelSelectionError on SM100/SM110 (both triton and cublaslt eligible)
+    undetected, since existing tests always passed backend="triton" explicitly.
+    """
+    platform = PlatformInfo("cuda", arch)
+    spec = select_kernel(
+        op, backend=_WRAPPER_DEFAULT_BACKEND.get(op), platform=platform
+    )
+    assert spec.op == op
 
 
 def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPatch):
@@ -203,6 +238,50 @@ def test_mxfp8_scaled_mm_explicit_backend_overrides_the_pinned_default(
     sb = torch.empty(1, 3)
 
     gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32, backend="triton")
+
+    assert seen["backend"] == "triton"
+
+
+def test_mxfp8_scaled_grouped_mm_defaults_to_the_pinned_grouped_backend(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seen = {}
+
+    def fake_dispatch(op, args, kwargs, backend=None, device=None):
+        seen.update(backend=backend)
+        return None
+
+    monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
+    aq = torch.empty(2, 4, dtype=torch.float8_e4m3fn)
+    bq = torch.empty(1, 4, 3, dtype=torch.float8_e4m3fn)
+    sa = torch.empty(2, 1)
+    sb = torch.empty(1, 1, 3)
+    offs = torch.tensor([2], dtype=torch.int32)
+
+    gemm_module.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.bfloat16, 32)
+
+    assert seen["backend"] == gemm_module._MXFP8_GROUPED_BACKEND
+
+
+def test_mxfp8_scaled_grouped_mm_explicit_backend_overrides_the_pinned_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seen = {}
+
+    def fake_dispatch(op, args, kwargs, backend=None, device=None):
+        seen.update(backend=backend)
+        return None
+
+    monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
+    aq = torch.empty(2, 4, dtype=torch.float8_e4m3fn)
+    bq = torch.empty(1, 4, 3, dtype=torch.float8_e4m3fn)
+    sa = torch.empty(2, 1)
+    sb = torch.empty(1, 1, 3)
+    offs = torch.tensor([2], dtype=torch.int32)
+
+    gemm_module.mxfp8_scaled_grouped_mm(
+        aq, bq, sa, sb, offs, torch.bfloat16, 32, backend="triton"
+    )
 
     assert seen["backend"] == "triton"
 
