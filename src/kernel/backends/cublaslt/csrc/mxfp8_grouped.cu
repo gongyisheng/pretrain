@@ -225,8 +225,8 @@ Mxfp8GroupedMetadata build_mxfp8_grouped_metadata(
       at::empty({group_count}, int_options),
       at::empty({group_count * padded_n * padded_blocks}, byte_options),
       at::empty({(m_total + (kScaleRows - 1) * group_count) * padded_blocks}, byte_options),
-      at::zeros({k}, aq.options()),
-      at::zeros({n}, out.options()),
+      at::zeros({k}, byte_options),
+      at::zeros({n}, byte_options),
       at::empty({kScaleRows * padded_blocks}, byte_options),
   };
 
