@@ -82,11 +82,6 @@ SCALING_CASES = (
     ),
 )
 
-SCALE_DTYPES = ("fp32", "fp8_e8m0")
-SCALE_DTYPE_VALUES = {
-    "fp32": torch.float32,
-    "fp8_e8m0": torch.float8_e8m0fnu,
-}
 BIAS_CASES = (False, True)
 
 
@@ -133,7 +128,7 @@ def make_scaled_gemm_inputs(
     workload: DenseWorkload,
     format_pair: FormatPair,
     scaling_case: ScalingCase,
-    scale_dtype: str,
+    mx_scales: bool,
     with_bias: bool,
     batch_size: int = BATCH_SIZE,
     device: str = "cuda",
@@ -145,7 +140,6 @@ def make_scaled_gemm_inputs(
     torch.Tensor,
     torch.dtype,
     int,
-    torch.dtype,
     torch.Tensor | None,
 ]:
     from src.quant.quantize import quantize_operand
@@ -157,7 +151,7 @@ def make_scaled_gemm_inputs(
     scaling = {
         "granularity": scaling_case.granularity,
         "block_shape": scaling_case.block_shape,
-        "scale_dtype": SCALE_DTYPE_VALUES[scale_dtype],
+        "scale_dtype": torch.float8_e8m0fnu if mx_scales else torch.float32,
     }
     aq, sa = quantize_operand(a, -1, format_pair.a_format, scaling)
     bq, sb = quantize_operand(b, -2, format_pair.b_format, scaling)
@@ -173,6 +167,5 @@ def make_scaled_gemm_inputs(
         sb,
         torch.bfloat16,
         scaling_case.block_size,
-        SCALE_DTYPE_VALUES[scale_dtype],
         bias,
     )
