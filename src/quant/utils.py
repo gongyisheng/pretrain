@@ -6,7 +6,6 @@ from typing import Optional
 import torch
 
 from src.quant.constants import (
-    QUANT_FORMATS,
     _FP8_FORMATS,
     _INT8_FORMATS,
     _STR_TO_DTYPE,
@@ -35,39 +34,6 @@ def is_quantized(fmt: str) -> bool:
     return is_fp8(fmt) or is_int8s(fmt)
 
 
-def is_supported(fmt: str) -> bool:
-    if fmt not in QUANT_FORMATS:
-        raise ValueError(
-            f"not an element format: {fmt!r}; expected one of {sorted(QUANT_FORMATS)}"
-        )
-    if is_fp8(fmt):
-        return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
-            8,
-            9,
-        )
-    return True
-
-
-def unsupported_error(fmt: str) -> str:
-    requirement = {
-        "fp8": "a CUDA GPU with compute capability >= 8.9 (Ada/Hopper/Blackwell)",
-        # TODO: "fp4": "a CUDA GPU with compute capability >= 10.0 (Blackwell)",
-    }.get(fmt.split("_", 1)[0], "supported hardware")
-    return (
-        f"quant dtype {fmt!r} requires {requirement}. "
-        "Disable quant or run on supported hardware."
-    )
-
-
-def check_hardware_support(quantization_configs: list[QuantizationConfig]) -> None:
-    for quantization_config in quantization_configs:
-        if not quantization_config.enabled:
-            continue
-        for fmt in quantization_config.dtype.values():
-            if not is_supported(fmt):
-                raise RuntimeError(unsupported_error(fmt))
-
-
 def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:
 
     def matches(patterns: list[str]) -> bool:
@@ -81,17 +47,43 @@ def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:
     return not matches(cfg.exclude)
 
 
-def scaled_mm_op(
-    a_fmt: str, b_fmt: str, scale_dtype: torch.dtype, grouped: bool
+def _resolve_gemm_quantization_family(
+    a_fmt: str,
+    b_fmt: str,
+    scale_dtype: torch.dtype,
+    block_shape: tuple[int, int],
 ) -> str | None:
     if is_fp8(a_fmt) and is_fp8(b_fmt):
-        family = "mxfp8" if scale_dtype == torch.float8_e8m0fnu else "fp8"
-    elif is_int8s(a_fmt) and is_int8s(b_fmt):
-        family = "int8"
-    else:
-        return None
-    suffix = "scaled_grouped_mm" if grouped else "scaled_mm"
-    return f"gemm.{family}_{suffix}"
+        if (
+            a_fmt == b_fmt == "fp8_e4m3"
+            and scale_dtype == torch.float8_e8m0fnu
+            and tuple(block_shape) == (1, 32)
+        ):
+            return "mxfp8"
+        return "fp8"
+    if is_int8s(a_fmt) and is_int8s(b_fmt):
+        return "int8"
+    return None
+
+
+def scaled_mm_op(
+    a_fmt: str,
+    b_fmt: str,
+    scale_dtype: torch.dtype,
+    block_shape: tuple[int, int],
+) -> str | None:
+    family = _resolve_gemm_quantization_family(a_fmt, b_fmt, scale_dtype, block_shape)
+    return None if family is None else f"gemm.{family}_scaled_mm"
+
+
+def scaled_grouped_mm_op(
+    a_fmt: str,
+    b_fmt: str,
+    scale_dtype: torch.dtype,
+    block_shape: tuple[int, int],
+) -> str | None:
+    family = _resolve_gemm_quantization_family(a_fmt, b_fmt, scale_dtype, block_shape)
+    return None if family is None else f"gemm.{family}_scaled_grouped_mm"
 
 
 def resolve_quantization_config(

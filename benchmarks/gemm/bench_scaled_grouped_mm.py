@@ -23,7 +23,7 @@ sys.path.insert(0, ".")
 from src.kernel.selector import dispatch
 from src.kernel.utils import to_column_major
 from src.quant.quantize import quantize_operand
-from src.quant.utils import scaled_mm_op
+from src.quant.utils import scaled_grouped_mm_op
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
 M_FIXED = 8 * 1024 * 8
@@ -93,7 +93,7 @@ def _relerr(out, ref):
 
 
 def _scaled_grouped_mm(fmt, aq, bq, sa, sb, offs, out_dtype, block_size, backend=None):
-    op = scaled_mm_op(fmt, fmt, torch.float32, grouped=True)
+    op = scaled_grouped_mm_op(fmt, fmt, torch.float32, _ROWWISE["block_shape"])
     return dispatch(
         op,
         (aq, bq, sa, sb, offs, out_dtype, block_size, None),

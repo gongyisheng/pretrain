@@ -6,7 +6,7 @@ from src.layers.mlp import SparseMoEBlock
 from src.quant.constants import QUANT_PASSTHROUGH
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
-from src.quant.utils import check_hardware_support, resolve_quantization_config
+from src.quant.utils import resolve_quantization_config
 
 
 def _is_passthrough(quantization_config) -> bool:
@@ -22,8 +22,6 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
     quantization_configs = config.training.quantization
     if not any(qc.enabled for qc in quantization_configs):
         return model
-
-    check_hardware_support(quantization_configs)
 
     embedding_weight_ids = {
         id(m.weight) for m in model.modules() if isinstance(m, nn.Embedding)

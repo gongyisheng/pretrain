@@ -24,7 +24,13 @@ def quantized_gemm(
     epilogue, so it never passes through the scales. Both paths add it before the
     downcast to `out_dtype`, matching what cuBLAS does for an unquantized addmm.
     """
-    op = scaled_mm_op(a_fmt, b_fmt, scaling_cfg.get("scale_dtype"), grouped=False)
+    block_shape = scaling_cfg.get("block_shape", (0, 0))
+    op = scaled_mm_op(
+        a_fmt,
+        b_fmt,
+        scaling_cfg.get("scale_dtype"),
+        block_shape,
+    )
 
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
@@ -34,10 +40,8 @@ def quantized_gemm(
         bq, sb = quantize_operand(b, -2, b_fmt, scaling_cfg)
         record_operand(b_stats, b, bq, sb, -2, scaling_cfg)
 
-    if op is not None and a.is_cuda and b.is_cuda:
-        return SCALED_MM_OPS[op](
-            aq, bq, sa, sb, out_dtype, scaling_cfg["block_shape"][1], bias=bias
-        )
+    if op is not None:
+        return SCALED_MM_OPS[op](aq, bq, sa, sb, out_dtype, block_shape[1], bias=bias)
 
     if aq is not None:
         a = dequantize_operand(aq, sa, -1, scaling_cfg).to(a.dtype)

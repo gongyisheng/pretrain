@@ -3,7 +3,6 @@ import torch
 
 from src.kernel.ops import gemm as gemm_module
 from src.quant import moe
-from src.quant.utils import is_supported
 from src.utils.config import QuantizationConfig
 
 pytestmark = pytest.mark.skipif(
@@ -92,7 +91,6 @@ def test_expert_mm_bias_is_additive(scaling):
     assert rel < 5e-3, rel
 
 
-@pytest.mark.skipif(not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9")
 @pytest.mark.parametrize("bias", [False, True])
 def test_moe_block_quantized_forward_backward_runs(bias):
     import torch.nn as nn
@@ -155,7 +153,6 @@ def test_moe_block_quantized_forward_backward_runs(bias):
             assert p.grad.abs().sum() > 0
 
 
-@pytest.mark.skipif(not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9")
 @pytest.mark.parametrize("scaling", ["tensorwise", "rowwise", "blockwise", "mxfp8"])
 def test_fused_matches_fake_quant(scaling, monkeypatch):
     # counts give R=299 with expert 1 empty. Scale blocks restart at each expert, so
@@ -191,7 +188,7 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
 
     # Reference: identical quantization, but dequantized and multiplied in bf16.
     # Comparing against this isolates the kernel from the quantization error itself.
-    monkeypatch.setattr(moe, "scaled_mm_op", lambda *a, **k: None)
+    monkeypatch.setattr(moe, "scaled_grouped_mm_op", lambda *a, **k: None)
     a_f = a.clone().requires_grad_(True)
     b_f = b.clone().requires_grad_(True)
     y_f = moe.scaled_grouped_mm_fn(cfg)(a_f, b_f, offs)

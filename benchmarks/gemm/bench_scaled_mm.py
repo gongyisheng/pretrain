@@ -182,7 +182,7 @@ def _scaling_for_config(config):
 
 
 def _scaled_mm(fmt, aq, bq, sa, sb, out_dtype, block_size, scale_dtype, backend=None):
-    op = scaled_mm_op(fmt, fmt, scale_dtype, grouped=False)
+    op = scaled_mm_op(fmt, fmt, scale_dtype, (1, block_size))
     return dispatch(
         op, (aq, bq, sa, sb, out_dtype, block_size, None), {}, backend, device=aq.device
     )

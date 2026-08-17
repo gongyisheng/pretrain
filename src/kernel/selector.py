@@ -26,6 +26,8 @@ def select_kernel(
     registry: KernelRegistry = KERNEL_REGISTRY,
 ) -> KernelSpec:
     """Resolve `op` to one implementation. A hard eligibility gate, not a ranking."""
+
+    # find registered implementations or honor an explicit backend choice.
     specs = registry.implementations(op)
     if not specs:
         raise KernelSelectionError(f"no kernels registered for operation {op!r}")
@@ -37,14 +39,20 @@ def select_kernel(
         raise KernelSelectionError(
             f"operation {op!r} has no backend {backend!r}; registered: {registered}"
         )
+
+    # no selection is needed when there is only one implementation.
     if len(specs) == 1:
         return specs[0]
+
+    # use the platform to filter implementations by availability.
     if platform is None:
         raise KernelSelectionError(
             f"operation {op!r} has multiple backends ({registered}) and no "
             "platform was supplied to choose among them"
         )
     eligible = [spec for spec in specs if spec.is_available(platform)]
+
+    # prefer one optimized implementation, then fall back to a reference.
     optimized = [spec for spec in eligible if not spec.reference]
     if len(optimized) == 1:
         return optimized[0]
@@ -58,6 +66,8 @@ def select_kernel(
                 f"{platform.arch}; registered: {registered}"
             )
         optimized = reference
+
+    # require an explicit backend when selection remains ambiguous.
     names = ", ".join(sorted(spec.backend for spec in optimized))
     raise KernelSelectionError(
         f"operation {op!r} has multiple eligible backends ({names}) on "

@@ -8,7 +8,7 @@ import src.kernel.backends.triton  # noqa: F401
 from src.kernel.registry import KERNEL_REGISTRY
 from src.kernel.selector import _platform_for, dispatch
 
-try:  # the registration gate leaves this absent when the extension is unbuilt
+try:  # Absent when the extension is unbuilt.
     from src.kernel.backends.cublaslt import gemm as _cublaslt
 except ImportError:  # pragma: no cover - exercised only on non-CUDA builds
     _cublaslt = None
@@ -24,7 +24,7 @@ def _check_contraction(a: torch.Tensor, b: torch.Tensor) -> None:
         raise ValueError(f"contraction mismatch: a {a.shape[-1]}, b {b.shape[-2]}")
 
 
-def _check_scaled_dense(
+def _check_scaled_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -39,7 +39,7 @@ def _check_scaled_dense(
         raise ValueError(f"sb block count {sb.shape[-2]} != {blocks}")
 
 
-def _check_scaled_grouped(
+def _check_scaled_grouped_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -47,23 +47,21 @@ def _check_scaled_grouped(
     offs: torch.Tensor,
     block_size: int,
 ) -> None:
-    """The scale-block axis depends on which operand carries the ragged dim."""
+    """Validate grouped scale shapes."""
     _check_contraction(aq, bq)
-    if aq.ndim == 2 and bq.ndim == 3:  # ragged-M: A's row axis, dense contraction
+    if aq.ndim == 2 and bq.ndim == 3:  # Ragged M.
         blocks = -(-aq.shape[-1] // block_size) if block_size else 1
         expected_sa, expected_sb = (
             (aq.shape[0], blocks),
             (bq.shape[0], blocks, bq.shape[2]),
         )
-    elif aq.ndim == 3 and bq.ndim == 2:  # ragged-N: B's column axis
+    elif aq.ndim == 3 and bq.ndim == 2:  # Ragged N.
         blocks = -(-aq.shape[-1] // block_size) if block_size else 1
         expected_sa, expected_sb = (
             (aq.shape[0], aq.shape[1], blocks),
             (blocks, bq.shape[1]),
         )
-    else:  # ragged-K: the contraction itself, e.g. the wgrad -- block count is
-        # per-group (Σ_g cdiv(k_g, block_size)) and unknowable without a host sync
-        # on offs, so sa/sb are only checked for mutual consistency.
+    else:  # Ragged K requires group-specific block counts, so check consistency.
         if sa.shape[0] != aq.shape[0]:
             raise ValueError(f"sa rows {sa.shape[0]} != aq rows {aq.shape[0]}")
         if sb.shape[-1] != bq.shape[-1]:
@@ -100,51 +98,45 @@ __all__ = [
 
 
 @lru_cache(maxsize=None)
-def _cublaslt_eligible(op: str, device_type: str, device_index: int | None) -> bool:
-    """Is cuBLASLt both built and hardware-eligible for `op` on this device?
-
-    Registration covers the build axis -- an unbuilt `_C` registers no spec at all --
-    and `is_available` covers the SM window. Cached per (op, device); the capability
-    gate itself never runs on the hot path.
-    """
-    platform = _platform_for(device_type, device_index)
+def _is_kernel_available(op: str, backend: str, device: torch.device) -> bool:
+    """Return whether a registered backend supports the device."""
+    platform = _platform_for(device.type, device.index)
     return any(
-        spec.backend == "cublaslt" and spec.is_available(platform)
+        spec.backend == backend and spec.is_available(platform)
         for spec in KERNEL_REGISTRY.implementations(op)
     )
 
 
-def _mxfp8_backend(op: str, serves: bool, device: torch.device) -> str:
-    """cuBLASLt for every mxfp8 call it can serve; Triton for the rest.
-
-    cuBLASLt is the vendor kernel and wins decisively once a GEMM is compute-bound
-    rather than launch-bound -- measured on sm120 at block_size=32: 18.7% faster at
-    M,K,N=4096,4096,4096 and 31.5% at 8192,2048,2048, against 3-8% slower at the
-    smaller shapes where both are launch-bound.
-
-    Two axes decide it, and they are separate on purpose. `_cublaslt_eligible` is
-    metadata -- the SM window plus whether the extension was built -- and is cached
-    per device. `serves` is per-call and cannot be metadata: cuBLASLt reads bare
-    32-wide e8m0 blocks, always returns bf16, and needs 16-byte-aligned operand
-    strides, so a `block_size` of 64, an fp16 output, or an unaligned token count
-    (M=250 leaves a 250-byte row stride) all fall to Triton, which serves every case.
-    """
-    if serves and _cublaslt_eligible(op, device.type, device.index):
+def _select_mxfp8_scaled_mm_backend(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+) -> str | None:
+    """Choose an optimized backend, or defer to capability-based dispatch."""
+    op = "gemm.mxfp8_scaled_mm"
+    if (
+        _cublaslt is not None
+        and _cublaslt.supports_mxfp8_scaled_mm(aq, bq, out_dtype, block_size)
+        and _is_kernel_available(op, "cublaslt", aq.device)
+    ):
         return "cublaslt"
-    return "triton"
+    if _is_kernel_available(op, "triton", aq.device):
+        return "triton"
+    return None
 
 
 def grouped_mm(a, b, offs, bias=None, backend=None):
     _check_offs(offs)
     _check_contraction(a, b)
-    # Triton's grouped kernel is bf16-only; every other dtype takes the reference.
+    # Triton supports grouped GEMM only in bfloat16.
     if backend is None and a.dtype is not torch.bfloat16:
         backend = "eager"
     return dispatch("gemm.grouped_mm", (a, b, offs, bias), {}, backend, device=a.device)
 
 
 def int8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
-    _check_scaled_dense(aq, bq, sa, sb, block_size)
+    _check_scaled_mm(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.int8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
@@ -155,7 +147,7 @@ def int8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=Non
 
 
 def fp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
-    _check_scaled_dense(aq, bq, sa, sb, block_size)
+    _check_scaled_mm(aq, bq, sa, sb, block_size)
     return dispatch(
         "gemm.fp8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
@@ -166,22 +158,16 @@ def fp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None
 
 
 def mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
-    _check_scaled_dense(aq, bq, sa, sb, block_size)
+    _check_scaled_mm(aq, bq, sa, sb, block_size)
     selected_backend = backend
-    kwargs = {}
     if selected_backend is None:
-        serves_cublaslt = _cublaslt is not None and _cublaslt.serves_dense(
+        selected_backend = _select_mxfp8_scaled_mm_backend(
             aq, bq, out_dtype, block_size
         )
-        selected_backend = _mxfp8_backend(
-            "gemm.mxfp8_scaled_mm", serves_cublaslt, aq.device
-        )
-        if selected_backend == "cublaslt" and serves_cublaslt:
-            kwargs["_dense_contract_checked"] = True
     return dispatch(
         "gemm.mxfp8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
-        kwargs,
+        {},
         selected_backend,
         device=aq.device,
     )
@@ -191,7 +177,7 @@ def int8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
     _check_offs(offs)
-    _check_scaled_grouped(aq, bq, sa, sb, offs, block_size)
+    _check_scaled_grouped_mm(aq, bq, sa, sb, offs, block_size)
     return dispatch(
         "gemm.int8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
@@ -205,7 +191,7 @@ def fp8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
     _check_offs(offs)
-    _check_scaled_grouped(aq, bq, sa, sb, offs, block_size)
+    _check_scaled_grouped_mm(aq, bq, sa, sb, offs, block_size)
     return dispatch(
         "gemm.fp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
@@ -219,7 +205,7 @@ def mxfp8_scaled_grouped_mm(
     aq, bq, sa, sb, offs, out_dtype, block_size, bias=None, backend=None
 ):
     _check_offs(offs)
-    _check_scaled_grouped(aq, bq, sa, sb, offs, block_size)
+    _check_scaled_grouped_mm(aq, bq, sa, sb, offs, block_size)
     return dispatch(
         "gemm.mxfp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),

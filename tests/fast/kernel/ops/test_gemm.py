@@ -113,8 +113,8 @@ def test_ops_without_cublaslt_policy_resolve_without_ambiguity_on_cuda(op, arch)
 
 
 # The mxfp8 policy has two separable axes, tested separately below:
-#   _cublaslt_eligible -- metadata (SM window + whether the extension was built)
-#   serves_dense -- per-call (scale width, out dtype, alignment)
+#   _is_kernel_available -- metadata (SM window + build availability)
+#   supports_mxfp8_scaled_mm -- per-call (scale width, out dtype, alignment)
 _ELIGIBILITY = [
     ("gemm.mxfp8_scaled_mm", (8, 9), False),
     ("gemm.mxfp8_scaled_mm", (10, 0), True),
@@ -124,21 +124,24 @@ _ELIGIBILITY = [
 
 
 @pytest.mark.parametrize("op,arch,expected", _ELIGIBILITY)
-def test_cublaslt_eligibility_follows_the_sm_window(
+def test_kernel_availability_follows_the_cublaslt_sm_window(
     monkeypatch: pytest.MonkeyPatch, op, arch, expected
 ):
     """The metadata axis: hardware window plus build availability, no tensors."""
     monkeypatch.setattr(
         gemm_module, "_platform_for", lambda *_: PlatformInfo("cuda", arch)
     )
-    gemm_module._cublaslt_eligible.cache_clear()
+    gemm_module._is_kernel_available.cache_clear()
     try:
-        assert gemm_module._cublaslt_eligible(op, "cuda", 0) is expected
+        assert (
+            gemm_module._is_kernel_available(op, "cublaslt", torch.device("cuda", 0))
+            is expected
+        )
     finally:
-        gemm_module._cublaslt_eligible.cache_clear()
+        gemm_module._is_kernel_available.cache_clear()
 
 
-def test_cublaslt_eligibility_is_false_without_the_extension(
+def test_kernel_availability_is_false_without_the_extension(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """An unbuilt `_C` registers no cuBLASLt spec, so the policy must name Triton
@@ -153,28 +156,95 @@ def test_cublaslt_eligibility_is_false_without_the_extension(
         "implementations",
         lambda op: tuple(s for s in original(op) if s.backend != "cublaslt"),
     )
-    gemm_module._cublaslt_eligible.cache_clear()
+    gemm_module._is_kernel_available.cache_clear()
     try:
-        assert not gemm_module._cublaslt_eligible("gemm.mxfp8_scaled_mm", "cuda", 0)
+        assert not gemm_module._is_kernel_available(
+            "gemm.mxfp8_scaled_mm", "cublaslt", torch.device("cuda", 0)
+        )
     finally:
-        gemm_module._cublaslt_eligible.cache_clear()
+        gemm_module._is_kernel_available.cache_clear()
 
 
 @pytest.mark.parametrize(
-    ("serves", "eligible", "expected"),
-    [(True, True, "cublaslt"), (True, False, "triton"), (False, True, "triton")],
+    ("supports", "cublaslt_available", "triton_available", "expected"),
+    [
+        (True, True, True, "cublaslt"),
+        (True, False, True, "triton"),
+        (False, True, True, "triton"),
+        (False, False, False, None),
+    ],
 )
-def test_mxfp8_backend_needs_both_axes(
-    monkeypatch: pytest.MonkeyPatch, serves, eligible, expected
+def test_select_mxfp8_scaled_mm_backend_needs_both_axes(
+    monkeypatch: pytest.MonkeyPatch,
+    supports,
+    cublaslt_available,
+    triton_available,
+    expected,
 ):
-    """cuBLASLt only when the hardware allows it *and* it can serve this call."""
-    monkeypatch.setattr(gemm_module, "_cublaslt_eligible", lambda *_: eligible)
+    """cuBLASLt only when the hardware allows it and it supports this call."""
+    aq = torch.empty(2, 4, dtype=torch.float8_e4m3fn)
+    bq = torch.empty(4, 3, dtype=torch.float8_e4m3fn)
 
-    chosen = gemm_module._mxfp8_backend(
-        "gemm.mxfp8_scaled_mm", serves, torch.device("cuda", 0)
+    def supports_mxfp8_scaled_mm(aq, bq, out_dtype, block_size):
+        return supports
+
+    def kernel_available(op, backend, device):
+        return {
+            "cublaslt": cublaslt_available,
+            "triton": triton_available,
+        }[backend]
+
+    monkeypatch.setattr(
+        gemm_module,
+        "_cublaslt",
+        SimpleNamespace(supports_mxfp8_scaled_mm=supports_mxfp8_scaled_mm),
+    )
+    monkeypatch.setattr(
+        gemm_module,
+        "_is_kernel_available",
+        kernel_available,
     )
 
+    chosen = gemm_module._select_mxfp8_scaled_mm_backend(aq, bq, torch.bfloat16, 32)
+
     assert chosen == expected
+
+
+def test_select_mxfp8_scaled_mm_backend_uses_triton_without_the_extension(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    aq = torch.empty(2, 4, dtype=torch.float8_e4m3fn)
+    bq = torch.empty(4, 3, dtype=torch.float8_e4m3fn)
+    monkeypatch.setattr(gemm_module, "_cublaslt", None)
+
+    checked = []
+
+    def kernel_available(op, backend, device):
+        checked.append(backend)
+        return backend == "triton"
+
+    monkeypatch.setattr(
+        gemm_module,
+        "_is_kernel_available",
+        kernel_available,
+    )
+
+    assert (
+        gemm_module._select_mxfp8_scaled_mm_backend(aq, bq, torch.bfloat16, 32)
+        == "triton"
+    )
+    assert checked == ["triton"]
+
+
+def test_mxfp8_scaled_mm_uses_eager_fallback_on_cpu():
+    aq = torch.ones(2, 32, dtype=torch.float8_e4m3fn)
+    bq = torch.ones(32, 3, dtype=torch.float8_e4m3fn)
+    sa = torch.ones(2, 1)
+    sb = torch.ones(1, 3)
+
+    result = gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, block_size=32)
+
+    torch.testing.assert_close(result, torch.full((2, 3), 32.0))
 
 
 def test_grouped_mm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPatch):
@@ -264,7 +334,7 @@ def test_dense_scaled_mm_forwards_arguments(
     }
 
 
-def test_mxfp8_scaled_mm_forwards_the_resolved_backend(
+def test_mxfp8_scaled_mm_forwards_the_selected_backend(
     monkeypatch: pytest.MonkeyPatch,
 ):
     seen = {}
@@ -279,14 +349,28 @@ def test_mxfp8_scaled_mm_forwards_the_resolved_backend(
     sa = torch.empty(2, 1)
     sb = torch.empty(1, 3)
 
-    monkeypatch.setattr(
-        gemm_module, "_cublaslt", SimpleNamespace(serves_dense=lambda *_: True)
-    )
-    monkeypatch.setattr(gemm_module, "_mxfp8_backend", lambda *_: "cublaslt")
+    def fake_selector(
+        selected_aq, selected_bq, selected_out_dtype, selected_block_size
+    ):
+        seen.update(
+            selector_args=(
+                selected_aq,
+                selected_bq,
+                selected_out_dtype,
+                selected_block_size,
+            )
+        )
+        return "cublaslt"
+
+    monkeypatch.setattr(gemm_module, "_select_mxfp8_scaled_mm_backend", fake_selector)
 
     gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32)
 
-    assert seen == {"backend": "cublaslt", "kwargs": {"_dense_contract_checked": True}}
+    assert seen == {
+        "backend": "cublaslt",
+        "kwargs": {},
+        "selector_args": (aq, bq, torch.bfloat16, 32),
+    }
 
 
 def test_mxfp8_scaled_mm_fallback_has_no_private_kwargs(
@@ -305,9 +389,10 @@ def test_mxfp8_scaled_mm_fallback_has_no_private_kwargs(
     sb = torch.empty(1, 3)
 
     monkeypatch.setattr(
-        gemm_module, "_cublaslt", SimpleNamespace(serves_dense=lambda *_: False)
+        gemm_module,
+        "_select_mxfp8_scaled_mm_backend",
+        lambda aq, bq, out_dtype, block_size: "triton",
     )
-    monkeypatch.setattr(gemm_module, "_mxfp8_backend", lambda *_: "triton")
 
     gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32)
 

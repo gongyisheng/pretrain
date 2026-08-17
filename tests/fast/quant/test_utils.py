@@ -4,7 +4,7 @@ import torch
 from src.utils.config import QuantizationConfig
 from src.quant.utils import (
     is_fp8,
-    is_supported,
+    scaled_grouped_mm_op,
     scaled_mm_op,
     should_quantize,
     resolve_quantization_config,
@@ -41,14 +41,7 @@ def test_fp8_is_a_recipe_not_an_element_format():
     # element-format helpers -- loudly, not as a silent unquantized passthrough.
     with pytest.raises(KeyError):
         str_to_dtype("fp8")
-    with pytest.raises(ValueError, match="not an element format"):
-        is_supported("fp8")
     assert not is_fp8("fp8")
-
-
-def test_is_supported_accepts_every_element_format():
-    for fmt in ("fp8_e4m3", "fp8_e5m2", "int8", "int4", "fp32", "bf16"):
-        assert isinstance(is_supported(fmt), bool)
 
 
 def _cfg(**kw):
@@ -108,31 +101,52 @@ def test_resolve_quantization_config_skips_disabled():
 
 
 def test_int8_pair_resolves_to_the_int8_op():
-    assert scaled_mm_op("int8", "int8", torch.float32, False) == "gemm.int8_scaled_mm"
+    assert scaled_mm_op("int8", "int8", torch.float32, (0, 0)) == "gemm.int8_scaled_mm"
 
 
 def test_fp8_pair_with_fp32_scales_resolves_to_the_fp8_op():
-    assert scaled_mm_op("fp8_e4m3", "fp8_e4m3", torch.float32, False) == (
+    assert scaled_mm_op("fp8_e4m3", "fp8_e4m3", torch.float32, (1, 32)) == (
         "gemm.fp8_scaled_mm"
     )
 
 
 def test_fp8_pair_with_e8m0_scales_resolves_to_the_mxfp8_op():
     assert (
-        scaled_mm_op("fp8_e4m3", "fp8_e4m3", torch.float8_e8m0fnu, False)
+        scaled_mm_op("fp8_e4m3", "fp8_e4m3", torch.float8_e8m0fnu, (1, 32))
         == "gemm.mxfp8_scaled_mm"
     )
 
 
-def test_grouped_flag_selects_the_grouped_op():
-    assert scaled_mm_op("int8", "int8", torch.float32, True) == (
+def test_wrong_fp8_format_with_mx_scales_resolves_to_the_fp8_op():
+    assert (
+        scaled_mm_op("fp8_e5m2", "fp8_e4m3", torch.float8_e8m0fnu, (1, 32))
+        == "gemm.fp8_scaled_mm"
+    )
+
+
+def test_wrong_block_shape_with_mx_scales_resolves_to_the_fp8_op():
+    assert (
+        scaled_mm_op("fp8_e4m3", "fp8_e4m3", torch.float8_e8m0fnu, (1, 64))
+        == "gemm.fp8_scaled_mm"
+    )
+
+
+def test_grouped_mm_resolves_to_the_grouped_op():
+    assert scaled_grouped_mm_op("int8", "int8", torch.float32, (0, 0)) == (
         "gemm.int8_scaled_grouped_mm"
     )
 
 
+def test_grouped_mm_with_mx_contract_resolves_to_the_mxfp8_op():
+    assert (
+        scaled_grouped_mm_op("fp8_e4m3", "fp8_e4m3", torch.float8_e8m0fnu, (1, 32))
+        == "gemm.mxfp8_scaled_grouped_mm"
+    )
+
+
 def test_mixed_family_pair_has_no_op():
-    assert scaled_mm_op("int8", "fp8_e4m3", torch.float32, False) is None
+    assert scaled_mm_op("int8", "fp8_e4m3", torch.float32, (0, 0)) is None
 
 
 def test_unquantized_pair_has_no_op():
-    assert scaled_mm_op("bf16", "bf16", torch.float32, False) is None
+    assert scaled_mm_op("bf16", "bf16", torch.float32, (0, 0)) is None

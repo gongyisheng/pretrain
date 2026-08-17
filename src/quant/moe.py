@@ -8,7 +8,7 @@ from src.kernel.ops.gemm import SCALED_MM_OPS, grouped_mm
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
-from src.quant.utils import is_quantized, scaled_mm_op
+from src.quant.utils import is_quantized, scaled_grouped_mm_op
 from src.utils.config import QuantizationConfig
 
 
@@ -27,7 +27,12 @@ def quantized_grouped_mm(
     never quantized -- it rides the epilogue, past the scales.
     """
     block_size = scaling["block_shape"][1]
-    op = scaled_mm_op(a_fmt, b_fmt, scaling["scale_dtype"], grouped=True)
+    op = scaled_grouped_mm_op(
+        a_fmt,
+        b_fmt,
+        scaling["scale_dtype"],
+        scaling["block_shape"],
+    )
     if a.ndim != 2:
         raise NotImplementedError("the ragged-N layout (3D x 2D) is not supported")
     ragged_k = b.ndim == 2
@@ -81,7 +86,7 @@ def quantized_grouped_mm(
             ragged_dim=b_ragged_dim,
         )
 
-    if op is not None and a.is_cuda:
+    if op is not None:
         return SCALED_MM_OPS[op](
             aq.mT if ragged_k else aq,
             bq,

@@ -47,7 +47,7 @@ def _check_out_dtype(out_dtype: torch.dtype, feature: str) -> None:
         raise ValueError(f"{feature} requires out_dtype=bfloat16, got {out_dtype}")
 
 
-def _check_dense_contract(
+def _check_mxfp8_scaled_mm(
     aq: torch.Tensor, bq: torch.Tensor, out_dtype: torch.dtype, block_size: int
 ) -> None:
     """Everything this backend's dense kernel requires beyond its SM window."""
@@ -59,10 +59,10 @@ def _check_dense_contract(
     _check_dimension_multiple_of_16(bq, "MXFP8 GEMM B")
 
 
-def serves_dense(
+def supports_mxfp8_scaled_mm(
     aq: torch.Tensor, bq: torch.Tensor, out_dtype: torch.dtype, block_size: int
 ) -> bool:
-    """Can this backend serve the call? Routed through the kernel's own guards so
+    """Can this backend support the call? Routed through the kernel's own guards so
     the routing decision and the kernel's contract cannot drift apart.
 
     The SM window is a `capabilities` matter and is checked separately; what lives
@@ -70,7 +70,7 @@ def serves_dense(
     operand alignment (an unaligned token count leaves a non-16-byte row stride).
     """
     try:
-        _check_dense_contract(aq, bq, out_dtype, block_size)
+        _check_mxfp8_scaled_mm(aq, bq, out_dtype, block_size)
     except ValueError:
         return False
     return True
@@ -91,10 +91,8 @@ def scaled_mm_mxfp8(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
-    _dense_contract_checked: bool = False,
 ) -> torch.Tensor:
-    if not _dense_contract_checked:
-        _check_dense_contract(aq, bq, out_dtype, block_size)
+    _check_mxfp8_scaled_mm(aq, bq, out_dtype, block_size)
     del out_dtype, block_size
     return torch.ops.aot_kernel._scaled_mm_mxfp8_cublaslt(
         aq,

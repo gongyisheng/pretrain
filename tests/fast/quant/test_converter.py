@@ -7,17 +7,11 @@ import torch.nn as nn
 from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantizedLinear
-from src.quant.utils import is_supported
 from src.utils.config import (
     ModelConfig,
     QuantizationConfig,
     TrainConfig,
     TrainingConfig,
-)
-
-
-fp8_only = pytest.mark.skipif(
-    not is_supported("fp8_e4m3"), reason="fp8 needs SM >= 8.9"
 )
 
 
@@ -53,37 +47,22 @@ def test_disabled_is_noop():
     assert not isinstance(m.attn["q_proj"], QuantizedLinear)
 
 
-@pytest.mark.skipif(
-    is_supported("fp8_e4m3"), reason="testing the unsupported-hardware branch"
-)
-def test_raises_without_capable_gpu():
+def test_fp8_rule_swaps_without_hardware_preflight():
     m = _Tiny()
-    with pytest.raises(RuntimeError, match="compute capability"):
-        apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
+    apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
+    assert isinstance(m.attn["q_proj"], QuantizedLinear)
+    assert isinstance(m.mlp["down_proj"], QuantizedLinear)
 
 
-@pytest.mark.skipif(
-    is_supported("fp8_e4m3"), reason="testing the unsupported-hardware branch"
-)
-def test_mxfp8_rule_raises_without_capable_gpu():
-    # mxfp8 is e4m3 on every operand, so it gates on the same fp8 hardware
-    # requirement as the plain "fp8" recipe -- no separate Blackwell-only gate.
+def test_mxfp8_rule_swaps_without_hardware_preflight():
     m = _Tiny()
-    with pytest.raises(RuntimeError, match="compute capability"):
-        apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "mxfp8"}}))
-
-
-@fp8_only
-def test_mxfp8_rule_swaps_on_capable_gpu():
-    m = _Tiny().cuda().to(torch.bfloat16)
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "mxfp8"}}))
     assert isinstance(m.attn["q_proj"], QuantizedLinear)
     assert isinstance(m.mlp["down_proj"], QuantizedLinear)
 
 
-@fp8_only
 def test_swaps_and_excludes_lm_head():
-    m = _Tiny().cuda().to(torch.bfloat16)
+    m = _Tiny()
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
     assert isinstance(m.attn["q_proj"], QuantizedLinear)
     assert isinstance(m.mlp["down_proj"], QuantizedLinear)
@@ -93,9 +72,8 @@ def test_swaps_and_excludes_lm_head():
     assert isinstance(m.token_emb, nn.Embedding)
 
 
-@fp8_only
 def test_tie_guard_skips_tied_lm_head(capsys):
-    m = _Tiny(tie=True).cuda().to(torch.bfloat16)
+    m = _Tiny(tie=True)
     # exclude nothing: tie guard alone must keep lm_head unswapped
     cfg = _cfg({"enabled": True, "dtype": {"recipe": "fp8"}, "exclude": []})
     apply_quantization(m, cfg)
@@ -106,9 +84,8 @@ def test_tie_guard_skips_tied_lm_head(capsys):
     assert isinstance(m.attn["q_proj"], QuantizedLinear)  # non-tied still swapped
 
 
-@fp8_only
 def test_include_restricts_scope():
-    m = _Tiny().cuda().to(torch.bfloat16)
+    m = _Tiny()
     cfg = _cfg(
         {
             "enabled": True,
@@ -122,9 +99,8 @@ def test_include_restricts_scope():
     assert isinstance(m.mlp["down_proj"], nn.Linear)  # not in include
 
 
-@fp8_only
 def test_list_of_rules_first_match_wins():
-    m = _Tiny().cuda().to(torch.bfloat16)
+    m = _Tiny()
     cfg = _cfg(
         [
             {
@@ -166,7 +142,6 @@ def _moe_model():
     return M()
 
 
-@fp8_only
 def test_moe_experts_get_quantized_expert_mm():
     from src.layers.mlp import grouped_mm_fn
 
@@ -187,7 +162,6 @@ def test_moe_experts_get_quantized_expert_mm():
     assert m.mlp.expert_mm is not grouped_mm_fn
 
 
-@fp8_only
 def test_router_gate_stays_fp32_linear():
     m = _moe_model()
     apply_quantization(
@@ -205,7 +179,6 @@ def test_router_gate_stays_fp32_linear():
     assert not isinstance(m.mlp.router.gate, QuantizedLinear)
 
 
-@fp8_only
 def test_moe_expert_mm_default_when_excluded():
     from src.layers.mlp import grouped_mm_fn
 
@@ -250,11 +223,10 @@ def test_int8s_apply_quantization_swaps(fmt):
     assert isinstance(model[0], QuantizedLinear)
 
 
-@fp8_only
 def test_apply_quantization_attaches_no_metric_state():
     # Metrics are collected separately (collect_quantization_diagnostics), so conversion
     # alone must leave no metric state on the swapped modules — nothing in the graph.
-    m = _Tiny().cuda().to(torch.bfloat16)
+    m = _Tiny()
     apply_quantization(m, _cfg({"enabled": True, "dtype": {"recipe": "fp8"}}))
     qls = [mod for mod in m.modules() if isinstance(mod, QuantizedLinear)]
     assert qls and all(not hasattr(mod, "quantization_probe") for mod in qls)
