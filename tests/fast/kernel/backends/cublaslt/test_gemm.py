@@ -5,7 +5,7 @@ import torch
 
 import src.kernel.backends.cublaslt._C  # noqa: F401
 from src.kernel.backends.cublaslt import gemm as cublaslt_gemm
-from src.kernel.ops.gemm import mxfp8_scaled_grouped_mm, mxfp8_scaled_mm
+from src.kernel.ops.gemm import mxfp8_scaled_mm
 from src.quant.quantize import quantize_operand
 from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 
@@ -24,12 +24,6 @@ cuda_mxfp8_only = pytest.mark.skipif(
 def _require_mxfp8_device() -> None:
     if torch.cuda.get_device_capability()[0] < 10:
         pytest.skip("cuBLASLt MXFP8 GEMM requires SM100 or newer")
-
-
-def _require_grouped_mxfp8_device() -> None:
-    capability = torch.cuda.get_device_capability()
-    if capability[0] != 10 and capability != (11, 0):
-        pytest.skip("cuBLASLt grouped MXFP8 GEMM requires SM10x or SM110")
 
 
 def _mxfp8_operands(
@@ -136,7 +130,7 @@ def test_cublaslt_adapter_has_meta_implementation():
     b = torch.empty((144, 160), device="meta", dtype=torch.float8_e4m3fn)
     scale_a = torch.empty((129, 5), device="meta")
     scale_b = torch.empty((5, 160), device="meta")
-    out = cublaslt_gemm.scaled_gemm_mxfp8(
+    out = cublaslt_gemm.scaled_mm_mxfp8(
         a,
         b,
         scale_a,
@@ -156,95 +150,7 @@ def test_cublaslt_rejects_non_bf16_out_dtype():
     scale_b = torch.empty((5, 160), device="meta")
 
     with pytest.raises(ValueError, match="requires out_dtype=bfloat16"):
-        cublaslt_gemm.scaled_gemm_mxfp8(a, b, scale_a, scale_b, torch.float32, 32)
-
-
-def test_cublaslt_grouped_rejects_non_bf16_out_dtype():
-    aq = torch.empty((299, 144), device="meta", dtype=torch.float8_e4m3fn)
-    bq = torch.empty((4, 144, 160), device="meta", dtype=torch.float8_e4m3fn)
-    scale_a = torch.empty((299, 5), device="meta")
-    scale_b = torch.empty((4, 5, 160), device="meta")
-    offsets = torch.empty((4,), device="meta", dtype=torch.int32)
-
-    with pytest.raises(ValueError, match="requires out_dtype=bfloat16"):
-        cublaslt_gemm.scaled_grouped_gemm_mxfp8(
-            aq, bq, scale_a, scale_b, offsets, torch.float32, 32
-        )
-
-
-def test_cublaslt_grouped_adapter_has_meta_implementation():
-    aq = torch.empty((299, 144), device="meta", dtype=torch.float8_e4m3fn)
-    bq = torch.empty((4, 144, 160), device="meta", dtype=torch.float8_e4m3fn)
-    scale_a = torch.empty((299, 5), device="meta")
-    scale_b = torch.empty((4, 5, 160), device="meta")
-    offsets = torch.empty((4,), device="meta", dtype=torch.int32)
-
-    out = cublaslt_gemm.scaled_grouped_gemm_mxfp8(
-        aq,
-        bq,
-        scale_a,
-        scale_b,
-        offsets,
-        torch.bfloat16,
-        32,
-    )
-
-    assert out.shape == (299, 160)
-    assert out.dtype == torch.bfloat16
-    assert out.device.type == "meta"
-
-
-@cuda_mxfp8_only
-def test_cublaslt_grouped_native_op_validates_scale_shape():
-    aq = torch.empty((16, 32), device="cuda", dtype=torch.float8_e4m3fn)
-    bq = torch.empty((1, 32, 16), device="cuda", dtype=torch.float8_e4m3fn)
-    bq = bq.transpose(-1, -2).contiguous().transpose(-1, -2)
-    scale_a = torch.empty((16, 2), device="cuda")
-    scale_b = torch.empty((1, 1, 16), device="cuda")
-    offsets = torch.tensor([16], device="cuda", dtype=torch.int32)
-
-    with pytest.raises(RuntimeError, match="A scales must have shape"):
-        torch.ops.aot_kernel._scaled_grouped_gemm_mxfp8_cublaslt(
-            aq, bq, scale_a, scale_b, offsets
-        )
-
-
-@cuda_mxfp8_only
-def test_cublaslt_grouped_mxfp8_matches_eager_with_empty_expert():
-    _require_grouped_mxfp8_device()
-    counts = [128, 0, 130, 41]
-    rows, k, n = sum(counts), 144, 160
-    torch.manual_seed(0)
-    a = torch.randn(rows, k, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(len(counts), k, n, device="cuda", dtype=torch.bfloat16)
-    aq, scale_a = quantize_operand(a, -1, "fp8_e4m3", _MXFP8_SCALING)
-    bq, scale_b = quantize_operand(b, -2, "fp8_e4m3", _MXFP8_SCALING)
-    offsets = torch.tensor(counts, device="cuda", dtype=torch.int32).cumsum(0)
-
-    eager = mxfp8_scaled_grouped_mm(
-        aq,
-        bq,
-        scale_a,
-        scale_b,
-        offsets,
-        torch.bfloat16,
-        32,
-        backend="eager",
-    )
-    actual = mxfp8_scaled_grouped_mm(
-        aq,
-        bq,
-        scale_a,
-        scale_b,
-        offsets,
-        torch.bfloat16,
-        32,
-        backend="cublaslt",
-    )
-
-    assert actual.shape == (rows, n)
-    assert actual.dtype == torch.bfloat16
-    assert torch.equal(actual, eager)
+        cublaslt_gemm.scaled_mm_mxfp8(a, b, scale_a, scale_b, torch.float32, 32)
 
 
 def test_cublaslt_meta_rejects_invalid_contraction():
@@ -253,7 +159,7 @@ def test_cublaslt_meta_rejects_invalid_contraction():
     scale_a = torch.empty((512,), device="meta", dtype=torch.float8_e8m0fnu)
     scale_b = torch.empty((512,), device="meta", dtype=torch.float8_e8m0fnu)
     with pytest.raises(RuntimeError, match="contraction dimensions"):
-        torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(a, b, scale_a, scale_b)
+        torch.ops.aot_kernel._scaled_mm_mxfp8_cublaslt(a, b, scale_a, scale_b)
 
 
 @pytest.mark.parametrize(
@@ -278,7 +184,7 @@ def test_cublaslt_meta_rejects_invalid_transformed_abi(invalid_input: str, error
         bias = torch.empty((127,), device="meta", dtype=torch.bfloat16)
 
     with pytest.raises(RuntimeError, match=error):
-        torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(a, b, scale_a, scale_b, bias)
+        torch.ops.aot_kernel._scaled_mm_mxfp8_cublaslt(a, b, scale_a, scale_b, bias)
 
 
 @cuda_mxfp8_only
@@ -311,7 +217,7 @@ def test_cublaslt_native_operator_rejects_invalid_transformed_abi(
         bias = torch.empty(127, device="cuda", dtype=torch.bfloat16)
 
     with pytest.raises(RuntimeError, match=error):
-        torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
+        torch.ops.aot_kernel._scaled_mm_mxfp8_cublaslt(
             aq, b, swizzled_a, swizzled_b, bias
         )
 

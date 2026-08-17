@@ -84,7 +84,7 @@ def _dequant_b(q, scale, block_size):
     capabilities=frozenset(),
     reference=True,
 )
-def scaled_gemm(
+def scaled_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -123,7 +123,7 @@ def scaled_gemm(
     capabilities=frozenset(),
     reference=True,
 )
-def scaled_grouped_gemm(
+def scaled_grouped_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,

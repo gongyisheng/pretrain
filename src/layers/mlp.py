@@ -36,7 +36,7 @@ class GroupedGemmFn(torch.autograd.Function):
         return (*grads, None) if ctx.has_backend_arg else grads
 
 
-def grouped_gemm_fn(a, b, offs, bias=None, projection=None, backend: str | None = None):
+def grouped_mm_fn(a, b, offs, bias=None, projection=None, backend: str | None = None):
     return GroupedGemmFn.apply(a, b, bias, offs, backend)
 
 
@@ -49,7 +49,7 @@ def grouped_mlp(
     gated: bool,
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
-    expert_mm=grouped_gemm_fn,
+    expert_mm=grouped_mm_fn,
 ) -> torch.Tensor:
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
@@ -367,7 +367,7 @@ class SparseMoEBlock(nn.Module):
 
         # Pluggable expert GEMM seam (a, b, offs, projection)
         # quant converter swaps in a quantized callable
-        self.expert_mm = grouped_gemm_fn
+        self.expert_mm = grouped_mm_fn
 
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)

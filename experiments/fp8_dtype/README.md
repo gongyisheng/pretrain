@@ -68,7 +68,7 @@ momentum=0.95, nesterov), lr=5e-4, cosine with 1500 warmup, min_lr=5e-5, OpenWeb
 
 The converter (`src/quant/convert.py:apply_quantization`) swaps eligible
 `nn.Linear` modules to `QuantLinear`; each per-layer GEMM (`_gemm` in
-`src/quant/linear.py`) uses the fused `scaled_gemm` when both operands share a
+`src/quant/linear.py`) uses the fused `scaled_mm` when both operands share a
 quantized family, else falls back to fake-quant + a bf16 matmul. Everything else
 (RoPE, RMSNorm, qk_norm, attention, SwiGLU, residuals, embeddings, lm_head,
 cross-entropy, optimizer state) stays bf16/fp32; hp master weights preserved.

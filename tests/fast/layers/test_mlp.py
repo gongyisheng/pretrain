@@ -14,7 +14,7 @@ from src.layers.mlp import (
     MoERouter,
     MOE_ROUTER_SCORE_FNS,
     SparseMoEBlock,
-    grouped_gemm_fn,
+    grouped_mm_fn,
     grouped_mlp,
 )
 from tests.fast.layers._refs import (
@@ -26,7 +26,7 @@ from tests.fast.layers._refs import (
 )
 
 
-def grouped_gemm_eager(a, b, offs, bias=None):
+def grouped_mm_eager(a, b, offs, bias=None):
     return grouped_mm(a, b, offs, bias=bias, backend="eager")
 
 
@@ -1340,7 +1340,7 @@ def test_moe_expert_mm_seam_is_pluggable():
         .bfloat16()
     )
     # default seam is the bf16 grouped GEMM wrapped for autograd
-    assert blk.expert_mm is grouped_gemm_fn
+    assert blk.expert_mm is grouped_mm_fn
 
     seen = []
 
@@ -1377,7 +1377,7 @@ def _make_grouped_layout(layout, counts=(64, 0, 130, 46), M=32, K=64, N=48, seed
     return rand(G, M, K), rand(K, R), offs  # ragged_n: (G,M,K) x (K,R) -> (M,R)
 
 
-def _run_grouped_gemm_apply(a0, b0, offs, grad, backend, include_backend):
+def _run_grouped_mm_apply(a0, b0, offs, grad, backend, include_backend):
     a = a0.clone().requires_grad_(True)
     b = b0.clone().requires_grad_(True)
     if include_backend:
@@ -1396,11 +1396,11 @@ def _run_grouped_gemm_apply(a0, b0, offs, grad, backend, include_backend):
     [(None, False), ("triton", True)],
     ids=["four_inputs", "forced_backend"],
 )
-def test_grouped_gemm_fn_apply_backward_arity(backend, include_backend):
+def test_grouped_mm_fn_apply_backward_arity(backend, include_backend):
     a0, b0, offs = _make_grouped_layout("ragged_m")
     grad = torch.randn(a0.shape[0], b0.shape[-1], device="cuda", dtype=torch.bfloat16)
 
-    out, grad_a, grad_b = _run_grouped_gemm_apply(
+    out, grad_a, grad_b = _run_grouped_mm_apply(
         a0, b0, offs, grad, backend, include_backend
     )
 
@@ -1412,12 +1412,12 @@ def test_grouped_gemm_fn_apply_backward_arity(backend, include_backend):
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
 )
-def test_grouped_gemm_fn_explicit_none_backend_matches_omitted_backend():
+def test_grouped_mm_fn_explicit_none_backend_matches_omitted_backend():
     a0, b0, offs = _make_grouped_layout("ragged_m")
     grad = torch.randn(a0.shape[0], b0.shape[-1], device="cuda", dtype=torch.bfloat16)
 
-    omitted = _run_grouped_gemm_apply(a0, b0, offs, grad, None, False)
-    explicit_none = _run_grouped_gemm_apply(a0, b0, offs, grad, None, True)
+    omitted = _run_grouped_mm_apply(a0, b0, offs, grad, None, False)
+    explicit_none = _run_grouped_mm_apply(a0, b0, offs, grad, None, True)
 
     for got, expected in zip(explicit_none, omitted):
         torch.testing.assert_close(got, expected)
@@ -1427,7 +1427,7 @@ def test_grouped_gemm_fn_explicit_none_backend_matches_omitted_backend():
     not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
 )
 @pytest.mark.parametrize("layout", _GG_LAYOUTS)
-def test_grouped_gemm_fn_grads_match_torch(layout):
+def test_grouped_mm_fn_grads_match_torch(layout):
     """Each layout's dgrad/wgrad lands in another layout of the same set, so
     GroupedGemmFn is only correct once all three are."""
     a0, b0, offs = _make_grouped_layout(layout)
@@ -1439,7 +1439,7 @@ def test_grouped_gemm_fn_grads_match_torch(layout):
         (out * out).sum().backward()
         return out, a.grad, b.grad
 
-    ref = run(lambda a, b: grouped_gemm_eager(a, b, offs))
+    ref = run(lambda a, b: grouped_mm_eager(a, b, offs))
     got = run(lambda a, b: GroupedGemmFn.apply(a, b, None, offs))
     for g, r in zip(got, ref):
         torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
@@ -1449,11 +1449,11 @@ def test_grouped_gemm_fn_grads_match_torch(layout):
     not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
 )
 @pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
-def test_grouped_gemm_fn_bias_grads_match_eager(layout):
+def test_grouped_mm_fn_bias_grads_match_eager(layout):
     a0, b0, offs = _make_grouped_layout(layout)
     G, N = offs.shape[0], 48
     bias0 = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
-    grad_out = torch.randn_like(grouped_gemm_eager(a0, b0, offs, bias0))
+    grad_out = torch.randn_like(grouped_mm_eager(a0, b0, offs, bias0))
 
     def run(fn):
         a, b = a0.clone().requires_grad_(True), b0.clone().requires_grad_(True)
@@ -1462,7 +1462,7 @@ def test_grouped_gemm_fn_bias_grads_match_eager(layout):
         out.backward(grad_out)
         return out, a.grad, b.grad, bias.grad
 
-    ref = run(lambda a, b, bias: grouped_gemm_eager(a, b, offs, bias))
+    ref = run(lambda a, b, bias: grouped_mm_eager(a, b, offs, bias))
     got = run(lambda a, b, bias: GroupedGemmFn.apply(a, b, bias, offs))
     for index, (g, r) in enumerate(zip(got, ref)):
         if layout == "ragged_m" and index == 3:
@@ -1474,7 +1474,7 @@ def test_grouped_gemm_fn_bias_grads_match_eager(layout):
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
 )
-def test_grouped_gemm_fn_compiles_fullgraph_and_matches_eager():
+def test_grouped_mm_fn_compiles_fullgraph_and_matches_eager():
     # Forward compiles with no graph break; the Function's backward runs eager
     # (Dynamo cannot trace the autograd engine under fullgraph), so we compile
     # forward and call backward outside the traced region, matching eager.

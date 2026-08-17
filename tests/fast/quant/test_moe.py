@@ -26,7 +26,7 @@ def _make(counts, K, N, seed=0):
     return a, b, offs
 
 
-def test_scaled_grouped_gemm_compiles_fullgraph():
+def test_scaled_grouped_mm_compiles_fullgraph():
     # Forward compiles with no graph break; the custom Function's backward runs
     # eager (Dynamo cannot trace the autograd engine under fullgraph — a
     # categorical limitation), so we compile forward and call backward outside
@@ -35,7 +35,7 @@ def test_scaled_grouped_gemm_compiles_fullgraph():
     cfg = _cfg("fp8", "rowwise")
 
     def fwd(a, b):
-        return moe.scaled_grouped_gemm_fn(cfg)(a, b, offs)
+        return moe.scaled_grouped_mm_fn(cfg)(a, b, offs)
 
     a_e = a.clone().requires_grad_(True)
     b_e = b.clone().requires_grad_(True)
@@ -64,7 +64,7 @@ def test_expert_mm_bias_is_additive(scaling):
     group_of_row = torch.searchsorted(
         offs, torch.arange(a.shape[0], device=offs.device), right=True
     )
-    mm = moe.scaled_grouped_gemm_fn(_cfg("fp8", scaling))
+    mm = moe.scaled_grouped_mm_fn(_cfg("fp8", scaling))
 
     def run(fused):
         a_ = a.clone().requires_grad_(True)
@@ -181,7 +181,7 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
 
     a_q = a.clone().requires_grad_(True)
     b_q = b.clone().requires_grad_(True)
-    y_q = moe.scaled_grouped_gemm_fn(cfg)(a_q, b_q, offs)
+    y_q = moe.scaled_grouped_mm_fn(cfg)(a_q, b_q, offs)
     gy = torch.randn_like(y_q)
     y_q.backward(gy)
 
@@ -194,7 +194,7 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
     monkeypatch.setattr(moe, "scaled_mm_op", lambda *a, **k: None)
     a_f = a.clone().requires_grad_(True)
     b_f = b.clone().requires_grad_(True)
-    y_f = moe.scaled_grouped_gemm_fn(cfg)(a_f, b_f, offs)
+    y_f = moe.scaled_grouped_mm_fn(cfg)(a_f, b_f, offs)
     y_f.backward(gy)
 
     assert len(wgrad_calls) == 1, "reference run did not fall back off the fused path"
@@ -229,7 +229,7 @@ def test_grad_b_quality_is_independent_across_experts(scaling):
 
     a_q = a.clone().requires_grad_(True)
     b_q = b.clone().requires_grad_(True)
-    moe.scaled_grouped_gemm_fn(cfg)(a_q, b_q, offs).sum().backward()
+    moe.scaled_grouped_mm_fn(cfg)(a_q, b_q, offs).sum().backward()
 
     a_ref = a.float().clone().requires_grad_(True)
     b_ref = b.float().clone().requires_grad_(True)
@@ -258,7 +258,7 @@ def test_ragged_n_layout_raises():
     a = torch.randn(2, 16, 48, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(48, 32, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(NotImplementedError, match="ragged-N"):
-        moe.quantized_grouped_gemm(
+        moe.quantized_grouped_mm(
             a, b, offs, "fp8_e4m3", "fp8_e4m3", a.dtype, _cfg().scaling
         )
 
@@ -281,7 +281,7 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
 
     monkeypatch.setattr(gemm_module, "dispatch", spy)
     a_q = a.clone().requires_grad_(True)
-    moe.scaled_grouped_gemm_fn(_cfg("fp8", "rowwise"))(
+    moe.scaled_grouped_mm_fn(_cfg("fp8", "rowwise"))(
         a_q, b.clone(), offs
     ).sum().backward()
     assert seen["block_size"] == 0  # rowwise -> one block per expert

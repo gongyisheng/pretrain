@@ -8,15 +8,6 @@ from src.kernel.registry import register_kernel
 from src.kernel.spec import cuda
 
 
-_FLOAT_DTYPES = {torch.float32, torch.bfloat16, torch.float16}
-_QUANTIZED_DTYPES = {torch.int8, torch.float8_e4m3fn, torch.float8_e5m2}
-
-
-def _require(condition: bool, reason: str) -> None:
-    if not condition:
-        raise ValueError(reason)
-
-
 # ---------------------------------------------------------------------------
 # Config + helpers
 # ---------------------------------------------------------------------------
@@ -62,7 +53,7 @@ _GROUPED_CONFIGS = [
 
 @triton.autotune(configs=_GROUPED_CONFIGS, key=["M", "N", "K", "A_IS_2D", "B_IS_2D"])
 @triton.jit
-def _grouped_gemm_kernel(
+def _grouped_mm_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -187,13 +178,35 @@ def _grouped_gemm_kernel(
         group_tile_start += group_tile_count
 
 
-@triton_op("jit_kernel::grouped_gemm", mutates_args={})
-def _grouped_gemm(
+# Dispatch reaches this entry directly, gated only by device/SM capability plus the
+# bf16-only dtype routing in src/kernel/ops/gemm.py.
+@register_kernel(
+    op="gemm.grouped_mm",
+    backend="triton",
+    build="jit",
+    autograd=False,
+    capabilities=frozenset({cuda(min_arch=(8, 0))}),
+)
+@triton_op("jit_kernel::grouped_mm", mutates_args={})
+def grouped_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     offs: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Ragged grouped GEMM matching torch._grouped_mm's layout convention.
+
+    Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
+        (M,K) x (G,K,N) -> (M,N)    ragged M
+        (M,K) x (K,N)   -> (G,M,N)  ragged K
+        (G,M,K) x (K,N) -> (M,N)    ragged N
+
+    `bias` is an optional (G,N) tensor broadcast over the output's row dim, fused
+    into the Triton epilogue.
+
+    Unvalidated: callers must supply bf16 CUDA `a`/`b` on one device, a contiguous
+    int32 `offs` of length G, and no bias for the ragged-N layout.
+    """
     a_is_2d, b_is_2d = a.ndim == 2, b.ndim == 2
     G = offs.shape[0]
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
@@ -216,7 +229,7 @@ def _grouped_gemm(
     stride = (M * padded, padded, 1) if len(output_size) == 3 else (padded, 1)
     c = torch.empty_strided(output_size, stride, device=a.device, dtype=a.dtype)
     num_sms = _num_sms(a.device)
-    wrap_triton(_grouped_gemm_kernel)[(num_sms,)](
+    wrap_triton(_grouped_mm_kernel)[(num_sms,)](
         a,
         b,
         c,
@@ -243,91 +256,6 @@ def _grouped_gemm(
         HAS_BIAS=bias is not None,
     )
     return c
-
-
-def grouped_gemm(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    offs: torch.Tensor,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Ragged grouped GEMM matching torch._grouped_mm's layout convention.
-
-    Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
-        (M,K) x (G,K,N) -> (M,N)    ragged M
-        (M,K) x (K,N)   -> (G,M,N)  ragged K
-        (G,M,K) x (K,N) -> (M,N)    ragged N
-
-    `bias` is an optional (G,N) tensor broadcast over the output's row dim, fused
-    into the Triton epilogue.
-    """
-    _require(
-        all(isinstance(tensor, torch.Tensor) for tensor in (a, b, offs)),
-        "a, b, and offs must be torch.Tensor inputs",
-    )
-    _require(a.ndim in (2, 3) and b.ndim in (2, 3), "a and b must be 2-D or 3-D")
-    _require(offs.ndim == 1 and offs.numel() > 0, "offs must be a nonempty 1-D tensor")
-    _require(a.ndim == 2 or b.ndim == 2, "3D x 3D has no ragged dim; use torch.bmm")
-    _require(
-        a.shape[-1] == b.shape[-2],
-        f"contraction mismatch: a {a.shape[-1]}, b {b.shape[-2]}",
-    )
-    if a.ndim == 3:
-        _require(
-            offs.shape[0] == a.shape[0],
-            f"offs len {offs.shape[0]} != G {a.shape[0]}",
-        )
-    if b.ndim == 3:
-        _require(
-            offs.shape[0] == b.shape[0],
-            f"offs len {offs.shape[0]} != G {b.shape[0]}",
-        )
-    _require(offs.dtype == torch.int32, f"offs must be int32, got {offs.dtype}")
-    _require(offs.is_contiguous(), "offs must be contiguous")
-    _require(a.dtype == b.dtype == torch.bfloat16, "a and b must both be bfloat16")
-    _require(
-        a.is_cuda and b.is_cuda and offs.is_cuda, "a, b, and offs must be CUDA tensors"
-    )
-    _require(
-        a.device == b.device == offs.device, "a, b, and offs must share one device"
-    )
-
-    if bias is not None:
-        _require(isinstance(bias, torch.Tensor), "bias must be a torch.Tensor")
-        _require(a.ndim != 3, "bias not supported for ragged-N")
-        _require(
-            bias.shape == (offs.shape[0], b.shape[-1]),
-            f"bias must be (G,N)=({offs.shape[0]},{b.shape[-1]}), got {tuple(bias.shape)}",
-        )
-        _require(bias.dtype == a.dtype, f"bias dtype {bias.dtype} != a {a.dtype}")
-        _require(bias.device == a.device, "bias must be on the same device as a")
-
-    capability = torch.cuda.get_device_capability(a.device)
-    _require(
-        capability >= (8, 0),
-        f"grouped GEMM requires SM80 or newer, got SM{capability[0]}{capability[1]}",
-    )
-
-    return _grouped_gemm_unchecked(a, b, offs, bias)
-
-
-# Dispatch reaches this entry directly, gated only by device/SM capability plus the
-# bf16-only dtype routing in src/kernel/ops/gemm.py. `grouped_gemm` above is a
-# separate, unused-by-dispatch reference kept for direct callers and tests.
-@register_kernel(
-    op="gemm.grouped_mm",
-    backend="triton",
-    build="jit",
-    autograd=False,
-    capabilities=frozenset({cuda(min_arch=(8, 0))}),
-)
-def _grouped_gemm_unchecked(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    offs: torch.Tensor,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    return _grouped_gemm(a, b, offs, bias)
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +301,7 @@ def _early_prune_scaled_configs(
     prune_configs_by={"early_config_prune": _early_prune_scaled_configs},
 )
 @triton.jit
-def _scaled_gemm_kernel(
+def _scaled_mm_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -473,7 +401,7 @@ _MXFP8_BLOCK_SIZE = 32
 
 @triton.autotune(configs=_SCALED_MXFP8_CONFIGS, key=["M", "N", "K"])
 @triton.jit
-def _scaled_gemm_mxfp8_kernel(
+def _mxfp8_scaled_mm_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -559,122 +487,6 @@ def _scaled_gemm_mxfp8_kernel(
     )
 
 
-def _check_scaled_gemm(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None,
-    operand_formats: dict | set,
-) -> tuple[int, int, int]:
-    """Checks shared by `epilogue_scaled_gemm` and `mxfp8_scaled_gemm`. `operand_formats`
-    is the allowed aq/bq dtype set -- `_QUANTIZED_DTYPES` or `_MXFP8_FORMAT` -- since
-    that is the one thing the two kernels genuinely disagree on. Returns (M, K, N) so
-    callers don't re-derive them.
-    """
-    tensors = (aq, bq, sa, sb) if bias is None else (aq, bq, sa, sb, bias)
-    _require(
-        all(isinstance(tensor, torch.Tensor) for tensor in tensors),
-        "aq, bq, sa, sb, and bias must be torch.Tensor inputs",
-    )
-    _require(
-        all(tensor.ndim == 2 for tensor in (aq, bq, sa, sb)),
-        "aq, bq, sa, and sb must be 2-D",
-    )
-    _require(isinstance(out_dtype, torch.dtype), "out_dtype must be torch.dtype")
-    _require(
-        type(block_size) is int and block_size >= 0,
-        "block_size must be a non-negative integer",
-    )
-    _require(
-        all(tensor.is_cuda for tensor in tensors), "scaled GEMM requires CUDA tensors"
-    )
-    _require(
-        all(tensor.device == aq.device for tensor in tensors),
-        "all scaled GEMM tensors must share one device",
-    )
-    _require(aq.dtype in operand_formats, f"unsupported aq dtype {aq.dtype}")
-    _require(bq.dtype in operand_formats, f"unsupported bq dtype {bq.dtype}")
-    _require(sa.dtype == sb.dtype == torch.float32, "sa and sb must both be float32")
-    _require(out_dtype in _FLOAT_DTYPES, f"unsupported out_dtype {out_dtype}")
-    _require(
-        aq.dtype.is_floating_point == bq.dtype.is_floating_point,
-        f"aq {aq.dtype} and bq {bq.dtype} are not the same family",
-    )
-    M, K = aq.shape
-    N = bq.shape[1]
-    _require(bq.shape[0] == K, f"contraction mismatch: aq {K}, bq {bq.shape[0]}")
-    expected_blocks = triton.cdiv(K, block_size) if block_size else 1
-    _require(
-        sa.shape == (M, expected_blocks),
-        f"sa must be (M,B)=({M},{expected_blocks}), got {tuple(sa.shape)}",
-    )
-    _require(
-        sb.shape == (expected_blocks, N),
-        f"sb must be (B,N)=({expected_blocks},{N}), got {tuple(sb.shape)}",
-    )
-    if bias is not None:
-        _require(bias.ndim == 1 and bias.shape[0] == N, f"bias must be (N,)=({N},)")
-        _require(bias.dtype in _FLOAT_DTYPES, f"unsupported bias dtype {bias.dtype}")
-    return M, K, N
-
-
-def epilogue_scaled_gemm(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    _, K, _ = _check_scaled_gemm(
-        aq, bq, sa, sb, out_dtype, block_size, bias, _QUANTIZED_DTYPES
-    )
-    expected_blocks = triton.cdiv(K, block_size) if block_size else 1
-    if expected_blocks > 1:
-        _require(
-            block_size >= 16 and block_size & (block_size - 1) == 0,
-            f"block_size must be a power of two >= 16 when it tiles K, got {block_size}",
-        )
-    capability = torch.cuda.get_device_capability(aq.device)
-    minimum = (8, 9) if aq.dtype.is_floating_point else (8, 0)
-    _require(
-        capability >= minimum,
-        f"scaled GEMM requires SM{minimum[0]}{minimum[1]} or newer, got SM{capability[0]}{capability[1]}",
-    )
-    return _epilogue_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
-
-
-def mxfp8_scaled_gemm(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    _check_scaled_gemm(aq, bq, sa, sb, out_dtype, block_size, bias, _MXFP8_FORMAT)
-    # block_size 0 is the "one block spans all of K" sentinel, not a real width -- 0 %
-    # 32 == 0 in Python, so it must be excluded explicitly or it would collapse rep_k
-    # to 0 in `_mxfp8_scaled_mm` and hand the kernel a zero-width scale tensor.
-    _require(
-        block_size != 0 and block_size % _MXFP8_BLOCK_SIZE == 0,
-        f"mxfp8 block_size must be a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}",
-    )
-    capability = torch.cuda.get_device_capability(aq.device)
-    _require(
-        capability >= (10, 0),
-        f"mxfp8 scaled GEMM requires SM100 or newer, got SM{capability[0]}{capability[1]}",
-    )
-    return _mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
-
-
-# Dispatch reaches this entry directly, gated only by device/SM capability; see the
-# entry's own docstring for what it still checks and why.
 @register_kernel(
     op="gemm.int8_scaled_mm",
     backend="triton",
@@ -689,8 +501,8 @@ def mxfp8_scaled_gemm(
     autograd=False,
     capabilities=frozenset({cuda(min_arch=(8, 9))}),
 )
-@triton_op("jit_kernel::epilogue_scaled_mm", mutates_args={})
-def _epilogue_scaled_mm(
+@triton_op("jit_kernel::scaled_mm", mutates_args={})
+def scaled_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -708,13 +520,10 @@ def _epilogue_scaled_mm(
     reaches.
 
     `bias` is an optional (N,) tensor broadcast over the rows, added to the fp32
-    accumulator in the epilogue so it never passes through the scales.
+    accumulator after scaling.
 
-    Dispatch reaches this entry directly, gated only by device/SM capability; the
-    `epilogue_scaled_gemm` function above is a separate, unused-by-dispatch reference
-    kept for direct callers and tests. Only checks whose violation is silent or
-    numerically wrong live here (see the `block_size` check below); everything else is
-    the caller's contract to get right.
+    Callers must supply compatible CUDA tensors. The multi-block `block_size` guard is
+    retained because violating it silently produces incorrect results.
     """
     M, K = aq.shape
     N = bq.shape[1]
@@ -731,7 +540,7 @@ def _epilogue_scaled_mm(
     def grid(meta):
         return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
 
-    wrap_triton(_scaled_gemm_kernel)[grid](
+    wrap_triton(_scaled_mm_kernel)[grid](
         aq,
         bq,
         c,
@@ -767,7 +576,7 @@ def _epilogue_scaled_mm(
     capabilities=frozenset({cuda(min_arch=(10, 0))}),
 )
 @triton_op("jit_kernel::mxfp8_scaled_mm", mutates_args={})
-def _mxfp8_scaled_mm(
+def mxfp8_scaled_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -776,13 +585,18 @@ def _mxfp8_scaled_mm(
     block_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Scaled GEMM, (M,K) x (K,N) -> (M,N), mxfp8 only; see `mxfp8_scaled_gemm` for the
-    checked entry point.
+    """Scaled GEMM, (M,K) x (K,N) -> (M,N), mxfp8 only.
 
-    Dispatch reaches this entry directly, gated only by device/SM capability; the
-    `mxfp8_scaled_gemm` function above is a separate, unused-by-dispatch reference kept
-    for direct callers and tests.
+    Callers must supply compatible CUDA tensors. The block-size guard is required
+    before scale replication: a zero or non-32-multiple width cannot reach the MMA.
     """
+    # block_size 0 is the "one block spans all of K" sentinel, not a real width -- 0 %
+    # 32 == 0 in Python, so it must be excluded explicitly or it would collapse rep_k
+    # to 0 and hand the kernel a zero-width scale tensor.
+    if block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"mxfp8 block_size must be a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}"
+        )
     M, K = aq.shape
     N = bq.shape[1]
     c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
@@ -804,7 +618,7 @@ def _mxfp8_scaled_mm(
     # of two and this cast is lossless; the kernel wants those bytes, not floats.
     sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
     sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
-    wrap_triton(_scaled_gemm_mxfp8_kernel)[grid](
+    wrap_triton(_mxfp8_scaled_mm_kernel)[grid](
         aq,
         bq,
         c,
@@ -895,7 +709,7 @@ def _early_prune_scaled_grouped_configs(
     prune_configs_by={"early_config_prune": _early_prune_scaled_grouped_configs},
 )
 @triton.jit
-def _scaled_grouped_gemm_kernel(
+def _scaled_grouped_mm_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -935,7 +749,7 @@ def _scaled_grouped_gemm_kernel(
 ):
     """Ragged scaled grouped GEMM over any one of M, N, K, with block scaling.
 
-    Same layout model as _grouped_gemm_kernel. The quantized addition is
+    Same layout model as _grouped_mm_kernel. The quantized addition is
     `scale_block_idx`, the index along the contraction axis -- global when the
     contraction is dense, per-group re-tiled and carried across the group loop when
     the contraction is itself ragged.
@@ -1098,7 +912,7 @@ _SCALED_GROUPED_MXFP8_CONFIGS = [
     key=["M", "N", "K", "A_IS_2D", "B_IS_2D"],
 )
 @triton.jit
-def _scaled_grouped_gemm_mxfp8_kernel(
+def _mxfp8_scaled_grouped_mm_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -1256,184 +1070,6 @@ def _scaled_grouped_gemm_mxfp8_kernel(
         group_tile_start += group_tile_count
 
 
-def _check_scaled_grouped_gemm(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    offs: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None,
-    operand_formats: dict | set,
-) -> None:
-    """Checks shared by `epilogue_scaled_grouped_gemm` and `mxfp8_scaled_grouped_gemm`.
-    `operand_formats` is the allowed aq/bq dtype set, the one thing the two kernels
-    genuinely disagree on.
-    """
-    tensors = (aq, bq, sa, sb, offs) if bias is None else (aq, bq, sa, sb, offs, bias)
-    _require(
-        all(isinstance(tensor, torch.Tensor) for tensor in tensors),
-        "scaled grouped GEMM inputs must be torch.Tensor objects",
-    )
-    _require(aq.ndim in (2, 3) and bq.ndim in (2, 3), "aq and bq must be 2-D or 3-D")
-    _require(sa.ndim in (2, 3) and sb.ndim in (2, 3), "sa and sb must be 2-D or 3-D")
-    _require(offs.ndim == 1 and offs.numel() > 0, "offs must be a nonempty 1-D tensor")
-    _require(isinstance(out_dtype, torch.dtype), "out_dtype must be torch.dtype")
-    _require(
-        type(block_size) is int and block_size >= 0,
-        "block_size must be a non-negative integer",
-    )
-    _require(
-        all(tensor.is_cuda for tensor in tensors),
-        "scaled grouped GEMM requires CUDA tensors",
-    )
-    _require(
-        all(tensor.device == aq.device for tensor in tensors),
-        "all scaled grouped GEMM tensors must share one device",
-    )
-    _require(aq.dtype in operand_formats, f"unsupported aq dtype {aq.dtype}")
-    _require(bq.dtype in operand_formats, f"unsupported bq dtype {bq.dtype}")
-    _require(sa.dtype == sb.dtype == torch.float32, "sa and sb must both be float32")
-    _require(offs.dtype == torch.int32, f"offs must be int32, got {offs.dtype}")
-    _require(offs.is_contiguous(), "offs must be contiguous")
-    _require(out_dtype in _FLOAT_DTYPES, f"unsupported out_dtype {out_dtype}")
-    _require(
-        aq.dtype.is_floating_point == bq.dtype.is_floating_point,
-        "aq and bq must use the same dtype family",
-    )
-    _require(aq.ndim == 2 or bq.ndim == 2, "3D x 3D has no ragged dim; use torch.bmm")
-    _require(
-        aq.shape[-1] == bq.shape[-2],
-        f"contraction mismatch: aq {aq.shape[-1]}, bq {bq.shape[-2]}",
-    )
-    if aq.ndim == 3:
-        _require(aq.shape[0] == offs.numel(), "aq group count must match offs")
-    if bq.ndim == 3:
-        _require(bq.shape[0] == offs.numel(), "bq group count must match offs")
-    if bias is not None:
-        _require(aq.ndim != 3, "bias not supported for ragged-N")
-        _require(
-            bias.shape == (offs.numel(), bq.shape[-1]),
-            f"bias must be ({offs.numel()}, {bq.shape[-1]})",
-        )
-        _require(bias.dtype in _FLOAT_DTYPES, f"unsupported bias dtype {bias.dtype}")
-
-
-def _grouped_scales_are_valid(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    offs: torch.Tensor,
-    block_size: int,
-) -> bool:
-    """The three-way scale-layout check shared by `epilogue_scaled_grouped_gemm` and
-    `mxfp8_scaled_grouped_gemm` -- identical for both, since it depends only on which
-    dim `offs` partitions, not on the operand format.
-    """
-    if aq.ndim == 2 and bq.ndim == 3:
-        blocks = triton.cdiv(aq.shape[1], block_size) if block_size else 1
-        return sa.shape == (aq.shape[0], blocks) and sb.shape == (
-            bq.shape[0],
-            blocks,
-            bq.shape[2],
-        )
-    elif aq.ndim == 2 and bq.ndim == 2:
-        return (
-            sa.ndim == 2
-            and sb.ndim == 2
-            and sa.shape[0] == aq.shape[0]
-            and sa.shape[1] == sb.shape[0]
-            and sb.shape[1] == bq.shape[1]
-            and (block_size != 0 or sa.shape[1] == offs.numel())
-        )
-    else:
-        blocks = triton.cdiv(aq.shape[2], block_size) if block_size else 1
-        return sa.shape == (aq.shape[0], aq.shape[1], blocks) and sb.shape == (
-            blocks,
-            bq.shape[1],
-        )
-
-
-def epilogue_scaled_grouped_gemm(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    offs: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    _check_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, out_dtype, block_size, bias, _QUANTIZED_DTYPES
-    )
-    _require(
-        _grouped_scales_are_valid(aq, bq, sa, sb, offs, block_size),
-        "invalid scale layout",
-    )
-    capability = torch.cuda.get_device_capability(aq.device)
-    minimum = (8, 9) if aq.dtype.is_floating_point else (8, 0)
-    _require(
-        capability >= minimum,
-        f"scaled grouped GEMM requires SM{minimum[0]}{minimum[1]} or newer, got SM{capability[0]}{capability[1]}",
-    )
-    return _epilogue_scaled_grouped_mm(
-        aq, bq, sa, sb, offs, out_dtype, block_size, bias
-    )
-
-
-def mxfp8_scaled_grouped_gemm(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    offs: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    _check_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, out_dtype, block_size, bias, _MXFP8_FORMAT
-    )
-    # The ragged-K layout re-tiles its scale blocks *inside* each group at runtime --
-    # group g's blocks start where group g-1's ended, sized off `offs` via
-    # cdiv(k_size_g, 32) -- so a flat repeat_interleave over the whole scale-block axis
-    # would smear a replicated scale across a group boundary. `_mxfp8_scaled_grouped_mm`
-    # therefore only supports the kernel's native 32-wide block for ragged-K; the other
-    # two layouts (ragged M, ragged N) have a single non-ragged K shared by every group,
-    # where one repeat_interleave over the whole axis is exact, so they take the
-    # generalized multiple-of-32 condition. Do not simplify this to one shared
-    # condition. block_size 0 is the "one block spans the whole segment" sentinel, not
-    # a real width -- 0 % 32 == 0 in Python, so it must be excluded explicitly or it
-    # would collapse rep_k to 0 in `_mxfp8_scaled_grouped_mm` and hand the kernel a
-    # zero-width scale tensor.
-    is_ragged_k = aq.ndim == 2 and bq.ndim == 2
-    if is_ragged_k:
-        _require(
-            block_size == _MXFP8_BLOCK_SIZE,
-            f"mxfp8 ragged-K grouped GEMM requires block_size == {_MXFP8_BLOCK_SIZE}, got {block_size}",
-        )
-    else:
-        _require(
-            block_size != 0 and block_size % _MXFP8_BLOCK_SIZE == 0,
-            f"mxfp8 grouped GEMM requires block_size a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}",
-        )
-    _require(
-        _grouped_scales_are_valid(aq, bq, sa, sb, offs, block_size),
-        "invalid scale layout",
-    )
-    capability = torch.cuda.get_device_capability(aq.device)
-    _require(
-        capability >= (10, 0),
-        f"mxfp8 scaled grouped GEMM requires SM100 or newer, got SM{capability[0]}{capability[1]}",
-    )
-    return _mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, out_dtype, block_size, bias)
-
-
-# Dispatch reaches this entry directly, gated only by device/SM capability; see the
-# entry's own docstring for what it still checks and why.
 @register_kernel(
     op="gemm.mxfp8_scaled_grouped_mm",
     backend="triton",
@@ -1442,7 +1078,7 @@ def mxfp8_scaled_grouped_gemm(
     capabilities=frozenset({cuda(min_arch=(10, 0))}),
 )
 @triton_op("jit_kernel::mxfp8_scaled_grouped_mm", mutates_args={})
-def _mxfp8_scaled_grouped_mm(
+def mxfp8_scaled_grouped_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -1453,9 +1089,6 @@ def _mxfp8_scaled_grouped_mm(
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Ragged scaled grouped GEMM, layout picked from the operand ranks, mxfp8 only.
-
-    At `block_size` 32 always and any multiple of 32 for the ragged-M/ragged-N layouts
-    (see `mxfp8_scaled_grouped_gemm`'s ragged-K note for why ragged-K is locked to 32).
 
     Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
         (M,K) x (E,K,N) -> (M,N)    ragged M
@@ -1468,10 +1101,19 @@ def _mxfp8_scaled_grouped_mm(
     `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
     the fp32 accumulator in the epilogue so it never passes through the scales.
 
-    Dispatch reaches this entry directly, gated only by device/SM capability; the
-    `mxfp8_scaled_grouped_gemm` function above is a separate, unused-by-dispatch
-    reference kept for direct callers and tests.
+    Callers must supply compatible CUDA tensors. Ragged-K needs native 32-wide scale
+    blocks; ragged-M and ragged-N may use any nonzero multiple of 32.
     """
+    is_ragged_k = aq.ndim == 2 and bq.ndim == 2
+    if is_ragged_k:
+        if block_size != _MXFP8_BLOCK_SIZE:
+            raise ValueError(
+                f"mxfp8 ragged-K grouped GEMM requires block_size == {_MXFP8_BLOCK_SIZE}, got {block_size}"
+            )
+    elif block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"mxfp8 grouped GEMM requires block_size a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}"
+        )
     a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
     E = offs.shape[0]
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
@@ -1488,12 +1130,11 @@ def _mxfp8_scaled_grouped_mm(
     c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
 
-    is_ragged_k = a_is_2d and b_is_2d
     if is_ragged_k:
         sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
         sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
     else:
-        # Same replication trick as `_mxfp8_scaled_mm`: K is shared by every group here,
+        # Same replication trick as dense `mxfp8_scaled_mm`: K is shared by every group here,
         # so one repeat_interleave over the whole scale-block axis is exact. The
         # axis is always last for sa and second-to-last for sb, in both the 2-D
         # and 3-D (E, ...) shapes, so this covers ragged M and ragged N alike.
@@ -1505,7 +1146,7 @@ def _mxfp8_scaled_grouped_mm(
         sb_mx = sb.repeat_interleave(rep_k, dim=-2).narrow(-2, 0, n_mx)
         sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
         sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
-    wrap_triton(_scaled_grouped_gemm_mxfp8_kernel)[(num_sms,)](
+    wrap_triton(_mxfp8_scaled_grouped_mm_kernel)[(num_sms,)](
         aq,
         bq,
         c,
@@ -1558,8 +1199,8 @@ def _mxfp8_scaled_grouped_mm(
     autograd=False,
     capabilities=frozenset({cuda(min_arch=(8, 9))}),
 )
-@triton_op("jit_kernel::epilogue_scaled_grouped_mm", mutates_args={})
-def _epilogue_scaled_grouped_mm(
+@triton_op("jit_kernel::scaled_grouped_mm", mutates_args={})
+def scaled_grouped_mm(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -1583,13 +1224,9 @@ def _epilogue_scaled_grouped_mm(
     `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
     the fp32 accumulator in the epilogue so it never passes through the scales.
 
-    Dispatch reaches this entry directly, gated only by device/SM capability; the
-    `epilogue_scaled_grouped_gemm` function above is a separate, unused-by-dispatch
-    reference kept for direct callers and tests. Unlike the dense `_epilogue_scaled_mm`, this
-    kernel has no numerically-fragile constraint to re-check here: it masks the
-    reduction to each scale block's end rather than clamping BLOCK_K to it, so a
-    non-power-of-two `block_size` (e.g. 48) is exercised and correct, not just
-    tolerated (see `test_scaled_grouped_layouts_match_oracle`'s `bs=48` case).
+    Callers must supply compatible CUDA tensors. Unlike dense `scaled_mm`, this
+    kernel masks each reduction to the scale-block end, so any valid block size is
+    supported.
     """
     a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
     E = offs.shape[0]
@@ -1607,7 +1244,7 @@ def _epilogue_scaled_grouped_mm(
     c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
 
-    wrap_triton(_scaled_grouped_gemm_kernel)[(num_sms,)](
+    wrap_triton(_scaled_grouped_mm_kernel)[(num_sms,)](
         aq,
         bq,
         c,

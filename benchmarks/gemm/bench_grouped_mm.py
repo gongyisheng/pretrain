@@ -7,9 +7,9 @@ operation and PyTorch calls `F.grouped_mm` directly. The eager backend is the
 correctness oracle and is not timed. Prints a table and (unless --no-plot)
 writes a chart.
 
-    uv run python benchmarks/gemm/bench_grouped_gemm.py
-    uv run python benchmarks/gemm/bench_grouped_gemm.py --out /tmp/gg.png
-    uv run python benchmarks/gemm/bench_grouped_gemm.py --no-plot
+    uv run python benchmarks/gemm/bench_grouped_mm.py
+    uv run python benchmarks/gemm/bench_grouped_mm.py --out /tmp/gg.png
+    uv run python benchmarks/gemm/bench_grouped_mm.py --no-plot
 """
 
 import argparse
@@ -23,7 +23,7 @@ import torch.nn.functional as F
 sys.path.insert(0, ".")
 
 from src.kernel.ops.gemm import grouped_mm
-from src.layers.mlp import grouped_gemm_fn
+from src.layers.mlp import grouped_mm_fn
 
 # Fixed total rows M = tokens * top_k (bs 8 * seq 1024 * top-k 8); rows/group = M/E.
 M_FIXED = 8 * 1024 * 8
@@ -43,13 +43,13 @@ SHAPES = [
     ("down", 192, 512),
 ]
 
-DEFAULT_OUT = "benchmarks/results/grouped_gemm.png"
+DEFAULT_OUT = "benchmarks/results/grouped_mm.png"
 
 # blue/orange pair (validated colorblind-safe)
 _BACKEND_COLOR = {"pytorch": "#eb6834", "triton": "#2a78d6"}
 
 
-def _pytorch_grouped_gemm(a, b, offs, bias=None):
+def _pytorch_grouped_mm(a, b, offs, bias=None):
     out = F.grouped_mm(a, b, offs=offs, bias=None)
     if bias is None:
         return out
@@ -63,19 +63,19 @@ class _PyTorchGroupedGemmFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b, offs):
         ctx.save_for_backward(a, b, offs)
-        return _pytorch_grouped_gemm(a, b, offs)
+        return _pytorch_grouped_mm(a, b, offs)
 
     @staticmethod
     def backward(ctx, grad_c):
         a, b, offs = ctx.saved_tensors
         return (
-            _pytorch_grouped_gemm(grad_c, b.mT, offs),
-            _pytorch_grouped_gemm(a.mT, grad_c, offs),
+            _pytorch_grouped_mm(grad_c, b.mT, offs),
+            _pytorch_grouped_mm(a.mT, grad_c, offs),
             None,
         )
 
 
-def _pytorch_grouped_gemm_with_autograd(a, b, offs):
+def _pytorch_grouped_mm_with_autograd(a, b, offs):
     return _PyTorchGroupedGemmFn.apply(a, b, offs)
 
 
@@ -131,13 +131,11 @@ def _bench_point(E, K, N):
         triton_out = grouped_mm(a, b, offs, backend="triton")
         _assert_parity(triton_out, eager)
         out[("triton", "relerr")] = _relative_error(triton_out, eager)
-        out[("triton", "fwd")] = _time(
-            lambda: grouped_mm(a, b, offs, backend="triton")
-        )
-        pytorch_out = _pytorch_grouped_gemm(a, b, offs)
+        out[("triton", "fwd")] = _time(lambda: grouped_mm(a, b, offs, backend="triton"))
+        pytorch_out = _pytorch_grouped_mm(a, b, offs)
         _assert_parity(pytorch_out, eager)
         out[("pytorch", "relerr")] = _relative_error(pytorch_out, eager)
-        out[("pytorch", "fwd")] = _time(lambda: _pytorch_grouped_gemm(a, b, offs))
+        out[("pytorch", "fwd")] = _time(lambda: _pytorch_grouped_mm(a, b, offs))
     for backend in ("pytorch", "triton"):
         if out[(backend, "fwd")] is None:
             out[(backend, "bwd")] = None
@@ -145,9 +143,9 @@ def _bench_point(E, K, N):
         ag, bg, offg = _make(E, M_FIXED, K, N, requires_grad=True)
         go = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16)
         res = (
-            _pytorch_grouped_gemm_with_autograd(ag, bg, offg)
+            _pytorch_grouped_mm_with_autograd(ag, bg, offg)
             if backend == "pytorch"
-            else grouped_gemm_fn(ag, bg, offg, backend=backend)
+            else grouped_mm_fn(ag, bg, offg, backend=backend)
         )
         # backward-only: forward already ran; time repeated grad passes (retain_graph)
         out[(backend, "bwd")] = _time(lambda: res.backward(go, retain_graph=True))

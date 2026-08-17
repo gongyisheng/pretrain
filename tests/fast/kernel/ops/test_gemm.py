@@ -1,4 +1,5 @@
 import inspect
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -93,12 +94,14 @@ _ALL_OPS = (
     "gemm.mxfp8_scaled_grouped_mm",
 )
 
-_MXFP8_OPS = ("gemm.mxfp8_scaled_mm", "gemm.mxfp8_scaled_grouped_mm")
+_CUBLASLT_POLICY_OPS = ("gemm.mxfp8_scaled_mm",)
 
 
 @pytest.mark.parametrize("arch", [(8, 0), (8, 9), (10, 0), (11, 0), (12, 0)])
-@pytest.mark.parametrize("op", [op for op in _ALL_OPS if op not in _MXFP8_OPS])
-def test_non_mxfp8_ops_resolve_without_ambiguity_on_cuda(op, arch):
+@pytest.mark.parametrize(
+    "op", [op for op in _ALL_OPS if op not in _CUBLASLT_POLICY_OPS]
+)
+def test_ops_without_cublaslt_policy_resolve_without_ambiguity_on_cuda(op, arch):
     """These ops have one optimized backend, so `backend=None` must resolve through
     the real eligibility path on every arch -- either to Triton or, below its SM
     floor, to the eager reference tier. A raise means the windows overlap.
@@ -111,16 +114,12 @@ def test_non_mxfp8_ops_resolve_without_ambiguity_on_cuda(op, arch):
 
 # The mxfp8 policy has two separable axes, tested separately below:
 #   _cublaslt_eligible -- metadata (SM window + whether the extension was built)
-#   serves_dense/serves_grouped -- per-call (scale width, out dtype, alignment)
+#   serves_dense -- per-call (scale width, out dtype, alignment)
 _ELIGIBILITY = [
     ("gemm.mxfp8_scaled_mm", (8, 9), False),
     ("gemm.mxfp8_scaled_mm", (10, 0), True),
     ("gemm.mxfp8_scaled_mm", (11, 0), True),
     ("gemm.mxfp8_scaled_mm", (12, 0), True),
-    ("gemm.mxfp8_scaled_grouped_mm", (10, 0), True),
-    ("gemm.mxfp8_scaled_grouped_mm", (11, 0), True),
-    # NVIDIA supports grouped MXFP8 only on SM9.0/10.x/11.0
-    ("gemm.mxfp8_scaled_grouped_mm", (12, 0), False),
 ]
 
 
@@ -178,7 +177,7 @@ def test_mxfp8_backend_needs_both_axes(
     assert chosen == expected
 
 
-def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPatch):
+def test_grouped_mm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPatch):
     seen = {}
     sentinel = object()
 
@@ -208,7 +207,7 @@ def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPa
     ("dtype", "expected_backend"),
     [(torch.float32, "eager"), (torch.bfloat16, None)],
 )
-def test_grouped_gemm_routes_non_bf16_to_eager_by_default(
+def test_grouped_mm_routes_non_bf16_to_eager_by_default(
     monkeypatch: pytest.MonkeyPatch, dtype, expected_backend
 ):
     """Triton's grouped kernel is bf16-only; the capability gate has no dtype axis,
@@ -271,7 +270,7 @@ def test_mxfp8_scaled_mm_forwards_the_resolved_backend(
     seen = {}
 
     def fake_dispatch(op, args, kwargs, backend=None, device=None):
-        seen.update(backend=backend)
+        seen.update(backend=backend, kwargs=kwargs)
         return None
 
     monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
@@ -280,20 +279,23 @@ def test_mxfp8_scaled_mm_forwards_the_resolved_backend(
     sa = torch.empty(2, 1)
     sb = torch.empty(1, 3)
 
-    monkeypatch.setattr(gemm_module, "_mxfp8_backend", lambda *_: "sentinel-backend")
+    monkeypatch.setattr(
+        gemm_module, "_cublaslt", SimpleNamespace(serves_dense=lambda *_: True)
+    )
+    monkeypatch.setattr(gemm_module, "_mxfp8_backend", lambda *_: "cublaslt")
 
     gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32)
 
-    assert seen["backend"] == "sentinel-backend"
+    assert seen == {"backend": "cublaslt", "kwargs": {"_dense_contract_checked": True}}
 
 
-def test_mxfp8_scaled_mm_explicit_backend_overrides_the_pinned_default(
+def test_mxfp8_scaled_mm_fallback_has_no_private_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ):
     seen = {}
 
     def fake_dispatch(op, args, kwargs, backend=None, device=None):
-        seen.update(backend=backend)
+        seen.update(backend=backend, kwargs=kwargs)
         return None
 
     monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
@@ -302,12 +304,37 @@ def test_mxfp8_scaled_mm_explicit_backend_overrides_the_pinned_default(
     sa = torch.empty(2, 1)
     sb = torch.empty(1, 3)
 
-    gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32, backend="triton")
+    monkeypatch.setattr(
+        gemm_module, "_cublaslt", SimpleNamespace(serves_dense=lambda *_: False)
+    )
+    monkeypatch.setattr(gemm_module, "_mxfp8_backend", lambda *_: "triton")
 
-    assert seen["backend"] == "triton"
+    gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32)
+
+    assert seen == {"backend": "triton", "kwargs": {}}
 
 
-def test_mxfp8_scaled_grouped_mm_forwards_the_resolved_backend(
+def test_mxfp8_scaled_mm_explicit_cublaslt_has_no_private_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seen = {}
+
+    def fake_dispatch(op, args, kwargs, backend=None, device=None):
+        seen.update(backend=backend, kwargs=kwargs)
+        return None
+
+    monkeypatch.setattr(gemm_module, "dispatch", fake_dispatch)
+    aq = torch.empty(2, 4, dtype=torch.float8_e4m3fn)
+    bq = torch.empty(4, 3, dtype=torch.float8_e4m3fn)
+    sa = torch.empty(2, 1)
+    sb = torch.empty(1, 3)
+
+    gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32, backend="cublaslt")
+
+    assert seen == {"backend": "cublaslt", "kwargs": {}}
+
+
+def test_mxfp8_scaled_grouped_mm_forwards_the_default_backend(
     monkeypatch: pytest.MonkeyPatch,
 ):
     seen = {}
@@ -323,14 +350,12 @@ def test_mxfp8_scaled_grouped_mm_forwards_the_resolved_backend(
     sb = torch.empty(1, 1, 3)
     offs = torch.tensor([2], dtype=torch.int32)
 
-    monkeypatch.setattr(gemm_module, "_mxfp8_backend", lambda *_: "sentinel-backend")
-
     gemm_module.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.bfloat16, 32)
 
-    assert seen["backend"] == "sentinel-backend"
+    assert seen["backend"] is None
 
 
-def test_mxfp8_scaled_grouped_mm_explicit_backend_overrides_the_pinned_default(
+def test_mxfp8_scaled_grouped_mm_forwards_an_explicit_backend(
     monkeypatch: pytest.MonkeyPatch,
 ):
     seen = {}

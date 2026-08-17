@@ -6,8 +6,8 @@ fp8-rowwise and int8-rowwise quantization. Accuracy is relative error against
 the eager backend for identical quantized operands. Unsupported native PyTorch
 contracts are reported as `n/a`.
 
-    uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py
-    uv run python benchmarks/gemm/bench_scaled_grouped_gemm.py --no-plot
+    uv run python benchmarks/gemm/bench_scaled_grouped_mm.py
+    uv run python benchmarks/gemm/bench_scaled_grouped_mm.py --no-plot
 """
 
 import argparse
@@ -41,7 +41,7 @@ SHAPES = [
 
 SCHEMES = ["fp8_rowwise", "int8_rowwise"]
 
-DEFAULT_OUT = "benchmarks/results/scaled_grouped_gemm.png"
+DEFAULT_OUT = "benchmarks/results/scaled_grouped_mm.png"
 
 # blue/orange pair (validated colorblind-safe, matches sibling benchmarks)
 _IMPL_COLOR = {"pytorch": "#eb6834", "triton": "#2a78d6"}
@@ -92,7 +92,7 @@ def _relerr(out, ref):
     return ((out.float() - ref).norm() / ref.norm()).item()
 
 
-def _scaled_grouped_gemm(fmt, aq, bq, sa, sb, offs, out_dtype, block_size, backend=None):
+def _scaled_grouped_mm(fmt, aq, bq, sa, sb, offs, out_dtype, block_size, backend=None):
     op = scaled_mm_op(fmt, fmt, torch.float32, grouped=True)
     return dispatch(
         op,
@@ -103,7 +103,7 @@ def _scaled_grouped_gemm(fmt, aq, bq, sa, sb, offs, out_dtype, block_size, backe
     )
 
 
-def _pytorch_scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype):
+def _pytorch_scaled_grouped_mm(aq, bq, sa, sb, offs, out_dtype):
     return F.scaled_grouped_mm(
         aq,
         to_column_major(bq),
@@ -122,12 +122,12 @@ def _bench_point(E, K, N, scheme):
     a, b, offs = _make(E, M_FIXED, K, N)
     aq, bq, sa, sb, bs = _quant(a, b, scheme)
     fmt = _fmt(scheme)
-    ref = _scaled_grouped_gemm(
+    ref = _scaled_grouped_mm(
         fmt, aq, bq, sa, sb, offs, torch.bfloat16, bs, backend="eager"
     )
 
     def triton_fn():
-        return _scaled_grouped_gemm(
+        return _scaled_grouped_mm(
             fmt, aq, bq, sa, sb, offs, torch.bfloat16, bs, backend="triton"
         )
 
@@ -136,7 +136,7 @@ def _bench_point(E, K, N, scheme):
     triton_relerr = _relerr(triton_out, ref)
 
     def pytorch_fn():
-        return _pytorch_scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.bfloat16)
+        return _pytorch_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.bfloat16)
 
     try:
         pytorch_out = pytorch_fn()
@@ -166,12 +166,12 @@ def _bench_wgrad_point(E, K, N, scheme):
     fmt = _fmt(scheme)
     aq, sa = quantize_operand(a, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
     gq, sg = quantize_operand(g, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
-    ref = _scaled_grouped_gemm(
+    ref = _scaled_grouped_mm(
         fmt, aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0, backend="eager"
     )
 
     def triton_fn():
-        return _scaled_grouped_gemm(
+        return _scaled_grouped_mm(
             fmt, aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0, backend="triton"
         )
 

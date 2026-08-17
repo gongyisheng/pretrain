@@ -9,8 +9,8 @@ Unsupported native PyTorch contracts print `n/a`. Accuracy is relative error
 against the eager backend for the same quantized operands. Prints a table and
 (unless --no-plot) writes a matplotlib grouped-bar chart.
 
-    uv run python benchmarks/gemm/bench_scaled_gemm.py
-    uv run python benchmarks/gemm/bench_scaled_gemm.py --no-plot
+    uv run python benchmarks/gemm/bench_scaled_mm.py
+    uv run python benchmarks/gemm/bench_scaled_mm.py --no-plot
 """
 
 import argparse
@@ -89,9 +89,9 @@ def _scheme_configs():
 
 SCHEMES = [config["label"] for config in _scheme_configs()]
 
-DEFAULT_OUT = "benchmarks/results/scaled_gemm.png"
+DEFAULT_OUT = "benchmarks/results/scaled_mm.png"
 
-# Implementation colors aligned with bench_grouped_gemm.py's palette.
+# Implementation colors aligned with bench_grouped_mm.py's palette.
 _SCHEME_COLOR = {"triton": "#2a78d6", "pytorch": "#eb6834"}
 
 
@@ -181,14 +181,14 @@ def _scaling_for_config(config):
     }
 
 
-def _scaled_gemm(fmt, aq, bq, sa, sb, out_dtype, block_size, scale_dtype, backend=None):
+def _scaled_mm(fmt, aq, bq, sa, sb, out_dtype, block_size, scale_dtype, backend=None):
     op = scaled_mm_op(fmt, fmt, scale_dtype, grouped=False)
     return dispatch(
         op, (aq, bq, sa, sb, out_dtype, block_size, None), {}, backend, device=aq.device
     )
 
 
-def _pytorch_scaled_gemm(aq, bq, sa, sb, out_dtype, block_size, scale_dtype):
+def _pytorch_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, scale_dtype):
     if aq.dtype == torch.int8:
         width = block_size or aq.shape[1]
         out = torch.zeros(
@@ -281,7 +281,7 @@ def _bench_scheme(a, b, config):
     bq, sb = quantize_operand(b, -2, fmt, scaling)
     scale_dtype = scaling["scale_dtype"]
 
-    ref = _scaled_gemm(
+    ref = _scaled_mm(
         fmt,
         aq,
         bq,
@@ -294,7 +294,7 @@ def _bench_scheme(a, b, config):
     )
 
     def triton_fn():
-        return _scaled_gemm(
+        return _scaled_mm(
             fmt,
             aq,
             bq,
@@ -311,7 +311,7 @@ def _bench_scheme(a, b, config):
     result["triton_relerr"] = _relerr(triton_out, ref)
 
     def pytorch_fn():
-        return _pytorch_scaled_gemm(
+        return _pytorch_scaled_mm(
             aq, bq, sa, sb, torch.bfloat16, block_size, scale_dtype
         )
 
@@ -328,7 +328,7 @@ def _bench_scheme(a, b, config):
         return result
 
     def cublaslt_fn():
-        return _scaled_gemm(
+        return _scaled_mm(
             fmt,
             aq,
             bq,
@@ -360,7 +360,7 @@ def _bench_scheme(a, b, config):
     native_sb = to_swizzle_32_4_4(sb.t())
 
     def cublaslt_native_fn():
-        return torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
+        return torch.ops.aot_kernel._scaled_mm_mxfp8_cublaslt(
             aq, native_bq, native_sa, native_sb, None
         )
 

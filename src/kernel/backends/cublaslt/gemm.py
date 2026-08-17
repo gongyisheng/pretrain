@@ -83,7 +83,7 @@ def serves_dense(
     autograd=False,
     capabilities=frozenset({cuda(min_arch=(10, 0))}),
 )
-def scaled_gemm_mxfp8(
+def scaled_mm_mxfp8(
     aq: torch.Tensor,
     bq: torch.Tensor,
     sa: torch.Tensor,
@@ -91,83 +91,15 @@ def scaled_gemm_mxfp8(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    _dense_contract_checked: bool = False,
 ) -> torch.Tensor:
-    _check_dense_contract(aq, bq, out_dtype, block_size)
+    if not _dense_contract_checked:
+        _check_dense_contract(aq, bq, out_dtype, block_size)
     del out_dtype, block_size
-    return torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
+    return torch.ops.aot_kernel._scaled_mm_mxfp8_cublaslt(
         aq,
         to_column_major(bq),
         to_swizzle_32_4_4(sa),
         to_swizzle_32_4_4(sb.t()),
         bias,
-    )
-
-
-def _check_grouped_contract(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None,
-) -> None:
-    """Everything this backend's grouped kernel requires beyond its SM window."""
-    _check_out_dtype(out_dtype, "MXFP8 grouped GEMM")
-    _check_block_size(block_size, "MXFP8 grouped GEMM")
-    if bias is not None:
-        raise ValueError("cuBLASLt MXFP8 grouped GEMM does not support bias")
-    _check_layout(aq, ((aq.shape[1], 1),), "MXFP8 grouped GEMM A")
-    _check_layout(
-        bq,
-        (
-            (bq.shape[1] * bq.shape[2], bq.shape[2], 1),
-            (bq.shape[1] * bq.shape[2], 1, bq.shape[1]),
-        ),
-        "MXFP8 grouped GEMM B",
-    )
-    _check_dimension_multiple_of_16(aq, "MXFP8 grouped GEMM A")
-    _check_dimension_multiple_of_16(bq, "MXFP8 grouped GEMM B")
-
-
-def serves_grouped(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None,
-) -> bool:
-    """Can this backend serve the call? Same guards the kernel runs -- see
-    `serves_dense`. The grouped kernel additionally has no bias epilogue.
-    """
-    try:
-        _check_grouped_contract(aq, bq, out_dtype, block_size, bias)
-    except ValueError:
-        return False
-    return True
-
-
-@register_kernel(
-    op="gemm.mxfp8_scaled_grouped_mm",
-    backend="cublaslt",
-    build="aot",
-    autograd=False,
-    capabilities=frozenset({cuda(min_arch=(10, 0), max_arch=(11, 0))}),
-)
-def scaled_grouped_gemm_mxfp8(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    offs: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    _check_grouped_contract(aq, bq, out_dtype, block_size, bias)
-    del out_dtype, block_size
-    return torch.ops.aot_kernel._scaled_grouped_gemm_mxfp8_cublaslt(
-        aq,
-        to_column_major(bq),
-        sa,
-        sb,
-        offs,
     )

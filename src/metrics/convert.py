@@ -9,7 +9,7 @@ import torch
 from src.metrics.activation import ActivationStats, linear_input_hook
 from src.metrics.quant import QuantizationStats
 from src.quant.linear import QuantizedLinear
-from src.quant.moe import QuantizedSparseMoEBlock, scaled_grouped_gemm_fn
+from src.quant.moe import QuantizedSparseMoEBlock, scaled_grouped_mm_fn
 from src.quant.utils import is_quantized
 
 
@@ -77,7 +77,7 @@ def apply_quantization_monitoring(model) -> None:
                 )
                 for projection in ("gate_up", "down")
             }
-            module.expert_mm = scaled_grouped_gemm_fn(cfg, by_projection)
+            module.expert_mm = scaled_grouped_mm_fn(cfg, by_projection)
             _register(
                 module,
                 [s for sites in by_projection.values() for s in sites.values()],

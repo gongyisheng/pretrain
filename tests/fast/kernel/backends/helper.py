@@ -124,7 +124,7 @@ def make_grouped_inputs(
     return a, b, offs, bias
 
 
-def make_scaled_gemm_inputs(
+def make_scaled_mm_inputs(
     workload: DenseWorkload,
     format_pair: FormatPair,
     scaling_case: ScalingCase,

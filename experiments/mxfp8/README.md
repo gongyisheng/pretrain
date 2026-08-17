@@ -1,7 +1,7 @@
 # mxfp8 (Blockwise) — All Three GEMMs
 
 > **Note (2026-07-26):** This run predates the unified Triton scaled-GEMM kernel.
-> mxfp8 now routes through `src/kernel/gemm.py:scaled_gemm` (blockwise-32 +
+> mxfp8 now routes through `src/kernel/gemm.py:scaled_mm` (blockwise-32 +
 > power-of-two fp32 scale) rather than the native `F.scaled_mm` BlockWise1x32 MX
 > path, and is no longer Blackwell-only. See
 > `docs/superpowers/specs/2026-07-26-blockwise-scaled-gemm-design.md`. The setup

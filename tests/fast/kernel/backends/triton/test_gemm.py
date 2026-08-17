@@ -14,7 +14,7 @@ from tests.fast.kernel.backends.helper import (
     GROUPED_PROJECTIONS,
     SCALING_CASES,
     make_grouped_inputs,
-    make_scaled_gemm_inputs,
+    make_scaled_mm_inputs,
 )
 
 
@@ -40,8 +40,8 @@ def _run(a, b, gran, bs, a_fmt, b_fmt):
     scaling = _scaling(gran, bs)
     aq, sa = quantize_operand(a, -1, a_fmt, scaling)
     bq, sb = quantize_operand(b, -2, b_fmt, scaling)
-    out = triton_gemm.epilogue_scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
-    oracle = eager_gemm.scaled_gemm(
+    out = triton_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, bs)
+    oracle = eager_gemm.scaled_mm(
         aq,
         bq,
         sa,
@@ -91,12 +91,12 @@ def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
 @pytest.mark.parametrize("projection", GROUPED_PROJECTIONS, ids=lambda case: case.name)
 @pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
 @pytest.mark.parametrize("with_bias", [False, True], ids=["no-bias", "bias"])
-def test_grouped_gemm_precision(projection, layout, with_bias):
+def test_grouped_mm_precision(projection, layout, with_bias):
     if layout == "ragged_n" and with_bias:
         pytest.skip("ragged-N has no defined per-expert output-channel bias")
     a, b, offs, bias = make_grouped_inputs(projection, layout, with_bias)
 
-    actual = triton_gemm.grouped_gemm(a, b, offs, bias)
+    actual = triton_gemm.grouped_mm(a, b, offs, bias)
     expected = eager_gemm.grouped_mm(a, b, offs, bias)
 
     assert actual.shape == expected.shape
@@ -107,21 +107,21 @@ def test_grouped_gemm_precision(projection, layout, with_bias):
 
 @pytest.mark.parametrize(
     "gemm_fn",
-    [triton_gemm.epilogue_scaled_gemm, triton_gemm.mxfp8_scaled_gemm],
-    ids=["epilogue", "mxfp8"],
+    [triton_gemm.scaled_mm, triton_gemm.mxfp8_scaled_mm],
+    ids=["scaled", "mxfp8"],
 )
 @pytest.mark.parametrize("workload", DENSE_WORKLOADS, ids=lambda case: case.name)
 @pytest.mark.parametrize("format_pair", FORMAT_PAIRS, ids=lambda case: case.name)
 @pytest.mark.parametrize("scaling_case", SCALING_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
-def test_scaled_gemm_precision(workload, format_pair, scaling_case, with_bias, gemm_fn):
+def test_scaled_mm_precision(workload, format_pair, scaling_case, with_bias, gemm_fn):
     capability = torch.cuda.get_device_capability()
     if format_pair.a_format == "int8" and capability < (8, 0):
         pytest.skip("Triton INT8 scaled GEMM requires SM80+")
     if format_pair.a_format.startswith("fp8") and capability < (8, 9):
         pytest.skip("Triton FP8 scaled GEMM requires SM89+")
 
-    is_mxfp8 = gemm_fn is triton_gemm.mxfp8_scaled_gemm
+    is_mxfp8 = gemm_fn is triton_gemm.mxfp8_scaled_mm
     if is_mxfp8:
         if format_pair.a_format == "int8":
             pytest.skip("mxfp8 kernel has no integer format")
@@ -131,11 +131,11 @@ def test_scaled_gemm_precision(workload, format_pair, scaling_case, with_bias, g
         if capability < (10, 0):
             pytest.skip("mxfp8 scaled GEMM requires SM100+")
 
-    aq, bq, sa, sb, out_dtype, block_size, bias = make_scaled_gemm_inputs(
+    aq, bq, sa, sb, out_dtype, block_size, bias = make_scaled_mm_inputs(
         workload, format_pair, scaling_case, mx_scales=is_mxfp8, with_bias=with_bias
     )
     actual = gemm_fn(aq, bq, sa, sb, out_dtype, block_size, bias)
-    expected = eager_gemm.scaled_gemm(aq, bq, sa, sb, out_dtype, block_size, bias)
+    expected = eager_gemm.scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
     assert actual.shape == expected.shape
     assert actual.dtype == out_dtype
@@ -147,7 +147,7 @@ def test_scaled_gemm_precision(workload, format_pair, scaling_case, with_bias, g
 
 def test_output_stride_is_dense_in_the_last_dimension():
     a, b, offs = _make_layout("ragged_m", N=51)
-    got = triton_gemm.grouped_gemm(a, b, offs)
+    got = triton_gemm.grouped_mm(a, b, offs)
     eager = eager_gemm.grouped_mm(a, b, offs)
     assert got.stride(-1) == 1
     assert got.stride(-2) >= got.shape[-1]
@@ -157,7 +157,7 @@ def test_output_stride_is_dense_in_the_last_dimension():
 def test_parity_empty_and_uneven_groups():
     # includes an empty group (0 rows) and uneven sizes
     a, b, offs = _make([5, 0, 130, 41, 1], K=64, N=48)
-    got = triton_gemm.grouped_gemm(a, b, offs)
+    got = triton_gemm.grouped_mm(a, b, offs)
     torch.testing.assert_close(
         got.float(), eager_gemm.grouped_mm(a, b, offs).float(), rtol=2e-2, atol=2e-2
     )
@@ -165,7 +165,7 @@ def test_parity_empty_and_uneven_groups():
 
 def test_parity_single_group():
     a, b, offs = _make([200], K=192, N=64)
-    got = triton_gemm.grouped_gemm(a, b, offs)
+    got = triton_gemm.grouped_mm(a, b, offs)
     torch.testing.assert_close(
         got.float(), eager_gemm.grouped_mm(a, b, offs).float(), rtol=2e-2, atol=2e-2
     )
@@ -182,7 +182,7 @@ def test_parity_config_shapes(K, N):
     # skewed load across 16 experts, summing to a realistic row count
     counts = [300, 5, 120, 0, 44, 210, 7, 90, 33, 150, 1, 260, 12, 80, 40, 400]
     a, b, offs = _make(counts, K=K, N=N, seed=1)
-    got = triton_gemm.grouped_gemm(a, b, offs)
+    got = triton_gemm.grouped_mm(a, b, offs)
     torch.testing.assert_close(
         got.float(), eager_gemm.grouped_mm(a, b, offs).float(), rtol=2e-2, atol=2e-2
     )
@@ -196,7 +196,7 @@ def test_wgrad_parity_uneven_and_empty():
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16)
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     ref = eager_gemm.grouped_mm(a.mT, grad_c, offs)
-    got = triton_gemm.grouped_gemm(a.mT, grad_c, offs)
+    got = triton_gemm.grouped_mm(a.mT, grad_c, offs)
     assert got.shape == (len(counts), K, N)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
@@ -219,7 +219,7 @@ def test_wgrad_parity_config_shapes(K, N):
     grad_c = torch.randn(R, N, device="cuda", dtype=torch.bfloat16) * 0.1
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
     ref = eager_gemm.grouped_mm(a.mT, grad_c, offs)
-    got = triton_gemm.grouped_gemm(a.mT, grad_c, offs)
+    got = triton_gemm.grouped_mm(a.mT, grad_c, offs)
     torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 
@@ -239,7 +239,7 @@ def test_output_dtype_respected(out_dtype):
     b = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
     aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("rowwise"))
     bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("rowwise"))
-    out = triton_gemm.epilogue_scaled_gemm(
+    out = triton_gemm.scaled_mm(
         aq, bq, sa, sb, out_dtype, 0
     )  # rowwise -> one block over K
     assert out.dtype == out_dtype
@@ -262,7 +262,7 @@ def test_mxfp8_scaling_uses_power_of_two_scales():
 
 @pytest.mark.parametrize("a_dtype,b_dtype", [(E4M3, E4M3), (E4M3, E5M2), (E5M2, E4M3)])
 @pytest.mark.parametrize("shape", [(128, 256, 96), (64, 64, 64), (192, 160, 128)])
-def test_scaled_gemm_mx_matches_oracle(a_dtype, b_dtype, shape):
+def test_scaled_mm_mx_matches_oracle(a_dtype, b_dtype, shape):
     """The mxfp8 path hands the e8m0 scales to the MMA instead of the epilogue.
 
     Which means the scales never touch the accumulator this kernel builds, so a wrong
@@ -277,13 +277,13 @@ def test_scaled_gemm_mx_matches_oracle(a_dtype, b_dtype, shape):
     b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
     aq, sa = quantize_operand(a, -1, FMT[a_dtype], MX)
     bq, sb = quantize_operand(b, -2, FMT[b_dtype], MX)
-    out = triton_gemm.mxfp8_scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
-    oracle = eager_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
+    out = triton_gemm.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, 32)
+    oracle = eager_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, 32)
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
 
-def test_scaled_gemm_mx_agrees_with_epilogue_path():
-    """`mxfp8_scaled_gemm` and `epilogue_scaled_gemm` must agree on identical inputs.
+def test_mxfp8_scaled_mm_agrees_with_scaled_mm():
+    """`mxfp8_scaled_mm` and `scaled_mm` must agree on identical inputs.
 
     Same operands, same scales, same answer, whichever kernel runs them. This is what
     would catch the MMA applying scales per 32-wide group where the other kernel
@@ -294,12 +294,12 @@ def test_scaled_gemm_mx_agrees_with_epilogue_path():
     b = torch.randn(512, 128, device="cuda", dtype=torch.bfloat16)
     aq, sa = quantize_operand(a, -1, FMT[E4M3], MX)
     bq, sb = quantize_operand(b, -2, FMT[E4M3], MX)
-    mx = triton_gemm.mxfp8_scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
-    epilogue = triton_gemm.epilogue_scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
-    assert (mx - epilogue).norm() / epilogue.norm() < 1e-6
+    mx = triton_gemm.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, 32)
+    scaled = triton_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, 32)
+    assert (mx - scaled).norm() / scaled.norm() < 1e-6
 
 
-def test_scaled_gemm_mx_bias_lands_once():
+def test_scaled_mm_mx_bias_lands_once():
     """The bias rides the epilogue past the scales, as on the other kernel."""
     torch.manual_seed(0)
     a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
@@ -307,7 +307,7 @@ def test_scaled_gemm_mx_bias_lands_once():
     bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
     aq, sa = quantize_operand(a, -1, FMT[E4M3], MX)
     bq, sb = quantize_operand(b, -2, FMT[E4M3], MX)
-    out = triton_gemm.mxfp8_scaled_gemm(
+    out = triton_gemm.mxfp8_scaled_mm(
         aq,
         bq,
         sa,
@@ -316,17 +316,17 @@ def test_scaled_gemm_mx_bias_lands_once():
         32,
         bias=bias,
     )
-    oracle = eager_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
+    oracle = eager_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, 32)
     oracle = oracle + bias.float()
     assert (out - oracle).norm() / oracle.norm() < 0.02
 
 
 @pytest.mark.parametrize("shape", [(256, 512, 192), (128, 256, 96), (192, 160, 128)])
-def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
+def test_scaled_mm_mxfp8_adds_no_error_over_dequantizing(shape):
     """Applying the e8m0 scales inside the MMA must be as exact as dequantizing first.
 
     The bound is fp32-rounding tight (measured 2e-8..4e-8) on purpose. The oracle
-    comparison in `test_scaled_gemm_mx_matches_oracle` allows 2e-2, which is ~5e5x
+    comparison in `test_scaled_mm_mx_matches_oracle` allows 2e-2, which is ~5e5x
     looser than reality: it would still pass if `QMMA.SF` were applying the scales at
     reduced precision. It would not hide a misaligned scale operand, though: an e8m0
     scale is a power of two, so landing one on the wrong row, column or k-tile is at
@@ -340,13 +340,13 @@ def test_scaled_gemm_mxfp8_adds_no_error_over_dequantizing(shape):
     b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
     aq, sa = quantize_operand(a, -1, FMT[E4M3], MX)
     bq, sb = quantize_operand(b, -2, FMT[E4M3], MX)
-    got = triton_gemm.mxfp8_scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
-    oracle = eager_gemm.scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
+    got = triton_gemm.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, 32)
+    oracle = eager_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, 32)
     rel = (got - oracle).norm() / oracle.norm()
     assert rel < 1e-6, rel
 
 
-def test_scaled_gemm_mxfp8_precision_band_against_unquantized():
+def test_scaled_mm_mxfp8_precision_band_against_unquantized():
     """mxfp8 must land at e4m3 precision against an unquantized oracle.
 
     Both bounds carry weight. The upper one catches scales that are wrong by a power
@@ -365,37 +365,22 @@ def test_scaled_gemm_mxfp8_precision_band_against_unquantized():
     b = torch.randn(512, 192, device="cuda", dtype=torch.bfloat16)
     aq, sa = quantize_operand(a, -1, FMT[E4M3], MX)
     bq, sb = quantize_operand(b, -2, FMT[E4M3], MX)
-    got = triton_gemm.mxfp8_scaled_gemm(aq, bq, sa, sb, torch.float32, 32)
+    got = triton_gemm.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, 32)
     truth = a.float() @ b.float()
     rel = ((got - truth).norm() / truth.norm()).item()
     assert 2e-2 < rel < 6e-2, rel
 
 
-@pytest.mark.parametrize(
-    "fmt,bs",
-    [
-        ("int8", 32),  # tl.dot_scaled has no integer format
-        (FMT[E4M3], 16),  # 16 clears the power-of-two->=16 guard but is not a
-        # multiple of the MMA's fixed 32-wide scale vector
-    ],
-)
-def test_scaled_gemm_mx_declines_unsupported_combinations(fmt, bs):
-    """`mxfp8_scaled_gemm` must reject inputs the MMA path cannot run, rather than
-    silently falling back to epilogue scaling.
-
-    Each of these would fail differently were the check missing: int8 is rejected
-    outright by tl.dot_scaled ("Invalid float format"), and a 16-wide block is not a
-    multiple of the instruction's fixed 32-wide scale vector so it cannot be reached by
-    replication.
-    """
+def test_mxfp8_scaled_mm_declines_invalid_block_size():
+    """The fast path cannot replicate 16-wide scales into its 32-wide MMA vectors."""
     torch.manual_seed(0)
     a = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(256, 96, device="cuda", dtype=torch.bfloat16)
-    scaling = _scaling("blockwise", bs, torch.float8_e8m0fnu)
-    aq, sa = quantize_operand(a, -1, fmt, scaling)
-    bq, sb = quantize_operand(b, -2, fmt, scaling)
+    scaling = _scaling("blockwise", 16, torch.float8_e8m0fnu)
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
     with pytest.raises(ValueError):
-        triton_gemm.mxfp8_scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
+        triton_gemm.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, 16)
 
 
 def rand(rows, columns):
@@ -403,19 +388,19 @@ def rand(rows, columns):
 
 
 @pytest.mark.parametrize("bs", [32, 64, 128])
-def test_mxfp8_kernel_matches_epilogue_at_any_multiple_of_32(bs):
-    """The e8m0 fast path must agree with epilogue scaling at every legal width."""
+def test_mxfp8_kernel_matches_scaled_mm_at_any_multiple_of_32(bs):
+    """The e8m0 fast path must agree with scaled_mm at every legal width."""
     a, b = rand(256, 512), rand(512, 128)
     scaling = _scaling("blockwise", bs, torch.float8_e8m0fnu)
     aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
     bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
-    mx = triton_gemm.mxfp8_scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
-    epilogue = triton_gemm.epilogue_scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
-    torch.testing.assert_close(mx, epilogue, rtol=2e-2, atol=2e-2)
+    mx = triton_gemm.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, bs)
+    scaled = triton_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, bs)
+    torch.testing.assert_close(mx, scaled, rtol=2e-2, atol=2e-2)
 
 
 @pytest.mark.parametrize("bs", [32, 64, 128])
-def test_mxfp8_kernel_matches_epilogue_when_k_is_not_a_multiple_of_32(bs):
+def test_mxfp8_kernel_matches_scaled_mm_when_k_is_not_a_multiple_of_32(bs):
     """K not a multiple of 32 leaves sa/sb with a trailing partial scale block --
     n_scale_blocks is ceil(K/32), one more than K // 32. The bs=32 case is the one that
     pins the regression: block_size == _MXFP8_BLOCK_SIZE is supposed to be a bit-exact
@@ -427,16 +412,16 @@ def test_mxfp8_kernel_matches_epilogue_when_k_is_not_a_multiple_of_32(bs):
     scaling = _scaling("blockwise", bs, torch.float8_e8m0fnu)
     aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
     bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
-    mx = triton_gemm.mxfp8_scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
-    epilogue = triton_gemm.epilogue_scaled_gemm(aq, bq, sa, sb, torch.float32, bs)
-    torch.testing.assert_close(mx, epilogue, rtol=2e-2, atol=2e-2)
+    mx = triton_gemm.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, bs)
+    scaled = triton_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, bs)
+    torch.testing.assert_close(mx, scaled, rtol=2e-2, atol=2e-2)
 
 
 def test_mxfp8_kernel_declines_block_size_zero():
     """block_size 0 is the "one scale block spans all of K" sentinel, not a multiple of
     32 in any meaningful sense -- but 0 % 32 == 0 in Python, so an unguarded condition
     would route it into the replication branch, where rep_k=0 collapses sa/sb to a
-    zero-width tensor and the kernel launch reads out of bounds. `mxfp8_scaled_gemm`
+    zero-width tensor and the kernel launch reads out of bounds. `mxfp8_scaled_mm`
     must reject it outright.
     """
     torch.manual_seed(0)
@@ -445,13 +430,22 @@ def test_mxfp8_kernel_declines_block_size_zero():
     aq, sa = quantize_operand(a, -1, FMT[E4M3], scaling)
     bq, sb = quantize_operand(b, -2, FMT[E4M3], scaling)
     with pytest.raises(ValueError):
-        triton_gemm.mxfp8_scaled_gemm(aq, bq, sa, sb, torch.float32, 0)
+        triton_gemm.mxfp8_scaled_mm(aq, bq, sa, sb, torch.float32, 0)
 
 
 _VM, _VK, _VN, _VBS = 64, 256, 96, 128  # K / block_size -> 2 scale blocks
 
 
-def test_scaled_gemm_accepts_non_pow2_block_size_spanning_k():
+def test_scaled_mm_declines_non_power_of_two_multi_block_size():
+    a = torch.randn(_VM, _VK, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(_VK, _VN, device="cuda", dtype=torch.bfloat16)
+    aq, sa = quantize_operand(a, -1, FMT[E4M3], _scaling("blockwise", 48))
+    bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", 48))
+    with pytest.raises(ValueError, match="power of two >= 16"):
+        triton_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, 48)
+
+
+def test_scaled_mm_accepts_non_pow2_block_size_spanning_k():
     """Guards the check above against over-rejecting: a block_size >= K collapses to
     a single scale block, which no BLOCK_K ever has to tile, so it needs no power of
     two.
@@ -462,7 +456,7 @@ def test_scaled_gemm_accepts_non_pow2_block_size_spanning_k():
     bq, sb = quantize_operand(b, -2, FMT[E4M3], _scaling("blockwise", _VK + 44))
     assert sa.shape[1] == 1
     assert torch.isfinite(
-        triton_gemm.epilogue_scaled_gemm(aq, bq, sa, sb, torch.float32, _VK + 44)
+        triton_gemm.scaled_mm(aq, bq, sa, sb, torch.float32, _VK + 44)
     ).all()
 
 
@@ -477,34 +471,6 @@ _SCALED_COUNTS = [64, 0, 130, 46]  # sums to 240; the empty group is deliberate
 # reorders the fp32 accumulation, so it must agree far more tightly than the
 # forward layouts, whose oracle pads scale blocks independently of the tiling.
 _SCALED_TOL = {"ragged_m": 0.02, "ragged_k": 1e-5, "ragged_n": 0.02}
-
-
-def test_direct_entries_raise_value_error_for_invalid_contracts():
-    with pytest.raises(ValueError, match="2-D or 3-D"):
-        triton_gemm.grouped_gemm(
-            torch.empty(4),
-            torch.empty(4, 4),
-            torch.empty(1, dtype=torch.int32),
-        )
-    with pytest.raises(ValueError, match="must be 2-D"):
-        triton_gemm.epilogue_scaled_gemm(
-            torch.empty(4, 4, dtype=torch.int8),
-            torch.empty(4, 4, dtype=torch.int8),
-            torch.empty(4),
-            torch.empty(1, 4),
-            torch.float32,
-            0,
-        )
-    with pytest.raises(ValueError, match="must be 2-D or 3-D"):
-        triton_gemm.epilogue_scaled_grouped_gemm(
-            torch.empty(4, dtype=torch.int8),
-            torch.empty(4, 4, dtype=torch.int8),
-            torch.empty(4, 1),
-            torch.empty(1, 4),
-            torch.empty(1, dtype=torch.int32),
-            torch.float32,
-            0,
-        )
 
 
 def _make_scaled_layout(
@@ -556,14 +522,14 @@ def _expected_shape(layout, counts, M=32, N=48):
     return {"ragged_m": (R, N), "ragged_k": (E, M, N), "ragged_n": (M, R)}[layout]
 
 
-def test_scaled_grouped_gemm_oracle_agrees_with_dequant():
+def test_scaled_grouped_mm_oracle_agrees_with_dequant():
     # The oracle walks its own per-group loop; this pins it against an explicit
     # dequant matmul so a bug in its block/pad bookkeeping cannot pass unnoticed.
     counts = [128, 128]
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
         "ragged_m", counts, "rowwise", 0, "fp8_e4m3"
     )
-    oracle = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    oracle = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     K = aq.shape[1]
     a_deq = eager_gemm._dequant_a(aq, sa, kbs or K)
     # per-expert B (E,K,N), each slice dequantized against its own (nkb,N) scale
@@ -594,10 +560,8 @@ def test_scaled_grouped_layouts_match_oracle(layout, gran, bs, fmt):
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
         layout, _SCALED_COUNTS, gran, bs, fmt
     )
-    got = triton_gemm.epilogue_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs
-    )
-    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    ref = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert got.shape == _expected_shape(layout, _SCALED_COUNTS)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL[layout], rel
@@ -620,10 +584,8 @@ def test_scaled_grouped_mxfp8_layouts_match_oracle(layout):
         "fp8_e4m3",
         scale_dtype=torch.float8_e8m0fnu,
     )
-    got = triton_gemm.mxfp8_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs
-    )
-    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    got = triton_gemm.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    ref = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert got.shape == _expected_shape(layout, _SCALED_COUNTS)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL[layout], rel
@@ -649,18 +611,16 @@ def test_scaled_grouped_mxfp8_ragged_m_matches_oracle_when_k_is_not_a_multiple_o
         K=163,
         scale_dtype=torch.float8_e8m0fnu,
     )
-    got = triton_gemm.mxfp8_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs
-    )
-    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    got = triton_gemm.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    ref = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert torch.isfinite(got).all(), got
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL["ragged_m"], rel
 
 
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
-def test_scaled_grouped_mxfp8_agrees_with_epilogue_path(layout):
-    """`mxfp8_scaled_grouped_gemm` and `epilogue_scaled_grouped_gemm` must agree on
+def test_scaled_grouped_mxfp8_agrees_with_scaled_path(layout):
+    """`mxfp8_scaled_grouped_mm` and `scaled_grouped_mm` must agree on
     identical inputs -- same operands, same scales, same answer, whichever kernel
     runs them.
     """
@@ -674,11 +634,9 @@ def test_scaled_grouped_mxfp8_agrees_with_epilogue_path(layout):
         scale_dtype=torch.float8_e8m0fnu,
     )
     aq, bq, sa, sb, offs, kbs = args
-    mx = triton_gemm.mxfp8_scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
-    epilogue = triton_gemm.epilogue_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs
-    )
-    rel = (mx - epilogue).norm() / epilogue.norm().clamp_min(1e-12)
+    mx = triton_gemm.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    scaled = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    rel = (mx - scaled).norm() / scaled.norm().clamp_min(1e-12)
     assert rel < 1e-5, rel
 
 
@@ -698,10 +656,8 @@ def test_scaled_grouped_mxfp8_adds_no_error_over_dequantizing(layout):
         "fp8_e4m3",
         scale_dtype=torch.float8_e8m0fnu,
     )
-    got = triton_gemm.mxfp8_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs
-    )
-    oracle = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    got = triton_gemm.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    oracle = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     rel = (got.float() - oracle).norm() / oracle.norm().clamp_min(1e-12)
     assert rel < 1e-6, rel
 
@@ -711,7 +667,7 @@ def test_scaled_grouped_mxfp8_kernel_declines_block_size_zero():
     unguarded condition would route the "one scale block spans the whole segment"
     sentinel into the replication branch, collapsing rep_k to 0 and handing the kernel
     a zero-width scale tensor -- a CUDA illegal memory access hit during development.
-    `mxfp8_scaled_grouped_gemm` must reject it outright.
+    `mxfp8_scaled_grouped_mm` must reject it outright.
     """
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
         "ragged_m",
@@ -722,23 +678,7 @@ def test_scaled_grouped_mxfp8_kernel_declines_block_size_zero():
         scale_dtype=torch.float8_e8m0fnu,
     )
     with pytest.raises(ValueError):
-        triton_gemm.mxfp8_scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
-
-
-def test_scaled_grouped_mxfp8_declines_int8():
-    """tl.dot_scaled has no integer format, so `mxfp8_scaled_grouped_gemm` must reject
-    int8 outright.
-    """
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
-        "ragged_m",
-        _SCALED_COUNTS,
-        "blockwise",
-        32,
-        "int8",
-        scale_dtype=torch.float8_e8m0fnu,
-    )
-    with pytest.raises(ValueError):
-        triton_gemm.mxfp8_scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+        triton_gemm.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
 
 
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
@@ -747,10 +687,8 @@ def test_scaled_grouped_layouts_uneven_groups(layout):
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
         layout, counts, "blockwise", 32, "fp8_e4m3", seed=1
     )
-    got = triton_gemm.epilogue_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs
-    )
-    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    ref = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < _SCALED_TOL[layout], rel
 
@@ -762,10 +700,8 @@ def test_scaled_grouped_ragged_n_shape_and_group_isolation():
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
         "ragged_n", counts, "rowwise", 0, "fp8_e4m3", M=32, K=64
     )
-    got = triton_gemm.epilogue_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs
-    )
-    ref = eager_gemm.scaled_grouped_gemm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
+    ref = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert got.shape == (32, sum(counts))
     rel = (got.float() - ref).norm() / ref.norm().clamp_min(1e-12)
     assert rel < 0.02, rel
@@ -778,9 +714,7 @@ def test_scaled_grouped_ragged_k_empty_group_is_zero():
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
         "ragged_k", counts, "blockwise", 32, "fp8_e4m3"
     )
-    out = triton_gemm.epilogue_scaled_grouped_gemm(
-        aq, bq, sa, sb, offs, torch.float32, kbs
-    )
+    out = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert (out[1] == 0).all()
 
 
@@ -790,7 +724,7 @@ def test_scaled_grouped_layouts_out_dtype(layout, out_dtype):
     aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
         layout, _SCALED_COUNTS, "rowwise", 0, "fp8_e4m3", seed=3
     )
-    out = triton_gemm.epilogue_scaled_grouped_gemm(aq, bq, sa, sb, offs, out_dtype, kbs)
+    out = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, out_dtype, kbs)
     assert out.dtype == out_dtype
 
 
@@ -809,10 +743,10 @@ def test_scaled_grouped_bias_matches_oracle(layout, gran, bs):
         layout, _SCALED_COUNTS, gran, bs, "fp8_e4m3"
     )
     bias = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16)
-    got = triton_gemm.epilogue_scaled_grouped_gemm(
+    got = triton_gemm.scaled_grouped_mm(
         aq, bq, sa, sb, offs, torch.float32, kbs, bias=bias
     )
-    ref = eager_gemm.scaled_grouped_gemm(
+    ref = eager_gemm.scaled_grouped_mm(
         aq, bq, sa, sb, offs, torch.float32, kbs, bias=bias
     )
     rel = (got.float() - ref).norm() / ref.norm()
@@ -825,12 +759,10 @@ def test_scaled_grouped_bias_none_unchanged():
         "ragged_m", _SCALED_COUNTS, "rowwise", 0, "fp8_e4m3"
     )
     torch.testing.assert_close(
-        triton_gemm.epilogue_scaled_grouped_gemm(
+        triton_gemm.scaled_grouped_mm(
             aq, bq, sa, sb, offs, torch.float32, kbs, bias=None
         ),
-        triton_gemm.epilogue_scaled_grouped_gemm(
-            aq, bq, sa, sb, offs, torch.float32, kbs
-        ),
+        triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs),
         rtol=0,
         atol=0,
     )

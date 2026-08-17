@@ -12,7 +12,7 @@ from src.quant.utils import is_quantized, scaled_mm_op
 from src.utils.config import QuantizationConfig
 
 
-def quantized_grouped_gemm(
+def quantized_grouped_mm(
     a, b, offs, a_fmt, b_fmt, out_dtype, scaling, bias=None, a_stats=None, b_stats=None
 ):
     """Quantized ragged grouped GEMM, layout picked from the operand ranks.
@@ -114,7 +114,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b, bias, offs, cfg: QuantizationConfig, stats):
         out_dtype = a.dtype
-        y = quantized_grouped_gemm(
+        y = quantized_grouped_mm(
             a,
             b,
             offs,
@@ -139,7 +139,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         stats = ctx.stats
         out_dtype = a.dtype
         # dgrad: grad_a = grad_y @ b^T
-        grad_a = quantized_grouped_gemm(
+        grad_a = quantized_grouped_mm(
             grad_y,
             b.transpose(-2, -1).contiguous(),
             offs,
@@ -152,7 +152,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         )
         # wgrad: grad_b[g] = a[g]^T @ grad_y[g] — the ragged token axis is the
         # contraction, i.e. the ragged-K layout
-        grad_b = quantized_grouped_gemm(
+        grad_b = quantized_grouped_mm(
             a.mT,
             grad_y,
             offs,
@@ -178,7 +178,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         return grad_a, grad_b, grad_bias, None, None, None
 
 
-def scaled_grouped_gemm_fn(cfg: QuantizationConfig, stats=None):
+def scaled_grouped_mm_fn(cfg: QuantizationConfig, stats=None):
     """Build the block's expert GEMM seam.
 
     `stats` maps `<projection>.<gemm>.<operand>` to an accumulator. Rebinding this
@@ -203,5 +203,5 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
-        q.expert_mm = scaled_grouped_gemm_fn(quantization_config)
+        q.expert_mm = scaled_grouped_mm_fn(quantization_config)
         return q

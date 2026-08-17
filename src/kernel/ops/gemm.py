@@ -47,9 +47,7 @@ def _check_scaled_grouped(
     offs: torch.Tensor,
     block_size: int,
 ) -> None:
-    """Mirrors `_grouped_scales_are_valid` (triton/gemm.py) -- the scale-block axis
-    depends on which operand rank carries the ragged dim, not just on block_size.
-    """
+    """The scale-block axis depends on which operand carries the ragged dim."""
     _check_contraction(aq, bq)
     if aq.ndim == 2 and bq.ndim == 3:  # ragged-M: A's row axis, dense contraction
         blocks = -(-aq.shape[-1] // block_size) if block_size else 1
@@ -169,17 +167,22 @@ def fp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None
 
 def mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=None):
     _check_scaled_dense(aq, bq, sa, sb, block_size)
+    selected_backend = backend
+    kwargs = {}
+    if selected_backend is None:
+        serves_cublaslt = _cublaslt is not None and _cublaslt.serves_dense(
+            aq, bq, out_dtype, block_size
+        )
+        selected_backend = _mxfp8_backend(
+            "gemm.mxfp8_scaled_mm", serves_cublaslt, aq.device
+        )
+        if selected_backend == "cublaslt" and serves_cublaslt:
+            kwargs["_dense_contract_checked"] = True
     return dispatch(
         "gemm.mxfp8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
-        {},
-        backend
-        or _mxfp8_backend(
-            "gemm.mxfp8_scaled_mm",
-            _cublaslt is not None
-            and _cublaslt.serves_dense(aq, bq, out_dtype, block_size),
-            aq.device,
-        ),
+        kwargs,
+        selected_backend,
         device=aq.device,
     )
 
@@ -221,13 +224,7 @@ def mxfp8_scaled_grouped_mm(
         "gemm.mxfp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
         {},
-        backend
-        or _mxfp8_backend(
-            "gemm.mxfp8_scaled_grouped_mm",
-            _cublaslt is not None
-            and _cublaslt.serves_grouped(aq, bq, out_dtype, block_size, bias),
-            aq.device,
-        ),
+        backend,
         device=aq.device,
     )
 

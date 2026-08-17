@@ -7,8 +7,8 @@ import pytest
 import setuptools
 import torch
 
-from benchmarks.gemm.bench_scaled_gemm import _require_mxfp8_precision
-from src.kernel.ops.gemm import mxfp8_scaled_grouped_mm, mxfp8_scaled_mm
+from benchmarks.gemm.bench_scaled_mm import _require_mxfp8_precision
+from src.kernel.ops.gemm import mxfp8_scaled_mm
 from src.kernel.selector import select_kernel
 
 
@@ -77,16 +77,6 @@ def _valid_dense_operands(block_size: int) -> tuple[object, ...]:
     return a, b, scale_a, scale_b, torch.bfloat16, block_size, None
 
 
-def _valid_grouped_operands(block_size: int) -> tuple[object, ...]:
-    m, k, n = 16, 32, 16
-    a = _fp8_values(m * k).view(m, k)
-    b = _fp8_values(k * n).view(1, k, n)
-    scale_a = torch.ones((m, 1), device="cuda", dtype=torch.float32)
-    scale_b = torch.ones((1, 1, n), device="cuda", dtype=torch.float32)
-    offs = torch.tensor([m], device="cuda", dtype=torch.int32)
-    return a, b, scale_a, scale_b, offs, torch.bfloat16, block_size, None
-
-
 @cuda_mxfp8_only
 def test_forced_backend_rejects_bad_scale_config():
     """cuBLASLt reads scales as bare 32-wide e8m0 blocks -- unlike Triton it does
@@ -97,15 +87,6 @@ def test_forced_backend_rejects_bad_scale_config():
 
     with pytest.raises(ValueError, match="requires block_size=32"):
         mxfp8_scaled_mm(*args, backend="cublaslt")
-
-
-@cuda_mxfp8_only
-def test_forced_backend_rejects_bad_grouped_scale_config():
-    _require_mxfp8_device()
-    args = _valid_grouped_operands(64)
-
-    with pytest.raises(ValueError, match="requires block_size=32"):
-        mxfp8_scaled_grouped_mm(*args, backend="cublaslt")
 
 
 @cuda_mxfp8_only
