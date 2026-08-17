@@ -1,9 +1,17 @@
+from functools import lru_cache
+
 import torch
 
 import src.kernel.backends.cublaslt  # noqa: F401
 import src.kernel.backends.eager  # noqa: F401
 import src.kernel.backends.triton  # noqa: F401
-from src.kernel.selector import dispatch
+from src.kernel.registry import KERNEL_REGISTRY
+from src.kernel.selector import _platform_for, dispatch
+
+try:  # the registration gate leaves this absent when the extension is unbuilt
+    from src.kernel.backends.cublaslt import gemm as _cublaslt
+except ImportError:  # pragma: no cover - exercised only on non-CUDA builds
+    _cublaslt = None
 
 
 def _check_offs(offs: torch.Tensor) -> None:
@@ -92,26 +100,40 @@ __all__ = [
     "SCALED_MM_OPS",
 ]
 
-# cuBLASLt measured ~5% faster than Triton for gemm.mxfp8_scaled_mm on this hardware
-# (RTX 5060 Ti sm120, M,K,N=4096,2048,2048, block_size=32 -- see the Step 9 benchmark
-# in task-3-report.md), but it only accepts block_size == 32 with 16-byte-aligned
-# strides and silently ignores out_dtype. Callers that legitimately pass
-# block_size=64 or unaligned/transposed shapes (e.g. src/quant/linear.py's wgrad)
-# would hit a ValueError or a wrong dtype, so cuBLASLt cannot be the *default* --
-# only Triton serves every caller of this op. Pass backend="cublaslt" explicitly
-# when the caller's shapes are known to satisfy those constraints; the capability
-# gate permits it since an explicit backend bypasses eligibility filtering.
-_MXFP8_DENSE_BACKEND = "triton"
 
-# gemm.mxfp8_scaled_grouped_mm's cuBLASLt kernel is registered only for
-# cuda(min_arch=(10,0), max_arch=(11,0)); Triton has no ceiling. On this repo's
-# sm120 hardware the ceiling already excludes cuBLASLt, so this default is a no-op
-# here -- but on SM100/SM110 both backends are eligible, and this pin forecloses
-# cuBLASLt there too. The pre-Task-3 selector reached cuBLASLt on that hardware via
-# a per-call shape predicate; a shape-conditional replacement is untested on
-# hardware neither author of this pin can exercise, so it isn't attempted here.
-# Task 7 owns deciding that routing with real SM100/SM110 evidence.
-_MXFP8_GROUPED_BACKEND = "triton"
+@lru_cache(maxsize=None)
+def _cublaslt_eligible(op: str, device_type: str, device_index: int | None) -> bool:
+    """Is cuBLASLt both built and hardware-eligible for `op` on this device?
+
+    Registration covers the build axis -- an unbuilt `_C` registers no spec at all --
+    and `is_available` covers the SM window. Cached per (op, device); the capability
+    gate itself never runs on the hot path.
+    """
+    platform = _platform_for(device_type, device_index)
+    return any(
+        spec.backend == "cublaslt" and spec.is_available(platform)
+        for spec in KERNEL_REGISTRY.implementations(op)
+    )
+
+
+def _mxfp8_backend(op: str, serves: bool, device: torch.device) -> str:
+    """cuBLASLt for every mxfp8 call it can serve; Triton for the rest.
+
+    cuBLASLt is the vendor kernel and wins decisively once a GEMM is compute-bound
+    rather than launch-bound -- measured on sm120 at block_size=32: 18.7% faster at
+    M,K,N=4096,4096,4096 and 31.5% at 8192,2048,2048, against 3-8% slower at the
+    smaller shapes where both are launch-bound.
+
+    Two axes decide it, and they are separate on purpose. `_cublaslt_eligible` is
+    metadata -- the SM window plus whether the extension was built -- and is cached
+    per device. `serves` is per-call and cannot be metadata: cuBLASLt reads bare
+    32-wide e8m0 blocks, always returns bf16, and needs 16-byte-aligned operand
+    strides, so a `block_size` of 64, an fp16 output, or an unaligned token count
+    (M=250 leaves a 250-byte row stride) all fall to Triton, which serves every case.
+    """
+    if serves and _cublaslt_eligible(op, device.type, device.index):
+        return "cublaslt"
+    return "triton"
 
 
 def grouped_mm(a, b, offs, bias=None, backend=None):
@@ -151,7 +173,13 @@ def mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias=None, backend=No
         "gemm.mxfp8_scaled_mm",
         (aq, bq, sa, sb, out_dtype, block_size, bias),
         {},
-        backend or _MXFP8_DENSE_BACKEND,
+        backend
+        or _mxfp8_backend(
+            "gemm.mxfp8_scaled_mm",
+            _cublaslt is not None
+            and _cublaslt.serves_dense(aq, bq, out_dtype, block_size),
+            aq.device,
+        ),
         device=aq.device,
     )
 
@@ -193,7 +221,13 @@ def mxfp8_scaled_grouped_mm(
         "gemm.mxfp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
         {},
-        backend or _MXFP8_GROUPED_BACKEND,
+        backend
+        or _mxfp8_backend(
+            "gemm.mxfp8_scaled_grouped_mm",
+            _cublaslt is not None
+            and _cublaslt.serves_grouped(aq, bq, out_dtype, block_size, bias),
+            aq.device,
+        ),
         device=aq.device,
     )
 

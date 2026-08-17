@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from src.kernel.ops import gemm as gemm_module
+from src.kernel.registry import KERNEL_REGISTRY
 from src.kernel.selector import select_kernel
 from src.kernel.spec import PlatformInfo
 
@@ -92,27 +93,89 @@ _ALL_OPS = (
     "gemm.mxfp8_scaled_grouped_mm",
 )
 
-_WRAPPER_DEFAULT_BACKEND = {
-    "gemm.mxfp8_scaled_mm": gemm_module._MXFP8_DENSE_BACKEND,
-    "gemm.mxfp8_scaled_grouped_mm": gemm_module._MXFP8_GROUPED_BACKEND,
-}
+_MXFP8_OPS = ("gemm.mxfp8_scaled_mm", "gemm.mxfp8_scaled_grouped_mm")
 
 
 @pytest.mark.parametrize("arch", [(8, 0), (8, 9), (10, 0), (11, 0), (12, 0)])
-@pytest.mark.parametrize("op", _ALL_OPS)
-def test_every_op_resolves_without_ambiguity_on_cuda(op, arch):
-    """Each wrapper must resolve to exactly one backend on every arch, using the
-    registry directly (no GPU needed): its own pinned default for mxfp8, or the
-    sole eligible optimized backend otherwise. A raise here means a wrapper forgot
-    to apply its default -- the gap that let mxfp8_scaled_grouped_mm raise
-    KernelSelectionError on SM100/SM110 (both triton and cublaslt eligible)
-    undetected, since existing tests always passed backend="triton" explicitly.
+@pytest.mark.parametrize("op", [op for op in _ALL_OPS if op not in _MXFP8_OPS])
+def test_non_mxfp8_ops_resolve_without_ambiguity_on_cuda(op, arch):
+    """These ops have one optimized backend, so `backend=None` must resolve through
+    the real eligibility path on every arch -- either to Triton or, below its SM
+    floor, to the eager reference tier. A raise means the windows overlap.
     """
-    platform = PlatformInfo("cuda", arch)
-    spec = select_kernel(
-        op, backend=_WRAPPER_DEFAULT_BACKEND.get(op), platform=platform
-    )
+    spec = select_kernel(op, platform=PlatformInfo("cuda", arch))
+
     assert spec.op == op
+    assert spec.backend in ("triton", "eager")
+
+
+# The mxfp8 policy has two separable axes, tested separately below:
+#   _cublaslt_eligible -- metadata (SM window + whether the extension was built)
+#   serves_dense/serves_grouped -- per-call (scale width, out dtype, alignment)
+_ELIGIBILITY = [
+    ("gemm.mxfp8_scaled_mm", (8, 9), False),
+    ("gemm.mxfp8_scaled_mm", (10, 0), True),
+    ("gemm.mxfp8_scaled_mm", (11, 0), True),
+    ("gemm.mxfp8_scaled_mm", (12, 0), True),
+    ("gemm.mxfp8_scaled_grouped_mm", (10, 0), True),
+    ("gemm.mxfp8_scaled_grouped_mm", (11, 0), True),
+    # NVIDIA supports grouped MXFP8 only on SM9.0/10.x/11.0
+    ("gemm.mxfp8_scaled_grouped_mm", (12, 0), False),
+]
+
+
+@pytest.mark.parametrize("op,arch,expected", _ELIGIBILITY)
+def test_cublaslt_eligibility_follows_the_sm_window(
+    monkeypatch: pytest.MonkeyPatch, op, arch, expected
+):
+    """The metadata axis: hardware window plus build availability, no tensors."""
+    monkeypatch.setattr(
+        gemm_module, "_platform_for", lambda *_: PlatformInfo("cuda", arch)
+    )
+    gemm_module._cublaslt_eligible.cache_clear()
+    try:
+        assert gemm_module._cublaslt_eligible(op, "cuda", 0) is expected
+    finally:
+        gemm_module._cublaslt_eligible.cache_clear()
+
+
+def test_cublaslt_eligibility_is_false_without_the_extension(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An unbuilt `_C` registers no cuBLASLt spec, so the policy must name Triton
+    rather than a backend `select_kernel` would then reject.
+    """
+    monkeypatch.setattr(
+        gemm_module, "_platform_for", lambda *_: PlatformInfo("cuda", (10, 0))
+    )
+    original = KERNEL_REGISTRY.implementations
+    monkeypatch.setattr(
+        gemm_module.KERNEL_REGISTRY,
+        "implementations",
+        lambda op: tuple(s for s in original(op) if s.backend != "cublaslt"),
+    )
+    gemm_module._cublaslt_eligible.cache_clear()
+    try:
+        assert not gemm_module._cublaslt_eligible("gemm.mxfp8_scaled_mm", "cuda", 0)
+    finally:
+        gemm_module._cublaslt_eligible.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("serves", "eligible", "expected"),
+    [(True, True, "cublaslt"), (True, False, "triton"), (False, True, "triton")],
+)
+def test_mxfp8_backend_needs_both_axes(
+    monkeypatch: pytest.MonkeyPatch, serves, eligible, expected
+):
+    """cuBLASLt only when the hardware allows it *and* it can serve this call."""
+    monkeypatch.setattr(gemm_module, "_cublaslt_eligible", lambda *_: eligible)
+
+    chosen = gemm_module._mxfp8_backend(
+        "gemm.mxfp8_scaled_mm", serves, torch.device("cuda", 0)
+    )
+
+    assert chosen == expected
 
 
 def test_grouped_gemm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPatch):
@@ -202,7 +265,7 @@ def test_dense_scaled_mm_forwards_arguments(
     }
 
 
-def test_mxfp8_scaled_mm_defaults_to_the_pinned_dense_backend(
+def test_mxfp8_scaled_mm_forwards_the_resolved_backend(
     monkeypatch: pytest.MonkeyPatch,
 ):
     seen = {}
@@ -217,9 +280,11 @@ def test_mxfp8_scaled_mm_defaults_to_the_pinned_dense_backend(
     sa = torch.empty(2, 1)
     sb = torch.empty(1, 3)
 
+    monkeypatch.setattr(gemm_module, "_mxfp8_backend", lambda *_: "sentinel-backend")
+
     gemm_module.mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32)
 
-    assert seen["backend"] == gemm_module._MXFP8_DENSE_BACKEND
+    assert seen["backend"] == "sentinel-backend"
 
 
 def test_mxfp8_scaled_mm_explicit_backend_overrides_the_pinned_default(
@@ -242,7 +307,7 @@ def test_mxfp8_scaled_mm_explicit_backend_overrides_the_pinned_default(
     assert seen["backend"] == "triton"
 
 
-def test_mxfp8_scaled_grouped_mm_defaults_to_the_pinned_grouped_backend(
+def test_mxfp8_scaled_grouped_mm_forwards_the_resolved_backend(
     monkeypatch: pytest.MonkeyPatch,
 ):
     seen = {}
@@ -258,9 +323,11 @@ def test_mxfp8_scaled_grouped_mm_defaults_to_the_pinned_grouped_backend(
     sb = torch.empty(1, 1, 3)
     offs = torch.tensor([2], dtype=torch.int32)
 
+    monkeypatch.setattr(gemm_module, "_mxfp8_backend", lambda *_: "sentinel-backend")
+
     gemm_module.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.bfloat16, 32)
 
-    assert seen["backend"] == gemm_module._MXFP8_GROUPED_BACKEND
+    assert seen["backend"] == "sentinel-backend"
 
 
 def test_mxfp8_scaled_grouped_mm_explicit_backend_overrides_the_pinned_default(

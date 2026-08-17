@@ -314,3 +314,27 @@ def test_cublaslt_native_operator_rejects_invalid_transformed_abi(
         torch.ops.aot_kernel._scaled_gemm_mxfp8_cublaslt(
             aq, b, swizzled_a, swizzled_b, bias
         )
+
+
+@cuda_mxfp8_only
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("ok", True),
+        ("block_size_64", False),
+        ("out_fp16", False),
+        # M=250 tokens leaves a 250-byte row stride on the transposed wgrad operand
+        ("unaligned_tokens", False),
+    ],
+)
+def test_serves_dense_matches_the_kernel_contract(case: str, expected: bool):
+    """`serves_dense` must accept exactly what the kernel accepts -- it is the
+    routing predicate for the mxfp8 backend choice, and a disagreement would either
+    lose cuBLASLt on valid calls or route invalid ones into a raise."""
+    k = 250 if case == "unaligned_tokens" else 256
+    aq = torch.zeros(256, k, device="cuda", dtype=torch.float8_e4m3fn)
+    bq = torch.zeros(k, 128, device="cuda", dtype=torch.float8_e4m3fn)
+    block_size = 64 if case == "block_size_64" else 32
+    out_dtype = torch.float16 if case == "out_fp16" else torch.bfloat16
+
+    assert cublaslt_gemm.serves_dense(aq, bq, out_dtype, block_size) is expected
