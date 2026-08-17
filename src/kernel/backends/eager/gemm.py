@@ -1,6 +1,7 @@
 import torch
 
 from src.kernel.registry import register_kernel
+from src.kernel.spec import CPU
 
 
 def _to_bounds(offs):
@@ -13,6 +14,7 @@ def _to_bounds(offs):
     backend="eager",
     build="eager",
     autograd=True,
+    capabilities=frozenset({CPU}),
 )
 def grouped_gemm(
     a: torch.Tensor,
@@ -63,6 +65,7 @@ def _dequant_b(q, scale, block_size):
     backend="eager",
     build="eager",
     autograd=True,
+    capabilities=frozenset({CPU}),
 )
 def scaled_gemm(
     aq: torch.Tensor,
@@ -86,6 +89,7 @@ def scaled_gemm(
     backend="eager",
     build="eager",
     autograd=True,
+    capabilities=frozenset({CPU}),
 )
 def scaled_grouped_gemm(
     aq: torch.Tensor,

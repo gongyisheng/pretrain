@@ -1,24 +1,20 @@
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from types import MappingProxyType
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch
 
 BuildMode = Literal["eager", "jit", "aot"]
 
-BACKEND_PRIORITIES = {
-    "eager": 0,
-    "triton": 1,
-    "cublaslt": 2,
-}
-
 BACKENDS = frozenset({"eager", "triton", "cublaslt"})
 
 
 @dataclass(frozen=True, slots=True)
 class PlatformInfo:
-    """A snapshot of the runtime accelerator. Never raises."""
+    """A snapshot of the runtime accelerator.
+
+    An absent or invisible accelerator yields the default CPU platform.
+    """
 
     device_type: str = "cpu"
     arch: tuple[int, int] | None = None
@@ -61,15 +57,6 @@ def cuda(
 
 
 @dataclass(frozen=True, slots=True)
-class CheckResult:
-    ok: bool
-    reason: str | None = None
-
-
-CanImplementFn = Callable[[tuple[Any, ...], Mapping[str, Any]], CheckResult]
-
-
-@dataclass(frozen=True, slots=True)
 class KernelSpec:
     op: str
     backend: str
@@ -96,35 +83,3 @@ class KernelSpec:
         return any(
             requirement.is_satisfied_by(platform) for requirement in self.capabilities
         )
-
-
-@dataclass(frozen=True, slots=True)
-class OperationSpec:
-    can_implement: Mapping[str, CanImplementFn]
-    validate: CanImplementFn | None = None
-    _callbacks: dict[str, CanImplementFn] = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        callbacks = dict(self.can_implement)
-        if not callbacks:
-            raise ValueError("can_implement must be nonempty")
-        if self.validate is not None and not callable(self.validate):
-            raise TypeError("operation validate must be callable")
-        for backend, callback in callbacks.items():
-            if backend not in BACKEND_PRIORITIES:
-                supported = ", ".join(BACKEND_PRIORITIES)
-                raise ValueError(
-                    f"unknown kernel backend {backend!r}; supported: {supported}"
-                )
-            if not callable(callback):
-                raise TypeError(
-                    f"backend can_implement must be callable: backend={backend!r}"
-                )
-        object.__setattr__(self, "_callbacks", callbacks)
-        object.__setattr__(self, "can_implement", MappingProxyType(callbacks))
-
-    def supports(self, backend: str) -> bool:
-        return backend in self._callbacks
-
-    def validator(self, backend: str) -> CanImplementFn | None:
-        return self._callbacks.get(backend)

@@ -8,9 +8,8 @@ import setuptools
 import torch
 
 from benchmarks.gemm.bench_scaled_gemm import _require_mxfp8_precision
-from src.kernel.ops import gemm as gemm_module
 from src.kernel.ops.gemm import scaled_gemm
-from src.kernel.selector import KernelSelectionError, select_kernel
+from src.kernel.selector import select_kernel
 
 
 cuda_mxfp8_only = pytest.mark.skipif(
@@ -54,20 +53,6 @@ def _view_operands(case: str) -> tuple[object, ...]:
 
 
 @cuda_mxfp8_only
-@pytest.mark.parametrize("case", ["padded_a", "padded_b"])
-def test_auto_falls_back_for_unsafe_operand_view(case: str):
-    _require_mxfp8_device()
-    args = _view_operands(case)
-
-    selected = select_kernel("gemm.scaled", args, {}, backend="auto")
-    expected = scaled_gemm(*args, backend="eager")
-    actual = scaled_gemm(*args, backend="auto")
-
-    assert selected.backend != "cublaslt"
-    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
-
-
-@cuda_mxfp8_only
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
@@ -79,28 +64,21 @@ def test_forced_backend_rejects_unsafe_operand_view(case: str, reason: str):
     _require_mxfp8_device()
     args = _view_operands(case)
 
-    eligibility = gemm_module.can_implement_scaled_gemm_cublaslt(args, {})
-
-    assert not eligibility.ok
-    assert eligibility.reason is not None
-    assert reason in eligibility.reason
-    with pytest.raises(KernelSelectionError, match=reason):
+    with pytest.raises(ValueError, match=reason):
         scaled_gemm(*args, backend="cublaslt")
 
 
 @cuda_mxfp8_only
-@pytest.mark.parametrize("backend", ["auto", "cublaslt"])
+@pytest.mark.parametrize("backend", ["cublaslt"])
 @pytest.mark.parametrize("case", ["offset_a", "offset_b"])
 def test_misaligned_operand_executes_with_cublaslt(case: str, backend: str):
     _require_mxfp8_device()
     args = _view_operands(case)
 
-    eligibility = gemm_module.can_implement_scaled_gemm_cublaslt(args, {})
-    selected = select_kernel("gemm.scaled", args, {}, backend=backend)
+    selected = select_kernel("gemm.scaled", backend=backend)
     expected = scaled_gemm(*args, backend="eager")
     actual = scaled_gemm(*args, backend=backend)
 
-    assert eligibility.ok
     assert selected.backend == "cublaslt"
     _require_mxfp8_precision(f"misaligned {case} {backend}", actual, expected)
 
@@ -130,7 +108,7 @@ def _zero_operands(shape: tuple[int, int, int], with_bias: bool) -> tuple[object
 
 
 @cuda_mxfp8_only
-@pytest.mark.parametrize("backend", ["auto", "cublaslt"])
+@pytest.mark.parametrize("backend", [None, "cublaslt"])
 @pytest.mark.parametrize(
     ("shape", "with_bias"),
     [
@@ -141,7 +119,7 @@ def _zero_operands(shape: tuple[int, int, int], with_bias: bool) -> tuple[object
     ],
 )
 def test_zero_size_gemm_matches_eager(
-    backend: str, shape: tuple[int, int, int], with_bias: bool
+    backend: str | None, shape: tuple[int, int, int], with_bias: bool
 ):
     _require_mxfp8_device()
     args = _zero_operands(shape, with_bias)

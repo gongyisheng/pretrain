@@ -5,6 +5,7 @@ import triton.language as tl
 from torch._library.triton import triton_op, wrap_triton
 
 from src.kernel.registry import register_kernel
+from src.kernel.spec import cuda
 
 
 _FLOAT_DTYPES = {torch.float32, torch.bfloat16, torch.float16}
@@ -310,12 +311,15 @@ def grouped_gemm(
     return _grouped_gemm_unchecked(a, b, offs, bias)
 
 
-# Dispatch reaches this internal path only after contract and eligibility checks.
+# Dispatch reaches this entry directly, gated only by device/SM capability plus the
+# bf16-only dtype routing in src/kernel/ops/gemm.py. `grouped_gemm` above is a
+# separate, unused-by-dispatch reference kept for direct callers and tests.
 @register_kernel(
     op="gemm.grouped",
     backend="triton",
     build="jit",
     autograd=False,
+    capabilities=frozenset({cuda(min_arch=(8, 0))}),
 )
 def _grouped_gemm_unchecked(
     a: torch.Tensor,
@@ -630,12 +634,14 @@ def scaled_gemm(
     )
 
 
-# Dispatch reaches this internal path only after contract and eligibility checks.
+# Dispatch reaches this entry directly, gated only by device/SM capability; see the
+# entry's own docstring for what it still checks and why.
 @register_kernel(
     op="gemm.scaled",
     backend="triton",
     build="jit",
     autograd=False,
+    capabilities=frozenset({cuda(min_arch=(8, 0))}),
 )
 @triton_op("jit_kernel::scaled_gemm", mutates_args={})
 def _scaled_gemm_unchecked(
@@ -666,12 +672,21 @@ def _scaled_gemm_unchecked(
     `bias` is an optional (N,) tensor broadcast over the rows, added to the fp32
     accumulator in the epilogue so it never passes through the scales.
 
-    The public wrapper validates the launch contract before this registered entry is
-    called directly. Public operation dispatch validates once before selecting it.
+    Dispatch reaches this entry directly, gated only by device/SM capability; the
+    `scaled_gemm` function above is a separate, unused-by-dispatch reference kept for
+    direct callers and tests. Only checks whose violation is silent or numerically
+    wrong live here (see the `block_size` check below); everything else is the
+    caller's contract to get right.
     """
     M, K = aq.shape
     N = bq.shape[1]
     n_scale_blocks = sa.shape[1]
+    # SCALE_BLOCK_SIZE tiles K in the epilogue-scaling kernel below; a non-power-of-two
+    # or sub-16 width is not rejected by Triton, it just computes the wrong answer.
+    if n_scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1) != 0):
+        raise ValueError(
+            f"block_size must be a power of two >= 16 when it tiles K, got {block_size}"
+        )
     SCALE_BLOCK_SIZE = block_size if n_scale_blocks > 1 else K
     c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
 
@@ -1278,12 +1293,14 @@ def scaled_grouped_gemm(
     )
 
 
-# Dispatch reaches this internal path only after contract and eligibility checks.
+# Dispatch reaches this entry directly, gated only by device/SM capability; see the
+# entry's own docstring for what it still checks and why.
 @register_kernel(
     op="gemm.scaled_grouped",
     backend="triton",
     build="jit",
     autograd=False,
+    capabilities=frozenset({cuda(min_arch=(8, 0))}),
 )
 @triton_op("jit_kernel::scaled_grouped_gemm", mutates_args={})
 def _scaled_grouped_gemm_unchecked(
@@ -1315,6 +1332,14 @@ def _scaled_grouped_gemm_unchecked(
 
     `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
     the fp32 accumulator in the epilogue so it never passes through the scales.
+
+    Dispatch reaches this entry directly, gated only by device/SM capability; the
+    `scaled_grouped_gemm` function above is a separate, unused-by-dispatch reference
+    kept for direct callers and tests. Unlike the dense `_scaled_gemm_unchecked`, this
+    kernel has no numerically-fragile constraint to re-check here: it masks the
+    reduction to each scale block's end rather than clamping BLOCK_K to it, so a
+    non-power-of-two `block_size` (e.g. 48) is exercised and correct, not just
+    tolerated (see `test_scaled_grouped_layouts_match_oracle`'s `bs=48` case).
     """
     a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
     E = offs.shape[0]

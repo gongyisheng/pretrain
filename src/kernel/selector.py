@@ -1,124 +1,82 @@
 from collections.abc import Mapping
-from typing import Any
+from functools import lru_cache
+from typing import Any, Callable
 
 import torch
 
 from src.kernel.registry import KERNEL_REGISTRY, KernelRegistry
-from src.kernel.spec import BACKEND_PRIORITIES, CanImplementFn, CheckResult, KernelSpec
+from src.kernel.spec import KernelSpec, PlatformInfo
 
 
 class KernelSelectionError(RuntimeError):
     pass
 
 
-def _check(
-    spec: KernelSpec,
-    can_implement: CanImplementFn,
-    args: tuple[Any, ...],
-    kwargs: Mapping[str, Any],
-) -> CheckResult:
-    tensor_requires_grad = any(
-        isinstance(value, torch.Tensor) and value.requires_grad for value in args
-    ) or any(
-        isinstance(value, torch.Tensor) and value.requires_grad
-        for value in kwargs.values()
-    )
-    if not spec.autograd and torch.is_grad_enabled() and tensor_requires_grad:
-        return CheckResult(
-            False,
-            "backend does not support ordinary autograd for a grad-enabled call "
-            "with tensor inputs requiring grad",
-        )
-    return can_implement(args, kwargs)
-
-
-def _require_implementation(
-    spec: KernelSpec,
-    can_implement: CanImplementFn,
-    args: tuple[Any, ...],
-    kwargs: Mapping[str, Any],
-) -> None:
-    result = _check(spec, can_implement, args, kwargs)
-    if not result.ok:
-        raise KernelSelectionError(
-            f"operation {spec.op!r} backend {spec.backend!r} cannot implement "
-            f"this call: {result.reason}"
-        )
-
-
-def _require_valid_contract(
-    validate: CanImplementFn | None,
-    args: tuple[Any, ...],
-    kwargs: Mapping[str, Any],
-) -> None:
-    if validate is None:
-        return
-    result = validate(args, kwargs)
-    if not result.ok:
-        raise KernelSelectionError(result.reason)
+@lru_cache(maxsize=None)
+def _platform_for(device_type: str, device_index: int | None) -> PlatformInfo:
+    if device_type != "cuda":
+        return PlatformInfo(device_type)
+    return PlatformInfo("cuda", torch.cuda.get_device_capability(device_index))
 
 
 def select_kernel(
     op: str,
-    args: tuple[Any, ...],
-    kwargs: Mapping[str, Any],
-    backend: str = "auto",
+    backend: str | None = None,
+    platform: PlatformInfo | None = None,
     registry: KernelRegistry = KERNEL_REGISTRY,
 ) -> KernelSpec:
+    """Resolve `op` to one implementation. A hard eligibility gate, not a ranking."""
     specs = registry.implementations(op)
     if not specs:
         raise KernelSelectionError(f"no kernels registered for operation {op!r}")
-
-    operation = registry.operation(op)
-    if operation is None:
+    registered = ", ".join(sorted(spec.backend for spec in specs))
+    if backend is not None:
+        for spec in specs:
+            if spec.backend == backend:
+                return spec
         raise KernelSelectionError(
-            f"operation {op!r} has no registered metadata; import its public "
-            "src.kernel.ops entry point before dispatch"
+            f"operation {op!r} has no backend {backend!r}; registered: {registered}"
         )
-    if backend != "auto":
-        matches = [spec for spec in specs if spec.backend == backend]
-        if not matches:
-            registered = ", ".join(sorted(spec.backend for spec in specs))
-            raise KernelSelectionError(
-                f"operation {op!r} has no backend {backend!r}; registered: {registered}"
-            )
-        spec = matches[0]
-        can_implement = registry.can_implement(op, spec.backend)
-        if can_implement is None:
-            raise KernelSelectionError(
-                f"operation {op!r} backend {spec.backend!r} has no registered validator"
-            )
-        _require_valid_contract(operation.validate, args, kwargs)
-        _require_implementation(spec, can_implement, args, kwargs)
-        return spec
-
-    _require_valid_contract(operation.validate, args, kwargs)
-    rejected: list[str] = []
-    for spec in sorted(
-        specs,
-        key=lambda item: BACKEND_PRIORITIES[item.backend],
-        reverse=True,
-    ):
-        can_implement = registry.can_implement(op, spec.backend)
-        if can_implement is None:
-            raise KernelSelectionError(
-                f"operation {op!r} backend {spec.backend!r} has no registered validator"
-            )
-        result = _check(spec, can_implement, args, kwargs)
-        if result.ok:
-            return spec
-        rejected.append(f"{spec.backend}: {result.reason}")
+    if len(specs) == 1:
+        return specs[0]
+    if platform is None:
+        raise KernelSelectionError(
+            f"operation {op!r} has multiple backends ({registered}) and no "
+            "platform was supplied to choose among them"
+        )
+    eligible = [spec for spec in specs if spec.is_available(platform)]
+    if len(eligible) == 1:
+        return eligible[0]
+    if not eligible:
+        raise KernelSelectionError(
+            f"operation {op!r} has no backend for {platform.device_type} "
+            f"{platform.arch}; registered: {registered}"
+        )
+    names = ", ".join(sorted(spec.backend for spec in eligible))
     raise KernelSelectionError(
-        f"no eligible kernel for operation {op!r}; " + "; ".join(rejected)
+        f"operation {op!r} has multiple eligible backends ({names}) on "
+        f"{platform.device_type} {platform.arch}; pass backend=... to choose one"
     )
+
+
+@lru_cache(maxsize=None)
+def _resolve(
+    op: str, backend: str | None, device_type: str, device_index: int | None
+) -> Callable[..., Any]:
+    return select_kernel(op, backend, _platform_for(device_type, device_index)).fn
+
+
+def clear_cache() -> None:
+    """Drop the platform and resolution caches. Used by tests."""
+    _platform_for.cache_clear()
+    _resolve.cache_clear()
 
 
 def dispatch(
     op: str,
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
-    backend: str = "auto",
-    registry: KernelRegistry = KERNEL_REGISTRY,
+    backend: str | None = None,
+    device: torch.device | None = None,
 ) -> Any:
-    selected = select_kernel(op, args, kwargs, backend, registry)
-    return selected.fn(*args, **kwargs)
+    return _resolve(op, backend, device.type, device.index)(*args, **kwargs)

@@ -7,9 +7,8 @@ from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 class GroupedGemmFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, bias, offs, backend: str | None = "auto"):
+    def forward(ctx, a, b, bias, offs, backend: str | None = None):
         ctx.has_backend_arg = len(ctx.needs_input_grad) == 5
-        backend = backend or "auto"
         y = grouped_gemm(a, b, offs, bias=bias, backend=backend)
         ctx.save_for_backward(a, b, offs)
         ctx.bias_needs_grad = ctx.needs_input_grad[2]
@@ -37,9 +36,7 @@ class GroupedGemmFn(torch.autograd.Function):
         return (*grads, None) if ctx.has_backend_arg else grads
 
 
-def grouped_gemm_fn(
-    a, b, offs, bias=None, projection=None, backend: str | None = "auto"
-):
+def grouped_gemm_fn(a, b, offs, bias=None, projection=None, backend: str | None = None):
     return GroupedGemmFn.apply(a, b, bias, offs, backend)
 
 

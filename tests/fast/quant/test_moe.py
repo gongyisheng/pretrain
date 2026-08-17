@@ -176,7 +176,7 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
         block_size,
         scale_dtype,
         bias=None,
-        backend="auto",
+        backend=None,
     ):
         # one op serves every layout now; 2D x 2D is ragged-K, i.e. the wgrad
         if bq.ndim == 2:
@@ -299,7 +299,7 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
         block_size,
         scale_dtype,
         bias=None,
-        backend="auto",
+        backend=None,
     ):
         if gq.ndim == 2:  # ragged-K layout, i.e. the wgrad
             seen["block_size"] = block_size
