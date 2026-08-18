@@ -33,7 +33,7 @@ training:
   mixed_precision: bf16
   quantization:
     enabled: true
-    dtype: {recipe: int8}       # weight int8; act and both grads bf16
+    dtype: {weight: int8, act: bf16, grad_out: bf16}
     scaling: {granularity: blockwise, block_shape: [1, 64]}
     exclude: [lm_head]
   grad_clip: 1.0
