@@ -7,17 +7,17 @@ cd "$(dirname "$0")/../.."
 
 configs=(
     qwen3_51m_bf16
-    qwen3_51m_fp8_e4m3_w8a16
-    qwen3_51m_fp8_e4m3_w16a8
-    qwen3_51m_fp8_e4m3_w8a8
-    qwen3_51m_fp8_e4m3_w8a8g8
-    qwen3_51m_fp8_e4m3_w8a8_e5m2_g8
-    qwen3_51m_fp8_e5m2_w8a16
-    qwen3_51m_fp8_e5m2_w16a8
-    qwen3_51m_fp8_e5m2_w8a8
-    qwen3_51m_fp8_e5m2_w8a8g8
-    qwen3_51m_fp8_e5m2_w8a8_e4m3_g8
 )
+
+for dtype in e4m3 e5m2; do
+    for tensor_dtypes in w8a16 w16a8 w8a8 w8a8g8; do
+        configs+=("qwen3_51m_fp8_${dtype}_${tensor_dtypes}")
+    done
+    for gradient_dtype in e4m3 e5m2; do
+        [[ "${gradient_dtype}" == "${dtype}" ]] && continue
+        configs+=("qwen3_51m_fp8_${dtype}_w8a8_${gradient_dtype}_g8")
+    done
+done
 
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
