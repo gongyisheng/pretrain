@@ -22,7 +22,7 @@ Smaller FP8 scale blocks reduce quantization error and improve validation loss, 
 | `qwen3_51m_fp8_blockwise2d_64` | blockwise 2D | `(64, 64)` | E4M3/E4M3/E5M2 | ~51M |
 | `qwen3_51m_fp8_blockwise2d_128` | blockwise 2D | `(128, 128)` | E4M3/E4M3/E5M2 | ~51M |
 
-All configs use ~51M parameters: `d_model=512`, 8 layers, 8/4 Q/KV heads, `intermediate_size=1536`, and `max_seq_len=1024`. They use OpenWebText, batch size 16, gradient accumulation 16, 50K steps, bf16 mixed precision, Muon (`match_rms_adamw`, momentum 0.95, Nesterov), learning rate 5e-4, cosine decay with 1,500 warmup steps, and minimum learning rate 5e-5. Checkpoints are every 5,000 steps; evaluation is every 100 steps for 25 batches.
+All configs use ~51M parameters: `d_model=512`, 8 layers, 8/4 Q/KV heads, `intermediate_size=1536`, and `max_seq_len=1024`. They use OpenWebText, batch size 16, gradient accumulation 16, 50K steps, bf16 mixed precision, Muon (`match_rms_adamw`, momentum 0.95, Nesterov), learning rate 5e-4, cosine decay with 1,500 warmup steps, and minimum learning rate 5e-5. Checkpoints are every 5,000 steps; evaluation is every 100 steps for 100 batches.
 
 The primary FP8 configs explicitly set E4M3 for weights and activations and E5M2 for output gradients. `lm_head` remains bf16 in every quantized run. Tensorwise, rowwise, and blockwise FP8 GEMMs dispatch to the in-house Triton scaled-GEMM backend on SM 8.9+ GPUs; they do not use the cuBLASLt MXFP8 path.
 
