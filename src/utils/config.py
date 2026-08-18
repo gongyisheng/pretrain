@@ -551,11 +551,10 @@ class TrainConfig:
 
     def _validate_moe_compile_precision(self):
         m = self.model
-        if m.is_moe and self.training.mixed_precision != "bf16":
+        if m.is_moe and self.training.mixed_precision not in ("bf16", "fp16"):
             raise ValueError(
-                "dropless MoE requires "
-                f"training.mixed_precision='bf16'; got {self.training.mixed_precision!r}. "
-                "torch._grouped_mm is bf16-only under torch.compile."
+                "dropless MoE requires training.mixed_precision='bf16' or 'fp16'; "
+                f"got {self.training.mixed_precision!r}."
             )
 
     def to_dict(self):

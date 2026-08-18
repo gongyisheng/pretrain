@@ -777,19 +777,15 @@ def _moe_train_config(mixed_precision):
     )
 
 
-def test_dropless_moe_requires_bf16_fp16_raises():
-    with pytest.raises(ValueError, match="bf16"):
-        _moe_train_config("fp16")
-
-
-def test_dropless_moe_requires_bf16_no_raises():
-    with pytest.raises(ValueError, match="bf16"):
+def test_dropless_moe_without_mixed_precision_raises():
+    with pytest.raises(ValueError, match="'bf16' or 'fp16'"):
         _moe_train_config("no")
 
 
-def test_dropless_moe_bf16_ok():
-    cfg = _moe_train_config("bf16")
-    assert cfg.training.mixed_precision == "bf16"
+@pytest.mark.parametrize("mixed_precision", ["bf16", "fp16"])
+def test_dropless_moe_reduced_precision_ok(mixed_precision):
+    cfg = _moe_train_config(mixed_precision)
+    assert cfg.training.mixed_precision == mixed_precision
 
 
 # ==================== Quantization config ====================

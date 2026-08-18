@@ -1293,11 +1293,10 @@ def test_sparse_moe_latent_flops_less_than_dense_moe():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="grouped GEMM is CUDA only")
 @pytest.mark.parametrize("gated", [True, False])
-def test_sparse_moe_block_compiles_fullgraph(gated):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_sparse_moe_block_compiles_fullgraph(gated, dtype):
     torch.manual_seed(0)
     blk = (
         SparseMoEBlock(
@@ -1312,12 +1311,12 @@ def test_sparse_moe_block_compiles_fullgraph(gated):
             expert_bias=True,
         )
         .cuda()
-        .to(torch.bfloat16)
+        .to(dtype)
     )
     for p in blk.parameters():
         if p.ndim >= 2:
             torch.nn.init.normal_(p, std=0.02)
-    x = torch.randn(2, 8, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(2, 8, 64, device="cuda", dtype=dtype, requires_grad=True)
     compiled = torch.compile(blk, fullgraph=True)
     out, _ = compiled(x)
     out.float().sum().backward()
