@@ -15,6 +15,10 @@ QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset(
 
 QUANT_GRANULARITY = frozenset({"tensorwise", "rowwise", "blockwise"})
 
+# "RNE" is round-to-nearest-even.
+# "SR" is stochastic rounding.
+QUANT_ROUNDING = frozenset({"RNE", "SR"})
+
 QUANT_SCALING_RECIPES = {
     "tensorwise": {"granularity": "tensorwise"},
     "rowwise": {"granularity": "rowwise"},
@@ -53,14 +57,6 @@ QUANT_TENSOR_GEMMS = {
 
 QUANT_TENSORS = tuple(QUANT_TENSOR_GEMMS)
 
-# Retired dtype keys, kept only to point their configs at the replacement.
-_RETIRED_DTYPE_KEYS = {
-    "grad_input": "grad_out scoped to dgrad",
-    "grad_weight": "grad_out scoped to wgrad",
-    "dx": "grad_out scoped to dgrad",
-    "dw": "grad_out scoped to wgrad",
-}
-
 
 # --- format property maps ---------------------------------------------------
 
@@ -85,14 +81,11 @@ _STR_TO_QMAX = {
     "int4": 7.0,
 }
 
-_STR_TO_MIN_SUBNORMAL = {
-    "fp8_e4m3": 2**-9,
-    "fp8_e5m2": 2**-16,
-    "int8": 0.5,
-    "int7": 0.5,
-    "int6": 0.5,
-    "int5": 0.5,
-    "int4": 0.5,
+# (mantissa bits, log2 subnormal spacing) define each fp8 format's binade grid.
+# New float formats must declare their grid explicitly.
+_STR_TO_FP8_ULP = {
+    "fp8_e4m3": (3, -9),
+    "fp8_e5m2": (2, -16),
 }
 
 EPS = 1e-30

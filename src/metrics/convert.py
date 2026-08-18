@@ -10,7 +10,7 @@ from src.metrics.activation import ActivationStats, linear_input_hook
 from src.metrics.quant import QuantizationStats
 from src.quant.constants import QUANT_TENSORS
 from src.quant.linear import QuantizedLinear
-from src.quant.moe import QuantizedSparseMoEBlock, scaled_grouped_mm_fn
+from src.quant.moe import QuantizedSparseMoEBlock
 from src.quant.utils import is_quantized
 
 
@@ -50,10 +50,10 @@ def _register(module, sites):
 def apply_quantization_monitoring(model) -> None:
     """Attach quantization accumulators to every quantized site; call before compile.
 
-    Linear sites hold theirs in a dict the autograd Function receives as a non-tensor
-    argument, the way `cfg` already travels. MoE sites cannot use a hook -- routing
-    happens inside the block's forward -- so their `expert_mm` seam is rebuilt with the
-    stats bound into the closure.
+    Both kinds hold theirs in a `quant_stats` dict the autograd Function receives as a
+    non-tensor argument, the way `cfg` already travels. Neither can use a module hook:
+    a Linear's operands are inside its Function, and a block's routing happens inside
+    its forward, so nothing a hook sees names the operands.
     """
     for name, module in getattr(model, "_orig_mod", model).named_modules():
         cfg = getattr(module, "quantization_config", None)
@@ -64,14 +64,13 @@ def apply_quantization_monitoring(model) -> None:
             # every expert is quantized against its own amax, so the accumulators are
             # per expert: one cold, badly scaled expert has to show up
             device = next(module.parameters()).device
-            by_projection = {
+            module.quant_stats = {
                 projection: _tensor_stats(
                     f"{name}.expert_{projection}", cfg, module.n_routed_experts, device
                 )
                 for projection in ("gate_up", "down")
             }
-            module.expert_mm = scaled_grouped_mm_fn(cfg, by_projection)
             _register(
                 module,
-                [s for sites in by_projection.values() for s in sites.values()],
+                [s for sites in module.quant_stats.values() for s in sites.values()],
             )

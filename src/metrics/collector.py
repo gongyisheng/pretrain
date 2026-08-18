@@ -16,10 +16,8 @@ from src.metrics.quant import (
 from src.utils.config import TrainConfig
 from src.utils.tracking_utils import WandbLogger
 
-# (config flag, reset, arm) per windowed monitoring feature. Both the train and the
-# eval window walk this. Each feature arms independently: the flags are independent
-# in the config and the quantization fold is far costlier than the activation one, so
-# the cadences are free to diverge.
+# (config flag, reset, arm) for train-window monitors.
+# Monitors are independently enabled; eval records activations only (see eval_begin).
 _MONITORS = (
     ("log_activation_norms", reset_activation_stats, set_activation_monitoring_status),
     ("log_quant_metrics", reset_quantization_stats, set_quantization_monitoring_status),
@@ -306,8 +304,7 @@ class MetricsCollector:
         return d
 
     def eval_begin(self, model: torch.nn.Module | None = None) -> None:
-        """Reset eval accumulators and open the activation/quantization window the
-        eval loop will fill.
+        """Reset eval accumulators and open the activation window the eval loop fills.
 
         Every eval is a window, so there is no cadence check -- unlike the train
         window, which only opens on a log step. Resetting here cannot lose a train
@@ -326,11 +323,12 @@ class MetricsCollector:
 
         if model is None:
             return
-        for flag, reset, set_status in _MONITORS:
-            enabled = getattr(self.config.logging, flag)
-            if enabled:
-                reset(model)
-            set_status(enabled)
+        enabled = self.config.logging.log_activation_norms
+        if enabled:
+            reset_activation_stats(model)
+        set_activation_monitoring_status(enabled)
+        # Quantization is not measured in eval
+        set_quantization_monitoring_status(False)
 
     def eval_end(self) -> None:
         """Close the window eval_begin opened.
@@ -338,8 +336,7 @@ class MetricsCollector:
         Separate from log_eval because the SFT train-accuracy pass runs between the
         val loop and the read: leaving the window armed would fold those forwards in.
         """
-        for _, _, set_status in _MONITORS:
-            set_status(False)
+        set_activation_monitoring_status(False)
 
     def on_eval_step(
         self,
@@ -392,11 +389,6 @@ class MetricsCollector:
         Routing by config.task ('pretrain' vs 'sft') matches train-time keys:
         - "pretrain": val/loss, val/perplexity, val/bpb (when tokenizer present)
         - "sft": val/loss, val/val_acc, val/train_acc (when provided)
-
-        With a `model`, also reads the window eval_begin opened, as val-act/ and
-        val-quant/. val-quant carries only the fwd.* operands: eval runs under
-        no_grad, so no dgrad/wgrad operand is ever quantized. That is inherent, not
-        a gap -- a missing val-quant/sqnr/wgrad.grad/* series is expected.
         """
         n_batches = max(self._eval_n_batches, 1)
         avg_loss = self._eval_loss_sum / n_batches
@@ -441,15 +433,9 @@ class MetricsCollector:
             d["val-moe/maxvio_global/mean"] = statistics.mean(glob)
             d["val-moe/maxvio_global/max"] = max(glob)
 
-        if model is not None:
-            if self.config.logging.log_activation_norms:
-                for name, rms in metric_utils.compute_activation_norm(model).items():
-                    d[f"val-act/norm/{name}"] = rms
-            if self.config.logging.log_quant_metrics:
-                for name, value in metric_utils.compute_quantization_metrics(
-                    model
-                ).items():
-                    d[f"val-quant/{name}"] = value
+        if model is not None and self.config.logging.log_activation_norms:
+            for name, rms in metric_utils.compute_activation_norm(model).items():
+                d[f"val-act/norm/{name}"] = rms
 
         self.logger.log(d, step=step)
         print(self._format_eval_msg(d, avg_loss))

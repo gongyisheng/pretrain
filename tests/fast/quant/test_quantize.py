@@ -7,7 +7,7 @@ from src.quant.quantize import (
     dequantize_operand,
     _scale_block_map,
 )
-from src.quant.utils import str_to_qmax
+from src.quant.utils import str_to_dtype, str_to_qmax
 
 _E4M3 = "fp8_e4m3"
 
@@ -34,6 +34,66 @@ def test_quantize_requires_scale_dtype():
             _E4M3,
             {"granularity": "rowwise", "block_shape": (0, 0)},
         )
+
+
+@pytest.mark.parametrize("fmt", ["int4", "fp8_e4m3", "fp8_e5m2"])
+def test_stochastic_rounding_is_unbiased_between_adjacent_codes(fmt):
+    # The leading 1 sets the row scale; .3 is strictly between two codes for every
+    # format here, so its expected reconstruction is exactly .3.
+    x = torch.cat([torch.ones(1), torch.full((9999,), 0.3)]).reshape(1, -1)
+    codes, scale = quantize_operand(
+        x, -1, fmt, _scaling("rowwise"), stochastic_rounding=True
+    )
+    reconstructed = codes.float() * scale
+    rounded = codes.float()[0, 1:]
+
+    assert rounded.unique().numel() == 2
+    assert reconstructed[0, 1:].mean().item() == pytest.approx(0.3, abs=0.002)
+
+
+@pytest.mark.parametrize("fmt", ["int4", "fp8_e4m3", "fp8_e5m2"])
+def test_stochastic_rounding_preserves_exact_endpoints(fmt):
+    x = torch.tensor([[1.0, 0.0, -0.0, -1.0]])
+    codes, _ = quantize_operand(
+        x, -1, fmt, _scaling("rowwise"), stochastic_rounding=True
+    )
+
+    qmax = str_to_qmax(fmt)
+    assert torch.equal(codes.float(), torch.tensor([[qmax, 0.0, -0.0, -qmax]]))
+    if fmt.startswith("fp8"):
+        assert torch.signbit(codes.float()[0, 2])
+
+
+@pytest.mark.parametrize("fmt", ["fp8_e4m3", "fp8_e5m2"])
+def test_stochastic_rounding_never_leaves_the_adjacent_codes(fmt):
+    """The gate on the per-element ULP: a wrong grid lands on a non-adjacent code.
+
+    Probes every code, every midpoint between codes, and the subnormal run below the
+    smallest normal, which shares one spacing instead of halving per binade.
+    """
+    dtype = str_to_dtype(fmt)
+    codes = torch.arange(256, dtype=torch.uint8).view(dtype).float()
+    codes = codes[codes.isfinite()].unique()
+    x = torch.cat([codes, (codes[:-1] + codes[1:]) / 2]).reshape(1, -1)
+
+    # scale 1: the row's amax is qmax, so the codes are the values themselves
+    rounded, scale = quantize_operand(
+        x, -1, fmt, _scaling("rowwise"), stochastic_rounding=True
+    )
+    assert scale.item() == 1.0
+    below = torch.searchsorted(codes, x.flatten().contiguous())
+    lower = codes[(below - 1).clamp(min=0)]
+    upper = codes[below.clamp(max=codes.numel() - 1)]
+    got = rounded.float().flatten()
+    assert bool(((got == lower) | (got == upper)).all())
+
+
+def test_deterministic_rounding_does_not_consume_rng():
+    x = torch.tensor([[1.0, 0.3]])
+    torch.manual_seed(0)
+    before = torch.random.get_rng_state()
+    quantize_operand(x, -1, _E4M3, _scaling("rowwise"))
+    assert torch.equal(torch.random.get_rng_state(), before)
 
 
 @pytest.mark.parametrize("bs", [16, 32, 128])
@@ -734,13 +794,19 @@ def test_blockwise_2d_rejects_a_ragged_axis():
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="2D quantizer compilation requires CUDA"
 )
-def test_quantize_operand_2d_compiles_fullgraph():
+@pytest.mark.parametrize("stochastic_rounding", [False, True])
+def test_quantize_operand_2d_compiles_fullgraph(stochastic_rounding):
     scaling = {
         "granularity": "blockwise",
         "block_shape": (32, 32),
         "scale_dtype": torch.float32,
     }
     x = torch.randn(256, 512, device="cuda", dtype=torch.bfloat16)
-    fn = torch.compile(lambda: quantize_operand(x, -1, _E4M3, scaling), fullgraph=True)
+    fn = torch.compile(
+        lambda: quantize_operand(
+            x, -1, _E4M3, scaling, stochastic_rounding=stochastic_rounding
+        ),
+        fullgraph=True,
+    )
     _, scale = fn()
     assert scale.shape == (256, 16)

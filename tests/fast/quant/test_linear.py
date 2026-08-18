@@ -8,7 +8,8 @@ from src.metrics.quant import (
 )
 from src.model import build_model
 from src.quant.constants import _INT8_FORMATS
-from src.quant.linear import QuantizedLinear, quantized_gemm
+import src.quant.linear as quant_linear
+from src.quant.linear import QuantizedLinear, quantized_mm
 from src.quant.convert import apply_quantization
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.utils.config import (
@@ -61,6 +62,137 @@ mxfp8_only = pytest.mark.skipif(
 def _cfg(grad="bf16"):
     # recipe fills weight/act=fp8_e4m3; grad_out overridden in both its GEMMs
     return QuantizationConfig(enabled=True, dtype={"recipe": "fp8", "grad_out": grad})
+
+
+def _record_rounding(monkeypatch):
+    """Collect (fmt, stochastic_rounding) for every operand the linear quantizes."""
+    seen = []
+    original = quant_linear.quantize_operand
+
+    def record(
+        x,
+        contract_dim,
+        fmt,
+        scaling,
+        offs=None,
+        ragged_dim=None,
+        stochastic_rounding=False,
+    ):
+        seen.append((fmt, stochastic_rounding))
+        return original(
+            x, contract_dim, fmt, scaling, offs, ragged_dim, stochastic_rounding
+        )
+
+    monkeypatch.setattr(quant_linear, "quantize_operand", record)
+    return seen
+
+
+def test_rounding_is_scoped_to_the_grad_out_tensor(monkeypatch):
+    # The recipe gives weight/act e4m3 and grad_out e5m2, so the format identifies
+    # which tensor each quantize call is for.
+    seen = _record_rounding(monkeypatch)
+    cfg = TrainingConfig(
+        mixed_precision="no",
+        quantization={
+            "enabled": True,
+            "dtype": {"recipe": "fp8"},
+            "rounding": {"grad_out": "SR"},
+        },
+    ).quantization[0]
+    linear = QuantizedLinear.from_module(nn.Linear(4, 3, bias=False), cfg)
+    linear(torch.randn(2, 4, requires_grad=True)).sum().backward()
+
+    # fwd quantizes act and weight; dgrad grad_out and weight; wgrad grad_out and act
+    assert [fmt for fmt, _ in seen] == [
+        "fp8_e4m3",
+        "fp8_e4m3",
+        "fp8_e5m2",
+        "fp8_e4m3",
+        "fp8_e5m2",
+        "fp8_e4m3",
+    ]
+    assert all(sr == (fmt == "fp8_e5m2") for fmt, sr in seen)
+
+
+def test_rounding_is_supported_on_the_forward_tensors(monkeypatch):
+    seen = _record_rounding(monkeypatch)
+    cfg = TrainingConfig(
+        mixed_precision="no",
+        quantization={
+            "enabled": True,
+            "dtype": {"weight": "int4"},
+            "rounding": {"weight": "SR"},
+        },
+    ).quantization[0]
+    linear = QuantizedLinear.from_module(nn.Linear(4, 3, bias=False), cfg)
+    linear(torch.randn(2, 4))
+    # act/grad_out stay at the compute dtype, so the weight is the only operand
+    assert seen == [("int4", True)]
+
+
+def test_quantized_linear_only_quantizes_during_training(monkeypatch):
+    calls = []
+    original = quant_linear.quantized_mm
+
+    def record(
+        a,
+        b,
+        a_fmt,
+        b_fmt,
+        out_dtype,
+        scaling_cfg,
+        bias=None,
+        a_stochastic_rounding=False,
+        b_stochastic_rounding=False,
+        a_stats=None,
+        b_stats=None,
+    ):
+        calls.append(None)
+        return original(
+            a,
+            b,
+            a_fmt,
+            b_fmt,
+            out_dtype,
+            scaling_cfg,
+            bias=bias,
+            a_stochastic_rounding=a_stochastic_rounding,
+            b_stochastic_rounding=b_stochastic_rounding,
+            a_stats=a_stats,
+            b_stats=b_stats,
+        )
+
+    monkeypatch.setattr(quant_linear, "quantized_mm", record)
+    linear = QuantizedLinear.from_module(
+        nn.Linear(4, 3, device="cpu"),
+        TrainingConfig(
+            quantization={"enabled": True, "dtype": {"weight": "int4"}}
+        ).quantization[0],
+    )
+    x = torch.randn(2, 4, device="cpu")
+
+    linear.train()
+    linear(x)
+    linear.eval()
+    actual = linear(x)
+
+    assert len(calls) == 1
+    torch.testing.assert_close(
+        actual, nn.functional.linear(x, linear.weight, linear.bias)
+    )
+
+
+def test_quantized_linear_preserves_source_eval_mode():
+    source = nn.Linear(4, 3, device="cpu")
+    source.eval()
+    linear = QuantizedLinear.from_module(
+        source,
+        TrainingConfig(
+            quantization={"enabled": True, "dtype": {"weight": "int4"}}
+        ).quantization[0],
+    )
+
+    assert not linear.training
 
 
 @fp8_only
@@ -177,7 +309,7 @@ def test_runs_under_bf16_autocast():
     assert torch.isfinite(q.weight.grad).all()
 
 
-# --- int8-family quantized_gemm dispatch (migrated from the old test_int8.py) ---
+# --- int8-family quantized_mm dispatch (migrated from the old test_int8.py) ---
 
 
 int_gpu = pytest.mark.skipif(
@@ -187,7 +319,7 @@ int_gpu = pytest.mark.skipif(
 
 def test_gemm_passthrough_is_plain_matmul():
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    out = quantized_gemm(a, b, "bf16", "bf16", torch.float32, {})
+    out = quantized_mm(a, b, "bf16", "bf16", torch.float32, {})
     assert torch.allclose(out, a @ b, atol=1e-4)
 
 
@@ -196,9 +328,7 @@ def test_gemm_records_nothing_without_stats():
     a, b = torch.randn(20, 32), torch.randn(32, 40)
     set_quantization_monitoring_status(True)
     try:
-        out = quantized_gemm(
-            a, b, "int8", "int8", torch.float32, _scaling("tensorwise")
-        )
+        out = quantized_mm(a, b, "int8", "int8", torch.float32, _scaling("tensorwise"))
     finally:
         set_quantization_monitoring_status(False)
     assert torch.isfinite(out).all()
@@ -211,7 +341,7 @@ def test_gemm_records_only_the_operands_whose_format_is_quantized():
     b_stats = QuantizationStats("weight/x", 1, b.device)
     set_quantization_monitoring_status(True)
     try:
-        out = quantized_gemm(
+        out = quantized_mm(
             a,
             b,
             "int8",
@@ -232,7 +362,7 @@ def test_gemm_applies_bias_on_the_fallback_path():
     """bf16 x bf16 never reaches the kernel, so the unfused branch must add it too."""
     a, b = torch.randn(20, 32), torch.randn(32, 40)
     bias = torch.randn(40)
-    out = quantized_gemm(a, b, "bf16", "bf16", torch.float32, {}, bias=bias)
+    out = quantized_mm(a, b, "bf16", "bf16", torch.float32, {}, bias=bias)
     assert torch.allclose(out, a @ b + bias, atol=1e-4)
 
 
@@ -244,10 +374,10 @@ def test_gemm_applies_bias_in_the_fused_kernel():
     b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)
     bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
     cfg = _scaling("rowwise")
-    with_bias = quantized_gemm(
+    with_bias = quantized_mm(
         a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg, bias=bias
     )
-    without = quantized_gemm(a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg)
+    without = quantized_mm(a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg)
     torch.testing.assert_close(
         with_bias.float(), without.float() + bias.float(), rtol=2e-2, atol=2e-2
     )
@@ -275,7 +405,7 @@ def test_quantized_linear_adds_bias_exactly_once():
 @pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
-    out = quantized_gemm(a, b, fmt, "bf16", torch.float32, _scaling("tensorwise"))
+    out = quantized_mm(a, b, fmt, "bf16", torch.float32, _scaling("tensorwise"))
     assert out.shape == (20, 40) and torch.isfinite(out).all()
 
 
@@ -285,7 +415,7 @@ def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")
     b = torch.randn(128, 96, device="cuda")
-    out = quantized_gemm(a, b, fmt, fmt, torch.float32, _scaling("rowwise"))
+    out = quantized_mm(a, b, fmt, fmt, torch.float32, _scaling("rowwise"))
     ref = _roundtrip(a, -1, fmt, _scaling("rowwise")) @ _roundtrip(
         b, -2, fmt, _scaling("rowwise")
     )
@@ -345,7 +475,7 @@ def test_mxfp8_wgrad_unaligned_tokens():
 
 def test_mxfp8_fake_quant_fallback_on_cpu():
     # A one-sided mxfp8 rule (weight quantized, act passthrough) exercises the
-    # mxfp8 fake-quant path inside quantized_gemm without touching the real GEMM — on CPU.
+    # mxfp8 fake-quant path inside quantized_mm without touching the real GEMM — on CPU.
     torch.manual_seed(0)
     cfg = QuantizationConfig(
         enabled=True,
@@ -449,7 +579,7 @@ def test_quantized_linear_forward_backward_with_square_tiles():
 @fp8_only
 @pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float8_e8m0fnu])
 @pytest.mark.parametrize("tile", [32, 64])
-def test_quantized_gemm_2d_matches_fp32_dequant_reference(tile, scale_dtype):
+def test_quantized_mm_2d_matches_fp32_dequant_reference(tile, scale_dtype):
     """The real kernel path against an fp32 oracle, both scale dtypes.
 
     tile=64 with `torch.float8_e8m0fnu` also exercises rep_k == 2, composing the 2D
@@ -462,6 +592,6 @@ def test_quantized_gemm_2d_matches_fp32_dequant_reference(tile, scale_dtype):
     }
     a = torch.randn(256, 512, device="cuda")
     b = torch.randn(512, 128, device="cuda")
-    out = quantized_gemm(a, b, _E4M3, _E4M3, torch.float32, scaling)
+    out = quantized_mm(a, b, _E4M3, _E4M3, torch.float32, scaling)
     ref = _roundtrip(a, -1, _E4M3, scaling) @ _roundtrip(b, -2, _E4M3, scaling)
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)

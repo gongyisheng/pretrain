@@ -10,6 +10,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _expert_mm(cfg, a, b, offs, bias=None):
+    """Drive the quantized expert GEMM directly, with no block and no stats."""
+    return moe.ScaledGroupedGemmFn.apply(a, b, bias, offs, cfg, {})
+
+
 def _cfg(recipe="fp8", scaling="rowwise"):
     return QuantizationConfig(
         enabled=True, dtype={"recipe": recipe}, scaling={"recipe": scaling}
@@ -34,7 +39,7 @@ def test_scaled_grouped_mm_compiles_fullgraph():
     cfg = _cfg("fp8", "rowwise")
 
     def fwd(a, b):
-        return moe.scaled_grouped_mm_fn(cfg)(a, b, offs)
+        return _expert_mm(cfg, a, b, offs)
 
     a_e = a.clone().requires_grad_(True)
     b_e = b.clone().requires_grad_(True)
@@ -63,16 +68,16 @@ def test_expert_mm_bias_is_additive(scaling):
     group_of_row = torch.searchsorted(
         offs, torch.arange(a.shape[0], device=offs.device), right=True
     )
-    mm = moe.scaled_grouped_mm_fn(_cfg("fp8", scaling))
+    cfg = _cfg("fp8", scaling)
 
     def run(fused):
         a_ = a.clone().requires_grad_(True)
         b_ = b.clone().requires_grad_(True)
         bias = bias0.clone().requires_grad_(True)
         y = (
-            mm(a_, b_, offs, bias=bias)
+            _expert_mm(cfg, a_, b_, offs, bias=bias)
             if fused
-            else mm(a_, b_, offs) + bias[group_of_row]
+            else _expert_mm(cfg, a_, b_, offs) + bias[group_of_row]
         )
         y.backward(gy)
         return y, a_.grad, b_.grad, bias.grad
@@ -95,7 +100,6 @@ def test_expert_mm_bias_is_additive(scaling):
 def test_moe_block_quantized_forward_backward_runs(bias):
     import torch.nn as nn
 
-    from src.kernel.ops.gemm import grouped_mm
     from src.layers.mlp import SparseMoEBlock
     from src.quant.convert import apply_quantization
     from src.utils.config import (
@@ -137,7 +141,8 @@ def test_moe_block_quantized_forward_backward_runs(bias):
         ),
     )
     apply_quantization(m, cfg)
-    assert m.mlp.expert_mm is not grouped_mm  # confirms the quantized seam installed
+    # confirms the quantized seam installed
+    assert m.mlp.expert_mm.__func__ is moe.QuantizedSparseMoEBlock.expert_mm
     x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     out, _ = m.mlp(x)
     out.sum().backward()
@@ -178,7 +183,7 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
 
     a_q = a.clone().requires_grad_(True)
     b_q = b.clone().requires_grad_(True)
-    y_q = moe.scaled_grouped_mm_fn(cfg)(a_q, b_q, offs)
+    y_q = _expert_mm(cfg, a_q, b_q, offs)
     gy = torch.randn_like(y_q)
     y_q.backward(gy)
 
@@ -191,7 +196,7 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
     monkeypatch.setattr(moe, "scaled_grouped_mm_op", lambda *a, **k: None)
     a_f = a.clone().requires_grad_(True)
     b_f = b.clone().requires_grad_(True)
-    y_f = moe.scaled_grouped_mm_fn(cfg)(a_f, b_f, offs)
+    y_f = _expert_mm(cfg, a_f, b_f, offs)
     y_f.backward(gy)
 
     assert len(wgrad_calls) == 1, "reference run did not fall back off the fused path"
@@ -226,7 +231,7 @@ def test_grad_b_quality_is_independent_across_experts(scaling):
 
     a_q = a.clone().requires_grad_(True)
     b_q = b.clone().requires_grad_(True)
-    moe.scaled_grouped_mm_fn(cfg)(a_q, b_q, offs).sum().backward()
+    _expert_mm(cfg, a_q, b_q, offs).sum().backward()
 
     a_ref = a.float().clone().requires_grad_(True)
     b_ref = b.float().clone().requires_grad_(True)
@@ -278,8 +283,6 @@ def test_wgrad_receives_per_expert_block_table(monkeypatch):
 
     monkeypatch.setattr(gemm_module, "dispatch", spy)
     a_q = a.clone().requires_grad_(True)
-    moe.scaled_grouped_mm_fn(_cfg("fp8", "rowwise"))(
-        a_q, b.clone(), offs
-    ).sum().backward()
+    _expert_mm(_cfg("fp8", "rowwise"), a_q, b.clone(), offs).sum().backward()
     assert seen["block_size"] == 0  # rowwise -> one block per expert
     assert seen["n_scale_rows"] == 3  # including the empty expert

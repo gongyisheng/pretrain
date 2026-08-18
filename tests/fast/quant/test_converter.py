@@ -7,6 +7,8 @@ import torch.nn as nn
 from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantizedLinear
+from src.quant import moe as quant_moe
+from src.quant.moe import QuantizedSparseMoEBlock
 from src.utils.config import (
     ModelConfig,
     QuantizationConfig,
@@ -143,8 +145,6 @@ def _moe_model():
 
 
 def test_moe_experts_get_quantized_expert_mm():
-    from src.layers.mlp import grouped_mm_fn
-
     m = _moe_model()
     apply_quantization(
         m,
@@ -158,8 +158,49 @@ def test_moe_experts_get_quantized_expert_mm():
     )
     # routed experts stay Parameters (no module swap)
     assert isinstance(m.mlp.expert_gate_up, torch.nn.Parameter)
-    # expert_mm was replaced with a quantized callable
-    assert m.mlp.expert_mm is not grouped_mm_fn
+    # the block was swapped, so its seam is the quantizing override
+    assert m.mlp.expert_mm.__func__ is QuantizedSparseMoEBlock.expert_mm
+
+
+def test_quantized_moe_uses_plain_expert_gemm_in_eval(monkeypatch):
+    from src.layers.mlp import SparseMoEBlock
+
+    with torch.device("cpu"):
+        source = SparseMoEBlock(
+            d_model=4,
+            intermediate_size=8,
+            n_routed_experts=2,
+            n_routed_experts_per_token=1,
+            aux_loss=False,
+        )
+    source.eval()
+    block = QuantizedSparseMoEBlock.from_module(
+        source, QuantizationConfig(enabled=True, dtype={"weight": "int4"})
+    )
+
+    # Which GEMM the seam dispatches to is the whole question, so spy on both: the
+    # base block's seam is what eval falls through to.
+    used = []
+    monkeypatch.setattr(
+        SparseMoEBlock, "expert_mm", lambda *a, **kw: used.append("plain")
+    )
+    monkeypatch.setattr(
+        quant_moe.ScaledGroupedGemmFn,
+        "apply",
+        staticmethod(lambda *a: used.append("quantized")),
+    )
+    a = torch.randn(4, 4)
+    b = torch.randn(2, 4, 8)
+    offs = torch.tensor([2, 4])
+
+    assert not block.training
+    block.expert_mm(a, b, offs, projection="gate_up")
+    block.train()
+    block.expert_mm(a, b, offs, projection="gate_up")
+    block.eval()
+    block.expert_mm(a, b, offs, projection="gate_up")
+
+    assert used == ["plain", "quantized", "plain"]
 
 
 def test_router_gate_stays_fp32_linear():
@@ -180,7 +221,7 @@ def test_router_gate_stays_fp32_linear():
 
 
 def test_moe_expert_mm_default_when_excluded():
-    from src.layers.mlp import grouped_mm_fn
+    from src.layers.mlp import SparseMoEBlock
 
     m = _moe_model()
     apply_quantization(
@@ -194,7 +235,9 @@ def test_moe_expert_mm_default_when_excluded():
             }
         ),
     )
-    assert m.mlp.expert_mm is grouped_mm_fn
+    # never converted, so it keeps the base block's unquantized seam
+    assert type(m.mlp) is SparseMoEBlock
+    assert m.mlp.expert_mm.__func__ is SparseMoEBlock.expert_mm
 
 
 # --- int8-family config + converter (migrated from the old test_int8.py; int8

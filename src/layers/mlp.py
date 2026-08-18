@@ -365,9 +365,13 @@ class SparseMoEBlock(nn.Module):
 
         self.expert_load = ExpertLoad(n_routed_experts)
 
-        # Pluggable expert GEMM seam (a, b, offs, projection)
-        # quant converter swaps in a quantized callable
-        self.expert_mm = grouped_mm_fn
+    def expert_mm(self, a, b, offs, bias=None, projection=None):
+        """The expert GEMM seam, one call per projection.
+
+        A method so a subclass can override it -- QuantizedSparseMoEBlock does -- while
+        an instance can still assign over it to spy on or replace the GEMM.
+        """
+        return grouped_mm_fn(a, b, offs, bias=bias, projection=projection)
 
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)

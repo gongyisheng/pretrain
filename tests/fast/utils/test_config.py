@@ -800,9 +800,54 @@ def _only_rule(tc):
 def test_quant_defaults_disabled():
     q = QuantizationConfig()
     assert q.enabled is False
+    assert q.rounding == {}
     assert q.exclude == ["lm_head", "*mlp.router.gate"]
     # disabled rule is inert: no dtype/scaling defaults applied
     assert q.dtype == {} and q.scaling == {}
+
+
+def test_quant_rounding_defaults_to_rne_everywhere():
+    q = _only_rule(TrainingConfig(quantization={"enabled": True}))
+    assert q.rounding == {"weight": "RNE", "act": "RNE", "grad_out": "RNE"}
+    assert not any(mode == "SR" for mode in q.rounding.values())
+
+
+def test_quant_rounding_fills_unnamed_tensors_and_round_trips():
+    config = TrainConfig(
+        training=TrainingConfig(
+            mixed_precision="bf16",
+            quantization={"enabled": True, "rounding": {"grad_out": "SR"}},
+        )
+    )
+    q = _only_rule(config.training)
+    assert q.rounding == {"weight": "RNE", "act": "RNE", "grad_out": "SR"}
+    assert config.to_dict()["training"]["quantization"][0]["rounding"] == q.rounding
+
+
+def test_quant_rounding_on_an_unquantized_tensor_is_inert():
+    # act stays at the compute dtype here; a mode on it names no quantizer, and the
+    # config takes it rather than second-guessing a dtype it may be swept against.
+    q = _only_rule(
+        TrainingConfig(
+            mixed_precision="bf16",
+            quantization={
+                "enabled": True,
+                "dtype": {"weight": "int8"},
+                "rounding": {"act": "SR"},
+            },
+        )
+    )
+    assert q.dtype["act"] == {"fwd": "bf16", "wgrad": "bf16"}
+    assert q.rounding["act"] == "SR"
+
+
+def test_quant_rounding_rejects_unknown_key_and_mode():
+    with pytest.raises(ValueError, match="unknown quant rounding key: 'grad_input'"):
+        QuantizationConfig(enabled=True, rounding={"grad_input": "SR"})
+    with pytest.raises(
+        ValueError, match="unknown quant rounding for act: 'stochastic'"
+    ):
+        QuantizationConfig(enabled=True, rounding={"act": "stochastic"})
 
 
 def test_quant_tensor_defaults_follow_mixed_precision():

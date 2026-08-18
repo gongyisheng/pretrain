@@ -14,7 +14,6 @@ from src.layers.mlp import (
     MoERouter,
     MOE_ROUTER_SCORE_FNS,
     SparseMoEBlock,
-    grouped_mm_fn,
     grouped_mlp,
 )
 from tests.fast.layers._refs import (
@@ -1339,7 +1338,7 @@ def test_moe_expert_mm_seam_is_pluggable():
         .bfloat16()
     )
     # default seam is the bf16 grouped GEMM wrapped for autograd
-    assert blk.expert_mm is grouped_mm_fn
+    assert blk.expert_mm.__func__ is SparseMoEBlock.expert_mm
 
     seen = []
 

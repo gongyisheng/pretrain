@@ -127,7 +127,7 @@ def record_operand(
 ) -> None:
     """Fold one quantized operand into `stats`, if there is one and it is armed.
 
-    Called from inside `quantized_gemm`/`quantized_grouped_mm`, immediately after the
+    Called from inside `quantized_mm`/`quantized_grouped_mm`, immediately after the
     quantize that produced `codes`, so `source` and `codes` are the exact tensors the
     GEMM consumes.
 

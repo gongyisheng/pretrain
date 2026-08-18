@@ -4,17 +4,28 @@ import copy
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.kernel.ops.gemm import SCALED_MM_OPS
-from src.metrics.quant import record_operand
+from src.metrics.quant import QuantizationStats, record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.utils import is_quantized, scaled_mm_op
 from src.utils.config import QuantizationConfig
 
 
-def quantized_gemm(
-    a, b, a_fmt, b_fmt, out_dtype, scaling_cfg, bias=None, a_stats=None, b_stats=None
-):
+def quantized_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_fmt: str,
+    b_fmt: str,
+    out_dtype: torch.dtype,
+    scaling_cfg: dict,
+    bias: torch.Tensor | None = None,
+    a_stochastic_rounding: bool = False,
+    b_stochastic_rounding: bool = False,
+    a_stats: QuantizationStats | None = None,
+    b_stats: QuantizationStats | None = None,
+) -> torch.Tensor:
     """Quantized 2D GEMM. `a_stats`/`b_stats` are optional metric accumulators; when
     armed, each operand's quantization error is folded into its own here, where the
     quantization actually happens, so the measured quantization *is* the performed one
@@ -34,10 +45,14 @@ def quantized_gemm(
 
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
-        aq, sa = quantize_operand(a, -1, a_fmt, scaling_cfg)
+        aq, sa = quantize_operand(
+            a, -1, a_fmt, scaling_cfg, stochastic_rounding=a_stochastic_rounding
+        )
         record_operand(a_stats, a, aq, sa, -1, scaling_cfg)
     if is_quantized(b_fmt):
-        bq, sb = quantize_operand(b, -2, b_fmt, scaling_cfg)
+        bq, sb = quantize_operand(
+            b, -2, b_fmt, scaling_cfg, stochastic_rounding=b_stochastic_rounding
+        )
         record_operand(b_stats, b, bq, sb, -2, scaling_cfg)
 
     if op is not None:
@@ -65,7 +80,7 @@ class QuantizedLinearFn(torch.autograd.Function):
 
         x2d = x.reshape(-1, x.shape[-1]).to(compute_dtype)
         w = weight.to(compute_dtype)
-        y = quantized_gemm(
+        y = quantized_mm(
             x2d,
             w.t(),
             cfg.dtype["act"]["fwd"],
@@ -73,6 +88,8 @@ class QuantizedLinearFn(torch.autograd.Function):
             compute_dtype,
             cfg.scaling,
             bias=None if bias is None else bias.to(compute_dtype),
+            a_stochastic_rounding=cfg.rounding["act"] == "SR",
+            b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("act"),
             b_stats=stats.get("weight"),
         )
@@ -96,24 +113,28 @@ class QuantizedLinearFn(torch.autograd.Function):
         g = grad_out.reshape(-1, grad_out.shape[-1]).to(compute_dtype)  # (M, N)
 
         # dX = g @ W, (M,N)@(N,K) -> (M,K)
-        dx = quantized_gemm(
+        dx = quantized_mm(
             g,
             w,
             cfg.dtype["grad_out"]["dgrad"],
             cfg.dtype["weight"]["dgrad"],
             compute_dtype,
             cfg.scaling,
+            a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
+            b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("grad_out"),
             b_stats=stats.get("weight"),
         )
         # dW = gᵀ @ X, (N,M)@(M,K) -> (N,K)
-        dw = quantized_gemm(
+        dw = quantized_mm(
             g.t(),
             x2d,
             cfg.dtype["grad_out"]["wgrad"],
             cfg.dtype["act"]["wgrad"],
             compute_dtype,
             cfg.scaling,
+            a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
+            b_stochastic_rounding=cfg.rounding["act"] == "SR",
             a_stats=stats.get("grad_out"),
             b_stats=stats.get("act"),
         )
@@ -139,6 +160,8 @@ class QuantizedLinear(nn.Linear):
         return q
 
     def forward(self, x):
+        if not self.training:
+            return F.linear(x, self.weight, self.bias)
         return QuantizedLinearFn.apply(
             x, self.weight, self.bias, self.quantization_config, self.quant_stats
         )

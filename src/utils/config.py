@@ -12,9 +12,10 @@ from src.quant.constants import (
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,
     QUANT_PASSTHROUGH,
+    QUANT_ROUNDING,
     QUANT_SCALING_RECIPES,
     QUANT_TENSOR_GEMMS,
-    _RETIRED_DTYPE_KEYS,
+    QUANT_TENSORS,
 )
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
@@ -313,11 +314,9 @@ def _resolve_quant_dtype(dtype: dict) -> dict:
     resolved = {}
     for tensor, value in dtype.items():
         if tensor not in QUANT_TENSOR_GEMMS:
-            hint = _RETIRED_DTYPE_KEYS.get(tensor)
             raise ValueError(
                 f"unknown quant dtype key: {tensor!r}; "
                 f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
-                + (f"; {tensor!r} is now {hint}" if hint else "")
             )
         gemms = QUANT_TENSOR_GEMMS[tensor]
         per_gemm = (
@@ -344,12 +343,26 @@ class QuantizationConfig:
     # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
     dtype: dict = field(default_factory=dict)
     scaling: dict = field(default_factory=dict)  # {granularity, block_shape}
+    rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
     def __post_init__(self):
         if not self.enabled:
             return
+
+        for tensor, mode in self.rounding.items():
+            if tensor not in QUANT_TENSOR_GEMMS:
+                raise ValueError(
+                    f"unknown quant rounding key: {tensor!r}; "
+                    f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
+                )
+            if mode not in QUANT_ROUNDING:
+                raise ValueError(
+                    f"unknown quant rounding for {tensor}: {mode!r}; "
+                    f"expected one of {sorted(QUANT_ROUNDING)}"
+                )
+        self.rounding = {t: self.rounding.get(t, "RNE") for t in QUANT_TENSORS}
 
         dtype_recipe = self.dtype.pop("recipe", None)
         self.dtype = _resolve_quant_dtype(self.dtype)

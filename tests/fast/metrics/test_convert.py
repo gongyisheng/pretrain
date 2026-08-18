@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from src.layers.block import TransformerBlock
+from src.layers.mlp import SparseMoEBlock
 from src.metrics.activation import set_activation_monitoring_status
 from src.metrics.convert import (
     apply_activation_monitoring,
@@ -14,6 +15,7 @@ from src.metrics.convert import (
 from src.metrics.functional import compute_activation_norm
 from src.metrics.quant import set_quantization_monitoring_status
 from src.quant.convert import apply_quantization
+from src.quant.moe import QuantizedSparseMoEBlock
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
 from tests.fast.helpers import make_attn_mask
 
@@ -203,3 +205,41 @@ def test_both_gemms_pool_into_one_tensor_site():
     x = torch.randn(4, D_MODEL, requires_grad=True)
     _fold(proj, x)
     assert proj.quant_stats["grad_out"].numel.item() == 2 * 4 * D_MODEL
+
+
+def test_moe_monitoring_installs_per_projection_stats():
+    """One site per (projection, quantized tensor), reachable by the reset/read walk.
+
+    The seam itself is a method keyed on training mode, so installing monitoring has
+    nothing to rebind and cannot strand a block on the wrong GEMM.
+    """
+    model = torch.nn.Module()
+    model.moe = SparseMoEBlock(
+        d_model=D_MODEL,
+        intermediate_size=2 * D_MODEL,
+        n_routed_experts=2,
+        n_routed_experts_per_token=1,
+    )
+    cfg = TrainConfig(
+        model=_block_cfg(),
+        training=TrainingConfig(
+            mixed_precision="no",
+            quantization={"enabled": True, "dtype": {"weight": "int8"}},
+        ),
+    )
+    apply_quantization(model, cfg)
+    moe = model.moe
+
+    assert isinstance(moe, QuantizedSparseMoEBlock)
+    moe.eval()
+    assert moe.quant_stats == {}
+    apply_quantization_monitoring(model)
+
+    assert set(moe.quant_stats) == {"gate_up", "down"}
+    assert {
+        site.key for sites in moe.quant_stats.values() for site in sites.values()
+    } == {"weight/moe.expert_gate_up", "weight/moe.expert_down"}
+    # children, so reset_quantization_stats and the metric read reach them
+    assert len(moe._quant_stats) == 2
+    # per expert: one cold, badly scaled expert has to be visible on its own
+    assert moe.quant_stats["gate_up"]["weight"].numel.shape == (2,)

@@ -895,25 +895,13 @@ def test_log_eval_omits_val_act_keys_when_disabled():
     assert not [k for k in d if k.startswith("val-act/")]
 
 
-def test_log_eval_emits_val_quant_keys():
-    """Quant accumulators are filled after eval_begin, which resets them."""
+def test_log_eval_never_emits_quant_keys():
+    """Eval runs the unquantized fallback, so there is no val-quant/ series at all.
+
+    Filled accumulators and the flag on: the only thing keeping them out of the eval
+    log_dict is that log_eval does not read them.
+    """
     tracker, _ = _tracker(_cfg(log_quant_metrics=True))
-    model = torch.nn.Linear(8, 4)
-    site = QuantizationStats("act/layer_0", 1, torch.randn(1).device)
-    model.add_module("_quant_stats", torch.nn.ModuleList([site]))
-
-    tracker.eval_begin(model)
-    site.src_sq += 100.0
-    site.err_sq += 1.0
-    site.numel += 32.0
-    tracker.eval_end()
-    _one_eval_step(tracker)
-    d = tracker.log_eval(step=1, model=model)
-    assert d["val-quant/sqnr/act/layer_0"] == pytest.approx(20.0)
-
-
-def test_log_eval_omits_val_quant_keys_when_disabled():
-    tracker, _ = _tracker(_cfg(log_quant_metrics=False))
     model = torch.nn.Linear(8, 4)
     site = QuantizationStats("act/layer_0", 1, torch.randn(1).device)
     site.src_sq += 100.0
@@ -926,6 +914,8 @@ def test_log_eval_omits_val_quant_keys_when_disabled():
     _one_eval_step(tracker)
     d = tracker.log_eval(step=1, model=model)
     assert not [k for k in d if k.startswith("val-quant/")]
+    # eval_begin left them alone rather than resetting: the train window still reads
+    assert site.numel.sum().item() == 32.0
 
 
 def test_log_eval_without_a_model_emits_no_window_keys():

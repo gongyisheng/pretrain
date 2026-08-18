@@ -1,9 +1,4 @@
-"""Pure metric computation — stateless functions, no logging, no state.
-
-The bottom layer of the metrics stack. Everything here takes numbers/tensors
-in and returns numbers/dicts out; it never touches W&B or the training loop.
-`MetricsCollector` (the stateful assembler) builds on these primitives.
-"""
+"""Stateless metric computations."""
 
 import math
 import statistics
@@ -22,9 +17,7 @@ from src.utils.config import TrainConfig
 
 
 def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-    """
-    Per-parameter L2 gradient norms, keyed by parameter name.
-    """
+    """Return L2 gradient norms keyed by parameter name."""
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if param.grad is None:
@@ -36,12 +29,7 @@ def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 
 
 def compute_activation_norm(model: torch.nn.Module) -> dict[str, float]:
-    """Per-site activation RMS (sqrt(energy / count)), keyed by the Linear's path.
-
-    RMS, not L2: the window spans a whole optimizer step, so an L2 would scale with
-    sqrt(batch x seq x gradient_accumulation_steps) and shift between runs whose
-    batch schedule differs but whose model does not.
-    """
+    """Return activation RMS keyed by the parent linear path."""
     norms: dict[str, float] = {}
     for name, module in model.named_modules():
         if not isinstance(module, ActivationStats):
@@ -56,10 +44,7 @@ def compute_activation_norm(model: torch.nn.Module) -> dict[str, float]:
 
 
 def compute_weight_norms(model: torch.nn.Module) -> dict[str, float]:
-    """
-    Per-parameter L2 weight norms, keyed by parameter name. Stacked 3D expert
-    weights are one norm over all experts, matching the grad-norm convention.
-    """
+    """Return L2 weight norms keyed by parameter name."""
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if not param.is_floating_point():
@@ -75,10 +60,7 @@ def compute_weight_norms(model: torch.nn.Module) -> dict[str, float]:
 
 
 def compute_maxvio(expert_counts: torch.Tensor) -> float:
-    """Maximal load violation for one MoE layer (arXiv:2408.15664):
-    `(max_i load_i - mean load) / mean load`. 0 = perfectly balanced; 1.0 means
-    the hottest expert carries 2x its fair share.
-    """
+    """Return an MoE layer's maximum relative expert-load violation."""
     counts = expert_counts.float()
     mean = counts.mean()
     if mean == 0:
@@ -92,12 +74,12 @@ def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 
 
 def compute_moe_global_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
-    """Per-layer MaxVio of the batch-summed load from stacked ``[n_batch, E]`` counts."""
+    """Return batch-summed MaxVio for each MoE layer."""
     return [compute_maxvio(loads.sum(0)) for loads in load_per_layer]
 
 
 def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
-    """Per-layer mean per-batch MaxVio from stacked ``[n_batch, E]`` counts."""
+    """Return mean per-batch MaxVio for each MoE layer."""
     return [
         statistics.mean([compute_maxvio(row) for row in loads])
         for loads in load_per_layer
@@ -110,7 +92,7 @@ def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 
 
 def _gram_energy(weight: torch.Tensor) -> torch.Tensor:
-    """Descending σ² spectrum via eigvalsh of the smaller Gram matrix (= svdvals(W)², no full SVD)."""
+    """Return descending squared singular values without a full SVD."""
     w = weight.float()
     m, k = w.shape[-2], w.shape[-1]
     gram = w @ w.transpose(-2, -1) if m <= k else w.transpose(-2, -1) @ w
@@ -119,7 +101,7 @@ def _gram_energy(weight: torch.Tensor) -> torch.Tensor:
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """srank / pr of a weight's σ² spectrum (averaged over experts if 3D)."""
+    """Return stable rank and participation ratio, averaged for 3D weights."""
     energy = _gram_energy(weight)  # (..., k) descending σ²
     total = energy.sum(-1)
     if (total == 0).any():
@@ -130,7 +112,7 @@ def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
 
 
 def compute_weight_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
-    """Spectral metrics (srank/pr) per 2D/3D weight, keyed by param name (rope/embeddings skipped)."""
+    """Return spectral metrics for non-embedding 2D and 3D weights."""
     metrics: dict[str, dict[str, float]] = {}
     for name, param in model.named_parameters():
         if param.ndim not in (2, 3) or not param.is_floating_point():
@@ -143,7 +125,7 @@ def compute_weight_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, fl
 
 
 def compute_grad_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
-    """Spectral metrics (srank/pr) per 2D/3D weight gradient (rope/embeddings skipped)."""
+    """Return spectral metrics for non-embedding 2D and 3D weight gradients."""
     metrics: dict[str, dict[str, float]] = {}
     for name, param in model.named_parameters():
         if param.grad is None or param.ndim not in (2, 3):
@@ -161,20 +143,14 @@ def compute_grad_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, floa
 
 
 def snapshot_params(model: torch.nn.Module) -> list[torch.Tensor]:
-    """
-    Detached clone of every trainable parameter, ordered by model.parameters().
-
-    Use with compute_param_step_norm to measure ||θ_after - θ_before||.
-    """
+    """Clone trainable parameters for `compute_param_step_norm`."""
     return [p.detach().clone() for p in model.parameters() if p.requires_grad]
 
 
 def compute_param_step_norm(
     model: torch.nn.Module, snapshot: list[torch.Tensor]
 ) -> float:
-    """
-    L2 norm of the parameter delta vs. an earlier snapshot.
-    """
+    """Return the L2 norm of parameter changes since a snapshot."""
     total_sq: torch.Tensor | None = None
     params = (p for p in model.parameters() if p.requires_grad)
     for p, p_before in zip(params, snapshot, strict=True):
@@ -186,9 +162,7 @@ def compute_param_step_norm(
 def _aggregate_state_norm(
     optimizer: torch.optim.Optimizer, *, key: str
 ) -> float | None:
-    """
-    L2 norm across all `state[p][key]` buffers, or None if no buffer exists.
-    """
+    """Return the L2 norm of optimizer buffers for `key`, or `None`."""
     total_sq: torch.Tensor | None = None
     for state in optimizer.state.values():
         buf = state.get(key)
@@ -200,16 +174,12 @@ def _aggregate_state_norm(
 
 
 def compute_momentum_norm(optimizer: torch.optim.Optimizer) -> float | None:
-    """
-    L2 norm across optimizer first-moment buffers.
-    """
+    """Return the L2 norm of first-moment buffers, or `None`."""
     return _aggregate_state_norm(optimizer, key="exp_avg")
 
 
 def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
-    """
-    L2 norm across optimizer second-moment buffers.
-    """
+    """Return the L2 norm of second-moment buffers, or `None`."""
     return _aggregate_state_norm(optimizer, key="exp_avg_sq")
 
 
@@ -219,15 +189,7 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 
 
 def _quantization_metrics(src_sq, err_sq, under, numel, nonzero, grouped):
-    """Reported metrics from one operand's accumulated sums, as 0-dim fp32 tensors.
-
-    Empty experts are excluded: they have no error to report. Grouped operands also
-    report the worst expert, because averaging over experts hides the single bad one
-    that per-expert scales exist to prevent.
-
-    A former range_ratio (amax/median) was dropped: the median is a sort, per expert
-    per operand, and it dominated the cost of a logged step.
-    """
+    """Return quantization metrics from one operand's accumulated statistics."""
     # clamps match the pre-vectorized form, which clamped each norm before the ratio
     sqnr = 20.0 * torch.log10(
         src_sq.sqrt().clamp_min(EPS) / err_sq.sqrt().clamp_min(EPS)
@@ -261,19 +223,7 @@ def _quantization_metrics(src_sq, err_sq, under, numel, nonzero, grouped):
 
 
 def compute_quantization_metrics(model: torch.nn.Module) -> dict[str, float]:
-    """Read a window's quantization accumulators as `<metric>/<site>` floats.
-
-    Phase-agnostic, like `compute_activation_norm`: the caller prefixes
-    `train-quant/` or `val-quant/`, because only the caller knows which window it
-    just closed. Keyed off each accumulator's own `key`, not its module path: which
-    GEMM and operand it belongs to is not something a path can express.
-
-    A site whose accumulated numel is all zero was never folded this window --
-    e.g. a dgrad/wgrad operand during a no_grad eval pass -- and is dropped rather
-    than reported: its sqnr would read 0.0, the same value that means "noise equals
-    signal". The emptiness flag rides the same single stack-and-sync as the metric
-    values below, so this costs no extra device sync.
-    """
+    """Return quantization metrics for populated sites as `<metric>/<site>` floats."""
     metrics = {}
     has_data = {}
     for module in model.modules():
@@ -301,9 +251,7 @@ def compute_quantization_metrics(model: torch.nn.Module) -> dict[str, float]:
 
 
 def compute_statistics(values: list[float]) -> dict[str, float]:
-    """
-    {mean, median, max, min} over a non-empty list of scalars.
-    """
+    """Return mean, median, maximum, and minimum, or `{}` if empty."""
     if not values:
         return {}
     return {
@@ -325,9 +273,7 @@ def count_correct(
     ignore_index: int = -100,
     exclude_id: int | None = None,
 ) -> tuple[int, int]:
-    """
-    Count positions where argmax(logits) == labels.
-    """
+    """Return correct and eligible prediction counts."""
     preds = logits.argmax(dim=-1)
     mask = labels != ignore_index
     if exclude_id is not None:
@@ -338,16 +284,12 @@ def count_correct(
 
 
 def compute_decoded_byte_len(tokenizer, token_ids: list[int]) -> int:
-    """
-    UTF-8 byte length of `token_ids` decoded back to text.
-    """
+    """Return the UTF-8 byte length of decoded token IDs."""
     return len(tokenizer.decode(token_ids, skip_special_tokens=True).encode("utf-8"))
 
 
 def compute_bytes_per_token(tokenizer, texts: list[str]) -> float:
-    """
-    Bytes/token over `texts` using `tokenizer` (special tokens excluded).
-    """
+    """Return UTF-8 bytes per token across `texts`."""
     n_bytes = 0
     n_tokens = 0
     for t in texts:
@@ -359,10 +301,7 @@ def compute_bytes_per_token(tokenizer, texts: list[str]) -> float:
 
 
 def compute_perplexity(loss: float, cap: float = 1e6) -> float:
-    """exp(loss), capped to avoid Inf on early high-loss steps.
-
-    Uses torch.exp so overflow saturates to the cap rather than raising.
-    """
+    """Return capped `exp(loss)`."""
     return min(float(torch.exp(torch.tensor(loss))), cap)
 
 
@@ -377,9 +316,7 @@ def compute_bits_per_byte(loss: float, tokens_per_byte: float) -> float:
 
 
 def count_parameters(config: TrainConfig) -> dict[str, int]:
-    """
-    Total, non-embedding, and active-non-embedding parameter counts.
-    """
+    """Return total, non-embedding, and active parameter counts."""
     return TransformerLM.compute_parameters(config.model, config.max_seq_len)
 
 
@@ -389,9 +326,7 @@ def count_parameters(config: TrainConfig) -> dict[str, int]:
 
 
 def compute_flops_per_token(config: TrainConfig) -> int:
-    """
-    Total training FLOPs per token
-    """
+    """Return total training FLOPs per token."""
     fwd_total = TransformerLM.compute_flops(config.model, config.max_seq_len)
     return fwd_total * 3  # fwd + bwd (2x); no activation recomputation
 
@@ -402,10 +337,7 @@ def compute_flops_per_token(config: TrainConfig) -> int:
 
 
 def estimate_gpu_peak_flops(device: str) -> float | None:
-    """Estimate GPU peak bf16/fp16 FLOPS for MFU calculation.
-
-    Returns None on non-CUDA devices or unrecognized GPUs (caller skips MFU).
-    """
+    """Estimate bf16/fp16 GPU peak FLOPS, or `None` if unknown."""
     if device != "cuda":
         return None
     name = torch.cuda.get_device_properties(0).name.lower()

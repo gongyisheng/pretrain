@@ -6,15 +6,26 @@ import torch
 
 from src.kernel.ops.gemm import SCALED_MM_OPS, grouped_mm
 from src.layers.mlp import SparseMoEBlock
-from src.metrics.quant import record_operand
+from src.metrics.quant import QuantizationStats, record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.utils import is_quantized, scaled_grouped_mm_op
 from src.utils.config import QuantizationConfig
 
 
 def quantized_grouped_mm(
-    a, b, offs, a_fmt, b_fmt, out_dtype, scaling, bias=None, a_stats=None, b_stats=None
-):
+    a: torch.Tensor,
+    b: torch.Tensor,
+    offs: torch.Tensor,
+    a_fmt: str,
+    b_fmt: str,
+    out_dtype: torch.dtype,
+    scaling: dict,
+    bias: torch.Tensor | None = None,
+    a_stochastic_rounding: bool = False,
+    b_stochastic_rounding: bool = False,
+    a_stats: QuantizationStats | None = None,
+    b_stats: QuantizationStats | None = None,
+) -> torch.Tensor:
     """Quantized ragged grouped GEMM, layout picked from the operand ranks.
 
         (M,K) x (E,K,N) -> (M,N)    ragged M: A's row axis, not the contraction
@@ -51,7 +62,13 @@ def quantized_grouped_mm(
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
-            src_a, contract_a, a_fmt, scaling, offs=offs, ragged_dim=a_ragged_dim
+            src_a,
+            contract_a,
+            a_fmt,
+            scaling,
+            offs=offs,
+            ragged_dim=a_ragged_dim,
+            stochastic_rounding=a_stochastic_rounding,
         )
         record_operand(
             a_stats,
@@ -65,7 +82,13 @@ def quantized_grouped_mm(
         )
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(
-            b, -2, b_fmt, scaling, offs=b_offs, ragged_dim=b_ragged_dim
+            b,
+            -2,
+            b_fmt,
+            scaling,
+            offs=b_offs,
+            ragged_dim=b_ragged_dim,
+            stochastic_rounding=b_stochastic_rounding,
         )
         # `offs` here is the real offs, not `b_offs` -- deliberately, even though
         # b_ragged_dim is None in the forward/dgrad case (B stacked (E,K,N)), which
@@ -128,6 +151,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             out_dtype,
             cfg.scaling,
             bias=bias,
+            a_stochastic_rounding=cfg.rounding["act"] == "SR",
+            b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("act"),
             b_stats=stats.get("weight"),
         )
@@ -152,6 +177,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["weight"]["dgrad"],
             out_dtype,
             cfg.scaling,
+            a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
+            b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("grad_out"),
             b_stats=stats.get("weight"),
         )
@@ -165,6 +192,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["grad_out"]["wgrad"],
             out_dtype,
             cfg.scaling,
+            a_stochastic_rounding=cfg.rounding["act"] == "SR",
+            b_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             a_stats=stats.get("act"),
             b_stats=stats.get("grad_out"),
         )
@@ -183,23 +212,6 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         return grad_a, grad_b, grad_bias, None, None, None
 
 
-def scaled_grouped_mm_fn(cfg: QuantizationConfig, stats=None):
-    """Build the block's expert GEMM seam.
-
-    `stats` maps `<projection>.<gemm>.<operand>` to an accumulator. Rebinding this
-    closure with a populated map is how metric collection is installed -- routing
-    happens inside the block's forward, so no module hook can reach these operands.
-    """
-    stats = stats or {}
-
-    def expert_mm(a, b, offs, bias=None, projection=None):
-        return ScaledGroupedGemmFn.apply(
-            a, b, bias, offs, cfg, stats.get(projection, {})
-        )
-
-    return expert_mm
-
-
 class QuantizedSparseMoEBlock(SparseMoEBlock):
     @classmethod
     def from_module(
@@ -208,5 +220,25 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
-        q.expert_mm = scaled_grouped_mm_fn(quantization_config)
+        # populated by src.metrics.convert.apply_quantization_monitoring; empty means
+        # every .get() below returns {} and the folds are skipped outright
+        q.quant_stats = {}
         return q
+
+    def expert_mm(self, a, b, offs, bias=None, projection=None):
+        """Quantize the base block's seam, unless in eval.
+
+        eval runs the unquantized GEMM, as QuantizedLinear.forward does. `quant_stats`
+        maps a projection to its accumulators; routing happens inside the block's
+        forward, so no module hook can reach these operands.
+        """
+        if not self.training:
+            return super().expert_mm(a, b, offs, bias=bias, projection=projection)
+        return ScaledGroupedGemmFn.apply(
+            a,
+            b,
+            bias,
+            offs,
+            self.quantization_config,
+            self.quant_stats.get(projection, {}),
+        )
