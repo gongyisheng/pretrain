@@ -5,9 +5,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-configs=(
-    qwen3_51m_bf16
-)
+configs=(qwen3_51m_bf16)
 
 for dtype in e4m3 e5m2; do
     for tensor_dtypes in w8a16 w16a8 w8a8 w8a8g8; do
