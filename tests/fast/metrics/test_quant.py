@@ -215,22 +215,22 @@ def test_reading_a_window_averages_operands_not_micro_batches():
     micro = [torch.randn(8, 32) * 0.01, torch.randn(8, 32) * 100.0]
     device = micro[0].device
 
-    window = QuantizationStats("fwd.act/x", 1, device)
+    window = QuantizationStats("act/x", 1, device)
     for x in micro:
         _fold(window, x)
-    got = compute_quantization_metrics(_holder([window]))["sqnr/fwd.act/x"]
+    got = compute_quantization_metrics(_holder([window]))["sqnr/act/x"]
 
     per_batch = []
     for x in micro:
-        one = QuantizationStats("fwd.act/x", 1, device)
+        one = QuantizationStats("act/x", 1, device)
         _fold(one, x)
-        per_batch.append(compute_quantization_metrics(_holder([one]))["sqnr/fwd.act/x"])
+        per_batch.append(compute_quantization_metrics(_holder([one]))["sqnr/act/x"])
 
     assert min(per_batch) <= got <= max(per_batch)
 
 
 def test_reset_clears_every_accumulator_field():
-    stats = QuantizationStats("fwd.act/x", 1, torch.randn(1).device)
+    stats = QuantizationStats("act/x", 1, torch.randn(1).device)
     _fold(stats, torch.randn(8, 32))
     assert stats.numel.item() > 0
     stats.reset()
@@ -239,13 +239,13 @@ def test_reset_clears_every_accumulator_field():
 
 def test_compute_reads_every_site_under_its_own_key():
     device = torch.randn(1).device
-    sites = [QuantizationStats(f"fwd.act/layer{i}", 1, device) for i in range(3)]
+    sites = [QuantizationStats(f"act/layer{i}", 1, device) for i in range(3)]
     for site in sites:
         _fold(site, torch.randn(8, 32))
     got = compute_quantization_metrics(_holder(sites))
     for i in range(3):
         for metric in METRICS:
-            assert f"{metric}/fwd.act/layer{i}" in got
+            assert f"{metric}/act/layer{i}" in got
     assert all(isinstance(v, float) for v in got.values())
 
 
@@ -257,23 +257,23 @@ def test_never_folded_site_produces_no_key():
     """Reset but never folded -- e.g. a dgrad/wgrad operand during a no_grad eval
     pass -- must report no key at all, not a spurious sqnr of 0.0."""
     device = torch.randn(1).device
-    site = QuantizationStats("dgrad.grad/x", 1, device)
+    site = QuantizationStats("grad_out/x", 1, device)
     got = compute_quantization_metrics(_holder([site]))
     assert got == {}
-    assert "sqnr/dgrad.grad/x" not in got
+    assert "sqnr/grad_out/x" not in got
 
 
 def test_mixed_folded_and_unfolded_sites_only_report_the_folded_one():
     """The production shape: one folded site alongside one that was reset for the
     window but never folded (e.g. eval's backward operands)."""
     device = torch.randn(1).device
-    folded = QuantizationStats("fwd.act/x", 1, device)
-    unfolded = QuantizationStats("dgrad.grad/x", 1, device)
+    folded = QuantizationStats("act/x", 1, device)
+    unfolded = QuantizationStats("grad_out/x", 1, device)
     _fold(folded, torch.randn(8, 32))
     got = compute_quantization_metrics(_holder([folded, unfolded]))
     for metric in METRICS:
-        assert f"{metric}/fwd.act/x" in got
-        assert f"{metric}/dgrad.grad/x" not in got
+        assert f"{metric}/act/x" in got
+        assert f"{metric}/grad_out/x" not in got
 
 
 def test_each_operand_is_folded_under_its_own_element_format():
@@ -284,9 +284,9 @@ def test_each_operand_is_folded_under_its_own_element_format():
     x = torch.randn(64, 64)
     rates = {}
     for fmt in ("int4", "int8"):
-        stats = QuantizationStats(f"fwd.act/{fmt}", 1, x.device)
+        stats = QuantizationStats(f"act/{fmt}", 1, x.device)
         _fold(stats, x, fmt=fmt)
         rates[fmt] = compute_quantization_metrics(_holder([stats]))[
-            f"underflow_rate/fwd.act/{fmt}"
+            f"underflow_rate/act/{fmt}"
         ]
     assert rates["int4"] > rates["int8"]

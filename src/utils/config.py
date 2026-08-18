@@ -11,9 +11,10 @@ from src.quant.constants import (
     QUANT_FORMATS,
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,
-    QUANT_OPERANDS,
     QUANT_PASSTHROUGH,
     QUANT_SCALING_RECIPES,
+    QUANT_TENSOR_GEMMS,
+    _RETIRED_DTYPE_KEYS,
 )
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
@@ -301,10 +302,47 @@ class TokenizerTrainingConfig:
             self.method_kwargs.setdefault("max_superword_words", 4)
 
 
+def _resolve_quant_dtype(dtype: dict) -> dict:
+    """Expand `{tensor: fmt | {gemm: fmt}}` to `{tensor: {gemm: fmt}}`, validating.
+
+    A scalar means "that format in every GEMM consuming the tensor"; a dict scopes it,
+    and may name only some of them -- the rest are filled by the recipe, or by
+    `TrainingConfig` with the compute dtype. Idempotent, so a resolved dict survives
+    the to_dict/load round trip.
+    """
+    resolved = {}
+    for tensor, value in dtype.items():
+        if tensor not in QUANT_TENSOR_GEMMS:
+            hint = _RETIRED_DTYPE_KEYS.get(tensor)
+            raise ValueError(
+                f"unknown quant dtype key: {tensor!r}; "
+                f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
+                + (f"; {tensor!r} is now {hint}" if hint else "")
+            )
+        gemms = QUANT_TENSOR_GEMMS[tensor]
+        per_gemm = (
+            dict(value) if isinstance(value, dict) else dict.fromkeys(gemms, value)
+        )
+        for gemm, fmt in per_gemm.items():
+            if gemm not in gemms:
+                raise ValueError(
+                    f"quant dtype {tensor!r} cannot be scoped to {gemm!r}: "
+                    f"only {list(gemms)} consume it"
+                )
+            if fmt not in QUANT_FORMATS:
+                raise ValueError(
+                    f"unknown quant fmt for {tensor}.{gemm}: {fmt!r}; "
+                    f"expected one of {sorted(QUANT_FORMATS)}"
+                )
+        resolved[tensor] = per_gemm
+    return resolved
+
+
 @dataclass
 class QuantizationConfig:
     enabled: bool = False
-    dtype: dict = field(default_factory=dict)  # {weight/act/grad: fmt}
+    # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
+    dtype: dict = field(default_factory=dict)
     scaling: dict = field(default_factory=dict)  # {granularity, block_shape}
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
@@ -313,16 +351,21 @@ class QuantizationConfig:
         if not self.enabled:
             return
 
-        # A dtype recipe fills the dtype dict the way a scaling recipe fills scaling.
         dtype_recipe = self.dtype.pop("recipe", None)
+        self.dtype = _resolve_quant_dtype(self.dtype)
+
+        # A dtype recipe fills the slots left open, the way a scaling recipe fills
+        # scaling. It is applied after the expansion so that a tensor scoped to one
+        # GEMM still takes the recipe's format in the other.
         if dtype_recipe is not None:
             if dtype_recipe not in QUANT_DTYPE_RECIPES:
                 raise ValueError(
                     f"unknown quant dtype recipe: {dtype_recipe!r}; "
                     f"expected one of {sorted(QUANT_DTYPE_RECIPES)}"
                 )
-            for operand, fmt in QUANT_DTYPE_RECIPES[dtype_recipe].items():
-                self.dtype.setdefault(operand, fmt)  # explicit dtype wins
+            for tensor, fmt in QUANT_DTYPE_RECIPES[dtype_recipe].items():
+                for gemm in QUANT_TENSOR_GEMMS[tensor]:
+                    self.dtype.setdefault(tensor, {}).setdefault(gemm, fmt)
             # mxfp8 is an fp8 element paired with the "mxfp8" scale scheme; seed it.
             if dtype_recipe == "mxfp8":
                 self.scaling.setdefault("recipe", "mxfp8")
@@ -397,26 +440,15 @@ class QuantizationConfig:
             # nothing downstream has to re-check the granularity to know that.
             self.scaling["block_shape"] = (0, 0)
 
-        for operand, fmt in self.dtype.items():
-            if operand not in QUANT_OPERANDS:
-                raise ValueError(
-                    f"unknown quant dtype key: {operand!r}; "
-                    f"expected one of {sorted(QUANT_OPERANDS)}"
-                )
-            if fmt not in QUANT_FORMATS:
-                raise ValueError(
-                    f"unknown quant fmt for {operand}: {fmt!r}; "
-                    f"expected one of {sorted(QUANT_FORMATS)}"
-                )
-
         # mxfp8 (blockwise + fp8_e8m0) is defined only over fp8 elements.
         if granularity == "blockwise" and scale_dtype == "fp8_e8m0":
-            for operand, fmt in self.dtype.items():
-                if fmt not in QUANT_PASSTHROUGH and not fmt.startswith("fp8"):
-                    raise ValueError(
-                        f"mxfp8 scaling requires an fp8 element for {operand}, "
-                        f"got {fmt!r}"
-                    )
+            for tensor, per_gemm in self.dtype.items():
+                for gemm, fmt in per_gemm.items():
+                    if fmt not in QUANT_PASSTHROUGH and not fmt.startswith("fp8"):
+                        raise ValueError(
+                            f"mxfp8 scaling requires an fp8 element for "
+                            f"{tensor}.{gemm}, got {fmt!r}"
+                        )
 
         self.scaling["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
 
@@ -472,8 +504,9 @@ class TrainingConfig:
             if isinstance(rule, dict):
                 rule = QuantizationConfig(**rule)
             if rule.enabled:
-                for operand in QUANT_OPERANDS:
-                    rule.dtype.setdefault(operand, amp_dtype)
+                for tensor, gemms in QUANT_TENSOR_GEMMS.items():
+                    for gemm in gemms:
+                        rule.dtype.setdefault(tensor, {}).setdefault(gemm, amp_dtype)
             normalized.append(rule)
         self.quantization = normalized
 

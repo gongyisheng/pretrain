@@ -59,11 +59,8 @@ mxfp8_only = pytest.mark.skipif(
 
 
 def _cfg(grad="bf16"):
-    # recipe fills weight/act=fp8_e4m3; both backward grads overridden explicitly
-    return QuantizationConfig(
-        enabled=True,
-        dtype={"recipe": "fp8", "grad_input": grad, "grad_weight": grad},
-    )
+    # recipe fills weight/act=fp8_e4m3; grad_out overridden in both its GEMMs
+    return QuantizationConfig(enabled=True, dtype={"recipe": "fp8", "grad_out": grad})
 
 
 @fp8_only
@@ -127,13 +124,13 @@ def test_rowwise_forward_and_backward():
 
 
 @fp8_only
-def test_high_precision_grad_weight_changes_wgrad():
+def test_high_precision_wgrad_changes_the_weight_gradient():
     torch.manual_seed(0)
     lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
 
     def grad_weight(hp):
-        dtype = {"grad_weight": "bf16"} if hp else {}
+        dtype = {"grad_out": {"wgrad": "bf16"}} if hp else {}
         cfg = QuantizationConfig(enabled=True, dtype={"recipe": "fp8", **dtype})
         q = QuantizedLinear.from_module(lin, cfg)
         q(x.clone()).square().mean().backward()
@@ -210,8 +207,8 @@ def test_gemm_records_nothing_without_stats():
 def test_gemm_records_only_the_operands_whose_format_is_quantized():
     """int x bf16: only `a` is a quantized format, so only its accumulator moves."""
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    a_stats = QuantizationStats("fwd.act/x", 1, a.device)
-    b_stats = QuantizationStats("fwd.weight/x", 1, b.device)
+    a_stats = QuantizationStats("act/x", 1, a.device)
+    b_stats = QuantizationStats("weight/x", 1, b.device)
     set_quantization_monitoring_status(True)
     try:
         out = quantized_gemm(
@@ -352,12 +349,7 @@ def test_mxfp8_fake_quant_fallback_on_cpu():
     torch.manual_seed(0)
     cfg = QuantizationConfig(
         enabled=True,
-        dtype={
-            "weight": "fp8_e4m3",
-            "act": "bf16",
-            "grad_input": "bf16",
-            "grad_weight": "bf16",
-        },
+        dtype={"weight": "fp8_e4m3", "act": "bf16", "grad_out": "bf16"},
         scaling={"recipe": "mxfp8"},
     )
     lin = nn.Linear(64, 64, bias=False).to(torch.float32)

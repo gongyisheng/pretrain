@@ -123,13 +123,13 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             a,
             b,
             offs,
-            cfg.dtype["act"],
-            cfg.dtype["weight"],
+            cfg.dtype["act"]["fwd"],
+            cfg.dtype["weight"]["fwd"],
             out_dtype,
             cfg.scaling,
             bias=bias,
-            a_stats=stats.get("fwd_act"),
-            b_stats=stats.get("fwd_weight"),
+            a_stats=stats.get("act"),
+            b_stats=stats.get("weight"),
         )
         ctx.save_for_backward(a, b, offs)
         ctx.cfg = cfg
@@ -148,12 +148,12 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             grad_y,
             b.transpose(-2, -1).contiguous(),
             offs,
-            cfg.dtype["grad_input"],
-            cfg.dtype["weight"],
+            cfg.dtype["grad_out"]["dgrad"],
+            cfg.dtype["weight"]["dgrad"],
             out_dtype,
             cfg.scaling,
-            a_stats=stats.get("dgrad_grad"),
-            b_stats=stats.get("dgrad_weight"),
+            a_stats=stats.get("grad_out"),
+            b_stats=stats.get("weight"),
         )
         # wgrad: grad_b[g] = a[g]^T @ grad_y[g] — the ragged token axis is the
         # contraction, i.e. the ragged-K layout
@@ -161,12 +161,12 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             a.mT,
             grad_y,
             offs,
-            cfg.dtype["act"],
-            cfg.dtype["grad_weight"],
+            cfg.dtype["act"]["wgrad"],
+            cfg.dtype["grad_out"]["wgrad"],
             out_dtype,
             cfg.scaling,
-            a_stats=stats.get("wgrad_act"),
-            b_stats=stats.get("wgrad_grad"),
+            a_stats=stats.get("act"),
+            b_stats=stats.get("grad_out"),
         )
         grad_bias = None
         if ctx.bias_needs_grad:

@@ -35,7 +35,7 @@ training:
     enabled: true
     dtype:
       recipe: fp8
-      grad_weight: bf16
+      grad_out: {wgrad: bf16}
     scaling:
       granularity: rowwise
     exclude: [lm_head]

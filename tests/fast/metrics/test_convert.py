@@ -1,8 +1,5 @@
 """Tests for src.metrics.convert — the install pass that decides which modules get
 accumulators, on what device, and that installing does not thrash recompiles.
-
-`apply_quantization_monitoring`, the module's other public function, has no test
-coverage yet -- out of scope for this move, tracked separately.
 """
 
 import pytest
@@ -10,9 +7,14 @@ import torch
 
 from src.layers.block import TransformerBlock
 from src.metrics.activation import set_activation_monitoring_status
-from src.metrics.convert import apply_activation_monitoring
+from src.metrics.convert import (
+    apply_activation_monitoring,
+    apply_quantization_monitoring,
+)
 from src.metrics.functional import compute_activation_norm
-from src.utils.config import ModelConfig
+from src.metrics.quant import set_quantization_monitoring_status
+from src.quant.convert import apply_quantization
+from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
 from tests.fast.helpers import make_attn_mask
 
 
@@ -120,3 +122,84 @@ def test_buffers_follow_the_model_not_the_ambient_default_device():
     apply_activation_monitoring(block)
     assert block.mlp.down_proj.act_stats.energy.device.type == "cpu"
     assert block.attn.q_proj.act_stats.count.device.type == "cpu"
+
+
+# ---------------------------------------------------------------------------
+# Quantization accumulators: one per tensor, not one per GEMM operand
+# ---------------------------------------------------------------------------
+
+
+def _quantized_linear(dtype):
+    """One int8-capable QuantizedLinear with monitoring installed, on CPU."""
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(D_MODEL, D_MODEL, bias=False)
+    cfg = TrainConfig(
+        model=_block_cfg(),
+        training=TrainingConfig(
+            mixed_precision="no",
+            quantization={
+                "enabled": True,
+                "dtype": dtype,
+                "scaling": {"granularity": "tensorwise"},
+            },
+        ),
+    )
+    apply_quantization(model, cfg)
+    apply_quantization_monitoring(model)
+    return model.proj
+
+
+def _fold(module, x):
+    set_quantization_monitoring_status(True)
+    try:
+        module(x).sum().backward()
+    finally:
+        set_quantization_monitoring_status(False)
+
+
+def test_one_accumulator_per_quantized_tensor():
+    """Keyed by tensor, so a tensor consumed by two GEMMs still gets one site, and a
+    tensor left in the compute dtype gets none."""
+    proj = _quantized_linear({"weight": "int8", "act": "bf16", "grad_out": "bf16"})
+    assert set(proj.quant_stats) == {"weight"}
+    assert proj.quant_stats["weight"].key == "weight/proj"
+
+
+def test_grad_out_site_exists_when_only_one_gemm_quantizes_it():
+    proj = _quantized_linear(
+        {
+            "weight": "bf16",
+            "act": "bf16",
+            "grad_out": {"dgrad": "int8", "wgrad": "bf16"},
+        }
+    )
+    assert set(proj.quant_stats) == {"grad_out"}
+
+
+def test_grad_out_site_holds_only_the_quantized_gemms_fold():
+    """dgrad quantized, wgrad not: the site sees exactly one operand's elements."""
+    proj = _quantized_linear(
+        {
+            "weight": "bf16",
+            "act": "bf16",
+            "grad_out": {"dgrad": "int8", "wgrad": "bf16"},
+        }
+    )
+    x = torch.randn(4, D_MODEL, requires_grad=True)
+    _fold(proj, x)
+    # grad_out is (4, D_MODEL); only the dgrad GEMM folded it
+    assert proj.quant_stats["grad_out"].numel.item() == 4 * D_MODEL
+
+
+def test_both_gemms_pool_into_one_tensor_site():
+    """Same tensor quantized in both its GEMMs: the sums add, they do not overwrite."""
+    proj = _quantized_linear(
+        {
+            "weight": "bf16",
+            "act": "bf16",
+            "grad_out": {"dgrad": "int8", "wgrad": "int8"},
+        }
+    )
+    x = torch.randn(4, D_MODEL, requires_grad=True)
+    _fold(proj, x)
+    assert proj.quant_stats["grad_out"].numel.item() == 2 * 4 * D_MODEL

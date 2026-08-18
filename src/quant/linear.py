@@ -68,13 +68,13 @@ class QuantizedLinearFn(torch.autograd.Function):
         y = quantized_gemm(
             x2d,
             w.t(),
-            cfg.dtype["act"],
-            cfg.dtype["weight"],
+            cfg.dtype["act"]["fwd"],
+            cfg.dtype["weight"]["fwd"],
             compute_dtype,
             cfg.scaling,
             bias=None if bias is None else bias.to(compute_dtype),
-            a_stats=stats.get("fwd_act"),
-            b_stats=stats.get("fwd_weight"),
+            a_stats=stats.get("act"),
+            b_stats=stats.get("weight"),
         )
 
         ctx.save_for_backward(x2d, w)
@@ -99,23 +99,23 @@ class QuantizedLinearFn(torch.autograd.Function):
         dx = quantized_gemm(
             g,
             w,
-            cfg.dtype["grad_input"],
-            cfg.dtype["weight"],
+            cfg.dtype["grad_out"]["dgrad"],
+            cfg.dtype["weight"]["dgrad"],
             compute_dtype,
             cfg.scaling,
-            a_stats=stats.get("dgrad_grad"),
-            b_stats=stats.get("dgrad_weight"),
+            a_stats=stats.get("grad_out"),
+            b_stats=stats.get("weight"),
         )
         # dW = gᵀ @ X, (N,M)@(M,K) -> (N,K)
         dw = quantized_gemm(
             g.t(),
             x2d,
-            cfg.dtype["grad_weight"],
-            cfg.dtype["act"],
+            cfg.dtype["grad_out"]["wgrad"],
+            cfg.dtype["act"]["wgrad"],
             compute_dtype,
             cfg.scaling,
-            a_stats=stats.get("wgrad_grad"),
-            b_stats=stats.get("wgrad_act"),
+            a_stats=stats.get("grad_out"),
+            b_stats=stats.get("act"),
         )
         db = g.sum(dim=0) if ctx.has_bias else None
 

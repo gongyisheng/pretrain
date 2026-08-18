@@ -147,7 +147,7 @@ def test_log_train_reads_quant_metrics_off_the_model():
     argument: the fold happens inside the training step itself."""
     tracker, _ = _tracker(_cfg(log_every=1, log_quant_metrics=True))
     model, opt, scaler = _linear_setup()
-    site = QuantizationStats("fwd.act/layer_0", 1, torch.randn(1).device)
+    site = QuantizationStats("act/layer_0", 1, torch.randn(1).device)
     site.src_sq += 100.0
     site.err_sq += 1.0
     site.numel += 32.0
@@ -156,12 +156,10 @@ def test_log_train_reads_quant_metrics_off_the_model():
     tracker.train_begin()
     _do_step(tracker, model, opt, scaler, step=0)
     d = tracker.log_train(step=1, model=model, optimizer=opt)
-    assert d["train-quant/sqnr/fwd.act/layer_0"] == pytest.approx(
+    assert d["train-quant/sqnr/act/layer_0"] == pytest.approx(20.0)  # 20*log10(10/1)
+    assert tracker.logger.logs[-1][1]["train-quant/sqnr/act/layer_0"] == pytest.approx(
         20.0
-    )  # 20*log10(10/1)
-    assert tracker.logger.logs[-1][1][
-        "train-quant/sqnr/fwd.act/layer_0"
-    ] == pytest.approx(20.0)
+    )
 
 
 def test_log_train_without_quant_metrics_has_no_train_quant_keys():
@@ -901,7 +899,7 @@ def test_log_eval_emits_val_quant_keys():
     """Quant accumulators are filled after eval_begin, which resets them."""
     tracker, _ = _tracker(_cfg(log_quant_metrics=True))
     model = torch.nn.Linear(8, 4)
-    site = QuantizationStats("fwd.act/layer_0", 1, torch.randn(1).device)
+    site = QuantizationStats("act/layer_0", 1, torch.randn(1).device)
     model.add_module("_quant_stats", torch.nn.ModuleList([site]))
 
     tracker.eval_begin(model)
@@ -911,13 +909,13 @@ def test_log_eval_emits_val_quant_keys():
     tracker.eval_end()
     _one_eval_step(tracker)
     d = tracker.log_eval(step=1, model=model)
-    assert d["val-quant/sqnr/fwd.act/layer_0"] == pytest.approx(20.0)
+    assert d["val-quant/sqnr/act/layer_0"] == pytest.approx(20.0)
 
 
 def test_log_eval_omits_val_quant_keys_when_disabled():
     tracker, _ = _tracker(_cfg(log_quant_metrics=False))
     model = torch.nn.Linear(8, 4)
-    site = QuantizationStats("fwd.act/layer_0", 1, torch.randn(1).device)
+    site = QuantizationStats("act/layer_0", 1, torch.randn(1).device)
     site.src_sq += 100.0
     site.err_sq += 1.0
     site.numel += 32.0

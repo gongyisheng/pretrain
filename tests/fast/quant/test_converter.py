@@ -207,10 +207,9 @@ def test_int8s_recipe_expands(fmt):
     # activations/gradients, so those stay bf16.
     c = QuantizationConfig(enabled=True, dtype={"recipe": fmt})
     assert c.dtype == {
-        "weight": fmt,
-        "act": "bf16",
-        "grad_input": "bf16",
-        "grad_weight": "bf16",
+        "weight": {"fwd": fmt, "dgrad": fmt},
+        "act": {"fwd": "bf16", "wgrad": "bf16"},
+        "grad_out": {"dgrad": "bf16", "wgrad": "bf16"},
     }
 
 

@@ -11,7 +11,7 @@ FP8 GEMM (E4M3 forward operands, E5M2 grad, hardware-accelerated on Blackwell SM
 The recipes trade accuracy against kernel cost:
 - `tensorwise` — one scale per tensor; cheapest, most aggressive quantization.
 - `rowwise` — per-row (per-token) / per-column (per-output-channel) scales; tighter dynamic range, slightly slower kernel.
-- `rowwise_with_gw_hp` — rowwise, but the weight-gradient GEMM (`dW = dYᵀ@X`) runs in bf16 (`dtype.grad_weight: bf16`); forward + dgrad stay fp8. Protects the weight-gradient signal at some throughput cost.
+- `rowwise_with_gw_hp` — rowwise, but the weight-gradient GEMM (`dW = dYᵀ@X`) runs in bf16 (`dtype.grad_out: {wgrad: bf16}`); forward + dgrad stay fp8. Protects the weight-gradient signal at some throughput cost.
 
 If (1) fails with `tensorwise`, expect `rowwise` / `rowwise_with_gw_hp` to recover loss at some throughput cost.
 If (2) is flat, the bottleneck is data movement / non-GEMM kernels, not the matmul itself.

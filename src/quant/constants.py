@@ -31,30 +31,35 @@ QUANT_SCALING_RECIPES = {
 }
 
 QUANT_DTYPE_RECIPES = {
-    "fp8": {
-        "weight": "fp8_e4m3",
-        "act": "fp8_e4m3",
-        "grad_input": "fp8_e5m2",
-        "grad_weight": "fp8_e5m2",
-    },
-    "mxfp8": {
-        "weight": "fp8_e4m3",
-        "act": "fp8_e4m3",
-        "grad_input": "fp8_e4m3",
-        "grad_weight": "fp8_e4m3",
-    },
+    "fp8": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+    "mxfp8": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"},
     **{
-        fmt: {
-            "weight": fmt,
-            "act": "bf16",
-            "grad_input": "bf16",
-            "grad_weight": "bf16",
-        }
+        fmt: {"weight": fmt, "act": "bf16", "grad_out": "bf16"}
         for fmt in ("int8", "int7", "int6", "int5", "int4")
     },
 }
 
-QUANT_OPERANDS = ("weight", "act", "grad_input", "grad_weight")
+# The three tensors a quantized linear holds, and which GEMMs consume each. A dtype is
+# a property of a tensor; scoping it to a GEMM is how one tensor takes two dtypes:
+#
+#   fwd    y  = act @ weightᵀ
+#   dgrad  dx = grad_out @ weight
+#   wgrad  dw = grad_outᵀ @ act
+QUANT_TENSOR_GEMMS = {
+    "weight": ("fwd", "dgrad"),
+    "act": ("fwd", "wgrad"),
+    "grad_out": ("dgrad", "wgrad"),
+}
+
+QUANT_TENSORS = tuple(QUANT_TENSOR_GEMMS)
+
+# Retired dtype keys, kept only to point their configs at the replacement.
+_RETIRED_DTYPE_KEYS = {
+    "grad_input": "grad_out scoped to dgrad",
+    "grad_weight": "grad_out scoped to wgrad",
+    "dx": "grad_out scoped to dgrad",
+    "dw": "grad_out scoped to wgrad",
+}
 
 
 # --- format property maps ---------------------------------------------------

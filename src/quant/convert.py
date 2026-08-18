@@ -11,7 +11,9 @@ from src.quant.utils import resolve_quantization_config
 
 def _is_passthrough(quantization_config) -> bool:
     return quantization_config is None or all(
-        fmt in QUANT_PASSTHROUGH for fmt in quantization_config.dtype.values()
+        fmt in QUANT_PASSTHROUGH
+        for per_gemm in quantization_config.dtype.values()
+        for fmt in per_gemm.values()
     )
 
 

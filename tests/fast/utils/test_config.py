@@ -805,34 +805,57 @@ def test_quant_defaults_disabled():
     assert q.dtype == {} and q.scaling == {}
 
 
-def test_quant_operand_defaults_follow_mixed_precision():
+def test_quant_tensor_defaults_follow_mixed_precision():
     r = _only_rule(
         TrainingConfig(mixed_precision="bf16", quantization={"enabled": True})
     )
-    # every operand defaults to the compute dtype
+    # every slot defaults to the compute dtype
     assert r.dtype == {
-        "weight": "bf16",
-        "act": "bf16",
-        "grad_input": "bf16",
-        "grad_weight": "bf16",
+        "weight": {"fwd": "bf16", "dgrad": "bf16"},
+        "act": {"fwd": "bf16", "wgrad": "bf16"},
+        "grad_out": {"dgrad": "bf16", "wgrad": "bf16"},
     }
     r32 = _only_rule(
         TrainingConfig(mixed_precision="no", quantization={"enabled": True})
     )
-    assert r32.dtype["weight"] == "fp32"
-    # explicit operands are kept; only unset ones follow the compute dtype
-    r2 = _only_rule(
+    assert r32.dtype["weight"]["fwd"] == "fp32"
+
+
+def test_quant_dtype_scalar_applies_to_every_consuming_gemm():
+    r = _only_rule(
         TrainingConfig(
             mixed_precision="bf16",
             quantization={"enabled": True, "dtype": {"weight": "fp8_e4m3"}},
         )
     )
-    assert r2.dtype == {
-        "weight": "fp8_e4m3",
-        "act": "bf16",
-        "grad_input": "bf16",
-        "grad_weight": "bf16",
+    assert r.dtype == {
+        "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
+        "act": {"fwd": "bf16", "wgrad": "bf16"},
+        "grad_out": {"dgrad": "bf16", "wgrad": "bf16"},
     }
+
+
+def test_quant_dtype_scopes_a_tensor_per_gemm():
+    # the w16a16dx8 cell: grad_out quantized in dgrad only
+    q = QuantizationConfig(
+        enabled=True, dtype={"grad_out": {"dgrad": "fp8_e4m3", "wgrad": "bf16"}}
+    )
+    assert q.dtype["grad_out"] == {"dgrad": "fp8_e4m3", "wgrad": "bf16"}
+
+
+def test_quant_scoped_dtype_leaves_unset_gemm_to_mixed_precision():
+    r = _only_rule(
+        TrainingConfig(
+            mixed_precision="bf16",
+            quantization={"enabled": True, "dtype": {"grad_out": {"dgrad": "int8"}}},
+        )
+    )
+    assert r.dtype["grad_out"] == {"dgrad": "int8", "wgrad": "bf16"}
+
+
+def test_quant_rejects_a_gemm_that_does_not_consume_the_tensor():
+    with pytest.raises(ValueError, match="wgrad"):
+        QuantizationConfig(enabled=True, dtype={"weight": {"wgrad": "fp8_e4m3"}})
 
 
 def test_quant_disabled_rule_dtype_stays_empty():
@@ -846,25 +869,33 @@ def test_quant_disabled_rule_dtype_stays_empty():
 def test_quant_dtype_is_mixable():
     q = QuantizationConfig(
         enabled=True,
-        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_weight": "bf16"},
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "bf16"},
     )
-    assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["grad_weight"] == "bf16"
+    assert q.dtype["weight"]["fwd"] == "fp8_e4m3"
+    assert q.dtype["grad_out"]["wgrad"] == "bf16"
 
 
 def test_quant_dtype_recipe_fp8():
     q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8"})
     assert q.dtype == {
-        "weight": "fp8_e4m3",
-        "act": "fp8_e4m3",
-        "grad_input": "fp8_e5m2",
-        "grad_weight": "fp8_e5m2",
+        "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
+        "act": {"fwd": "fp8_e4m3", "wgrad": "fp8_e4m3"},
+        "grad_out": {"dgrad": "fp8_e5m2", "wgrad": "fp8_e5m2"},
     }
 
 
-def test_quant_dtype_recipe_respects_explicit_operand():
-    # explicit grad_weight: bf16 overrides the recipe (torchao *_with_gw_hp)
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8", "grad_weight": "bf16"})
-    assert q.dtype["weight"] == "fp8_e4m3" and q.dtype["grad_weight"] == "bf16"
+def test_quant_dtype_recipe_respects_an_explicit_tensor():
+    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8", "grad_out": "bf16"})
+    assert q.dtype["weight"]["fwd"] == "fp8_e4m3"
+    assert q.dtype["grad_out"] == {"dgrad": "bf16", "wgrad": "bf16"}
+
+
+def test_quant_dtype_recipe_fills_the_gemms_a_scope_leaves_unset():
+    # the *_with_gw_hp cell: wgrad opts out, dgrad still follows the recipe
+    q = QuantizationConfig(
+        enabled=True, dtype={"recipe": "fp8", "grad_out": {"wgrad": "bf16"}}
+    )
+    assert q.dtype["grad_out"] == {"dgrad": "fp8_e5m2", "wgrad": "bf16"}
 
 
 def test_quant_unknown_recipe_raises():
@@ -913,29 +944,39 @@ def test_quant_block_shape_normalized_to_sentinel_off_blockwise(granularity):
     assert q.scaling["block_shape"] == (0, 0)
 
 
-def test_quant_recipe_sets_both_backward_grads():
+def test_quant_recipe_sets_both_backward_grad_slots():
     r = TrainingConfig(
         quantization={"enabled": True, "dtype": {"recipe": "fp8"}}
     ).quantization[0]
-    assert r.dtype["grad_input"] == r.dtype["grad_weight"] == "fp8_e5m2"
-    assert "grad" not in r.dtype
+    assert r.dtype["grad_out"]["dgrad"] == r.dtype["grad_out"]["wgrad"] == "fp8_e5m2"
 
 
-def test_quant_grad_weight_hp_override():
-    # gw_hp: keep only the weight-gradient GEMM in bf16
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8", "grad_weight": "bf16"})
-    assert q.dtype["grad_weight"] == "bf16" and q.dtype["grad_input"] == "fp8_e5m2"
+def test_quant_wgrad_hp_override():
+    # keep only the weight-gradient GEMM in bf16
+    q = QuantizationConfig(
+        enabled=True, dtype={"recipe": "fp8", "grad_out": {"wgrad": "bf16"}}
+    )
+    assert q.dtype["grad_out"] == {"dgrad": "fp8_e5m2", "wgrad": "bf16"}
 
 
-def test_quant_grad_input_hp_override():
-    # keep only the input-gradient (dgrad) GEMM in bf16
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8", "grad_input": "bf16"})
-    assert q.dtype["grad_input"] == "bf16" and q.dtype["grad_weight"] == "fp8_e5m2"
+def test_quant_dgrad_hp_override():
+    # keep only the input-gradient GEMM in bf16
+    q = QuantizationConfig(
+        enabled=True, dtype={"recipe": "fp8", "grad_out": {"dgrad": "bf16"}}
+    )
+    assert q.dtype["grad_out"] == {"dgrad": "bf16", "wgrad": "fp8_e5m2"}
 
 
 def test_quant_rejects_unknown_dtype_key():
     with pytest.raises(ValueError, match="dtype key"):
         QuantizationConfig(enabled=True, dtype={"bogus_grad": "bf16"})
+
+
+@pytest.mark.parametrize("retired", ["grad_input", "grad_weight", "dx", "dw"])
+def test_quant_rejects_retired_dtype_keys(retired):
+    # the old per-GEMM grad keys: the message has to name their replacement
+    with pytest.raises(ValueError, match="grad_out"):
+        QuantizationConfig(enabled=True, dtype={retired: "bf16"})
 
 
 def test_quant_rejects_unsupported_granularity():
@@ -948,7 +989,7 @@ def test_quant_rejects_unsupported_granularity():
 def test_training_config_normalizes_single_rule_to_list():
     tc = TrainingConfig(quantization={"enabled": True, "dtype": {"recipe": "fp8"}})
     assert isinstance(tc.quantization, list) and len(tc.quantization) == 1
-    assert tc.quantization[0].dtype["weight"] == "fp8_e4m3"
+    assert tc.quantization[0].dtype["weight"]["fwd"] == "fp8_e4m3"
 
 
 def test_training_config_accepts_list_of_rules():
@@ -962,10 +1003,9 @@ def test_training_config_accepts_list_of_rules():
     assert len(tc.quantization) == 2
     assert tc.quantization[0].include == ["*.mlp.*"]
     assert tc.quantization[1].dtype == {
-        "weight": "fp8_e4m3",
-        "act": "bf16",
-        "grad_input": "bf16",
-        "grad_weight": "bf16",
+        "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
+        "act": {"fwd": "bf16", "wgrad": "bf16"},
+        "grad_out": {"dgrad": "bf16", "wgrad": "bf16"},
     }
 
 
@@ -979,13 +1019,12 @@ def test_quant_disabled_stays_disabled():
 
 def test_quant_mxfp8_recipe_expands_dtype_and_scaling():
     q = QuantizationConfig(enabled=True, dtype={"recipe": "mxfp8"})
-    # mxfp8 is e4m3 on every operand (incl. grads): the MX GEMM only does
+    # mxfp8 is e4m3 on every slot (incl. grads): the MX GEMM only does
     # e4m3 x e4m3, and per-block rescaling gives e4m3 enough range for grads.
     assert q.dtype == {
-        "weight": "fp8_e4m3",
-        "act": "fp8_e4m3",
-        "grad_input": "fp8_e4m3",
-        "grad_weight": "fp8_e4m3",
+        "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
+        "act": {"fwd": "fp8_e4m3", "wgrad": "fp8_e4m3"},
+        "grad_out": {"dgrad": "fp8_e4m3", "wgrad": "fp8_e4m3"},
     }
     assert q.scaling == {
         "granularity": "blockwise",
@@ -1067,7 +1106,7 @@ def test_quant_mxfp8_normalizes_through_training_config():
         )
     )
     assert r.scaling["scale_dtype"] is torch.float8_e8m0fnu
-    assert r.dtype["weight"] == "fp8_e4m3"
+    assert r.dtype["weight"]["fwd"] == "fp8_e4m3"
 
 
 # ==================== latent_moe / latent_dim ====================
