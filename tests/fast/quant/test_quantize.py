@@ -236,6 +236,31 @@ def test_pow2_scale_roundtrips_within_error():
     assert (fq - x).norm() / x.norm() < 0.15
 
 
+@pytest.mark.parametrize(
+    ("fmt", "value", "code"),
+    [("fp8_e4m3", 2**-136, 2**-9), ("fp8_e5m2", 2**-143, 2**-16)],
+)
+def test_e8m0_tiny_nonzero_block_uses_minimum_scale(fmt, value, code):
+    x = torch.zeros(1, 32)
+    x[0, 0] = value
+    xq, scale = quantize_operand(x, -1, fmt, _MXFP8)
+
+    assert torch.equal(scale, torch.full_like(scale, 2**-127))
+    assert xq.float()[0, 0] == code
+    assert torch.count_nonzero(xq) == 1
+    assert torch.equal(dequantize_operand(xq, scale, -1, _MXFP8), x)
+
+
+@pytest.mark.parametrize("fmt", ["fp8_e4m3", "fp8_e5m2"])
+def test_e8m0_zero_block_uses_minimum_scale(fmt):
+    x = torch.zeros(1, 32)
+    xq, scale = quantize_operand(x, -1, fmt, _MXFP8)
+
+    assert torch.equal(scale, torch.full_like(scale, 2**-127))
+    assert torch.count_nonzero(xq) == 0
+    assert torch.count_nonzero(dequantize_operand(xq, scale, -1, _MXFP8)) == 0
+
+
 @pytest.mark.parametrize("granularity", ["tensorwise", "rowwise"])
 def test_fp32_scale_never_clips(granularity):
     # scale = amax/qmax lands the extremal element exactly on qmax, so the clamp in

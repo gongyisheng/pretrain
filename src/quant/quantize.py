@@ -51,8 +51,11 @@ def _compute_scale(
     """fp32 dequant scale from per-block amax."""
     if scale_dtype is torch.float8_e8m0fnu:
         # e8m0 is a bare 8-bit exponent: a power of two, biased to cover +-127.
-        exp = torch.ceil(torch.log2(amax.clamp_min(EPS) / str_to_qmax(fmt)))
-        return torch.exp2(exp.clamp(-127, 127))
+        # Clamping the exponent, rather than amax, preserves the scale format's
+        # full lower range. log2(0) is -inf and therefore selects 2**-127.
+        exp = torch.ceil(torch.log2(amax / str_to_qmax(fmt)))
+        # Canonicalize through E8M0 because CUDA exp2 is one ULP low at -127.
+        return torch.exp2(exp.clamp(-127, 127)).to(scale_dtype).float()
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 
