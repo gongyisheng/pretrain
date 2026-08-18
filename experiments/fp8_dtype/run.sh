@@ -5,17 +5,16 @@
 set -e
 cd "$(dirname "$0")/../.."
 
+# bf16 seeds 42/43/44 run first: their spread is the noise floor for every quant folder.
 configs=(
     qwen3_51m_bf16
+    qwen3_51m_bf16_seed43
+    qwen3_51m_bf16_seed44
     qwen3_51m_fp8_std
     qwen3_51m_fp8_alle4m3
     qwen3_51m_fp8_alle5m2
     qwen3_51m_fp8_std_gwhp
     qwen3_51m_fp8_std_gihp
-    qwen3_51m_fp8_e4m3_actweight
-    qwen3_51m_fp8_e5m2_actweight
-    qwen3_51m_fp8_e4m3_weightonly
-    qwen3_51m_fp8_e5m2_weightonly
 )
 
 for config in "${configs[@]}"; do
