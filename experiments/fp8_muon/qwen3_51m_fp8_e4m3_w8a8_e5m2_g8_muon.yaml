@@ -45,7 +45,7 @@ training:
       granularity: tensorwise
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_muon/qwen3_51m_fp8_std_muon/
+  checkpoint_dir: checkpoints/fp8_muon/qwen3_51m_fp8_e4m3_w8a8_e5m2_g8_muon/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -68,5 +68,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-fp8-muon
-  wandb_run_name: qwen3-51m-fp8-std-muon
+  wandb_run_name: qwen3-51m-fp8-e4m3-w8a8-e5m2-g8-muon
   log_every: 10
