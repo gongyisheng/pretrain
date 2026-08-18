@@ -11,7 +11,6 @@ from src.quant.quantize import quantize_operand
 BATCH_SIZE = 8
 SEQUENCE_LENGTH = 1024
 TOP_K = 8
-EXPERT_COUNT = 64
 GROUPED_LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
 
 
@@ -89,6 +88,23 @@ def _make_random_tensor(
     return torch.randn(shape, device=device, dtype=dtype) * 0.1
 
 
+def _make_grouped_counts_and_offsets(
+    batch_size: int,
+    counts: Sequence[int] | None,
+    device: str,
+) -> tuple[list[int], torch.Tensor]:
+    if counts is None:
+        counts = [
+            batch_size * count for count in (72, 88, 104, 120, 136, 152, 168, 184)
+        ] * 8
+    else:
+        counts = [batch_size * count for count in counts]
+    offsets = torch.tensor(counts, device=device, dtype=torch.int32).cumsum(
+        0, dtype=torch.int32
+    )
+    return counts, offsets
+
+
 def make_grouped_mm_inputs(
     shape: GemmShape,
     layout: str,
@@ -99,28 +115,24 @@ def make_grouped_mm_inputs(
     seed: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     torch.manual_seed(seed)
-    counts = [
-        batch_size * count for count in (72, 88, 104, 120, 136, 152, 168, 184)
-    ] * 8
+    counts, offs = _make_grouped_counts_and_offsets(batch_size, None, device)
+    expert_count = len(counts)
     rows = sum(counts)
-    offs = torch.tensor(counts, device=device, dtype=torch.int32).cumsum(
-        0, dtype=torch.int32
-    )
 
     if layout == "ragged_m":
         a = _make_random_tensor((rows, shape.k), device, dtype)
-        b = _make_random_tensor((EXPERT_COUNT, shape.k, shape.n), device, dtype)
+        b = _make_random_tensor((expert_count, shape.k, shape.n), device, dtype)
     elif layout == "ragged_k":
         a = _make_random_tensor((rows, shape.k), device, dtype).mT
         b = _make_random_tensor((rows, shape.n), device, dtype)
     elif layout == "ragged_n":
-        a = _make_random_tensor((EXPERT_COUNT, shape.k, shape.n), device, dtype)
+        a = _make_random_tensor((expert_count, shape.k, shape.n), device, dtype)
         b = _make_random_tensor((shape.n, rows), device, dtype)
     else:
         raise ValueError(f"unknown grouped GEMM layout: {layout}")
 
     bias = (
-        _make_random_tensor((EXPERT_COUNT, shape.n), device, dtype)
+        _make_random_tensor((expert_count, shape.n), device, dtype)
         if with_bias
         else None
     )
@@ -172,9 +184,10 @@ def make_scaled_mm_inputs(
 def make_scaled_grouped_mm_inputs(
     shape: GemmShape,
     layout: str,
-    counts: Sequence[int],
     format: QuantFormatCase,
     scaling: QuantScaleCase,
+    batch_size: int = BATCH_SIZE,
+    counts: Sequence[int] | None = None,
     m: int = 32,
     scale_dtype: torch.dtype = torch.float32,
     dtype: torch.dtype = torch.bfloat16,
@@ -189,10 +202,8 @@ def make_scaled_grouped_mm_inputs(
     int,
 ]:
     torch.manual_seed(seed)
+    counts, offs = _make_grouped_counts_and_offsets(batch_size, counts, device)
     expert_count, rows = len(counts), sum(counts)
-    offs = torch.tensor(counts, device=device, dtype=torch.int32).cumsum(
-        0, dtype=torch.int32
-    )
     scaling_config = {
         "granularity": scaling.granularity,
         "block_shape": scaling.block_shape,

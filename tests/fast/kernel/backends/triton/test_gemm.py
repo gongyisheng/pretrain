@@ -512,9 +512,10 @@ def test_scaled_grouped_mm_oracle_agrees_with_dequant():
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         "ragged_m",
-        counts,
         FP8_E4M3_FORMAT,
         ROWWISE_SCALING,
+        batch_size=1,
+        counts=counts,
     )
     oracle = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     K = aq.shape[1]
@@ -551,7 +552,12 @@ def test_scaled_grouped_mm_oracle_agrees_with_dequant():
 )
 def test_scaled_grouped_layouts_match_oracle(layout, format, scaling, out_dtype):
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
-        SCALED_GROUPED_SHAPE, layout, _SCALED_COUNTS, format, scaling
+        SCALED_GROUPED_SHAPE,
+        layout,
+        format,
+        scaling,
+        batch_size=1,
+        counts=_SCALED_COUNTS,
     )
     got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, out_dtype, kbs)
     ref = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, out_dtype, kbs)
@@ -580,9 +586,10 @@ def test_scaled_grouped_mxfp8_layouts_match_oracle(layout):
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         layout,
-        _SCALED_COUNTS,
         FP8_E4M3_FORMAT,
         BLOCK_32_SCALING,
+        batch_size=1,
+        counts=_SCALED_COUNTS,
         scale_dtype=torch.float8_e8m0fnu,
     )
     got = triton_gemm.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -608,9 +615,10 @@ def test_scaled_grouped_mxfp8_ragged_m_matches_oracle_when_k_is_not_a_multiple_o
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         GemmShape("scaled-grouped-tail", 163, 48),
         "ragged_m",
-        _SCALED_COUNTS,
         FP8_E4M3_FORMAT,
         scaling,
+        batch_size=1,
+        counts=_SCALED_COUNTS,
         scale_dtype=torch.float8_e8m0fnu,
     )
     got = triton_gemm.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -629,9 +637,10 @@ def test_scaled_grouped_mxfp8_agrees_with_scaled_path(layout):
     args = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         layout,
-        [5, 0, 130, 41, 1],
         FP8_E4M3_FORMAT,
         BLOCK_32_SCALING,
+        batch_size=1,
+        counts=[5, 0, 130, 41, 1],
         seed=1,
         scale_dtype=torch.float8_e8m0fnu,
     )
@@ -653,9 +662,10 @@ def test_scaled_grouped_mxfp8_adds_no_error_over_dequantizing(layout):
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         layout,
-        _SCALED_COUNTS,
         FP8_E4M3_FORMAT,
         BLOCK_32_SCALING,
+        batch_size=1,
+        counts=_SCALED_COUNTS,
         scale_dtype=torch.float8_e8m0fnu,
     )
     got = triton_gemm.mxfp8_scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -674,9 +684,10 @@ def test_scaled_grouped_mxfp8_kernel_declines_block_size_zero():
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         "ragged_m",
-        _SCALED_COUNTS,
         FP8_E4M3_FORMAT,
         TENSORWISE_SCALING,
+        batch_size=1,
+        counts=_SCALED_COUNTS,
         scale_dtype=torch.float8_e8m0fnu,
     )
     with pytest.raises(ValueError):
@@ -689,10 +700,15 @@ def test_scaled_grouped_layouts_uneven_groups(layout):
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         layout,
-        counts,
         FP8_E4M3_FORMAT,
         BLOCK_32_SCALING,
+        batch_size=2,
+        counts=counts,
         seed=1,
+    )
+    torch.testing.assert_close(
+        offs,
+        torch.tensor([10, 10, 270, 352, 354], device=offs.device, dtype=torch.int32),
     )
     got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     ref = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -707,9 +723,10 @@ def test_scaled_grouped_ragged_n_shape_and_group_isolation():
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         "ragged_n",
-        counts,
         FP8_E4M3_FORMAT,
         ROWWISE_SCALING,
+        batch_size=1,
+        counts=counts,
         m=32,
     )
     got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -726,9 +743,10 @@ def test_scaled_grouped_ragged_k_empty_group_is_zero():
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         "ragged_k",
-        counts,
         FP8_E4M3_FORMAT,
         BLOCK_32_SCALING,
+        batch_size=1,
+        counts=counts,
     )
     out = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
     assert (out[1] == 0).all()
@@ -740,9 +758,10 @@ def test_scaled_grouped_layouts_out_dtype(layout, out_dtype):
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         layout,
-        _SCALED_COUNTS,
         FP8_E4M3_FORMAT,
         ROWWISE_SCALING,
+        batch_size=1,
+        counts=_SCALED_COUNTS,
         seed=3,
     )
     out = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, out_dtype, kbs)
@@ -763,9 +782,10 @@ def test_scaled_grouped_bias_matches_oracle(layout, scaling):
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         layout,
-        _SCALED_COUNTS,
         FP8_E4M3_FORMAT,
         scaling,
+        batch_size=1,
+        counts=_SCALED_COUNTS,
     )
     bias = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16)
     got = triton_gemm.scaled_grouped_mm(
@@ -783,9 +803,10 @@ def test_scaled_grouped_bias_none_unchanged():
     aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         SCALED_GROUPED_SHAPE,
         "ragged_m",
-        _SCALED_COUNTS,
         FP8_E4M3_FORMAT,
         ROWWISE_SCALING,
+        batch_size=1,
+        counts=_SCALED_COUNTS,
     )
     torch.testing.assert_close(
         triton_gemm.scaled_grouped_mm(
