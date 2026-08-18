@@ -94,9 +94,11 @@ def _compute_codes(
             probability = (xq - lower) / ulp
             xq = torch.where(torch.rand_like(xq) < probability, lower + ulp, lower)
         else:
-            # RNE otherwise: the cast below is round-to-nearest-even in hardware
-            return xq.to(str_to_dtype(fmt))
-    raise ValueError(f"Unknown fmt:{fmt}")
+            # RNE otherwise: the final cast is round-to-nearest-even in hardware
+            pass
+    else:
+        raise ValueError(f"Unknown fmt:{fmt}")
+    return xq.to(str_to_dtype(fmt))
 
 
 def _check_tile_dim(dim: int) -> None:
