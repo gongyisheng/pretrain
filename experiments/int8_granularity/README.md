@@ -13,14 +13,14 @@ Smaller scale blocks reduce weight quantization error and improve validation los
 | qwen3_51m_bf16 | bf16 | — | 16 |
 | qwen3_51m_int8_tensorwise | tensorwise | — | 8.00 |
 | qwen3_51m_int8_rowwise | rowwise | — | 8.06 |
-| qwen3_51m_int8_blockwise1d_128 | blockwise-1D | (1, 128) | 8.25 |
-| qwen3_51m_int8_blockwise1d_64 | blockwise-1D | (1, 64) | 8.50 |
-| qwen3_51m_int8_blockwise1d_32 | blockwise-1D | (1, 32) | 9.00 |
-| qwen3_51m_int8_blockwise1d_16 | blockwise-1D | (1, 16) | 10.00 |
-| qwen3_51m_int8_blockwise2d_128 | blockwise-2D | (128, 128) | 8.002 |
-| qwen3_51m_int8_blockwise2d_64 | blockwise-2D | (64, 64) | 8.008 |
-| qwen3_51m_int8_blockwise2d_32 | blockwise-2D | (32, 32) | 8.031 |
-| qwen3_51m_int8_blockwise2d_16 | blockwise-2D | (16, 16) | 8.125 |
+| qwen3_51m_int8_blockwise1d_128 | blockwise1D | (1, 128) | 8.25 |
+| qwen3_51m_int8_blockwise1d_64 | blockwise1D | (1, 64) | 8.50 |
+| qwen3_51m_int8_blockwise1d_32 | blockwise1D | (1, 32) | 9.00 |
+| qwen3_51m_int8_blockwise1d_16 | blockwise1D | (1, 16) | 10.00 |
+| qwen3_51m_int8_blockwise2d_128 | blockwise2D | (128, 128) | 8.002 |
+| qwen3_51m_int8_blockwise2d_64 | blockwise2D | (64, 64) | 8.008 |
+| qwen3_51m_int8_blockwise2d_32 | blockwise2D | (32, 32) | 8.031 |
+| qwen3_51m_int8_blockwise2d_16 | blockwise2D | (16, 16) | 8.125 |
 
 All runs: ~51M params, seq_len=1024, batch=16, grad_accum=16, 50K steps, Muon (`match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup steps, min_lr=5e-5, OpenWebText, bf16 mixed precision, seed 42, and `eval_steps: 100`.
 
