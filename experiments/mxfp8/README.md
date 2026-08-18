@@ -1,10 +1,14 @@
 # MXFP8 W8A8 Gradient and Scale Ablation
 
-Measure the training cost of MXFP8's E8M0 power-of-two scales independently from the cost of quantizing output gradients. All quantized runs use E4M3 values and blockwise 1D `(1, 32)` scaling at Qwen3-51M.
+This experiment uses E4M3 blockwise 1D `(1, 32)` quantization with FP32 scales as the control. MXFP8 replaces those FP32 scales with E8M0 power-of-two scales; gradient quantization is a separate ablation.
+
+## Mental model
+
+Think of MXFP8 here as the accelerated variant of the same blockwise 1D `(1, 32)` FP8 setup: the control stores one FP32 scale per 32 values, while MXFP8 stores that scale as E8M0. This reduces scale metadata from 32 to 8 bits per block and enables native MXFP8 kernels on SM100+ GPUs. On older GPUs, the fallback remains useful for numerical comparison but cannot establish an MXFP8 speedup.
 
 ## Hypothesis
 
-FP32 scales are the higher-precision control. Replacing them with E8M0 scales reduces scale metadata from 32 to 8 bits per 32-value block, but adds power-of-two scale rounding. Quantizing `grad_out` to E4M3 introduces an independent backward-GEMM error source. MXFP8 is the combination of E4M3 W8A8G8 and E8M0 scales.
+At fixed E4M3 values and blockwise 1D `(1, 32)` scaling, replacing FP32 scales with E8M0 scales may improve throughput and reduce scale metadata, but adds power-of-two scale rounding. Quantizing `grad_out` to E4M3 introduces an independent backward-GEMM error source. The full MXFP8 training recipe combines E4M3 W8A8G8 with E8M0 scales.
 
 ## Setup
 
