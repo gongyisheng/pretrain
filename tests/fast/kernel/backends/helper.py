@@ -1,8 +1,11 @@
 """Shared workloads for GEMM backend precision tests."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
+
+from src.quant.quantize import quantize_operand
 
 
 BATCH_SIZE = 8
@@ -87,7 +90,7 @@ def _make_random_tensor(
 
 
 def make_grouped_mm_inputs(
-    projection: GemmShape,
+    shape: GemmShape,
     layout: str,
     with_bias: bool,
     dtype: torch.dtype = torch.bfloat16,
@@ -105,23 +108,19 @@ def make_grouped_mm_inputs(
     )
 
     if layout == "ragged_m":
-        a = _make_random_tensor((rows, projection.k), device, dtype)
-        b = _make_random_tensor(
-            (EXPERT_COUNT, projection.k, projection.n), device, dtype
-        )
+        a = _make_random_tensor((rows, shape.k), device, dtype)
+        b = _make_random_tensor((EXPERT_COUNT, shape.k, shape.n), device, dtype)
     elif layout == "ragged_k":
-        a = _make_random_tensor((rows, projection.k), device, dtype).mT
-        b = _make_random_tensor((rows, projection.n), device, dtype)
+        a = _make_random_tensor((rows, shape.k), device, dtype).mT
+        b = _make_random_tensor((rows, shape.n), device, dtype)
     elif layout == "ragged_n":
-        a = _make_random_tensor(
-            (EXPERT_COUNT, projection.k, projection.n), device, dtype
-        )
-        b = _make_random_tensor((projection.n, rows), device, dtype)
+        a = _make_random_tensor((EXPERT_COUNT, shape.k, shape.n), device, dtype)
+        b = _make_random_tensor((shape.n, rows), device, dtype)
     else:
         raise ValueError(f"unknown grouped GEMM layout: {layout}")
 
     bias = (
-        _make_random_tensor((EXPERT_COUNT, projection.n), device, dtype)
+        _make_random_tensor((EXPERT_COUNT, shape.n), device, dtype)
         if with_bias
         else None
     )
@@ -129,11 +128,12 @@ def make_grouped_mm_inputs(
 
 
 def make_scaled_mm_inputs(
-    workload: GemmShape,
-    format_pair: QuantFormatCase,
-    scaling_case: QuantScaleCase,
-    mx_scales: bool,
+    shape: GemmShape,
+    format: QuantFormatCase,
+    scaling: QuantScaleCase,
     with_bias: bool,
+    scale_dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.bfloat16,
     batch_size: int = BATCH_SIZE,
     device: str = "cuda",
     seed: int = 0,
@@ -146,96 +146,110 @@ def make_scaled_mm_inputs(
     int,
     torch.Tensor | None,
 ]:
-    from src.quant.quantize import quantize_operand
-
     torch.manual_seed(seed)
     rows = batch_size * SEQUENCE_LENGTH
-    a = _make_random_tensor((rows, workload.k), device)
-    b = _make_random_tensor((workload.k, workload.n), device)
-    scaling = {
-        "granularity": scaling_case.granularity,
-        "block_shape": scaling_case.block_shape,
-        "scale_dtype": torch.float8_e8m0fnu if mx_scales else torch.float32,
+    a = _make_random_tensor((rows, shape.k), device, dtype)
+    b = _make_random_tensor((shape.k, shape.n), device, dtype)
+    scaling_config = {
+        "granularity": scaling.granularity,
+        "block_shape": scaling.block_shape,
+        "scale_dtype": scale_dtype,
     }
-    aq, sa = quantize_operand(a, -1, format_pair.a_format, scaling)
-    bq, sb = quantize_operand(b, -2, format_pair.b_format, scaling)
-    bias = _make_random_tensor((workload.n,), device) if with_bias else None
+    aq, sa = quantize_operand(a, -1, format.a_format, scaling_config)
+    bq, sb = quantize_operand(b, -2, format.b_format, scaling_config)
+    bias = _make_random_tensor((shape.n,), device, dtype) if with_bias else None
     return (
         aq,
         bq,
         sa,
         sb,
-        torch.bfloat16,
-        scaling_case.block_size,
+        dtype,
+        scaling.block_size,
         bias,
     )
 
 
 def make_scaled_grouped_mm_inputs(
-    layout,
-    counts,
-    gran,
-    bs,
-    fmt,
-    M=32,
-    K=64,
-    N=48,
-    seed=0,
-    scale_dtype=torch.float32,
-):
-    """Quantized operands and scales for one ragged scaled grouped GEMM layout.
-
-    Scales mirror each operand's axis order, replacing the contraction axis with the
-    scale-block axis. A zero `bs` (row/tensorwise) uses one block per contraction
-    segment.
-    """
-    from src.quant.quantize import quantize_operand
-
+    shape: GemmShape,
+    layout: str,
+    counts: Sequence[int],
+    format: QuantFormatCase,
+    scaling: QuantScaleCase,
+    m: int = 32,
+    scale_dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.bfloat16,
+    device: str = "cuda",
+    seed: int = 0,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    int,
+]:
     torch.manual_seed(seed)
-    E, R = len(counts), sum(counts)
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    scaling = {
-        "granularity": gran,
-        "block_shape": (1, bs) if bs else (0, 0),
+    expert_count, rows = len(counts), sum(counts)
+    offs = torch.tensor(counts, device=device, dtype=torch.int32).cumsum(
+        0, dtype=torch.int32
+    )
+    scaling_config = {
+        "granularity": scaling.granularity,
+        "block_shape": scaling.block_shape,
         "scale_dtype": scale_dtype,
     }
 
     if layout == "ragged_m":
-        aq, sa = quantize_operand(_make_random_tensor((R, K), "cuda"), -1, fmt, scaling)
-        b = torch.stack([_make_random_tensor((K, N), "cuda") for _ in range(E)])
-        bq, sb = quantize_operand(b, -2, fmt, scaling)
-        return aq, bq, sa, sb, offs, bs
+        aq, sa = quantize_operand(
+            _make_random_tensor((rows, shape.k), device, dtype),
+            -1,
+            format.a_format,
+            scaling_config,
+        )
+        b = torch.stack(
+            [
+                _make_random_tensor((shape.k, shape.n), device, dtype)
+                for _ in range(expert_count)
+            ]
+        )
+        bq, sb = quantize_operand(b, -2, format.b_format, scaling_config)
+        return aq, bq, sa, sb, offs, scaling.block_size
 
     if layout == "ragged_k":
         aq, sa = quantize_operand(
-            _make_random_tensor((R, M), "cuda"),
+            _make_random_tensor((rows, m), device, dtype),
             -2,
-            fmt,
-            scaling,
+            format.a_format,
+            scaling_config,
             offs=offs,
             ragged_dim=-2,
         )
         bq, sb = quantize_operand(
-            _make_random_tensor((R, N), "cuda"),
+            _make_random_tensor((rows, shape.n), device, dtype),
             -2,
-            fmt,
-            scaling,
+            format.b_format,
+            scaling_config,
             offs=offs,
             ragged_dim=-2,
         )
-        return aq.mT, bq, sa.mT, sb, offs, bs
+        return aq.mT, bq, sa.mT, sb, offs, scaling.block_size
 
     if layout == "ragged_n":
-        a = torch.stack([_make_random_tensor((M, K), "cuda") for _ in range(E)])
-        aq, sa = quantize_operand(a, -1, fmt, scaling)
+        a = torch.stack(
+            [
+                _make_random_tensor((m, shape.k), device, dtype)
+                for _ in range(expert_count)
+            ]
+        )
+        aq, sa = quantize_operand(a, -1, format.a_format, scaling_config)
         bqT, sbT = quantize_operand(
-            _make_random_tensor((R, K), "cuda"),
+            _make_random_tensor((rows, shape.k), device, dtype),
             -1,
-            fmt,
-            scaling,
+            format.b_format,
+            scaling_config,
             offs=offs,
             ragged_dim=-2,
         )
-        return aq, bqT.mT, sa, sbT.mT, offs, bs
+        return aq, bqT.mT, sa, sbT.mT, offs, scaling.block_size
 
     raise ValueError(layout)
