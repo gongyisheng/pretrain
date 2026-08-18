@@ -62,6 +62,6 @@ nohup bash experiments/fp8_muon/run.sh > logs/fp8_muon_51m.log 2>&1 &
 
 - Compare the FP8 Muon−AdamW gap here against the in-experiment bf16 baseline pair — a preserved gap supports outcome (1), a shrunk gap supports (2). (`experiments/muon_optm/` is a looser external reference.)
 - `optim/momentum_norm` and `optim/variance_norm` in W&B reflect only the AdamW-routed params (Muon's `momentum_buffer` is not aggregated by `metric_utils`).
-- tensorwise is the most aggressive recipe; if Muon's edge collapses here, rerun with `rowwise` / `rowwise_with_gw_hp` (see `experiments/fp8_granularity/`) to see whether tighter scaling restores it.
+- tensorwise is the most aggressive recipe; if Muon's edge collapses here, rerun with rowwise or blockwise scaling (see `experiments/fp8_granularity/`) to see whether tighter scaling restores it.
 - If turnaround matters, compare the 5K/10K-step intermediate eval losses before committing all runs to 50K.
 - std vs alle4m3 isolates the grad format: if alle4m3 degrades (or diverges), e5m2's extra dynamic range on gradients is load-bearing at tensorwise scaling; if it matches std, the grad mantissa precision wins the trade. Watch whether the effect differs between AdamW and Muon.

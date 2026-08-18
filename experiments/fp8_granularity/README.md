@@ -1,56 +1,34 @@
-# FP8 Scaling Granularity Ablation
+# FP8 Scaling-Granularity Sweep
 
-Compare end-task loss and throughput across FP8 scaling granularities (`tensorwise`, `rowwise`, `rowwise_with_gw_hp`) against a bf16 baseline at Qwen3-51M, using the in-house `src/quant/` framework (cuBLASLt FP8 GEMM via `torch._scaled_mm`). The independent variable is the scaling granularity; the bf16 run anchors the loss/throughput reference.
+Sweep FP8 scale granularity at Qwen3-51M against a bf16 baseline. The primary comparison holds the FP8 dtype recipe fixed and varies only scale layout.
 
 ## Hypothesis
 
-FP8 GEMM (E4M3 forward operands, E5M2 grad, hardware-accelerated on Blackwell SM 12.0) should:
-1. Match bf16 final loss within noise — the high-dynamic-range ops (softmax, RMSNorm, residual stream, cross-entropy) stay in bf16, so FP8 noise is bounded to the Q/K/V/O and FFN GEMMs.
-2. Deliver measurable throughput gain (tokens/sec) over bf16 (matmul share of step time).
-
-The recipes trade accuracy against kernel cost:
-- `tensorwise` — one scale per tensor; cheapest, most aggressive quantization.
-- `rowwise` — per-row (per-token) / per-column (per-output-channel) scales; tighter dynamic range, slightly slower kernel.
-- `rowwise_with_gw_hp` — rowwise, but the weight-gradient GEMM (`dW = dYᵀ@X`) runs in bf16 (`dtype.grad_out: {wgrad: bf16}`); forward + dgrad stay fp8. Protects the weight-gradient signal at some throughput cost.
-
-If (1) fails with `tensorwise`, expect `rowwise` / `rowwise_with_gw_hp` to recover loss at some throughput cost.
-If (2) is flat, the bottleneck is data movement / non-GEMM kernels, not the matmul itself.
+Smaller FP8 scale blocks reduce quantization error and improve validation loss, at the cost of scale storage and kernel overhead. `tensorwise` is the cheapest and most aggressive setting; rowwise and blockwise settings should trade throughput for accuracy.
 
 ## Setup
 
-All hyperparameters are matched between bf16 and fp8. The only independent variable is the `training.quantization` block. Same seed (default 42), same data order, same LR schedule.
+| Config | Granularity | `block_shape` | W/A/G format | Approx params |
+|---|---|---|---|---|
+| `qwen3_51m_bf16` | bf16 | — | bf16 | ~51M |
+| `qwen3_51m_fp8_tensorwise` | tensorwise | — | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_rowwise` | rowwise | — | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_blockwise1d_16` | blockwise 1D | `(1, 16)` | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_blockwise1d_32` | blockwise 1D | `(1, 32)` | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_blockwise1d_64` | blockwise 1D | `(1, 64)` | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_blockwise1d_128` | blockwise 1D | `(1, 128)` | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_blockwise2d_16` | blockwise 2D | `(16, 16)` | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_blockwise2d_32` | blockwise 2D | `(32, 32)` | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_blockwise2d_64` | blockwise 2D | `(64, 64)` | E4M3/E4M3/E5M2 | ~51M |
+| `qwen3_51m_fp8_blockwise2d_128` | blockwise 2D | `(128, 128)` | E4M3/E4M3/E5M2 | ~51M |
 
-| Config | d_model | layers | heads/kv | inter_size | quant | granularity | Approx params |
-|---|---|---|---|---|---|---|---|
-| qwen3_51m_bf16 | 512 | 8 | 8/4 | 2048 | off | — | ~51M |
-| qwen3_51m_fp8_tensorwise | 512 | 8 | 8/4 | 2048 | fp8 | tensorwise | ~51M |
-| qwen3_51m_fp8_rowwise | 512 | 8 | 8/4 | 2048 | fp8 | rowwise | ~51M |
-| qwen3_51m_fp8_rowwise_with_gw_hp | 512 | 8 | 8/4 | 2048 | fp8 | rowwise + gw_hp | ~51M |
+All configs use ~51M parameters: `d_model=512`, 8 layers, 8/4 Q/KV heads, `intermediate_size=1536`, and `max_seq_len=1024`. They use OpenWebText, batch size 16, gradient accumulation 16, 50K steps, bf16 mixed precision, Muon (`match_rms_adamw`, momentum 0.95, Nesterov), learning rate 5e-4, cosine decay with 1,500 warmup steps, and minimum learning rate 5e-5. Checkpoints are every 5,000 steps; evaluation is every 100 steps for 25 batches.
 
-`exclude: [lm_head]` for all FP8 runs (lm_head stays in bf16; numerically sensitive under tied embeddings). fp8 uses `dtype: {recipe: fp8}` → weight/act `fp8_e4m3`, grad `fp8_e5m2`.
-
-All runs: seq_len=1024, batch=16, grad_accum=16 (effective batch=256, ~262K tok/step), 50K steps (~13B tokens), Muon optimizer (`muon_adjust_lr_fn: match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup, min_lr=5e-5, OpenWebText.
-
-## What runs in FP8
-
-For each FP8 run, the converter (`src/quant/convert.py:apply_quantization`) swaps eligible `nn.Linear` modules to `QuantLinear`; only the per-layer GEMM operands are cast to FP8 on the fly (dynamic scaling). Everything else (RoPE, RMSNorm, qk_norm, flash/flex attention, SwiGLU, residuals, embeddings, lm_head, cross-entropy, optimizer state) stays in bf16 / fp32. hp master weights are preserved.
-
-The `quant` block:
-```yaml
-training:
-  mixed_precision: bf16
-  quantization:
-    enabled: true
-    dtype: {recipe: fp8}       # weight/act fp8_e4m3, grad fp8_e5m2
-    scaling: {granularity: tensorwise}   # or rowwise
-    exclude: [lm_head]
-```
-
-Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 6000, SM 12.0) the runs use Blackwell's FP8 path in cuBLASLt.
+The primary FP8 configs explicitly set E4M3 for weights and activations and E5M2 for output gradients. `lm_head` remains bf16 in every quantized run. Tensorwise, rowwise, and blockwise FP8 GEMMs dispatch to the in-house Triton scaled-GEMM backend on SM 8.9+ GPUs; they do not use the cuBLASLt MXFP8 path.
 
 ## Run
 
-The script runs the bf16 baseline followed by both FP8 recipes.
+The primary sweep runs 11 recipes; the weight-transpose ablation adds four.
 
 ```bash
 nohup bash experiments/fp8_granularity/run.sh > logs/fp8_granularity_51m.log 2>&1 &
@@ -58,15 +36,58 @@ nohup bash experiments/fp8_granularity/run.sh > logs/fp8_granularity_51m.log 2>&
 
 ## Results
 
-| Model | Precision | Recipe | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
-|---|---|---|---|---|---|---|
-| 51M | bf16 | — | | | | 1.00× |
-| 51M | fp8 | tensorwise | | | | |
-| 51M | fp8 | rowwise | | | | |
-| 51M | fp8 | rowwise_with_gw_hp | | | | |
+| Model | Precision | Granularity | `block_shape` | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
+|---|---|---|---|---|---|---|---|
+| 51M | bf16 | — | — | | | | 1.00× |
+| 51M | fp8 | tensorwise | — | | | | |
+| 51M | fp8 | rowwise | — | | | | |
+| 51M | fp8 | blockwise 1D | (1, 16) | | | | |
+| 51M | fp8 | blockwise 1D | (1, 32) | | | | |
+| 51M | fp8 | blockwise 1D | (1, 64) | | | | |
+| 51M | fp8 | blockwise 1D | (1, 128) | | | | |
+| 51M | fp8 | blockwise 2D | (16, 16) | | | | |
+| 51M | fp8 | blockwise 2D | (32, 32) | | | | |
+| 51M | fp8 | blockwise 2D | (64, 64) | | | | |
+| 51M | fp8 | blockwise 2D | (128, 128) | | | | |
 
 ## Notes
 
-- Compare `tensorwise` vs `rowwise` vs `rowwise_with_gw_hp` for the loss/throughput trade-off.
-- If `lm_head` ends up dominating final loss noise, drop it from `exclude` only after the dense-only ablation is clean.
-- Throughput gain at 51M is modest — the model is small enough that non-GEMM kernels are a meaningful fraction of step time.
+- Compare FP8 runs with the bf16 baseline using the mean validation loss over the final 10 evaluations.
+- At this model size, non-GEMM kernels can limit end-to-end throughput gains.
+
+## Weight-transpose consistency
+
+This separate ablation holds the FP8 block extent at 32 and keeps activations in bf16. It compares 1D blocks, which re-partition a weight when it is transposed between forward and dgrad, with square 2D blocks, whose tile partition transposes consistently.
+
+### Hypothesis
+
+If inconsistent weight blocking is a material error source, `(32, 32)` should improve loss or stability over `(1, 32)`. The G16 pair isolates this effect with bf16 output gradients; the G8 pair tests whether quantizing the output-gradient operand changes that conclusion.
+
+### Setup
+
+| Config | Weight / activation / grad-out | `block_shape` | GEMM behavior | Approx params |
+|---|---|---|---|---|
+| `qwen3_51m_fp8_blockwise1d_32_w8a16g16` | E4M3 / bf16 / bf16 | `(1, 32)` | fake-quant + bf16 GEMMs | ~51M |
+| `qwen3_51m_fp8_blockwise2d_32_w8a16g16` | E4M3 / bf16 / bf16 | `(32, 32)` | fake-quant + bf16 GEMMs | ~51M |
+| `qwen3_51m_fp8_blockwise1d_32_w8a16g8` | E4M3 / bf16 / E4M3 | `(1, 32)` | two quantized operands only in dgrad | ~51M |
+| `qwen3_51m_fp8_blockwise2d_32_w8a16g8` | E4M3 / bf16 / E4M3 | `(32, 32)` | two quantized operands only in dgrad | ~51M |
+
+All four use fp32 scales and exclude `lm_head`; their batch size, gradient accumulation, checkpoint, and evaluation settings match the primary sweep. G16 has at most one quantized operand per GEMM, so quantization is dequantized before each bf16 matmul. In G8, forward and wgrad still have one quantized operand; dgrad is the only GEMM with two quantized operands.
+
+### Run
+
+`run.sh` runs this ablation after the primary sweep.
+
+### Results
+
+| Model | Grad-out | Granularity | `block_shape` | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
+|---|---|---|---|---|---|---|---|
+| 51M | bf16 | blockwise 1D | `(1, 32)` | | | | |
+| 51M | bf16 | blockwise 2D | `(32, 32)` | | | | |
+| 51M | E4M3 | blockwise 1D | `(1, 32)` | | | | |
+| 51M | E4M3 | blockwise 2D | `(32, 32)` | | | | |
+
+### Notes
+
+- Compare 1D and 2D within each grad-out precision before comparing G16 with G8.
+- Record instability, divergence, or loss spikes in addition to final-window validation loss.

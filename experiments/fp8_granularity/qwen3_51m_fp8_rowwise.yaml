@@ -33,7 +33,10 @@ training:
   mixed_precision: bf16
   quantization:
     enabled: true
-    dtype: {recipe: fp8}
+    dtype:
+      weight: fp8_e4m3
+      act: fp8_e4m3
+      grad_out: fp8_e5m2
     scaling:
       granularity: rowwise
     exclude: [lm_head]
@@ -41,7 +44,7 @@ training:
   checkpoint_dir: checkpoints/fp8_granularity/qwen3_51m_fp8_rowwise/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 100
+  eval_steps: 25
 optimizer:
   name: muon
   lr: 5e-4
@@ -57,6 +60,6 @@ scheduler:
   warmup_steps: 1500
   min_lr: 5e-5
 logging:
-  wandb_project: pretrain-fp8
+  wandb_project: pretrain-fp8-granularity
   wandb_run_name: qwen3-51m-fp8-rowwise
   log_every: 10

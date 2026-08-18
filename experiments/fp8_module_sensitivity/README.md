@@ -58,7 +58,7 @@ Sensitivity ranking = modules sorted by Δ Loss (descending).
 
 ## Notes
 
-- tensorwise is deliberately the noisiest recipe to amplify per-module differences. If one module dominates, rerun just that module under `rowwise` / `rowwise_with_gw_hp` (see `experiments/fp8_granularity/`) to see whether tighter scaling recovers it.
+- tensorwise is deliberately the noisiest recipe to amplify per-module differences. If one module dominates, rerun just that module under rowwise or blockwise scaling (see `experiments/fp8_granularity/`) to see whether tighter scaling recovers it.
 - `lm_head` quantizes a single but very large GEMM; watch tokens/sec there — one module can still be a meaningful throughput share.
 - Untying changes param count and absolute loss vs the tied 51M configs, so compare Δ's *within this experiment*, not against `fp8_granularity/`.
 - `optim/momentum_norm` / `optim/variance_norm` in W&B reflect only the AdamW-routed params (Muon's `momentum_buffer` is not aggregated).
