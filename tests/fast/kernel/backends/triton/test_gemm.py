@@ -8,12 +8,13 @@ from src.kernel.backends.triton import gemm as triton_gemm
 from src.quant.quantize import quantize_operand
 from tests.fast.kernel.backends.helper import (
     BIAS_CASES,
-    DENSE_WORKLOADS,
-    FORMAT_PAIRS,
+    DENSE_GEMM_SHAPES,
     GROUPED_LAYOUTS,
-    GROUPED_PROJECTIONS,
-    SCALING_CASES,
-    make_grouped_inputs,
+    GROUPED_GEMM_SHAPES,
+    QUANT_FORMAT_CASES,
+    QUANT_SCALE_CASES,
+    make_grouped_mm_inputs,
+    make_scaled_grouped_mm_inputs,
     make_scaled_mm_inputs,
 )
 
@@ -88,21 +89,28 @@ def _make_layout(layout, counts=_LAYOUT_COUNTS, M=32, K=64, N=48, seed=0):
     raise ValueError(layout)
 
 
-@pytest.mark.parametrize("projection", GROUPED_PROJECTIONS, ids=lambda case: case.name)
+@pytest.mark.parametrize("projection", GROUPED_GEMM_SHAPES, ids=lambda case: case.name)
 @pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
 @pytest.mark.parametrize("with_bias", [False, True], ids=["no-bias", "bias"])
-def test_grouped_mm_precision(projection, layout, with_bias):
+@pytest.mark.parametrize(
+    ("dtype", "tolerance"),
+    [(torch.bfloat16, 2e-2), (torch.float16, 2e-3)],
+    ids=["bf16", "fp16"],
+)
+def test_grouped_mm_precision(projection, layout, with_bias, dtype, tolerance):
     if layout == "ragged_n" and with_bias:
         pytest.skip("ragged-N has no defined per-expert output-channel bias")
-    a, b, offs, bias = make_grouped_inputs(projection, layout, with_bias)
+    a, b, offs, bias = make_grouped_mm_inputs(
+        projection, layout, with_bias, dtype=dtype
+    )
 
     actual = triton_gemm.grouped_mm(a, b, offs, bias)
     expected = eager_gemm.grouped_mm(a, b, offs, bias)
 
     assert actual.shape == expected.shape
-    assert actual.dtype == torch.bfloat16
+    assert actual.dtype == dtype
     assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
 
 @pytest.mark.parametrize(
@@ -110,9 +118,9 @@ def test_grouped_mm_precision(projection, layout, with_bias):
     [triton_gemm.scaled_mm, triton_gemm.mxfp8_scaled_mm],
     ids=["scaled", "mxfp8"],
 )
-@pytest.mark.parametrize("workload", DENSE_WORKLOADS, ids=lambda case: case.name)
-@pytest.mark.parametrize("format_pair", FORMAT_PAIRS, ids=lambda case: case.name)
-@pytest.mark.parametrize("scaling_case", SCALING_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("workload", DENSE_GEMM_SHAPES, ids=lambda case: case.name)
+@pytest.mark.parametrize("format_pair", QUANT_FORMAT_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("scaling_case", QUANT_SCALE_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
 def test_scaled_mm_precision(workload, format_pair, scaling_case, with_bias, gemm_fn):
     capability = torch.cuda.get_device_capability()
@@ -473,50 +481,6 @@ _SCALED_COUNTS = [64, 0, 130, 46]  # sums to 240; the empty group is deliberate
 _SCALED_TOL = {"ragged_m": 0.02, "ragged_k": 1e-5, "ragged_n": 0.02}
 
 
-def _make_scaled_layout(
-    layout, counts, gran, bs, fmt, M=32, K=64, N=48, seed=0, scale_dtype=torch.float32
-):
-    """Quantized operands + scales for one ragged layout of the scaled grouped GEMM.
-
-    Scales follow the kernel's invariant: each mirrors its operand's axis order with
-    the contraction axis replaced by the scale-block axis. `bs` 0 (row/tensorwise)
-    means one block per contraction segment.
-    """
-    torch.manual_seed(seed)
-    E, R = len(counts), sum(counts)
-    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    scaling = _scaling(gran, bs, scale_dtype)
-
-    def rand(dim0, dim1, dim2=None):
-        shape = (dim0, dim1) if dim2 is None else (dim0, dim1, dim2)
-        return torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
-
-    if layout == "ragged_m":  # (R,K) x (E,K,N) -> (R,N)
-        aq, sa = quantize_operand(rand(R, K), -1, fmt, scaling)
-        b = torch.stack([rand(K, N) for _ in range(E)])
-        bq, sb = quantize_operand(b, -2, fmt, scaling)
-        return aq, bq, sa, sb, offs, bs
-
-    if layout == "ragged_k":  # (M,R) x (R,N) -> (E,M,N)
-        aq, sa = quantize_operand(
-            rand(R, M), -2, fmt, scaling, offs=offs, ragged_dim=-2
-        )
-        bq, sb = quantize_operand(
-            rand(R, N), -2, fmt, scaling, offs=offs, ragged_dim=-2
-        )
-        return aq.mT, bq, sa.mT, sb, offs, bs
-
-    if layout == "ragged_n":  # (E,M,K) x (K,R) -> (M,R)
-        a = torch.stack([rand(M, K) for _ in range(E)])
-        aq, sa = quantize_operand(a, -1, fmt, scaling)
-        bqT, sbT = quantize_operand(
-            rand(R, K), -1, fmt, scaling, offs=offs, ragged_dim=-2
-        )
-        return aq, bqT.mT, sa, sbT.mT, offs, bs
-
-    raise ValueError(layout)
-
-
 def _expected_shape(layout, counts, M=32, N=48):
     E, R = len(counts), sum(counts)
     return {"ragged_m": (R, N), "ragged_k": (E, M, N), "ragged_n": (M, R)}[layout]
@@ -526,7 +490,7 @@ def test_scaled_grouped_mm_oracle_agrees_with_dequant():
     # The oracle walks its own per-group loop; this pins it against an explicit
     # dequant matmul so a bug in its block/pad bookkeeping cannot pass unnoticed.
     counts = [128, 128]
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         "ragged_m", counts, "rowwise", 0, "fp8_e4m3"
     )
     oracle = eager_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -557,7 +521,7 @@ def test_scaled_grouped_mm_oracle_agrees_with_dequant():
 )
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
 def test_scaled_grouped_layouts_match_oracle(layout, gran, bs, fmt):
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         layout, _SCALED_COUNTS, gran, bs, fmt
     )
     got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -576,7 +540,7 @@ def test_scaled_grouped_mxfp8_layouts_match_oracle(layout):
     globally. Getting that wrong shifts every group after the first onto the previous
     group's scales, which stays finite and roughly the right magnitude.
     """
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         layout,
         _SCALED_COUNTS,
         "blockwise",
@@ -602,7 +566,7 @@ def test_scaled_grouped_mxfp8_ragged_m_matches_oracle_when_k_is_not_a_multiple_o
     reading past a host-side tensor narrowed one column short produces NaN, not just a
     large relative error.
     """
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         "ragged_m",
         _SCALED_COUNTS,
         "blockwise",
@@ -624,7 +588,7 @@ def test_scaled_grouped_mxfp8_agrees_with_scaled_path(layout):
     identical inputs -- same operands, same scales, same answer, whichever kernel
     runs them.
     """
-    args = _make_scaled_layout(
+    args = make_scaled_grouped_mm_inputs(
         layout,
         [5, 0, 130, 41, 1],
         "blockwise",
@@ -648,7 +612,7 @@ def test_scaled_grouped_mxfp8_adds_no_error_over_dequantizing(layout):
     what would catch the group cursor drifting a scale block -- which stays well inside
     2e-2 while being plainly wrong.
     """
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         layout,
         _SCALED_COUNTS,
         "blockwise",
@@ -669,7 +633,7 @@ def test_scaled_grouped_mxfp8_kernel_declines_block_size_zero():
     a zero-width scale tensor -- a CUDA illegal memory access hit during development.
     `mxfp8_scaled_grouped_mm` must reject it outright.
     """
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         "ragged_m",
         _SCALED_COUNTS,
         "tensorwise",
@@ -684,7 +648,7 @@ def test_scaled_grouped_mxfp8_kernel_declines_block_size_zero():
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
 def test_scaled_grouped_layouts_uneven_groups(layout):
     counts = [5, 0, 130, 41, 1]
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         layout, counts, "blockwise", 32, "fp8_e4m3", seed=1
     )
     got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -697,7 +661,7 @@ def test_scaled_grouped_ragged_n_shape_and_group_isolation():
     # (E,M,K) x (K,R) -> (M,R): offs partitions b's columns, so each group's column
     # block must come from its own expert slice of a
     counts = [17, 0, 40, 7]
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         "ragged_n", counts, "rowwise", 0, "fp8_e4m3", M=32, K=64
     )
     got = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -711,7 +675,7 @@ def test_scaled_grouped_ragged_k_empty_group_is_zero():
     # an expert with no tokens owns no blockwise scale blocks; its (M,N) slice of the
     # (E,M,N) output must still be zeroed rather than left uninitialized
     counts = [8, 0, 8]
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         "ragged_k", counts, "blockwise", 32, "fp8_e4m3"
     )
     out = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs)
@@ -721,7 +685,7 @@ def test_scaled_grouped_ragged_k_empty_group_is_zero():
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16, torch.float32])
 @pytest.mark.parametrize("layout", SCALED_LAYOUTS)
 def test_scaled_grouped_layouts_out_dtype(layout, out_dtype):
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         layout, _SCALED_COUNTS, "rowwise", 0, "fp8_e4m3", seed=3
     )
     out = triton_gemm.scaled_grouped_mm(aq, bq, sa, sb, offs, out_dtype, kbs)
@@ -739,7 +703,7 @@ def test_scaled_grouped_bias_matches_oracle(layout, gran, bs):
     final accumulator, so folding it into a per-scale-block partial would both
     multiply it by that block's scales and add it once per block.
     """
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         layout, _SCALED_COUNTS, gran, bs, "fp8_e4m3"
     )
     bias = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16)
@@ -755,7 +719,7 @@ def test_scaled_grouped_bias_matches_oracle(layout, gran, bs):
 
 def test_scaled_grouped_bias_none_unchanged():
     """bias=None must be byte-identical to omitting it -- the HAS_BIAS=False path."""
-    aq, bq, sa, sb, offs, kbs = _make_scaled_layout(
+    aq, bq, sa, sb, offs, kbs = make_scaled_grouped_mm_inputs(
         "ragged_m", _SCALED_COUNTS, "rowwise", 0, "fp8_e4m3"
     )
     torch.testing.assert_close(

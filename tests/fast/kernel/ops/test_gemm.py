@@ -275,13 +275,16 @@ def test_grouped_mm_forwards_normalized_arguments(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.parametrize(
     ("dtype", "expected_backend"),
-    [(torch.float32, "eager"), (torch.bfloat16, None)],
+    [
+        (torch.float32, "eager"),
+        (torch.float16, None),
+        (torch.bfloat16, None),
+    ],
 )
-def test_grouped_mm_routes_non_bf16_to_eager_by_default(
+def test_grouped_mm_leaves_supported_dtypes_for_capability_dispatch(
     monkeypatch: pytest.MonkeyPatch, dtype, expected_backend
 ):
-    """Triton's grouped kernel is bf16-only; the capability gate has no dtype axis,
-    so the wrapper itself must route away from triton for every other dtype."""
+    """BF16 and FP16 use capability dispatch; unsupported FP32 stays on eager."""
     seen = {}
 
     def fake_dispatch(op, args, kwargs, backend=None, device=None):

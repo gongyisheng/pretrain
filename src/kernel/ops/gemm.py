@@ -129,8 +129,7 @@ def _select_mxfp8_scaled_mm_backend(
 def grouped_mm(a, b, offs, bias=None, backend=None):
     _check_offs(offs)
     _check_contraction(a, b)
-    # Triton supports grouped GEMM only in bfloat16.
-    if backend is None and a.dtype is not torch.bfloat16:
+    if backend is None and a.dtype not in (torch.bfloat16, torch.float16):
         backend = "eager"
     return dispatch("gemm.grouped_mm", (a, b, offs, bias), {}, backend, device=a.device)
 

@@ -19,7 +19,7 @@ def _num_sms(device: torch.device | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Grouped GEMM (bf16 ragged MoE): ragged over M, N, or K
+# Grouped GEMM (bf16/fp16 ragged MoE): ragged over M, N, or K
 # ---------------------------------------------------------------------------
 
 
@@ -98,7 +98,7 @@ def _grouped_mm_kernel(
 
     # this persistent program owns pid, pid+NUM_SMS, ...
     global_tile_idx = tl.program_id(0)
-    group_tile_start = 0  # flat index of the current group's first tile
+    group_tile_start = tl.zeros((), dtype=tl.int64)
     m_end = 0  # offs are END-offsets, so the previous end is the next start
     n_end = 0
     k_end = 0
@@ -178,8 +178,7 @@ def _grouped_mm_kernel(
         group_tile_start += group_tile_count
 
 
-# Dispatch reaches this entry directly, gated only by device/SM capability plus the
-# bf16-only dtype routing in src/kernel/ops/gemm.py.
+# Default dispatch reaches this entry for bf16 and fp16.
 @register_kernel(
     op="gemm.grouped_mm",
     backend="triton",
@@ -204,8 +203,8 @@ def grouped_mm(
     `bias` is an optional (G,N) tensor broadcast over the output's row dim, fused
     into the Triton epilogue.
 
-    Unvalidated: callers must supply bf16 CUDA `a`/`b` on one device, a contiguous
-    int32 `offs` of length G, and no bias for the ragged-N layout.
+    Callers must supply bf16 or fp16 CUDA `a`/`b` on one device, a contiguous int32
+    `offs` of length G, and no bias for the ragged-N layout.
     """
     a_is_2d, b_is_2d = a.ndim == 2, b.ndim == 2
     G = offs.shape[0]
@@ -770,7 +769,7 @@ def _scaled_grouped_mm_kernel(
 
     # this persistent program owns pid, pid+NUM_SMS, ...
     global_tile_idx = tl.program_id(0)
-    group_tile_start = 0  # flat index of the current group's first tile
+    group_tile_start = tl.zeros((), dtype=tl.int64)
     m_end = 0  # offs are END-offsets, so the previous end is the next start
     n_end = 0
     k_end = 0
@@ -966,7 +965,7 @@ def _mxfp8_scaled_grouped_mm_kernel(
     K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
 
     global_tile_idx = tl.program_id(0)
-    group_tile_start = 0
+    group_tile_start = tl.zeros((), dtype=tl.int64)
     m_end = 0
     n_end = 0
     k_end = 0
