@@ -33,11 +33,11 @@ training:
   mixed_precision: bf16
   quantization:
     enabled: true
-    dtype: {weight: fp8_e4m3, act: fp8_e4m3, grad_out: bf16}
+    dtype: {weight: fp8_e4m3, act: fp8_e4m3, grad_out: fp8_e4m3}
     scaling: {granularity: tensorwise}
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_tensor_dtype/qwen3_51m_fp8_e4m3_w8a8/
+  checkpoint_dir: checkpoints/fp8_tensor_dtype/qwen3_51m_fp8_e4m3_w8a8g8/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -57,5 +57,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-fp8-tensor-dtype
-  wandb_run_name: qwen3-51m-fp8-e4m3-w8a8
+  wandb_run_name: qwen3-51m-fp8-e4m3-w8a8g8
   log_every: 10
