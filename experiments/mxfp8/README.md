@@ -20,7 +20,7 @@ At fixed E4M3 values and blockwise 1D `(1, 32)` scaling, replacing FP32 scales w
 | `qwen3_51m_fp8_e4m3_w8a8g8_blockwise1d_32` | E4M3 | E4M3 | FP32 | (1, 32) | 1.00 | ~51M |
 | `qwen3_51m_mxfp8_w8a8g8` | E4M3 | E4M3 | E8M0 | (1, 32) | 0.25 | ~51M |
 
-All runs use OpenWebText, sequence length 1024, batch size 16, gradient accumulation 16 (effective batch 256), 50K steps, seed 42, bf16 mixed precision, Muon with `match_rms_adamw`, lr=5e-4, weight decay=0.1, and a cosine schedule (1500 warmup, min lr=5e-5). They explicitly use `checkpoint_every: 5000`, `eval_every: 100`, and `eval_steps: 25`. The lm head remains bf16; embeddings, norms, attention, residuals, loss, and optimizer state also stay bf16/fp32.
+All runs use OpenWebText, sequence length 1024, batch size 16, gradient accumulation 16 (effective batch 256), 50K steps, seed 42, bf16 mixed precision, Muon with `match_rms_adamw`, lr=5e-4, weight decay=0.1, and a cosine schedule (1500 warmup, min lr=5e-5). They explicitly use `checkpoint_every: 5000`, `eval_every: 100`, and `eval_steps: 100`. The lm head remains bf16; embeddings, norms, attention, residuals, loss, and optimizer state also stay bf16/fp32.
 
 The W8A8G16 controls quantize weights and activations while leaving `grad_out` in bf16. Each backward GEMM therefore contains one bf16 operand and uses the one-sided fake-quantization fallback. Use these cells for numerical comparison, not end-to-end FP8 throughput. W8A8G8 quantizes both operands of all three eligible linear GEMMs.
 

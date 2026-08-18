@@ -33,8 +33,12 @@ training:
   mixed_precision: bf16
   quantization:
     enabled: true
-    dtype: {weight: fp8_e4m3, act: fp8_e4m3, grad_out: bf16}
-    scaling: {granularity: tensorwise}
+    dtype:
+      weight: fp8_e4m3
+      act: fp8_e4m3
+      grad_out: bf16
+    scaling:
+      granularity: tensorwise
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_tensor_dtype/qwen3_51m_fp8_e4m3_w8a8/

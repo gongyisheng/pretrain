@@ -40,7 +40,6 @@ training:
     scaling:
       granularity: blockwise
       block_shape: [1, 32]
-      scale_dtype: fp32
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_granularity/qwen3_51m_fp8_blockwise1d_32_w8a16g16/

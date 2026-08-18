@@ -44,13 +44,12 @@ training:
     scaling:
       granularity: blockwise
       block_shape: [1, 32]
-      scale_dtype: fp32
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/mxfp8/qwen3_51m_fp8_e4m3_w8a8g8_blockwise1d_32/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
 
 optimizer:
   name: muon

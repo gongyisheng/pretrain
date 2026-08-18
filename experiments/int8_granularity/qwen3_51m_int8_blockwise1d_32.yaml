@@ -33,8 +33,13 @@ training:
   mixed_precision: bf16
   quantization:
     enabled: true
-    dtype: {weight: int8, act: bf16, grad_out: bf16}
-    scaling: {granularity: blockwise, block_shape: [1, 32]}
+    dtype:
+      weight: int8
+      act: bf16
+      grad_out: bf16
+    scaling:
+      granularity: blockwise
+      block_shape: [1, 32]
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int8_granularity/qwen3_51m_int8_blockwise1d_32/

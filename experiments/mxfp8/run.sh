@@ -5,14 +5,11 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-echo "=== qwen3_51m_bf16 ==="
-echo "Started at: $(date)"
-uv run python scripts/train.py --config experiments/mxfp8/qwen3_51m_bf16.yaml
-echo "Finished at: $(date)"
-echo ""
-
 grad_formats=(g16 g8)
 scale_dtypes=(fp32 e8m0)
+
+configs=()
+configs+=(qwen3_51m_bf16)
 for grad_format in "${grad_formats[@]}"; do
     for scale_dtype in "${scale_dtypes[@]}"; do
         if [[ "${scale_dtype}" == "e8m0" ]]; then
@@ -22,12 +19,16 @@ for grad_format in "${grad_formats[@]}"; do
         else
             config="qwen3_51m_fp8_e4m3_w8a8g8_blockwise1d_32"
         fi
-        echo "=== ${config} ==="
-        echo "Started at: $(date)"
-        uv run python scripts/train.py --config "experiments/mxfp8/${config}.yaml"
-        echo "Finished at: $(date)"
-        echo ""
+        configs+=("${config}")
     done
+done
+
+for config in "${configs[@]}"; do
+    echo "=== ${config} ==="
+    echo "Started at: $(date)"
+    uv run python scripts/train.py --config "experiments/mxfp8/${config}.yaml"
+    echo "Finished at: $(date)"
+    echo ""
 done
 
 echo "=== 51M MXFP8 runs complete ==="

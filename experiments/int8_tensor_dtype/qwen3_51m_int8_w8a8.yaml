@@ -33,8 +33,12 @@ training:
   mixed_precision: bf16
   quantization:
     enabled: true
-    dtype: {weight: int8, act: int8, grad_out: bf16}
-    scaling: {granularity: rowwise}
+    dtype:
+      weight: int8
+      act: int8
+      grad_out: bf16
+    scaling:
+      granularity: rowwise
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int8_tensor_dtype/qwen3_51m_int8_w8a8/
