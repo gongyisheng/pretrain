@@ -57,11 +57,11 @@ nohup bash experiments/fp8_granularity/run.sh > logs/fp8_granularity_51m.log 2>&
 
 ## Weight-transpose consistency
 
-This separate ablation holds the FP8 block extent at 32 and keeps activations in bf16. It compares 1D blocks, which re-partition a weight when it is transposed between forward and dgrad, with square 2D blocks, whose tile partition transposes consistently.
+This separate ablation holds the FP8 block extent at 32. It compares 1D blocks, which re-partition a weight when it is transposed between forward and dgrad, with square 2D blocks, whose tile partition transposes consistently.
 
 ### Hypothesis
 
-If inconsistent weight blocking is a material error source, `(32, 32)` should improve loss or stability over `(1, 32)`. The G16 pair isolates this effect with bf16 output gradients; the G8 pair tests whether quantizing the output-gradient operand changes that conclusion.
+If inconsistent weight blocking is a material error source, `(32, 32)` should improve loss or stability over `(1, 32)`. W8A16G16 isolates weight consistency. W8A8G16 adds FP8 activations, testing whether activation partitioning has the same 1D-versus-2D effect.
 
 ### Setup
 
@@ -69,10 +69,10 @@ If inconsistent weight blocking is a material error source, `(32, 32)` should im
 |---|---|---|---|---|
 | `qwen3_51m_fp8_blockwise1d_32_w8a16g16` | E4M3 / bf16 / bf16 | `(1, 32)` | fake-quant + bf16 GEMMs | ~51M |
 | `qwen3_51m_fp8_blockwise2d_32_w8a16g16` | E4M3 / bf16 / bf16 | `(32, 32)` | fake-quant + bf16 GEMMs | ~51M |
-| `qwen3_51m_fp8_blockwise1d_32_w8a16g8` | E4M3 / bf16 / E4M3 | `(1, 32)` | two quantized operands only in dgrad | ~51M |
-| `qwen3_51m_fp8_blockwise2d_32_w8a16g8` | E4M3 / bf16 / E4M3 | `(32, 32)` | two quantized operands only in dgrad | ~51M |
+| `qwen3_51m_fp8_blockwise1d_32_w8a8g16` | E4M3 / E4M3 / bf16 | `(1, 32)` | real FP8 forward; fake-quant bf16 backward GEMMs | ~51M |
+| `qwen3_51m_fp8_blockwise2d_32_w8a8g16` | E4M3 / E4M3 / bf16 | `(32, 32)` | real FP8 forward; fake-quant bf16 backward GEMMs | ~51M |
 
-All four use fp32 scales and exclude `lm_head`; their batch size, gradient accumulation, checkpoint, and evaluation settings match the primary sweep. G16 has at most one quantized operand per GEMM, so quantization is dequantized before each bf16 matmul. In G8, forward and wgrad still have one quantized operand; dgrad is the only GEMM with two quantized operands.
+All four use fp32 scales and exclude `lm_head`; their batch size, gradient accumulation, checkpoint, and evaluation settings match the primary sweep. W8A16G16 has at most one quantized operand per GEMM, so quantization is dequantized before each bf16 matmul. W8A8G16 has two quantized operands in forward, enabling a real FP8 GEMM; its dgrad and wgrad each have one quantized operand and use fake-quant plus bf16 GEMMs.
 
 ### Run
 
@@ -80,14 +80,14 @@ All four use fp32 scales and exclude `lm_head`; their batch size, gradient accum
 
 ### Results
 
-| Model | Grad-out | Granularity | `block_shape` | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
+| Model | Weight / activation / grad-out | Granularity | `block_shape` | Final Val Loss | Val BPB | Tokens/sec | Speedup vs bf16 |
 |---|---|---|---|---|---|---|---|
-| 51M | bf16 | blockwise 1D | `(1, 32)` | | | | |
-| 51M | bf16 | blockwise 2D | `(32, 32)` | | | | |
-| 51M | E4M3 | blockwise 1D | `(1, 32)` | | | | |
-| 51M | E4M3 | blockwise 2D | `(32, 32)` | | | | |
+| 51M | E4M3 / bf16 / bf16 | blockwise 1D | `(1, 32)` | | | | |
+| 51M | E4M3 / bf16 / bf16 | blockwise 2D | `(32, 32)` | | | | |
+| 51M | E4M3 / E4M3 / bf16 | blockwise 1D | `(1, 32)` | | | | |
+| 51M | E4M3 / E4M3 / bf16 | blockwise 2D | `(32, 32)` | | | | |
 
 ### Notes
 
-- Compare 1D and 2D within each grad-out precision before comparing G16 with G8.
+- Compare 1D and 2D within each W8A16G16 or W8A8G16 pair before comparing activation precision.
 - Record instability, divergence, or loss spikes in addition to final-window validation loss.

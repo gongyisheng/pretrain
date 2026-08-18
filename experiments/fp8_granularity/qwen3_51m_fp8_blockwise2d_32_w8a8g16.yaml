@@ -35,15 +35,15 @@ training:
     enabled: true
     dtype:
       weight: fp8_e4m3
-      act: bf16
-      grad_out: fp8_e4m3
+      act: fp8_e4m3
+      grad_out: bf16
     scaling:
       granularity: blockwise
       block_shape: [32, 32]
       scale_dtype: fp32
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_granularity/qwen3_51m_fp8_blockwise2d_32_w8a16g8/
+  checkpoint_dir: checkpoints/fp8_granularity/qwen3_51m_fp8_blockwise2d_32_w8a8g16/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 25
@@ -63,5 +63,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-fp8-granularity
-  wandb_run_name: qwen3-51m-fp8-blockwise2d-32-w8a16g8
+  wandb_run_name: qwen3-51m-fp8-blockwise2d-32-w8a8g16
   log_every: 10

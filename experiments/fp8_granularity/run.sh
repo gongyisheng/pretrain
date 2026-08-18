@@ -21,9 +21,9 @@ for config in "${primary_configs[@]}"; do
 done
 
 echo "=== Weight-transpose consistency sweep ==="
-for grad in g16 g8; do
+for recipe in w8a16g16 w8a8g16; do
     for layout in blockwise1d blockwise2d; do
-        config="qwen3_51m_fp8_${layout}_32_w8a16${grad}"
+        config="qwen3_51m_fp8_${layout}_32_${recipe}"
         echo "=== ${config} ==="
         echo "Started at: $(date)"
         uv run python scripts/train.py --config "experiments/fp8_granularity/${config}.yaml"
