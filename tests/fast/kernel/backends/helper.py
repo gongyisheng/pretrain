@@ -8,9 +8,6 @@ import torch
 from src.quant.quantize import quantize_operand
 
 
-GROUPED_LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
-
-
 @dataclass(frozen=True, slots=True)
 class ScaledMMCase:
     """A scaled mm workload; `m` of None takes the default row count."""
@@ -62,6 +59,16 @@ class QuantScaleCase:
     block_shape: tuple[int, int]
     block_size: int
 
+
+@dataclass(frozen=True, slots=True)
+class OutDtypeCase:
+    name: str
+    dtype: torch.dtype
+    rtol: float
+    atol: float
+
+
+BIAS_CASES = (False, True)
 
 DEFAULT_COUNTS = (72, 88, 104, 120, 136, 152, 168, 184) * 8
 RAGGED_COUNTS = (300, 5, 120, 0, 44, 210, 7, 90, 33, 150, 1, 260, 12, 80, 40, 401)
@@ -145,13 +152,15 @@ MXFP8_SCALE_ERROR_CASES = (
     BLOCKWISE1D_48_SCALE,
 )
 
-SCALED_GROUPED_MM_CASE = ScaledGroupedMMCase("scaled-grouped", 64, 48, RAGGED_COUNTS)
 SCALED_GROUPED_MM_CASES = (
     ScaledGroupedMMCase("scaled-grouped", 64, 48, RAGGED_COUNTS),
+    ScaledGroupedMMCase("scaled-grouped-tail", 163, 48, RAGGED_COUNTS),
 )
 
-BIAS_CASES = (False, True)
-OUT_DTYPE_CASES = (torch.bfloat16, torch.float16)
+OUT_DTYPE_CASES = (
+    OutDtypeCase("bf16", torch.bfloat16, rtol=2e-2, atol=2e-2),
+    OutDtypeCase("fp16", torch.float16, rtol=2e-3, atol=2e-3),
+)
 
 
 def _make_random_tensor(
@@ -173,7 +182,7 @@ def make_grouped_mm_inputs(
     case: GroupedMMCase,
     layout: str,
     with_bias: bool,
-    dtype: torch.dtype = torch.bfloat16,
+    out_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
     seed: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -183,22 +192,22 @@ def make_grouped_mm_inputs(
     expert_count, rows = len(case.counts), sum(case.counts)
 
     if layout == "ragged_m":  # (rows,K) x (G,K,N) -> (rows,N)
-        a = _make_random_tensor((rows, case.k), device, dtype)
-        b = _make_random_tensor((expert_count, case.k, case.n), device, dtype)
+        a = _make_random_tensor((rows, case.k), device, out_dtype)
+        b = _make_random_tensor((expert_count, case.k, case.n), device, out_dtype)
     elif layout == "ragged_k":  # (K,rows) x (rows,N) -> (G,K,N)
-        a = _make_random_tensor((rows, case.k), device, dtype).mT
-        b = _make_random_tensor((rows, case.n), device, dtype)
+        a = _make_random_tensor((rows, case.k), device, out_dtype).mT
+        b = _make_random_tensor((rows, case.n), device, out_dtype)
     elif layout == "ragged_n":  # (G,K,N) x (N,rows) -> (K,rows)
-        a = _make_random_tensor((expert_count, case.k, case.n), device, dtype)
-        b = _make_random_tensor((case.n, rows), device, dtype)
+        a = _make_random_tensor((expert_count, case.k, case.n), device, out_dtype)
+        b = _make_random_tensor((case.n, rows), device, out_dtype)
     elif layout == "3d_x_3d":  # (G,M,K) x (G,K,N): the one rank pair no layout defines
-        a = _make_random_tensor((expert_count, case.m, case.k), device, dtype)
-        b = _make_random_tensor((expert_count, case.k, case.n), device, dtype)
+        a = _make_random_tensor((expert_count, case.m, case.k), device, out_dtype)
+        b = _make_random_tensor((expert_count, case.k, case.n), device, out_dtype)
     else:
         raise ValueError(f"unknown grouped MM layout: {layout}")
 
     bias = (
-        _make_random_tensor((expert_count, case.n), device, dtype)
+        _make_random_tensor((expert_count, case.n), device, out_dtype)
         if with_bias
         else None
     )
@@ -211,7 +220,7 @@ def make_scaled_mm_inputs(
     scale: QuantScaleCase,
     with_bias: bool,
     scale_dtype: torch.dtype = torch.float32,
-    dtype: torch.dtype = torch.bfloat16,
+    out_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
     seed: int = 0,
 ) -> tuple[
@@ -225,8 +234,8 @@ def make_scaled_mm_inputs(
 ]:
     torch.manual_seed(seed)
     rows = case.m if case.m is not None else 8 * 1024
-    a = _make_random_tensor((rows, case.k), device, dtype)
-    b = _make_random_tensor((case.k, case.n), device, dtype)
+    a = _make_random_tensor((rows, case.k), device, out_dtype)
+    b = _make_random_tensor((case.k, case.n), device, out_dtype)
     scale_config = {
         "granularity": scale.granularity,
         "block_shape": scale.block_shape,
@@ -234,13 +243,13 @@ def make_scaled_mm_inputs(
     }
     aq, sa = quantize_operand(a, -1, format.a_format, scale_config)
     bq, sb = quantize_operand(b, -2, format.b_format, scale_config)
-    bias = _make_random_tensor((case.n,), device, dtype) if with_bias else None
+    bias = _make_random_tensor((case.n,), device, out_dtype) if with_bias else None
     return (
         aq,
         bq,
         sa,
         sb,
-        dtype,
+        out_dtype,
         scale.block_size,
         bias,
     )
@@ -253,7 +262,7 @@ def make_scaled_grouped_mm_inputs(
     scale: QuantScaleCase,
     with_bias: bool,
     scale_dtype: torch.dtype = torch.float32,
-    dtype: torch.dtype = torch.bfloat16,
+    out_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
     seed: int = 0,
 ) -> tuple[
@@ -275,14 +284,14 @@ def make_scaled_grouped_mm_inputs(
     }
     if layout == "ragged_m":
         aq, sa = quantize_operand(
-            _make_random_tensor((rows, case.k), device, dtype),
+            _make_random_tensor((rows, case.k), device, out_dtype),
             -1,
             format.a_format,
             scale_config,
         )
         b = torch.stack(
             [
-                _make_random_tensor((case.k, case.n), device, dtype)
+                _make_random_tensor((case.k, case.n), device, out_dtype)
                 for _ in range(expert_count)
             ]
         )
@@ -291,7 +300,7 @@ def make_scaled_grouped_mm_inputs(
 
     elif layout == "ragged_k":
         aq, sa = quantize_operand(
-            _make_random_tensor((rows, case.m), device, dtype),
+            _make_random_tensor((rows, case.m), device, out_dtype),
             -2,
             format.a_format,
             scale_config,
@@ -299,7 +308,7 @@ def make_scaled_grouped_mm_inputs(
             ragged_dim=-2,
         )
         bq, sb = quantize_operand(
-            _make_random_tensor((rows, case.n), device, dtype),
+            _make_random_tensor((rows, case.n), device, out_dtype),
             -2,
             format.b_format,
             scale_config,
@@ -311,13 +320,13 @@ def make_scaled_grouped_mm_inputs(
     elif layout == "ragged_n":
         a = torch.stack(
             [
-                _make_random_tensor((case.m, case.k), device, dtype)
+                _make_random_tensor((case.m, case.k), device, out_dtype)
                 for _ in range(expert_count)
             ]
         )
         aq, sa = quantize_operand(a, -1, format.a_format, scale_config)
         bqT, sbT = quantize_operand(
-            _make_random_tensor((rows, case.k), device, dtype),
+            _make_random_tensor((rows, case.k), device, out_dtype),
             -1,
             format.b_format,
             scale_config,
@@ -328,13 +337,13 @@ def make_scaled_grouped_mm_inputs(
 
     elif layout == "3d_x_3d":
         aq, sa = quantize_operand(
-            _make_random_tensor((expert_count, case.m, case.k), device, dtype),
+            _make_random_tensor((expert_count, case.m, case.k), device, out_dtype),
             -1,
             format.a_format,
             scale_config,
         )
         bq, sb = quantize_operand(
-            _make_random_tensor((expert_count, case.k, case.n), device, dtype),
+            _make_random_tensor((expert_count, case.k, case.n), device, out_dtype),
             -2,
             format.b_format,
             scale_config,
@@ -345,7 +354,7 @@ def make_scaled_grouped_mm_inputs(
         raise ValueError(layout)
 
     bias = (
-        _make_random_tensor((expert_count, case.n), device, dtype)
+        _make_random_tensor((expert_count, case.n), device, out_dtype)
         if with_bias
         else None
     )
