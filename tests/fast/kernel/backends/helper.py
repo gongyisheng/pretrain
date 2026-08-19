@@ -94,9 +94,6 @@ SCALED_MM_CASES = (
     ScaledMMCase("nonmultiple", 100, 130, m=70),
 )
 
-# The shapes every mxfp8 backend takes: K and N stay 16-aligned, which is what the
-# cuBLASLt operand contract needs, and `tail` still leaves the last 32-wide scale
-# block partial.
 MXFP8_SCALED_MM_CASES = (
     ScaledMMCase("attention", 512, 512),
     ScaledMMCase("dense-gate-up", 512, 3072),
@@ -105,10 +102,6 @@ MXFP8_SCALED_MM_CASES = (
     ScaledMMCase("moe-down", 192, 512),
     ScaledMMCase("tail", 112, 144, m=80),
 )
-
-# K and N that no 16-byte-aligned operand row can express. A kernel that masks the
-# ragged edge itself, like Triton's, still takes them; one that hands the operands
-# straight to a library, like cuBLASLt's, rejects them.
 MXFP8_SCALED_MM_ERROR_CASES = (ScaledMMCase("nonmultiple", 100, 130, m=70),)
 
 QUANT_FORMAT_CASES = (
