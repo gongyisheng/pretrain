@@ -152,7 +152,7 @@ def test_moe_experts_get_quantized_expert_mm():
             {
                 "enabled": True,
                 "dtype": {"recipe": "fp8"},
-                "scaling": {"recipe": "rowwise"},
+                "scale": {"recipe": "rowwise"},
             }
         ),
     )
@@ -211,7 +211,7 @@ def test_router_gate_stays_fp32_linear():
             {
                 "enabled": True,
                 "dtype": {"recipe": "fp8"},
-                "scaling": {"recipe": "rowwise"},
+                "scale": {"recipe": "rowwise"},
             }
         ),
     )
@@ -230,7 +230,7 @@ def test_moe_expert_mm_default_when_excluded():
             {
                 "enabled": True,
                 "dtype": {"recipe": "fp8"},
-                "scaling": {"recipe": "rowwise"},
+                "scale": {"recipe": "rowwise"},
                 "exclude": ["mlp"],
             }
         ),

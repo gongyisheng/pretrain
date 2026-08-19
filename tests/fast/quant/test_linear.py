@@ -22,7 +22,7 @@ from src.utils.config import (
 _E4M3 = "fp8_e4m3"
 
 
-def _scaling(gran, bs=0, scale_dtype=torch.float32):
+def _scale(gran, bs=0, scale_dtype=torch.float32):
     return {
         "granularity": gran,
         "block_shape": (1, bs) if bs else (0, 0),
@@ -30,19 +30,19 @@ def _scaling(gran, bs=0, scale_dtype=torch.float32):
     }
 
 
-_MXFP8 = _scaling("blockwise", 32, torch.float8_e8m0fnu)
+_MXFP8 = _scale("blockwise", 32, torch.float8_e8m0fnu)
 
 
-def test_mxfp8_oracle_scaling_uses_power_of_two_scales():
+def test_mxfp8_oracle_scale_uses_power_of_two_scales():
     _, scale = quantize_operand(torch.ones(1, 32), -1, _E4M3, _MXFP8)
     log2_scale = torch.log2(scale)
     assert torch.equal(log2_scale, log2_scale.round())
 
 
-def _roundtrip(x, contract_dim, fmt, scaling):
+def _roundtrip(x, contract_dim, fmt, scale_cfg):
     """dequant(quant(x)) — the operand the quantized GEMM actually multiplies."""
-    xq, scale = quantize_operand(x, contract_dim, fmt, scaling)
-    return dequantize_operand(xq, scale, contract_dim, scaling)
+    xq, scale = quantize_operand(x, contract_dim, fmt, scale_cfg)
+    return dequantize_operand(xq, scale, contract_dim, scale_cfg)
 
 
 def _fp8_capable():
@@ -73,14 +73,14 @@ def _record_rounding(monkeypatch):
         x,
         contract_dim,
         fmt,
-        scaling,
+        scale_cfg,
         offs=None,
         ragged_dim=None,
         stochastic_rounding=False,
     ):
         seen.append((fmt, stochastic_rounding))
         return original(
-            x, contract_dim, fmt, scaling, offs, ragged_dim, stochastic_rounding
+            x, contract_dim, fmt, scale_cfg, offs, ragged_dim, stochastic_rounding
         )
 
     monkeypatch.setattr(quant_linear, "quantize_operand", record)
@@ -140,7 +140,7 @@ def test_quantized_linear_only_quantizes_during_training(monkeypatch):
         a_fmt,
         b_fmt,
         out_dtype,
-        scaling_cfg,
+        scale_cfg,
         bias=None,
         a_stochastic_rounding=False,
         b_stochastic_rounding=False,
@@ -154,7 +154,7 @@ def test_quantized_linear_only_quantizes_during_training(monkeypatch):
             a_fmt,
             b_fmt,
             out_dtype,
-            scaling_cfg,
+            scale_cfg,
             bias=bias,
             a_stochastic_rounding=a_stochastic_rounding,
             b_stochastic_rounding=b_stochastic_rounding,
@@ -212,8 +212,8 @@ def test_forward_matches_roundtrip_oracle():
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     out = q(x)
     ref = (
-        _roundtrip(x, -1, _E4M3, _scaling("tensorwise"))
-        @ _roundtrip(lin.weight, -1, _E4M3, _scaling("tensorwise")).t()
+        _roundtrip(x, -1, _E4M3, _scale("tensorwise"))
+        @ _roundtrip(lin.weight, -1, _E4M3, _scale("tensorwise")).t()
     )
     assert out.shape == (64, 96) and out.dtype == torch.bfloat16
     rel = (out.float() - ref.float()).norm() / ref.float().norm()
@@ -239,15 +239,15 @@ def test_rowwise_forward_and_backward():
     torch.manual_seed(0)
     lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
     cfg = QuantizationConfig(
-        enabled=True, dtype={"recipe": "fp8"}, scaling={"granularity": "rowwise"}
+        enabled=True, dtype={"recipe": "fp8"}, scale={"granularity": "rowwise"}
     )
     q = QuantizedLinear.from_module(lin, cfg)
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     out = q(x)
     # rowwise oracle: per-row act, per-column weight (reduce over K)
     ref = (
-        _roundtrip(x, -1, _E4M3, _scaling("rowwise"))
-        @ _roundtrip(lin.weight, -1, _E4M3, _scaling("rowwise")).t()
+        _roundtrip(x, -1, _E4M3, _scale("rowwise"))
+        @ _roundtrip(lin.weight, -1, _E4M3, _scale("rowwise")).t()
     )
     rel = (out.float() - ref.float()).norm() / ref.float().norm()
     assert rel < 0.05
@@ -328,7 +328,7 @@ def test_gemm_records_nothing_without_stats():
     a, b = torch.randn(20, 32), torch.randn(32, 40)
     set_quantization_monitoring_status(True)
     try:
-        out = quantized_mm(a, b, "int8", "int8", torch.float32, _scaling("tensorwise"))
+        out = quantized_mm(a, b, "int8", "int8", torch.float32, _scale("tensorwise"))
     finally:
         set_quantization_monitoring_status(False)
     assert torch.isfinite(out).all()
@@ -347,7 +347,7 @@ def test_gemm_records_only_the_operands_whose_format_is_quantized():
             "int8",
             "bf16",
             torch.float32,
-            _scaling("tensorwise"),
+            _scale("tensorwise"),
             a_stats=a_stats,
             b_stats=b_stats,
         )
@@ -373,7 +373,7 @@ def test_gemm_applies_bias_in_the_fused_kernel():
     a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)
     bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
-    cfg = _scaling("rowwise")
+    cfg = _scale("rowwise")
     with_bias = quantized_mm(
         a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg, bias=bias
     )
@@ -405,7 +405,7 @@ def test_quantized_linear_adds_bias_exactly_once():
 @pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
 def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
     a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
-    out = quantized_mm(a, b, fmt, "bf16", torch.float32, _scaling("tensorwise"))
+    out = quantized_mm(a, b, fmt, "bf16", torch.float32, _scale("tensorwise"))
     assert out.shape == (20, 40) and torch.isfinite(out).all()
 
 
@@ -415,9 +415,9 @@ def test_int8s_gemm_dispatches_to_kernel(fmt):
     torch.manual_seed(0)
     a = torch.randn(64, 128, device="cuda")
     b = torch.randn(128, 96, device="cuda")
-    out = quantized_mm(a, b, fmt, fmt, torch.float32, _scaling("rowwise"))
-    ref = _roundtrip(a, -1, fmt, _scaling("rowwise")) @ _roundtrip(
-        b, -2, fmt, _scaling("rowwise")
+    out = quantized_mm(a, b, fmt, fmt, torch.float32, _scale("rowwise"))
+    ref = _roundtrip(a, -1, fmt, _scale("rowwise")) @ _roundtrip(
+        b, -2, fmt, _scale("rowwise")
     )
     assert (out - ref).norm() / ref.norm() < 0.02
 
@@ -480,7 +480,7 @@ def test_mxfp8_fake_quant_fallback_on_cpu():
     cfg = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "bf16", "grad_out": "bf16"},
-        scaling={"recipe": "mxfp8"},
+        scale={"recipe": "mxfp8"},
     )
     lin = nn.Linear(64, 64, bias=False).to(torch.float32)
     q = QuantizedLinear.from_module(lin, cfg)
@@ -543,7 +543,7 @@ def test_compiled_quant_linear_blockwise_fwd_bwd():
     cfg = QuantizationConfig(
         enabled=True,
         dtype={"recipe": "fp8"},
-        scaling={"granularity": "blockwise", "block_shape": (1, 128)},
+        scale={"granularity": "blockwise", "block_shape": (1, 128)},
     )
     q = QuantizedLinear.from_module(lin, cfg)
     x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -561,7 +561,7 @@ def test_quantized_linear_forward_backward_with_square_tiles():
     cfg = QuantizationConfig(
         enabled=True,
         dtype={"recipe": "fp8"},
-        scaling={
+        scale={
             "granularity": "blockwise",
             "block_shape": (32, 32),
             "scale_dtype": "fp32",
@@ -585,13 +585,13 @@ def test_quantized_mm_2d_matches_fp32_dequant_reference(tile, scale_dtype):
     tile=64 with `torch.float8_e8m0fnu` also exercises rep_k == 2, composing the 2D
     outer-axis expansion with the mxfp8 K-replication fast path.
     """
-    scaling = {
+    scale_cfg = {
         "granularity": "blockwise",
         "block_shape": (tile, tile),
         "scale_dtype": scale_dtype,
     }
     a = torch.randn(256, 512, device="cuda")
     b = torch.randn(512, 128, device="cuda")
-    out = quantized_mm(a, b, _E4M3, _E4M3, torch.float32, scaling)
-    ref = _roundtrip(a, -1, _E4M3, scaling) @ _roundtrip(b, -2, _E4M3, scaling)
+    out = quantized_mm(a, b, _E4M3, _E4M3, torch.float32, scale_cfg)
+    ref = _roundtrip(a, -1, _E4M3, scale_cfg) @ _roundtrip(b, -2, _E4M3, scale_cfg)
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)

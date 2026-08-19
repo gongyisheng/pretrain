@@ -37,7 +37,7 @@ training:
       weight: int8
       act: bf16
       grad_out: bf16
-    scaling:
+    scale:
       granularity: rowwise
     exclude: [lm_head]
   grad_clip: 1.0

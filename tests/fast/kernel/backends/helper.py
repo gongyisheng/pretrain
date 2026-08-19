@@ -101,48 +101,48 @@ QUANT_FORMAT_CASES = (
 
 MXFP8_FORMAT_CASES = (QuantFormatCase("e4m3xe4m3", "fp8_e4m3", "fp8_e4m3", 2e-2, 2e-2),)
 
-TENSORWISE_SCALING = QuantScaleCase("tensorwise", "tensorwise", (0, 0), 0)
-ROWWISE_SCALING = QuantScaleCase("rowwise", "rowwise", (1, 0), 0)
-BLOCKWISE1D_8_SCALING = QuantScaleCase("1x8", "blockwise", (1, 8), 8)
-BLOCKWISE1D_16_SCALING = QuantScaleCase("1x16", "blockwise", (1, 16), 16)
-BLOCKWISE1D_32_SCALING = QuantScaleCase("1x32", "blockwise", (1, 32), 32)
-BLOCKWISE1D_48_SCALING = QuantScaleCase("1x48", "blockwise", (1, 48), 48)
-BLOCKWISE1D_64_SCALING = QuantScaleCase("1x64", "blockwise", (1, 64), 64)
-BLOCKWISE1D_128_SCALING = QuantScaleCase("1x128", "blockwise", (1, 128), 128)
-BLOCKWISE2D_16_SCALING = QuantScaleCase("16x16", "blockwise", (16, 16), 16)
-BLOCKWISE2D_32_SCALING = QuantScaleCase("32x32", "blockwise", (32, 32), 32)
-BLOCKWISE2D_64_SCALING = QuantScaleCase("64x64", "blockwise", (64, 64), 64)
-BLOCKWISE2D_128_SCALING = QuantScaleCase("128x128", "blockwise", (128, 128), 128)
+TENSORWISE_SCALE = QuantScaleCase("tensorwise", "tensorwise", (0, 0), 0)
+ROWWISE_SCALE = QuantScaleCase("rowwise", "rowwise", (1, 0), 0)
+BLOCKWISE1D_8_SCALE = QuantScaleCase("1x8", "blockwise", (1, 8), 8)
+BLOCKWISE1D_16_SCALE = QuantScaleCase("1x16", "blockwise", (1, 16), 16)
+BLOCKWISE1D_32_SCALE = QuantScaleCase("1x32", "blockwise", (1, 32), 32)
+BLOCKWISE1D_48_SCALE = QuantScaleCase("1x48", "blockwise", (1, 48), 48)
+BLOCKWISE1D_64_SCALE = QuantScaleCase("1x64", "blockwise", (1, 64), 64)
+BLOCKWISE1D_128_SCALE = QuantScaleCase("1x128", "blockwise", (1, 128), 128)
+BLOCKWISE2D_16_SCALE = QuantScaleCase("16x16", "blockwise", (16, 16), 16)
+BLOCKWISE2D_32_SCALE = QuantScaleCase("32x32", "blockwise", (32, 32), 32)
+BLOCKWISE2D_64_SCALE = QuantScaleCase("64x64", "blockwise", (64, 64), 64)
+BLOCKWISE2D_128_SCALE = QuantScaleCase("128x128", "blockwise", (128, 128), 128)
 
 QUANT_SCALE_CASES = (
-    TENSORWISE_SCALING,
-    ROWWISE_SCALING,
-    BLOCKWISE1D_16_SCALING,
-    BLOCKWISE1D_32_SCALING,
-    BLOCKWISE1D_64_SCALING,
-    BLOCKWISE1D_128_SCALING,
-    BLOCKWISE2D_16_SCALING,
-    BLOCKWISE2D_32_SCALING,
-    BLOCKWISE2D_64_SCALING,
-    BLOCKWISE2D_128_SCALING,
+    TENSORWISE_SCALE,
+    ROWWISE_SCALE,
+    BLOCKWISE1D_16_SCALE,
+    BLOCKWISE1D_32_SCALE,
+    BLOCKWISE1D_64_SCALE,
+    BLOCKWISE1D_128_SCALE,
+    BLOCKWISE2D_16_SCALE,
+    BLOCKWISE2D_32_SCALE,
+    BLOCKWISE2D_64_SCALE,
+    BLOCKWISE2D_128_SCALE,
 )
 
 QUANT_SCALE_ERROR_CASES = (
-    BLOCKWISE1D_8_SCALING,
-    BLOCKWISE1D_48_SCALING,
+    BLOCKWISE1D_8_SCALE,
+    BLOCKWISE1D_48_SCALE,
 )
 
 MXFP8_SCALE_CASES = (
-    BLOCKWISE1D_32_SCALING,
-    BLOCKWISE2D_32_SCALING,
+    BLOCKWISE1D_32_SCALE,
+    BLOCKWISE2D_32_SCALE,
 )
 
 MXFP8_SCALE_ERROR_CASES = (
-    TENSORWISE_SCALING,
-    ROWWISE_SCALING,
-    BLOCKWISE1D_8_SCALING,
-    BLOCKWISE1D_16_SCALING,
-    BLOCKWISE1D_48_SCALING,
+    TENSORWISE_SCALE,
+    ROWWISE_SCALE,
+    BLOCKWISE1D_8_SCALE,
+    BLOCKWISE1D_16_SCALE,
+    BLOCKWISE1D_48_SCALE,
 )
 
 SCALED_GROUPED_MM_CASE = ScaledGroupedMMCase("scaled-grouped", 64, 48, RAGGED_COUNTS)
@@ -208,7 +208,7 @@ def make_grouped_mm_inputs(
 def make_scaled_mm_inputs(
     case: ScaledMMCase,
     format: QuantFormatCase,
-    scaling: QuantScaleCase,
+    scale: QuantScaleCase,
     with_bias: bool,
     scale_dtype: torch.dtype = torch.float32,
     dtype: torch.dtype = torch.bfloat16,
@@ -227,13 +227,13 @@ def make_scaled_mm_inputs(
     rows = case.m if case.m is not None else 8 * 1024
     a = _make_random_tensor((rows, case.k), device, dtype)
     b = _make_random_tensor((case.k, case.n), device, dtype)
-    scaling_config = {
-        "granularity": scaling.granularity,
-        "block_shape": scaling.block_shape,
+    scale_config = {
+        "granularity": scale.granularity,
+        "block_shape": scale.block_shape,
         "scale_dtype": scale_dtype,
     }
-    aq, sa = quantize_operand(a, -1, format.a_format, scaling_config)
-    bq, sb = quantize_operand(b, -2, format.b_format, scaling_config)
+    aq, sa = quantize_operand(a, -1, format.a_format, scale_config)
+    bq, sb = quantize_operand(b, -2, format.b_format, scale_config)
     bias = _make_random_tensor((case.n,), device, dtype) if with_bias else None
     return (
         aq,
@@ -241,7 +241,7 @@ def make_scaled_mm_inputs(
         sa,
         sb,
         dtype,
-        scaling.block_size,
+        scale.block_size,
         bias,
     )
 
@@ -250,7 +250,7 @@ def make_scaled_grouped_mm_inputs(
     case: ScaledGroupedMMCase,
     layout: str,
     format: QuantFormatCase,
-    scaling: QuantScaleCase,
+    scale: QuantScaleCase,
     with_bias: bool,
     scale_dtype: torch.dtype = torch.float32,
     dtype: torch.dtype = torch.bfloat16,
@@ -268,9 +268,9 @@ def make_scaled_grouped_mm_inputs(
     torch.manual_seed(seed)
     offs = _make_grouped_offsets(case.counts, device)
     expert_count, rows = len(case.counts), sum(case.counts)
-    scaling_config = {
-        "granularity": scaling.granularity,
-        "block_shape": scaling.block_shape,
+    scale_config = {
+        "granularity": scale.granularity,
+        "block_shape": scale.block_shape,
         "scale_dtype": scale_dtype,
     }
     if layout == "ragged_m":
@@ -278,7 +278,7 @@ def make_scaled_grouped_mm_inputs(
             _make_random_tensor((rows, case.k), device, dtype),
             -1,
             format.a_format,
-            scaling_config,
+            scale_config,
         )
         b = torch.stack(
             [
@@ -286,7 +286,7 @@ def make_scaled_grouped_mm_inputs(
                 for _ in range(expert_count)
             ]
         )
-        bq, sb = quantize_operand(b, -2, format.b_format, scaling_config)
+        bq, sb = quantize_operand(b, -2, format.b_format, scale_config)
         result = aq, bq, sa, sb
 
     elif layout == "ragged_k":
@@ -294,7 +294,7 @@ def make_scaled_grouped_mm_inputs(
             _make_random_tensor((rows, case.m), device, dtype),
             -2,
             format.a_format,
-            scaling_config,
+            scale_config,
             offs=offs,
             ragged_dim=-2,
         )
@@ -302,7 +302,7 @@ def make_scaled_grouped_mm_inputs(
             _make_random_tensor((rows, case.n), device, dtype),
             -2,
             format.b_format,
-            scaling_config,
+            scale_config,
             offs=offs,
             ragged_dim=-2,
         )
@@ -315,12 +315,12 @@ def make_scaled_grouped_mm_inputs(
                 for _ in range(expert_count)
             ]
         )
-        aq, sa = quantize_operand(a, -1, format.a_format, scaling_config)
+        aq, sa = quantize_operand(a, -1, format.a_format, scale_config)
         bqT, sbT = quantize_operand(
             _make_random_tensor((rows, case.k), device, dtype),
             -1,
             format.b_format,
-            scaling_config,
+            scale_config,
             offs=offs,
             ragged_dim=-2,
         )
@@ -331,13 +331,13 @@ def make_scaled_grouped_mm_inputs(
             _make_random_tensor((expert_count, case.m, case.k), device, dtype),
             -1,
             format.a_format,
-            scaling_config,
+            scale_config,
         )
         bq, sb = quantize_operand(
             _make_random_tensor((expert_count, case.k, case.n), device, dtype),
             -2,
             format.b_format,
-            scaling_config,
+            scale_config,
         )
         result = aq, bq, sa, sb
 
@@ -349,4 +349,4 @@ def make_scaled_grouped_mm_inputs(
         if with_bias
         else None
     )
-    return (*result, offs, scaling.block_size, bias)
+    return (*result, offs, scale.block_size, bias)

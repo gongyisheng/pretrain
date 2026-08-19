@@ -14,7 +14,7 @@ Measure the loss cost of tensorwise FP8 weight, activation, and `grad_out` quant
 
 All runs use Qwen3 51M (~51M parameters), OpenWebText, seq_len=1024, batch_size=16, gradient_accumulation_steps=16, 50K steps, Muon, lr=5e-4, cosine decay with 1500 warmup steps, bf16 mixed precision, seed 42, and `exclude: [lm_head]`. Checkpoints are every 5000 steps; evaluation is every 100 steps with 100 eval batches.
 
-All FP8 configs use `scaling: {granularity: tensorwise}`. Quantization applies to eligible attention and MLP linear layers; embeddings, lm_head, norms, attention, and optimizer state remain bf16/fp32.
+All FP8 configs use `scale: {granularity: tensorwise}`. Quantization applies to eligible attention and MLP linear layers; embeddings, lm_head, norms, attention, and optimizer state remain bf16/fp32.
 
 ## Run
 

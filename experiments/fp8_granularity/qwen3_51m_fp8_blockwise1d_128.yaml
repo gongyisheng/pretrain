@@ -37,7 +37,7 @@ training:
       weight: fp8_e4m3
       act: fp8_e4m3
       grad_out: fp8_e5m2
-    scaling:
+    scale:
       granularity: blockwise
       block_shape: [1, 128]
     exclude: [lm_head]

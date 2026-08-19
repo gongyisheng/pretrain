@@ -15,9 +15,9 @@ def _expert_mm(cfg, a, b, offs, bias=None):
     return moe.ScaledGroupedGemmFn.apply(a, b, bias, offs, cfg, {})
 
 
-def _cfg(recipe="fp8", scaling="rowwise"):
+def _cfg(recipe="fp8", scale="rowwise"):
     return QuantizationConfig(
-        enabled=True, dtype={"recipe": recipe}, scaling={"recipe": scaling}
+        enabled=True, dtype={"recipe": recipe}, scale={"recipe": scale}
     )
 
 
@@ -57,8 +57,8 @@ def test_scaled_grouped_mm_compiles_fullgraph():
     torch.testing.assert_close(b_c.grad.float(), b_e.grad.float(), rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.parametrize("scaling", ["rowwise", "blockwise"])
-def test_expert_mm_bias_is_additive(scaling):
+@pytest.mark.parametrize("scale", ["rowwise", "blockwise"])
+def test_expert_mm_bias_is_additive(scale):
     """The fused bias must stay purely additive: same output and same grad_a/grad_b as
     running the GEMM without it and adding it per row afterwards.
     """
@@ -68,7 +68,7 @@ def test_expert_mm_bias_is_additive(scaling):
     group_of_row = torch.searchsorted(
         offs, torch.arange(a.shape[0], device=offs.device), right=True
     )
-    cfg = _cfg("fp8", scaling)
+    cfg = _cfg("fp8", scale)
 
     def run(fused):
         a_ = a.clone().requires_grad_(True)
@@ -136,7 +136,7 @@ def test_moe_block_quantized_forward_backward_runs(bias):
             quantization={
                 "enabled": True,
                 "dtype": {"recipe": "fp8"},
-                "scaling": {"recipe": "rowwise"},
+                "scale": {"recipe": "rowwise"},
             }
         ),
     )
@@ -158,13 +158,13 @@ def test_moe_block_quantized_forward_backward_runs(bias):
             assert p.grad.abs().sum() > 0
 
 
-@pytest.mark.parametrize("scaling", ["tensorwise", "rowwise", "blockwise", "mxfp8"])
-def test_fused_matches_fake_quant(scaling, monkeypatch):
+@pytest.mark.parametrize("scale", ["tensorwise", "rowwise", "blockwise", "mxfp8"])
+def test_fused_matches_fake_quant(scale, monkeypatch):
     # counts give R=299 with expert 1 empty. Scale blocks restart at each expert, so
     # under blockwise-128 expert 2 (rows 128..257) owns two blocks and expert 3
     # (rows 258..298) its own short one — no block straddles the boundary at 258.
     a, b, offs = _make([128, 0, 130, 41], K=64, N=48)
-    cfg = _cfg("fp8", scaling)
+    cfg = _cfg("fp8", scale)
 
     wgrad_calls = []
     real_dispatch = gemm_module.dispatch
@@ -189,7 +189,7 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
 
     assert wgrad_calls, "wgrad fell back off the fused path"
     # row/tensorwise carry no numeric width: one block spans the whole ragged segment
-    assert wgrad_calls[0] == {"blockwise": 128, "mxfp8": 32}.get(scaling, 0)
+    assert wgrad_calls[0] == {"blockwise": 128, "mxfp8": 32}.get(scale, 0)
 
     # Reference: identical quantization, but dequantized and multiplied in bf16.
     # Comparing against this isolates the kernel from the quantization error itself.
@@ -205,18 +205,18 @@ def test_fused_matches_fake_quant(scaling, monkeypatch):
     # distributes exactly over addition, and fp8x fp8 products are exact in fp32, so
     # the fused and fake-quant paths are bitwise identical there. blockwise keeps a
     # real (if tight) tolerance since fp8 rounding differs between the two paths.
-    bound = 0.0 if scaling == "mxfp8" else 2e-2
+    bound = 0.0 if scale == "mxfp8" else 2e-2
     for name, got, ref in (
         ("y", y_q, y_f),
         ("grad_a", a_q.grad, a_f.grad),
         ("grad_b", b_q.grad, b_f.grad),
     ):
         rel = (got.float() - ref.float()).norm() / ref.float().norm().clamp_min(1e-12)
-        assert rel <= bound, (scaling, name, rel)
+        assert rel <= bound, (scale, name, rel)
 
 
-@pytest.mark.parametrize("scaling", ["tensorwise", "rowwise", "blockwise"])
-def test_grad_b_quality_is_independent_across_experts(scaling):
+@pytest.mark.parametrize("scale", ["tensorwise", "rowwise", "blockwise"])
+def test_grad_b_quality_is_independent_across_experts(scale):
     """A 1e5x hotter expert must not degrade a cold expert's grad_b.
 
     This is the whole point of per-expert scales: with one amax shared across the
@@ -227,7 +227,7 @@ def test_grad_b_quality_is_independent_across_experts(scaling):
     counts = [64, 64]
     a, b, offs = _make(counts, K=128, N=96)
     a[: counts[0]] *= 1e5  # expert 0 hot, expert 1 cold
-    cfg = _cfg("fp8", scaling)
+    cfg = _cfg("fp8", scale)
 
     a_q = a.clone().requires_grad_(True)
     b_q = b.clone().requires_grad_(True)
@@ -261,7 +261,7 @@ def test_ragged_n_layout_raises():
     b = torch.randn(48, 32, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(NotImplementedError, match="ragged-N"):
         moe.quantized_grouped_mm(
-            a, b, offs, "fp8_e4m3", "fp8_e4m3", a.dtype, _cfg().scaling
+            a, b, offs, "fp8_e4m3", "fp8_e4m3", a.dtype, _cfg().scale
         )
 
 

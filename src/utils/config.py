@@ -13,7 +13,7 @@ from src.quant.constants import (
     QUANT_DTYPE_RECIPES,
     QUANT_PASSTHROUGH,
     QUANT_ROUNDING,
-    QUANT_SCALING_RECIPES,
+    QUANT_SCALE_RECIPES,
     QUANT_TENSOR_GEMMS,
     QUANT_TENSORS,
 )
@@ -342,7 +342,7 @@ class QuantizationConfig:
     enabled: bool = False
     # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
     dtype: dict = field(default_factory=dict)
-    scaling: dict = field(default_factory=dict)  # {granularity, block_shape}
+    scale: dict = field(default_factory=dict)  # {granularity, block_shape}
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
@@ -367,8 +367,8 @@ class QuantizationConfig:
         dtype_recipe = self.dtype.pop("recipe", None)
         self.dtype = _resolve_quant_dtype(self.dtype)
 
-        # A dtype recipe fills the slots left open, the way a scaling recipe fills
-        # scaling. It is applied after the expansion so that a tensor scoped to one
+        # A dtype recipe fills the slots left open, the way a scale recipe fills
+        # scale. It is applied after the expansion so that a tensor scoped to one
         # GEMM still takes the recipe's format in the other.
         if dtype_recipe is not None:
             if dtype_recipe not in QUANT_DTYPE_RECIPES:
@@ -381,30 +381,30 @@ class QuantizationConfig:
                     self.dtype.setdefault(tensor, {}).setdefault(gemm, fmt)
             # mxfp8 is an fp8 element paired with the "mxfp8" scale scheme; seed it.
             if dtype_recipe == "mxfp8":
-                self.scaling.setdefault("recipe", "mxfp8")
+                self.scale.setdefault("recipe", "mxfp8")
 
-        # A scaling recipe fills the scaling dict the same way (recipe key popped from scaling).
-        recipe = self.scaling.pop("recipe", None)
+        # A scale recipe fills the scale dict the same way (recipe key popped from scale).
+        recipe = self.scale.pop("recipe", None)
         if recipe is not None:
-            if recipe not in QUANT_SCALING_RECIPES:
+            if recipe not in QUANT_SCALE_RECIPES:
                 raise ValueError(
-                    f"unknown quant scaling recipe: {recipe!r}; "
-                    f"expected one of {sorted(QUANT_SCALING_RECIPES)}"
+                    f"unknown quant scale recipe: {recipe!r}; "
+                    f"expected one of {sorted(QUANT_SCALE_RECIPES)}"
                 )
-            for key, val in QUANT_SCALING_RECIPES[recipe].items():
-                self.scaling.setdefault(key, val)  # explicit scaling keys win
+            for key, val in QUANT_SCALE_RECIPES[recipe].items():
+                self.scale.setdefault(key, val)  # explicit scale keys win
 
-        self.scaling.setdefault("granularity", "tensorwise")
-        granularity = self.scaling["granularity"]
+        self.scale.setdefault("granularity", "tensorwise")
+        granularity = self.scale["granularity"]
         if granularity not in QUANT_GRANULARITY:
             raise ValueError(
                 f"unknown quant granularity: {granularity!r}; "
                 f"expected one of {sorted(QUANT_GRANULARITY)}"
             )
 
-        if self.scaling.get("scale_dtype") is None:
-            self.scaling["scale_dtype"] = "fp32"
-        scale_dtype = self.scaling["scale_dtype"]
+        if self.scale.get("scale_dtype") is None:
+            self.scale["scale_dtype"] = "fp32"
+        scale_dtype = self.scale["scale_dtype"]
         if scale_dtype not in ("fp32", "fp8_e8m0"):
             raise ValueError(
                 f"unknown quant scale_dtype: {scale_dtype!r}; "
@@ -414,13 +414,13 @@ class QuantizationConfig:
             raise ValueError(
                 "quant scale_dtype 'fp8_e8m0' requires granularity 'blockwise'"
             )
-        if "block_size" in self.scaling:
+        if "block_size" in self.scale:
             raise ValueError(
-                "quant scaling key 'block_size' was replaced by 'block_shape', a "
+                "quant scale key 'block_size' was replaced by 'block_shape', a "
                 "(outer, contract) pair; use block_shape: [1, N] for the old behaviour"
             )
         if granularity == "blockwise":
-            block_shape = self.scaling.get("block_shape")
+            block_shape = self.scale.get("block_shape")
             if (
                 not isinstance(block_shape, (list, tuple))
                 or len(block_shape) != 2
@@ -446,12 +446,12 @@ class QuantizationConfig:
                     "quant scale_dtype 'fp8_e8m0' needs a contract extent that is a "
                     f"multiple of 32, the mx scale vector, got {contract}"
                 )
-            self.scaling["block_shape"] = (outer, contract)
+            self.scale["block_shape"] = (outer, contract)
         else:
             # block_shape only means anything blockwise. Normalize it to the sentinel
             # every consumer reads as "one scale block per contraction segment", so
             # nothing downstream has to re-check the granularity to know that.
-            self.scaling["block_shape"] = (0, 0)
+            self.scale["block_shape"] = (0, 0)
 
         # mxfp8 (blockwise + fp8_e8m0) is defined only over fp8 elements.
         if granularity == "blockwise" and scale_dtype == "fp8_e8m0":
@@ -459,11 +459,11 @@ class QuantizationConfig:
                 for gemm, fmt in per_gemm.items():
                     if fmt not in QUANT_PASSTHROUGH and not fmt.startswith("fp8"):
                         raise ValueError(
-                            f"mxfp8 scaling requires an fp8 element for "
+                            f"mxfp8 scale requires an fp8 element for "
                             f"{tensor}.{gemm}, got {fmt!r}"
                         )
 
-        self.scaling["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
+        self.scale["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
 
 
 @dataclass
@@ -606,10 +606,10 @@ class TrainConfig:
     def to_dict(self):
         config = asdict(self)
         for rule in config["training"]["quantization"]:
-            scale_dtype = rule["scaling"].get("scale_dtype")
+            scale_dtype = rule["scale"].get("scale_dtype")
             for name, dtype in _SCALE_DTYPES.items():
                 if scale_dtype is dtype:
-                    rule["scaling"]["scale_dtype"] = name
+                    rule["scale"]["scale_dtype"] = name
                     break
         return config
 
@@ -718,7 +718,7 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
     for item in config.model.mlp:
         _coerce_kwargs(item["mlp_kwargs"])
     for rule in config.training.quantization:
-        _coerce_kwargs(rule.scaling)
+        _coerce_kwargs(rule.scale)
 
     if overrides:
         _apply_overrides(config, overrides)

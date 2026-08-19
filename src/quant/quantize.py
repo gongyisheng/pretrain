@@ -356,7 +356,7 @@ def quantize_operand(
     x: torch.Tensor,
     contract_dim: int,
     fmt: str,
-    scaling: dict,
+    scale_cfg: dict,
     offs: torch.Tensor | None = None,
     ragged_dim: int | None = None,
     stochastic_rounding: bool = False,
@@ -379,9 +379,9 @@ def quantize_operand(
     square tile is a quantization policy, not a second scale layout.
     """
     _check_dims(x, contract_dim, ragged_dim, offs)
-    granularity = scaling["granularity"]
-    block_outer, block_size = scaling["block_shape"]
-    scale_dtype = scaling["scale_dtype"]
+    granularity = scale_cfg["granularity"]
+    block_outer, block_size = scale_cfg["block_shape"]
+    scale_dtype = scale_cfg["scale_dtype"]
     xf = x.float()
     if granularity == "tensorwise":
         codes, scale = _quantize_tensorwise(
@@ -422,13 +422,13 @@ def dequantize_operand(
     xq: torch.Tensor,
     scale: torch.Tensor,
     contract_dim: int,
-    scaling: dict,
+    scale_cfg: dict,
     offs: torch.Tensor | None = None,
     ragged_dim: int | None = None,
 ) -> torch.Tensor:
     """Invert `quantize_operand` in fp32, given the layout it was called with."""
     _check_dims(xq, contract_dim, ragged_dim, offs)
-    block_size = scaling["block_shape"][1]
+    block_size = scale_cfg["block_shape"][1]
     qf, sf = xq.float(), scale.float()
     if ragged_dim == contract_dim and offs is not None:
         row_blocks, _ = _scale_block_map(offs, xq.shape[contract_dim], block_size)

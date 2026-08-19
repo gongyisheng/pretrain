@@ -19,7 +19,7 @@ def quantized_grouped_mm(
     a_fmt: str,
     b_fmt: str,
     out_dtype: torch.dtype,
-    scaling: dict,
+    scale_cfg: dict,
     bias: torch.Tensor | None = None,
     a_stochastic_rounding: bool = False,
     b_stochastic_rounding: bool = False,
@@ -37,12 +37,12 @@ def quantized_grouped_mm(
     `bias` is an optional (E,N) tensor broadcast over the output's row dim. It is
     never quantized -- it rides the epilogue, past the scales.
     """
-    block_size = scaling["block_shape"][1]
+    block_size = scale_cfg["block_shape"][1]
     op = scaled_grouped_mm_op(
         a_fmt,
         b_fmt,
-        scaling["scale_dtype"],
-        scaling["block_shape"],
+        scale_cfg["scale_dtype"],
+        scale_cfg["block_shape"],
     )
     if a.ndim != 2:
         raise NotImplementedError("the ragged-N layout (3D x 2D) is not supported")
@@ -65,7 +65,7 @@ def quantized_grouped_mm(
             src_a,
             contract_a,
             a_fmt,
-            scaling,
+            scale_cfg,
             offs=offs,
             ragged_dim=a_ragged_dim,
             stochastic_rounding=a_stochastic_rounding,
@@ -76,7 +76,7 @@ def quantized_grouped_mm(
             aq,
             sa,
             contract_a,
-            scaling,
+            scale_cfg,
             offs=offs,
             ragged_dim=a_ragged_dim,
         )
@@ -85,7 +85,7 @@ def quantized_grouped_mm(
             b,
             -2,
             b_fmt,
-            scaling,
+            scale_cfg,
             offs=b_offs,
             ragged_dim=b_ragged_dim,
             stochastic_rounding=b_stochastic_rounding,
@@ -104,7 +104,7 @@ def quantized_grouped_mm(
             bq,
             sb,
             -2,
-            scaling,
+            scale_cfg,
             offs=offs,
             ragged_dim=b_ragged_dim,
         )
@@ -123,11 +123,11 @@ def quantized_grouped_mm(
 
     if aq is not None:
         src_a = dequantize_operand(
-            aq, sa, contract_a, scaling, offs=offs, ragged_dim=a_ragged_dim
+            aq, sa, contract_a, scale_cfg, offs=offs, ragged_dim=a_ragged_dim
         ).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(
-            bq, sb, -2, scaling, offs=b_offs, ragged_dim=b_ragged_dim
+            bq, sb, -2, scale_cfg, offs=b_offs, ragged_dim=b_ragged_dim
         ).to(b.dtype)
     y = grouped_mm(
         (src_a.mT if ragged_k else src_a).to(out_dtype),
@@ -149,7 +149,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["act"]["fwd"],
             cfg.dtype["weight"]["fwd"],
             out_dtype,
-            cfg.scaling,
+            cfg.scale,
             bias=bias,
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
@@ -176,7 +176,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["grad_out"]["dgrad"],
             cfg.dtype["weight"]["dgrad"],
             out_dtype,
-            cfg.scaling,
+            cfg.scale,
             a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("grad_out"),
@@ -191,7 +191,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["act"]["wgrad"],
             cfg.dtype["grad_out"]["wgrad"],
             out_dtype,
-            cfg.scaling,
+            cfg.scale,
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             a_stats=stats.get("act"),

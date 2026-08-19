@@ -121,7 +121,7 @@ def record_operand(
     codes,
     scale,
     contract_dim,
-    scaling,
+    scale_cfg,
     offs=None,
     ragged_dim=None,
 ) -> None:
@@ -148,7 +148,7 @@ def record_operand(
         codes,
         scale,
         contract_dim,
-        scaling,
+        scale_cfg,
         offs=offs if ragged_dim is not None else None,
         ragged_dim=ragged_dim,
     )

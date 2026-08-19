@@ -37,7 +37,7 @@ training:
       weight: bf16
       act: fp8_e5m2
       grad_out: bf16
-    scaling:
+    scale:
       granularity: tensorwise
     exclude: [lm_head]
   grad_clip: 1.0

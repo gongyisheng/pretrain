@@ -19,7 +19,7 @@ QUANT_GRANULARITY = frozenset({"tensorwise", "rowwise", "blockwise"})
 # "SR" is stochastic rounding.
 QUANT_ROUNDING = frozenset({"RNE", "SR"})
 
-QUANT_SCALING_RECIPES = {
+QUANT_SCALE_RECIPES = {
     "tensorwise": {"granularity": "tensorwise"},
     "rowwise": {"granularity": "rowwise"},
     "blockwise": {

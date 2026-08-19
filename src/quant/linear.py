@@ -19,7 +19,7 @@ def quantized_mm(
     a_fmt: str,
     b_fmt: str,
     out_dtype: torch.dtype,
-    scaling_cfg: dict,
+    scale_cfg: dict,
     bias: torch.Tensor | None = None,
     a_stochastic_rounding: bool = False,
     b_stochastic_rounding: bool = False,
@@ -35,33 +35,33 @@ def quantized_mm(
     epilogue, so it never passes through the scales. Both paths add it before the
     downcast to `out_dtype`, matching what cuBLAS does for an unquantized addmm.
     """
-    block_shape = scaling_cfg.get("block_shape", (0, 0))
+    block_shape = scale_cfg.get("block_shape", (0, 0))
     op = scaled_mm_op(
         a_fmt,
         b_fmt,
-        scaling_cfg.get("scale_dtype"),
+        scale_cfg.get("scale_dtype"),
         block_shape,
     )
 
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
         aq, sa = quantize_operand(
-            a, -1, a_fmt, scaling_cfg, stochastic_rounding=a_stochastic_rounding
+            a, -1, a_fmt, scale_cfg, stochastic_rounding=a_stochastic_rounding
         )
-        record_operand(a_stats, a, aq, sa, -1, scaling_cfg)
+        record_operand(a_stats, a, aq, sa, -1, scale_cfg)
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(
-            b, -2, b_fmt, scaling_cfg, stochastic_rounding=b_stochastic_rounding
+            b, -2, b_fmt, scale_cfg, stochastic_rounding=b_stochastic_rounding
         )
-        record_operand(b_stats, b, bq, sb, -2, scaling_cfg)
+        record_operand(b_stats, b, bq, sb, -2, scale_cfg)
 
     if op is not None:
         return SCALED_MM_OPS[op](aq, bq, sa, sb, out_dtype, block_shape[1], bias=bias)
 
     if aq is not None:
-        a = dequantize_operand(aq, sa, -1, scaling_cfg).to(a.dtype)
+        a = dequantize_operand(aq, sa, -1, scale_cfg).to(a.dtype)
     if bq is not None:
-        b = dequantize_operand(bq, sb, -2, scaling_cfg).to(b.dtype)
+        b = dequantize_operand(bq, sb, -2, scale_cfg).to(b.dtype)
     y = a @ b
     if bias is not None:
         y = y + bias
@@ -86,7 +86,7 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["act"]["fwd"],
             cfg.dtype["weight"]["fwd"],
             compute_dtype,
-            cfg.scaling,
+            cfg.scale,
             bias=None if bias is None else bias.to(compute_dtype),
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
@@ -119,7 +119,7 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["grad_out"]["dgrad"],
             cfg.dtype["weight"]["dgrad"],
             compute_dtype,
-            cfg.scaling,
+            cfg.scale,
             a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("grad_out"),
@@ -132,7 +132,7 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["grad_out"]["wgrad"],
             cfg.dtype["act"]["wgrad"],
             compute_dtype,
-            cfg.scaling,
+            cfg.scale,
             a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             b_stochastic_rounding=cfg.rounding["act"] == "SR",
             a_stats=stats.get("grad_out"),

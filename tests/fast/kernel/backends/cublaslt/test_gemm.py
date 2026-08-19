@@ -11,7 +11,7 @@ from src.quant.quantize import quantize_operand
 from src.kernel.utils import to_column_major, to_swizzle_32_4_4
 
 
-_MXFP8_SCALING = {
+_MXFP8_SCALE = {
     "granularity": "blockwise",
     "block_shape": (1, 32),
     "scale_dtype": torch.float8_e8m0fnu,
@@ -41,8 +41,8 @@ def _mxfp8_operands(
         a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
         b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
 
-    aq, scale_a = quantize_operand(a, -1, "fp8_e4m3", _MXFP8_SCALING)
-    bq, scale_b = quantize_operand(b, -2, "fp8_e4m3", _MXFP8_SCALING)
+    aq, scale_a = quantize_operand(a, -1, "fp8_e4m3", _MXFP8_SCALE)
+    bq, scale_b = quantize_operand(b, -2, "fp8_e4m3", _MXFP8_SCALE)
     if scale_case == "unit":
         assert torch.equal(scale_a, torch.ones_like(scale_a))
         assert torch.equal(scale_b, torch.ones_like(scale_b))

@@ -37,7 +37,7 @@ training:
       weight: int8
       act: bf16
       grad_out: bf16
-    scaling:
+    scale:
       granularity: blockwise
       block_shape: [1, 128]
     exclude: [lm_head]

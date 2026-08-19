@@ -37,7 +37,7 @@ training:
       weight: fp8_e4m3
       act: bf16
       grad_out: bf16
-    scaling:
+    scale:
       granularity: blockwise
       block_shape: [32, 32]
     exclude: [lm_head]
