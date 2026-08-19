@@ -81,8 +81,6 @@ GROUPED_MM_CASES = (
     GroupedMMCase("latent-down", 192, 64, RAGGED_COUNTS),
 )
 
-GROUPED_MM_ERROR_CASES = (GroupedMMCase("rejection", 64, 48, RAGGED_COUNTS),)
-
 GROUPED_LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
 GROUPED_ERROR_LAYOUTS = ("ragged_n", "3d_x_3d")
 
@@ -95,8 +93,6 @@ SCALED_MM_CASES = (
     # M, K and N all odd, with K leaving every scale block width a partial tail
     ScaledMMCase("nonmultiple", 100, 130, m=70),
 )
-
-SCALED_MM_ERROR_CASES = (ScaledMMCase("block-size", 256, 96, m=64),)
 
 QUANT_FORMAT_CASES = (
     QuantFormatCase("int8xint8", "int8", "int8", 2e-2, 2e-2),
@@ -271,6 +267,7 @@ def make_scaled_grouped_mm_inputs(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.dtype,
     int,
     torch.Tensor | None,
 ]:
@@ -358,4 +355,4 @@ def make_scaled_grouped_mm_inputs(
         if with_bias
         else None
     )
-    return (*result, offs, scale.block_size, bias)
+    return (*result, offs, out_dtype, scale.block_size, bias)
