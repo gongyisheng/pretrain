@@ -207,6 +207,8 @@ def grouped_mm(
     `offs` of length G, and no bias for the ragged-N layout.
     """
     a_is_2d, b_is_2d = a.ndim == 2, b.ndim == 2
+    if not a_is_2d and not b_is_2d:
+        raise NotImplementedError("3D x 3D not supported")
     G = offs.shape[0]
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
     if a_is_2d and not b_is_2d:  # (M,K) x (G,K,N) -> (M,N), ragged M
@@ -1223,11 +1225,17 @@ def scaled_grouped_mm(
     `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
     the fp32 accumulator in the epilogue so it never passes through the scales.
 
-    Callers must supply compatible CUDA tensors. Unlike dense `scaled_mm`, this
-    kernel masks each reduction to the scale-block end, so any valid block size is
-    supported.
+    Callers must supply compatible CUDA tensors. `block_size` may be zero for one
+    scale block; nonzero widths must be powers of two of at least 16, matching dense
+    `scaled_mm`.
     """
+    if block_size != 0 and (block_size < 16 or block_size & (block_size - 1) != 0):
+        raise ValueError(
+            f"block_size must be 0 or a power of two >= 16, got {block_size}"
+        )
     a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
+    if not a_is_2d and not b_is_2d:
+        raise NotImplementedError("3D x 3D not supported")
     E = offs.shape[0]
     # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
     if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
@@ -1237,6 +1245,8 @@ def scaled_grouped_mm(
         M, N, K = aq.shape[0], bq.shape[1], 0
         output_size = (E, M, N)
     else:  # (E,M,K) x (K,N) -> (M,N), ragged N
+        if bias is not None:
+            raise NotImplementedError("bias not supported for ragged-N")
         M, N, K = aq.shape[1], 0, aq.shape[2]
         output_size = (M, bq.shape[1])
 
