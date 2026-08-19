@@ -6,8 +6,17 @@ Selection order:
   2. cuda if torch.cuda.is_available() else cpu
 """
 
+import os
+
 import pytest
 import torch
+
+
+# Persist Triton autotune timings to the on-disk cache: each (shape, dtype, scale
+# width) key is then benchmarked once instead of once per xdist worker per run. The
+# cache key covers the kernel source hash, so editing a kernel invalidates it. Set
+# before any kernel module is imported, since Autotuner reads the knob at decoration.
+os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
 
 
 def pytest_addoption(parser):
