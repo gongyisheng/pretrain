@@ -57,7 +57,7 @@ Always run `nvidia-smi` before GPU tests, training, or benchmarks, then pin a fr
 
 Always specify `-n`. Use `-n 6` by default, including subsets and single files. Use `-n 12 --dist load` for `kernel`, `quant`, and `metrics`; use `-n 0` only for e2e or debugging.
 
-Group tests by the API under test: one test function per API behavior, with its cases supplied by `@pytest.mark.parametrize` instead of near-duplicate test functions. Keep case lists as named module-level constants so they can be reused across tests.
+Keep each test file API-focused. For a given API, name general passing tests `test_<api>` and error tests `test_<api>_raise_error`; when a test is class-scoped or property-specific, use `test_<class>_<api>_<property>` and `test_<class>_<api>_<property>_raise_error`, respectively. Merge cases for the same API with `pytest.mark.parametrize`; use one argument per parametrization decorator so case sets can be reused independently.
 
 ### Configuration and components
 
