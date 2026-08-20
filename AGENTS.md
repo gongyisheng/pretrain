@@ -55,9 +55,13 @@ Always run `nvidia-smi` before GPU tests, training, or benchmarks, then pin a fr
 
 ### Tests
 
-Always specify `-n`. Use `-n 6` by default, including subsets and single files. Use `-n 12 --dist load` for `kernel`, `quant`, and `metrics`; use `-n 0` only for e2e or debugging.
+Always specify `-n`: use `-n 6` by default, including subsets and single files; use `-n 12 --dist load` for `kernel`, `quant`, and `metrics`; use `-n 0` only for e2e or debugging.
 
-Keep each test file API-focused, and test public APIs only (never names with a leading `_`). For a given API, name general passing tests `test_<api>` and error tests `test_<api>_raise_error`; when a test is class-scoped or property-specific, use `test_<class>_<api>_<property>` and `test_<class>_<api>_<property>_raise_error`, respectively. Merge cases for the same API with `pytest.mark.parametrize`; use one argument per parametrization decorator so case sets can be reused independently.
+Keep test files API-focused and test only public APIs. Merge cases for the same API into one parameterized test and fold related properties into it rather than adding near-duplicates. Name general and error tests `test_<api>` and `test_<api>_raise_error`; name class/property variants `test_<class>_<api>_<property>` and `test_<class>_<api>_<property>_raise_error`; use `test_<api>_precision` for oracle checks.
+
+Build reusable, independent parameter axes with one argument per `pytest.mark.parametrize` decorator and explicit module-level case lists from product constants. Use tuples only for bound expectations or illegal Cartesian combinations; skip invalid cells with the reason. Name quantization cases by per-tensor storage width, such as `w8a8`, `w16a8`, and `g8` (int4–int8 weights are `w8`).
+
+Derive numeric tolerances from the worst case across the full grid, with a non-round 3–10× margin. Prefer `atol` with `rtol=0` for magnitude-independent error, match the oracle to the stored dtype, and use exact comparison when both paths run the same operations. Assert effects directly, including what changes and what remains bit-identical.
 
 ### Configuration and components
 
