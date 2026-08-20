@@ -26,14 +26,9 @@ def quantized_mm(
     a_stats: QuantizationStats | None = None,
     b_stats: QuantizationStats | None = None,
 ) -> torch.Tensor:
-    """Quantized 2D GEMM. `a_stats`/`b_stats` are optional metric accumulators; when
-    armed, each operand's quantization error is folded into its own here, where the
-    quantization actually happens, so the measured quantization *is* the performed one
-    rather than a replay that has to mirror this path by hand.
+    """Quantized 2D GEMM with optional per-operand quantization statistics.
 
-    `bias` is an optional (N,) tensor added to the fp32 accumulator in the kernel
-    epilogue, so it never passes through the scales. Both paths add it before the
-    downcast to `out_dtype`, matching what cuBLAS does for an unquantized addmm.
+    Bias is added before casting to `out_dtype`.
     """
     block_shape = scale_cfg.get("block_shape", (0, 0))
     op = scaled_mm_op(
@@ -62,9 +57,8 @@ def quantized_mm(
         a = dequantize_operand(aq, sa, -1, scale_cfg).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(bq, sb, -2, scale_cfg).to(b.dtype)
-    y = a @ b
-    if bias is not None:
-        y = y + bias
+    # Match fused kernels by adding bias in the accumulator before casting.
+    y = a @ b if bias is None else torch.addmm(bias, a, b)
     return y.to(out_dtype)
 
 
@@ -96,7 +90,7 @@ class QuantizedLinearFn(torch.autograd.Function):
 
         ctx.save_for_backward(x2d, w)
         ctx.cfg = cfg
-        # a plain dict of modules, carried the same way cfg is -- not a saved tensor
+        # Stats are metadata, not saved tensors.
         ctx.stats = stats
         ctx.has_bias = bias is not None
         ctx.x_shape = x.shape
@@ -154,8 +148,7 @@ class QuantizedLinear(nn.Linear):
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
-        # populated by src.metrics.convert.apply_quantization_monitoring; empty means
-        # every .get() below returns None and the folds are skipped outright
+        # Monitoring attaches stats later; an empty dict disables recording.
         q.quant_stats = {}
         return q
 

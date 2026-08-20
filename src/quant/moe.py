@@ -26,16 +26,10 @@ def quantized_grouped_mm(
     a_stats: QuantizationStats | None = None,
     b_stats: QuantizationStats | None = None,
 ) -> torch.Tensor:
-    """Quantized ragged grouped GEMM, layout picked from the operand ranks.
+    """Quantized grouped GEMM for ragged M, K, or N layouts.
 
-        (M,K) x (E,K,N) -> (M,N)    ragged M: A's row axis, not the contraction
-        (M,K) x (K,N)   -> (E,M,N)  ragged K: the contraction itself (the wgrad)
-
-    The ragged-N layout (3D x 2D) is unimplemented: a per-group scale on B's ragged
-    column axis would need a column-wise ragged mapping, and nothing asks for it.
-
-    `bias` is an optional (E,N) tensor broadcast over the output's row dim. It is
-    never quantized -- it rides the epilogue, past the scales.
+    Operand ranks select the layout. `bias` has shape (E, N), broadcasts over output
+    rows, and is not quantized.
     """
     block_size = scale_cfg["block_shape"][1]
     op = scaled_grouped_mm_op(
@@ -44,20 +38,21 @@ def quantized_grouped_mm(
         scale_cfg["scale_dtype"],
         scale_cfg["block_shape"],
     )
-    if a.ndim != 2:
-        raise NotImplementedError("the ragged-N layout (3D x 2D) is not supported")
-    ragged_k = b.ndim == 2
+    ragged_k = a.ndim == 2 and b.ndim == 2
 
-    # ragged K: the contraction is ragged, so both operands carry the mapping, and A is
-    # quantized in the (ragged,K) orientation -- only there is the reduction ragged --
-    # then transposed back below with its scale. ragged M: the contraction is dense, so
-    # the mapping reaches A alone, where only tensorwise has a tile wide enough to span
-    # groups.
-    src_a = a.mT if ragged_k else a
-    contract_a = -2 if ragged_k else -1
-    a_ragged_dim = -2
-    # B carries the mapping only when the contraction is the ragged axis
-    b_ragged_dim, b_offs = (-2, offs) if ragged_k else (None, None)
+    # Map the operand containing the ragged axis.
+    if a.ndim == 3:
+        # Ragged N: only B is mapped on its outer axis.
+        src_a, contract_a, a_offs, a_ragged_dim = a, -1, None, None
+        b_offs, b_ragged_dim = offs, -1
+    elif ragged_k:
+        # Ragged K: map both operands and transpose A for quantization.
+        src_a, contract_a, a_offs, a_ragged_dim = a.mT, -2, offs, -2
+        b_offs, b_ragged_dim = offs, -2
+    else:
+        # Ragged M: only A is mapped.
+        src_a, contract_a, a_offs, a_ragged_dim = a, -1, offs, -2
+        b_offs, b_ragged_dim = None, None
 
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):
@@ -66,7 +61,7 @@ def quantized_grouped_mm(
             contract_a,
             a_fmt,
             scale_cfg,
-            offs=offs,
+            offs=a_offs,
             ragged_dim=a_ragged_dim,
             stochastic_rounding=a_stochastic_rounding,
         )
@@ -77,7 +72,7 @@ def quantized_grouped_mm(
             sa,
             contract_a,
             scale_cfg,
-            offs=offs,
+            offs=a_offs,
             ragged_dim=a_ragged_dim,
         )
     if is_quantized(b_fmt):
@@ -90,14 +85,7 @@ def quantized_grouped_mm(
             ragged_dim=b_ragged_dim,
             stochastic_rounding=b_stochastic_rounding,
         )
-        # `offs` here is the real offs, not `b_offs` -- deliberately, even though
-        # b_ragged_dim is None in the forward/dgrad case (B stacked (E,K,N)), which
-        # looks like it violates the given-together rule _check_dims enforces. It
-        # doesn't: record_operand narrows offs to None for its own dequantize when
-        # ragged_dim is None, while the accumulated sums branch on whether offs is
-        # None to decide global vs. per-expert reduction. Swapping this to b_offs "to
-        # match" would silently drop the MoE weight metrics to a global reduction
-        # whenever b_ragged_dim is None.
+        # Keep `offs` for per-expert B metrics, even when B is not ragged.
         record_operand(
             b_stats,
             b,
@@ -123,7 +111,7 @@ def quantized_grouped_mm(
 
     if aq is not None:
         src_a = dequantize_operand(
-            aq, sa, contract_a, scale_cfg, offs=offs, ragged_dim=a_ragged_dim
+            aq, sa, contract_a, scale_cfg, offs=a_offs, ragged_dim=a_ragged_dim
         ).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(
@@ -182,8 +170,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             a_stats=stats.get("grad_out"),
             b_stats=stats.get("weight"),
         )
-        # wgrad: grad_b[g] = a[g]^T @ grad_y[g] — the ragged token axis is the
-        # contraction, i.e. the ragged-K layout
+        # Wgrad uses the ragged-K layout.
         grad_b = quantized_grouped_mm(
             a.mT,
             grad_y,
@@ -199,11 +186,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         )
         grad_bias = None
         if ctx.bias_needs_grad:
-            # bias is (E,N) broadcast over the ragged row axis, so its grad sums that
-            # axis. The fp32 accumulator is the point: autograd's own index backward
-            # sums each expert's hundreds of rows in grad_y's dtype, and bf16 drifts
-            # percent-level over that many terms. Unquantized on purpose -- a plain
-            # reduction of the incoming grad has no operand worth quantizing.
+            # Sum each expert's rows in fp32 to avoid bf16 reduction error.
             rows = torch.arange(grad_y.shape[0], device=offs.device)
             group_of_row = torch.searchsorted(offs, rows, right=True)
             acc = grad_y.new_zeros(offs.shape[0], grad_y.shape[1], dtype=torch.float32)
@@ -220,18 +203,12 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
-        # populated by src.metrics.convert.apply_quantization_monitoring; empty means
-        # every .get() below returns {} and the folds are skipped outright
+        # Monitoring populates this; empty disables statistics.
         q.quant_stats = {}
         return q
 
     def expert_mm(self, a, b, offs, bias=None, projection=None):
-        """Quantize the base block's seam, unless in eval.
-
-        eval runs the unquantized GEMM, as QuantizedLinear.forward does. `quant_stats`
-        maps a projection to its accumulators; routing happens inside the block's
-        forward, so no module hook can reach these operands.
-        """
+        """Quantize training expert GEMMs; use the base block in eval."""
         if not self.training:
             return super().expert_mm(a, b, offs, bias=bias, projection=projection)
         return ScaledGroupedGemmFn.apply(

@@ -54,6 +54,14 @@ CANONICAL_GRANULARITIES = [("tensorwise", 0), ("rowwise", 0), ("blockwise", 32)]
 RAGGED_GRANULARITIES = [("tensorwise", 0), ("rowwise", 0), ("blockwise", 4)]
 # granularities that already carry a scale per row, so a ragged row axis is a no-op
 PER_ROW_GRANULARITIES = [("rowwise", 0), ("blockwise", 4)]
+# the same set as resolved configs, plus the square tile, which restarts its rows at
+# every group boundary rather than tiling across one
+RAGGED_SCALES = [
+    _scale("tensorwise"),
+    _scale("rowwise"),
+    _scale("blockwise", 4),
+    _scale2d(4),
+]
 
 # 100 is not a multiple of any block width here, so it leaves a partial last block
 SHAPES = [(8, 256), (4, 100), (64, 128)]
@@ -186,18 +194,6 @@ QUANTIZE_ERROR_CASES = [
         ),
         ValueError,
         "2D operand",
-    ),
-    (
-        dict(
-            x=torch.randn(64, 128),
-            contract_dim=-2,
-            fmt=E4M3,
-            scale_cfg=_scale2d(16),
-            offs=_offs([32, 64]),
-            ragged_dim=-2,
-        ),
-        NotImplementedError,
-        "ragged",
     ),
 ]
 
@@ -470,13 +466,12 @@ def _ragged_input(counts=RAGGED_COUNTS, cols=8, hot=50.0):
     return x, _offs(counts)
 
 
-@pytest.mark.parametrize("granularity,block", RAGGED_GRANULARITIES)
-def test_quantize_operand_ragged_scale_shape(granularity, block):
+@pytest.mark.parametrize("scale_cfg", RAGGED_SCALES)
+def test_quantize_operand_ragged_scale_shape(scale_cfg):
     x, offs = _ragged_input()
+    block = scale_cfg["block_shape"][1]
     _, n_blocks = _scale_block_map(offs, x.shape[0], block)
-    codes, scale = quantize_operand(
-        x, -2, E4M3, _scale(granularity, block), offs=offs, ragged_dim=-2
-    )
+    codes, scale = quantize_operand(x, -2, E4M3, scale_cfg, offs=offs, ragged_dim=-2)
     assert codes.shape == x.shape
     assert scale.shape == (n_blocks, x.shape[1])
     assert scale.dtype == torch.float32
@@ -484,15 +479,14 @@ def test_quantize_operand_ragged_scale_shape(granularity, block):
     assert torch.isfinite(scale).all() and (scale > 0).all()
 
 
-@pytest.mark.parametrize("granularity,block", RAGGED_GRANULARITIES)
-def test_quantize_operand_ragged_matches_per_group(granularity, block):
+@pytest.mark.parametrize("scale_cfg", RAGGED_SCALES)
+def test_quantize_operand_ragged_matches_per_group(scale_cfg):
     """Each group quantized on its own must give byte-identical codes AND identical
     scales to the fused ragged call — that IS the definition of expert independence.
     """
     x, offs = _ragged_input()
-    scale_cfg = _scale(granularity, block)
     codes, scale = quantize_operand(x, -2, E4M3, scale_cfg, offs=offs, ragged_dim=-2)
-    row_blocks, _ = _scale_block_map(offs, x.shape[0], block)
+    row_blocks, _ = _scale_block_map(offs, x.shape[0], scale_cfg["block_shape"][1])
 
     lo = 0
     for hi in offs.tolist():
@@ -515,8 +509,8 @@ def test_quantize_operand_ragged_isolates_group_scales():
     assert torch.allclose(scale[0] / scale[1], torch.full((3,), 100.0), rtol=1e-5)
 
 
-@pytest.mark.parametrize("granularity,block", RAGGED_GRANULARITIES)
-def test_quantize_operand_ragged_transpose_equivalence(granularity, block):
+@pytest.mark.parametrize("scale_cfg", RAGGED_SCALES)
+def test_quantize_operand_ragged_transpose_equivalence(scale_cfg):
     """Quantizing the transposed view == transposing the quantization.
 
     This is what would let a caller whose operand already arrives transposed quantize
@@ -528,7 +522,7 @@ def test_quantize_operand_ragged_transpose_equivalence(granularity, block):
     """
     torch.manual_seed(0)
     x = torch.randn(24, 16)
-    offs, scale_cfg = _offs([8, 0, 10, 6]), _scale(granularity, block)
+    offs = _offs([8, 0, 10, 6])
     codes, scale = quantize_operand(x, -2, E4M3, scale_cfg, offs=offs, ragged_dim=-2)
     codes_t, scale_t = quantize_operand(
         x.mT, -1, E4M3, scale_cfg, offs=offs, ragged_dim=-1
@@ -705,10 +699,9 @@ def test_dequantize_operand_stacked_experts(granularity, block):
     assert torch.equal(deq, reference)
 
 
-@pytest.mark.parametrize("granularity,block", RAGGED_GRANULARITIES)
-def test_dequantize_operand_ragged(granularity, block):
+@pytest.mark.parametrize("scale_cfg", RAGGED_SCALES)
+def test_dequantize_operand_ragged(scale_cfg):
     x, offs = _ragged_input()
-    scale_cfg = _scale(granularity, block)
     codes, scale = quantize_operand(x, -2, E4M3, scale_cfg, offs=offs, ragged_dim=-2)
     deq = dequantize_operand(codes, scale, -2, scale_cfg, offs=offs, ragged_dim=-2)
 

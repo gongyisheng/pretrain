@@ -16,25 +16,10 @@ from src.quant.utils import (
 def _scale_block_map(
     offs: torch.Tensor, n_rows: int, block_size: int
 ) -> tuple[torch.Tensor, int]:
-    """Map each row to its scale block for an axis that is ragged over groups.
-
-    Rows are sorted by group and cut by the cumulative end-offsets `offs`, so a
-    scale block must never span two groups: pooling amax across groups is what
-    lets one hot expert set the scale for a cold one. `block_size` 0
-    (row/tensorwise) gives one block per group. A positive one (blockwise)
-    re-tiles `block_size` rows inside each group, so group sizes that are not
-    multiples of `block_size` cost a short trailing block rather than a
-    straddling one.
-
-    Returns `(row_blocks, n_blocks)`: `row_blocks` is an int64 `(n_rows,)` tensor
-    indexing torch reductions; `n_blocks` is a Python int so the scale buffer's
-    shape stays static under torch.compile.
-    """
+    """Map rows to blocks that never cross `offs` groups; `n_blocks` is static under torch.compile."""
     n_groups = offs.shape[0]
     rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
-    # right=True: row r belongs to the group whose end-offset first exceeds r.
-    # Rows past offs[-1] cannot occur in the MoE dispatch (offs[-1] == n_rows);
-    # clamping only keeps the gathers below in bounds if one ever did.
+    # `right=True` maps each row to its containing end-offset group; clamp keeps gathers in bounds.
     group = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
     if not block_size:
         return group.long(), n_groups
@@ -44,21 +29,18 @@ def _scale_block_map(
     first_block = torch.cat([offs.new_zeros(1), per_group.cumsum(0)])
     local = torch.div(rows - starts[group], block_size, rounding_mode="floor")
     row_blocks = first_block[group].long() + local.long()
-    # sum_g ceil(m_g/bs) <= floor(M/bs) + n_groups for every offs, so this bound
-    # is static even though the per-group counts are not.
+    # `floor(n_rows / block_size) + n_groups` is a static upper bound.
     return row_blocks, n_rows // block_size + n_groups
 
 
 def _compute_scale(
     amax: torch.Tensor, fmt: str, scale_dtype: torch.dtype
 ) -> torch.Tensor:
-    """fp32 dequant scale from per-block amax."""
+    """Return fp32 or fp8_e8m0 dequantization scales from block maxima."""
     if scale_dtype is torch.float8_e8m0fnu:
-        # e8m0 is a bare 8-bit exponent: a power of two, biased to cover +-127.
-        # Clamping the exponent, rather than amax, preserves the scale format's
-        # full lower range. log2(0) is -inf and therefore selects 2**-127.
+        # Clamp E8M0 exponents, preserving its full lower range; `log2(0)` selects 2**-127.
         exp = torch.ceil(torch.log2(amax / str_to_qmax(fmt)))
-        # Canonicalize through E8M0 because CUDA exp2 is one ULP low at -127.
+        # E8M0 cast corrects CUDA `exp2(-127)` being one ULP low.
         return torch.exp2(exp.clamp(-127, 127)).to(scale_dtype).float()
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
@@ -66,10 +48,7 @@ def _compute_scale(
 def _compute_codes(
     xf: torch.Tensor, scale: torch.Tensor, fmt: str, stochastic_rounding: bool
 ) -> torch.Tensor:
-    """Scale into the format's range and cast — the tail every quantizer shares.
-
-    `scale` must broadcast against `xf`; both are float32.
-    """
+    """Scale float32 `xf` by broadcastable float32 `scale` and cast to `fmt`."""
     qmax = str_to_qmax(fmt)
     xq = (xf / scale).clamp(-qmax, qmax)
     if is_int8s(fmt):
@@ -80,21 +59,16 @@ def _compute_codes(
             xq = torch.round(xq)
     elif is_fp8(fmt):
         if stochastic_rounding:
-            # Every finite fp8 value is an integer multiple of its binade's ULP, so
-            # this is the int path's floor-and-draw on a grid that varies per element.
-            # The ULP comes off the fp32 exponent field rather than frexp/exp2, which
-            # also makes the subnormal floor free: zero and every fp8 subnormal sit
-            # below the clamp, which pins them to the one spacing they share.
+            # Construct binade ULPs from fp32 exponents; clamping gives subnormals their shared spacing.
             mantissa_bits, min_ulp_exp = str_to_fp8_ulp(fmt)
             exponent = ((xq.view(torch.int32) >> 23) & 0xFF) - mantissa_bits
             ulp = (exponent.clamp_min(127 + min_ulp_exp) << 23).view(torch.float32)
-            # floor rounds toward -inf, so lower..lower+ulp straddles xq for either
-            # sign -- the ULP is read off |xq|'s binade either way.
+            # `floor` makes the stochastic interval sign-safe.
             lower = torch.floor(xq / ulp) * ulp
             probability = (xq - lower) / ulp
             xq = torch.where(torch.rand_like(xq) < probability, lower + ulp, lower)
         else:
-            # RNE otherwise: the final cast is round-to-nearest-even in hardware
+            # Hardware cast supplies RNE.
             pass
     else:
         raise ValueError(f"Unknown fmt:{fmt}")
@@ -102,20 +76,14 @@ def _compute_codes(
 
 
 def _check_tile_dim(dim: int) -> None:
-    """The tiling helpers split one of the last two dims; anything else is a bug."""
+    """Reject dimensions outside the final two axes."""
     if dim not in (-2, -1):
         raise ValueError(f"dim must be -2 or -1, got {dim}")
 
 
 def _tile(a: torch.Tensor, dim: int, block_size: int) -> torch.Tensor:
-    """View `dim` as (n_blocks, block_size), zero-padding it to a multiple.
-
-    The tile axis lands at -1 for `dim == -1` and -2 for `dim == -2`. Both are free
-    views on contiguous input -- splitting a dim never transposes.
-    """
-    # Both entry points validate their dim up front; this stays because the -2 branch
-    # would otherwise silently claim an out-of-domain dim and mis-tile at the right
-    # shape.
+    """Pad and split `dim` into fixed-size blocks."""
+    # Validate because any non--1 dimension otherwise takes the -2 branch.
     _check_tile_dim(dim)
     length = a.shape[dim]
     n_blocks = (length + block_size - 1) // block_size
@@ -130,7 +98,7 @@ def _tile(a: torch.Tensor, dim: int, block_size: int) -> torch.Tensor:
 
 
 def _untile(a: torch.Tensor, dim: int, length: int) -> torch.Tensor:
-    """Inverse of `_tile`: fold the tile axis back in and drop the padding."""
+    """Merge tiled blocks and remove padding."""
     _check_tile_dim(dim)
     if dim == -1:
         return a.flatten(-2).narrow(-1, 0, length).contiguous()
@@ -138,12 +106,7 @@ def _untile(a: torch.Tensor, dim: int, length: int) -> torch.Tensor:
 
 
 def _tile2d(a: torch.Tensor, tile: int) -> torch.Tensor:
-    """View the last two dims as (n_rows, tile, n_cols, tile), zero-padding both.
-
-    A square tile needs no `contract_dim` branch -- the reshape is identical whichever
-    of the last two dims is the contraction. Only the scale's expansion back to the 1D
-    layout, in `_quantize_blockwise_2d`, is orientation-dependent.
-    """
+    """Pad and split both final dimensions into square tiles."""
     rows, cols = a.shape[-2:]
     pad_rows, pad_cols = (-rows) % tile, (-cols) % tile
     if pad_rows or pad_cols:
@@ -154,24 +117,21 @@ def _tile2d(a: torch.Tensor, tile: int) -> torch.Tensor:
 
 
 def _untile2d(v: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
-    """Inverse of `_tile2d`: fold both tile axes back in and drop the padding."""
+    """Merge square tiles and remove padding."""
     a = v.reshape(*v.shape[:-4], v.shape[-4] * v.shape[-3], v.shape[-2] * v.shape[-1])
     return a[..., :rows, :cols].contiguous()
 
 
 def _tile_amax(a: torch.Tensor, dim: int, block_size: int) -> torch.Tensor:
-    """Dense per-block amax along `dim`, giving `n_blocks` there."""
+    """Return dense block maxima along `dim`."""
     return _tile(a, dim, block_size).amax(dim=-1 if dim == -1 else -2)
 
 
 def _segment_amax(
     a: torch.Tensor, dim: int, row_blocks: torch.Tensor, n_blocks: int
 ) -> torch.Tensor:
-    """Per-block amax along a segmented `dim`, giving `n_blocks` there.
-
-    include_self with a zeros buffer is safe because `a` is abs(): an empty block
-    keeps 0 and clamps to EPS in _compute_scale.
-    """
+    """Return segmented block maxima along `dim`."""
+    # Empty absolute-value blocks remain zero before `_compute_scale` clamps to EPS.
     shape = list(a.shape)
     shape[dim] = n_blocks
     return a.new_zeros(shape).index_reduce_(
@@ -206,13 +166,7 @@ def _quantize_segmented_contraction(
     offs: torch.Tensor,
     stochastic_rounding: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The contraction is ragged: one scale block per group (or per `block_size` rows
-    inside a group), so no scale pools amax across two experts.
-
-    Shared verbatim by rowwise and blockwise -- `block_size` 0 vs N is the only
-    difference between them here. The ragged map already gives one scale entry per row,
-    so the operand is never tiled: reshaping it would only undo itself.
-    """
+    """Quantize a ragged contraction without pooling maxima across groups."""
     row_blocks, n_blocks = _scale_block_map(offs, xf.shape[contract_dim], block_size)
     amax = _segment_amax(xf.abs(), contract_dim, row_blocks, n_blocks)
     scale = _compute_scale(amax, fmt, scale_dtype)
@@ -236,20 +190,14 @@ def _quantize_tensorwise(
     ragged_dim: int | None,
     stochastic_rounding: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One scale per tensor -- the only granularity that pools the outer axis.
-
-    That is also why the scale-layout restore lives only here: every other granularity
-    leaves the outer axis at full length already.
-    """
+    """Quantize with one scale per tensor or ragged group."""
     outer_dim = -1 if contract_dim == -2 else -2
     if offs is None:
-        # (-2, -1), never (-1, -2): inductor compiles the two orders to markedly
-        # different kernels, and this is the hot path.
+        # This reduction order is Inductor-sensitive.
         amax = xf.abs().amax((-2, -1), keepdim=True)
         row_blocks = None
     else:
-        # Collapse the axis that is not ragged first, then segment the ragged one, so
-        # the index_reduce_ runs over a single row/column instead of the full tensor.
+        # Reduce the dense axis before segmented `index_reduce_`.
         dense_dim = -1 if ragged_dim == -2 else -2
         row_blocks, n_blocks = _scale_block_map(offs, xf.shape[ragged_dim], 0)
         amax = _segment_amax(
@@ -257,13 +205,12 @@ def _quantize_tensorwise(
         )
     scale = _compute_scale(amax, fmt, scale_dtype)
 
-    # one selection, on whichever axis is ragged
     div = scale if row_blocks is None else scale.index_select(ragged_dim, row_blocks)
     codes = _compute_codes(xf, div, fmt, stochastic_rounding)
 
-    # the invariant: outer restored to full length, contract left at n_blocks
+    # Returned scales expand the outer axis and remain blockwise on the contraction axis.
     if ragged_dim == outer_dim:
-        return codes, div  # the gather already restored the outer axis
+        return codes, div
     shape = list(scale.shape)
     shape[outer_dim] = xf.shape[outer_dim]
     return codes, scale.expand(shape)
@@ -278,12 +225,11 @@ def _quantize_rowwise(
     ragged_dim: int | None,
     stochastic_rounding: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One scale per row: a single block spans the whole contraction."""
+    """Quantize with one scale across each contraction row."""
     if ragged_dim == contract_dim:
         return _quantize_segmented_contraction(
             xf, contract_dim, 0, fmt, scale_dtype, offs, stochastic_rounding
         )
-    # a ragged outer axis cannot change a per-row scale, so it is ignored
     scale = _compute_scale(xf.abs().amax(contract_dim, keepdim=True), fmt, scale_dtype)
     return _compute_codes(xf, scale, fmt, stochastic_rounding), scale
 
@@ -298,12 +244,11 @@ def _quantize_blockwise_1d(
     ragged_dim: int | None,
     stochastic_rounding: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One scale per `block_size` elements along the contraction (a 1 x B block)."""
+    """Quantize with one scale per contraction-axis block."""
     if ragged_dim == contract_dim:
         return _quantize_segmented_contraction(
             xf, contract_dim, block_size, fmt, scale_dtype, offs, stochastic_rounding
         )
-    # a ragged outer axis cannot change a within-row scale, so it is ignored
     scale = _compute_scale(
         _tile_amax(xf.abs(), contract_dim, block_size), fmt, scale_dtype
     )
@@ -321,35 +266,78 @@ def _quantize_blockwise_1d(
     return codes, scale
 
 
+def _axis_amax(
+    a: torch.Tensor,
+    dim: int,
+    tile: int,
+    block_map: tuple[torch.Tensor, int] | None,
+) -> torch.Tensor:
+    """Return segmented or dense block maxima along `dim`."""
+    if block_map is None:
+        return _tile_amax(a, dim, tile)
+    row_blocks, n_blocks = block_map
+    return _segment_amax(a, dim, row_blocks, n_blocks)
+
+
+def _axis_expand(
+    scale: torch.Tensor,
+    dim: int,
+    tile: int,
+    length: int,
+    block_map: tuple[torch.Tensor, int] | None,
+) -> torch.Tensor:
+    """Expand block scales by gather on ragged axes or repetition on dense axes."""
+    if block_map is None:
+        return scale.repeat_interleave(tile, dim).narrow(dim, 0, length)
+    return scale.index_select(dim, block_map[0])
+
+
 def _quantize_blockwise_2d(
     xf: torch.Tensor,
     contract_dim: int,
-    tile: int,
+    block_size: int,
     fmt: str,
     scale_dtype: torch.dtype,
+    offs: torch.Tensor | None,
+    ragged_dim: int | None,
     stochastic_rounding: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One scale per `tile` x `tile` square, pooling amax over both axes.
+    """Quantize with square blocks that stay within ragged groups."""
+    outer_dim = -1 if contract_dim == -2 else -2
+    if offs is None:
+        # Dense 2D avoids the ragged path's slower materialized divisor.
+        rows, cols = xf.shape[-2:]
+        tiled = _tile2d(xf, block_size)
+        blocks = _compute_scale(tiled.abs().amax((-3, -1)), fmt, scale_dtype)
+        codes = _untile2d(
+            _compute_codes(
+                tiled, blocks[..., :, None, :, None], fmt, stochastic_rounding
+            ),
+            rows,
+            cols,
+        )
+        return codes, _axis_expand(
+            blocks, outer_dim, block_size, rows if outer_dim == -2 else cols, None
+        )
 
-    The scale is expanded along the outer axis before returning, so it leaves in the
-    layout a 1 x `tile` blockwise scale would -- outer at full length, contract at
-    n_blocks. That is what lets every kernel, `dequantize_operand` and the metrics fold
-    stay identical to the 1D path: a square tile shows up only as neighbouring rows
-    sharing a value, which nothing downstream can observe.
-    """
-    rows, cols = xf.shape[-2:]
-    tiled = _tile2d(xf, tile)
-    scale = _compute_scale(tiled.abs().amax((-3, -1)), fmt, scale_dtype)
-    codes = _untile2d(
-        _compute_codes(tiled, scale[..., :, None, :, None], fmt, stochastic_rounding),
-        rows,
-        cols,
+    # Ragged 2D uses a block map and gathered divisor instead of reshape/broadcast.
+    ragged_map = _scale_block_map(offs, xf.shape[ragged_dim], block_size)
+    dense_dim = contract_dim if ragged_dim == outer_dim else outer_dim
+    amax = _axis_amax(
+        _axis_amax(xf.abs(), dense_dim, block_size, None),
+        ragged_dim,
+        block_size,
+        ragged_map,
     )
-    # the outer axis is whichever of the last two is not the contraction
-    outer_dim = -2 if contract_dim == -1 else -1
-    length = rows if outer_dim == -2 else cols
-    scale = scale.repeat_interleave(tile, outer_dim).narrow(outer_dim, 0, length)
-    return codes, scale
+    blocks = _compute_scale(amax, fmt, scale_dtype)
+    maps = {ragged_dim: ragged_map, dense_dim: None}
+    scale = _axis_expand(
+        blocks, outer_dim, block_size, xf.shape[outer_dim], maps[outer_dim]
+    )
+    div = _axis_expand(
+        scale, contract_dim, block_size, xf.shape[contract_dim], maps[contract_dim]
+    )
+    return _compute_codes(xf, div, fmt, stochastic_rounding), scale
 
 
 def quantize_operand(
@@ -361,22 +349,12 @@ def quantize_operand(
     ragged_dim: int | None = None,
     stochastic_rounding: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize `x` into scale groups tiled along `contract_dim`.
+    """Quantize `x` with scales along `contract_dim`.
 
-    `contract_dim` and `ragged_dim` each name one of the last two dims (-2 or -1), so a
-    2D weight and a 3D expert stack are the same call; leading dims are batch and are
-    never pooled into a scale group. `offs` marks `ragged_dim` as ragged over groups and
-    keeps every scale inside one group -- which only changes the result where a scale
-    tile spans more than one element along that axis, so rowwise and blockwise ignore a
-    ragged axis that is not the contraction.
-
-    Returns codes in `fmt`'s dtype and an fp32 dequant scale whose outer axis is at full
-    length and whose contract axis is the number of scale blocks -- the layout
-    the scaled GEMM kernels read.
-
-    A 2D (square) `block_shape` pools amax over a `T x T` tile and then expands the
-    scale along the outer axis, so the returned layout is the same either way -- the
-    square tile is a quantization policy, not a second scale layout.
+    `contract_dim` and `ragged_dim` must be -2 or -1. When given, `offs` keeps
+    ragged-axis scale blocks within groups; 2D blockwise quantization uses either
+    ragged axis. Returns codes in `fmt` and fp32 or E8M0 scales with the outer axis
+    expanded and the contraction axis blockwise.
     """
     _check_dims(x, contract_dim, ragged_dim, offs)
     granularity = scale_cfg["granularity"]
@@ -393,14 +371,15 @@ def quantize_operand(
         )
     elif granularity == "blockwise":
         if block_outer > 1:
-            if offs is not None:
-                raise NotImplementedError(
-                    f"2D block_shape {(block_outer, block_size)} with a ragged axis "
-                    "is not supported; a square tile can straddle two groups on the "
-                    "ragged axis, which is what per-group scales exist to prevent"
-                )
             codes, scale = _quantize_blockwise_2d(
-                xf, contract_dim, block_size, fmt, scale_dtype, stochastic_rounding
+                xf,
+                contract_dim,
+                block_size,
+                fmt,
+                scale_dtype,
+                offs,
+                ragged_dim,
+                stochastic_rounding,
             )
         else:
             codes, scale = _quantize_blockwise_1d(
@@ -426,7 +405,7 @@ def dequantize_operand(
     offs: torch.Tensor | None = None,
     ragged_dim: int | None = None,
 ) -> torch.Tensor:
-    """Invert `quantize_operand` in fp32, given the layout it was called with."""
+    """Dequantize `xq` in fp32 using `quantize_operand`'s scale layout."""
     _check_dims(xq, contract_dim, ragged_dim, offs)
     block_size = scale_cfg["block_shape"][1]
     qf, sf = xq.float(), scale.float()
