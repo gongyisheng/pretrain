@@ -57,6 +57,8 @@ Always run `nvidia-smi` before GPU tests, training, or benchmarks, then pin a fr
 
 Always specify `-n`. Use `-n 6` by default, including subsets and single files. Use `-n 12 --dist load` for `kernel`, `quant`, and `metrics`; use `-n 0` only for e2e or debugging.
 
+Group tests by the API under test: one test function per API behavior, with its cases supplied by `@pytest.mark.parametrize` instead of near-duplicate test functions. Keep case lists as named module-level constants so they can be reused across tests.
+
 ### Configuration and components
 
 `src/utils/config.py` owns config defaults and validation: `ModelConfig.__post_init__` fills resolved kwargs and rejects invalid combinations. Components receive explicit resolved values. Norm, positional embedding, and residual use `*_cls` plus `*_kwargs`; attention and MLP are per-layer `{*_cls, *_kwargs, layer_idx?}` lists. One unscoped entry applies to every unclaimed layer; scoped entries override named layers, and at most one unscoped fallback is allowed. `resolve_attn(i)` and `resolve_mlp(i)` are the source of per-layer resolution.
