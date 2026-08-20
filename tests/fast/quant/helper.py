@@ -152,17 +152,6 @@ BACKWARD_DTYPES = [
 ]
 
 
-def has_passthrough(dtype):
-    """Whether any of a cell's slots is left unquantized, per-GEMM specs included. Such
-    a GEMM has no fused op and falls back to dequant-and-matmul, which is a different
-    accuracy regime from a fully quantized cell."""
-    return any(
-        not is_quantized(fmt)
-        for spec in dtype.values()
-        for fmt in (spec.values() if isinstance(spec, dict) else (spec,))
-    )
-
-
 def scale_of(granularity, block_shape=(0, 0), scale_dtype=torch.float32):
     return {
         "granularity": granularity,
@@ -235,13 +224,18 @@ def mm_ref(a, a_fmt, b, b_fmt, scale_cfg):
     )
 
 
-def has_int(dtype):
-    """Whether any cell slot names an int format; e8m0 scales require fp8 elements."""
-    return any(
+def skip_unsupported_dtype_scale(dtype, scale_cfg):
+    """Skip a cell QuantizationConfig will not build: an e8m0 scale is the mx grid,
+    defined only over fp8 elements, per-GEMM specs included. The kernels are looser than
+    this -- quantized_mm takes int codes with e8m0 scales fine -- so the constraint is
+    the config's, and the op-level tests need no such guard."""
+    has_int = any(
         is_int8s(fmt)
         for spec in dtype.values()
         for fmt in (spec.values() if isinstance(spec, dict) else (spec,))
     )
+    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and has_int:
+        pytest.skip("an e8m0 scale is defined only over fp8 elements")
 
 
 def operand_fmt(dtype, tensor, gemm):

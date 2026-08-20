@@ -17,12 +17,12 @@ from tests.fast.quant.helper import (
     TENSORWISE,
     BLOCKWISE1D_128,
     fp8_only,
-    has_int,
     mm_ref,
     operand_fmt,
     rel,
     roundtrip,
     rule,
+    skip_unsupported_dtype_scale,
 )
 
 
@@ -129,8 +129,7 @@ def test_quantized_linear_from_module(bias, eval_mode):
 @pytest.mark.parametrize("bias", [False, True])
 def test_quantized_linear_forward_precision(dtype, scale_cfg, bias):
     """Match the quantized result to its rounded bf16 oracle."""
-    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and has_int(dtype):
-        pytest.skip("an e8m0 scale is defined only over fp8 elements")
+    skip_unsupported_dtype_scale(dtype, scale_cfg)
     act_fmt, weight_fmt = (
         operand_fmt(dtype, "act", "fwd"),
         operand_fmt(dtype, "weight", "fwd"),
@@ -161,8 +160,7 @@ N_TOKENS = [256, 250]
 @pytest.mark.parametrize("n_tokens", N_TOKENS)
 @pytest.mark.parametrize("bias", [False, True])
 def test_quantized_linear_backward_precision(dtype, scale_cfg, n_tokens, bias):
-    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and has_int(dtype):
-        pytest.skip("an e8m0 scale is defined only over fp8 elements")
+    skip_unsupported_dtype_scale(dtype, scale_cfg)
     torch.manual_seed(0)
     lin = nn.Linear(256, 128, bias=bias).cuda().to(torch.bfloat16)
     q = QuantizedLinear.from_module(lin, rule(dtype, scale_cfg))

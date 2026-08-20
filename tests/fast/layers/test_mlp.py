@@ -969,17 +969,13 @@ def test_grouped_mlp_matches_per_group_loop(
         if c == 0:
             continue
         xs = x[start : start + c]
-        h = xs @ w_in[e].mT
-        if use_bias:
-            h = h + b_in[e]
+        h = torch.addmm(b_in[e], xs, w_in[e].mT) if use_bias else xs @ w_in[e].mT
         if gated:
             gate, up = h.chunk(2, dim=-1)
             h = act(gate, up)
         else:
             h = act(h)
-        out = h @ w_down[e].mT
-        if use_bias:
-            out = out + b_down[e]
+        out = torch.addmm(b_down[e], h, w_down[e].mT) if use_bias else h @ w_down[e].mT
         ref[start : start + c] = out
         start += c
 

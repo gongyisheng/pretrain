@@ -31,21 +31,29 @@ def grouped_mm(
     if bias is not None and not a_is_2d:
         raise NotImplementedError("bias not supported for ragged-N")
 
-    if a_is_2d and not b_is_2d:
-        pieces = [a[lo:hi] @ b[group] for group, (lo, hi) in enumerate(bounds)]
-        out = torch.cat(pieces, dim=0)
-    elif a_is_2d and b_is_2d:
-        out = torch.stack([a[:, lo:hi] @ b[lo:hi] for lo, hi in bounds])
-    else:
-        pieces = [a[group] @ b[:, lo:hi] for group, (lo, hi) in enumerate(bounds)]
-        out = torch.cat(pieces, dim=1)
-
     if bias is None:
-        return out
-    if out.ndim == 3:
-        return out + bias[:, None, :]
-    rows = torch.arange(out.shape[0], device=offs.device)
-    return out + bias[torch.searchsorted(offs, rows, right=True)]
+        if a_is_2d and not b_is_2d:
+            pieces = [a[lo:hi] @ b[group] for group, (lo, hi) in enumerate(bounds)]
+            return torch.cat(pieces, dim=0)
+        if a_is_2d and b_is_2d:
+            return torch.stack([a[:, lo:hi] @ b[lo:hi] for lo, hi in bounds])
+        pieces = [a[group] @ b[:, lo:hi] for group, (lo, hi) in enumerate(bounds)]
+        return torch.cat(pieces, dim=1)
+
+    if a_is_2d and not b_is_2d:
+        pieces = [
+            torch.addmm(bias[group], a[lo:hi], b[group])
+            for group, (lo, hi) in enumerate(bounds)
+        ]
+        return torch.cat(pieces, dim=0)
+    if a_is_2d and b_is_2d:
+        return torch.stack(
+            [
+                torch.addmm(bias[group], a[:, lo:hi], b[lo:hi])
+                for group, (lo, hi) in enumerate(bounds)
+            ]
+        )
+    raise AssertionError("ragged-N bias should have been rejected")
 
 
 def _dequant_a(q, scale, block_size):

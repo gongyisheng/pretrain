@@ -27,11 +27,11 @@ from tests.fast.quant.helper import (
     ROWWISE,
     SCALE_DTYPE_NAMES,
     fp8_only,
-    has_int,
     mm_ref,
     operand_fmt,
     rel,
     rule,
+    skip_unsupported_dtype_scale,
 )
 
 
@@ -203,19 +203,13 @@ def test_scaled_grouped_gemm_fn_compiles_fullgraph():
         torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
 
 
-def _skip_unsupported(dtype, scale_cfg):
-    """Skip combinations unsupported by the quantization rules or ragged quantizer."""
-    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and has_int(dtype):
-        pytest.skip("an e8m0 scale is defined only over fp8 elements")
-
-
 @fp8_only
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("dtype", FORWARD_DTYPES)
 def test_scaled_grouped_gemm_fn_forward_precision(dtype, scale_cfg, bias):
     """Check forward precision across formats, scales, bias, and empty experts."""
-    _skip_unsupported(dtype, scale_cfg)
+    skip_unsupported_dtype_scale(dtype, scale_cfg)
     a, b, offs = _make(COUNTS, K=64, N=48)
     bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16) * 0.1
     y = _expert_mm(
@@ -246,7 +240,7 @@ def test_scaled_grouped_gemm_fn_forward_precision(dtype, scale_cfg, bias):
 @pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
 def test_scaled_grouped_gemm_fn_backward_precision(dtype, scale_cfg, bias):
     """Check backward precision and fp32 bias-gradient accumulation."""
-    _skip_unsupported(dtype, scale_cfg)
+    skip_unsupported_dtype_scale(dtype, scale_cfg)
     a, b, offs = _make(COUNTS, K=64, N=48)
     bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16) * 0.1
     a_q, b_q = a.clone().requires_grad_(True), b.clone().requires_grad_(True)
