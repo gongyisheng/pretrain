@@ -2,500 +2,555 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.metrics.quant import (
-    QuantizationStats,
-    set_quantization_monitoring_status,
-)
+from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
 from src.model import build_model
-from src.quant.constants import _INT8_FORMATS
+from src.quant.constants import QUANT_PASSTHROUGH, _FP8_FORMATS, _INT8_FORMATS
 import src.quant.linear as quant_linear
-from src.quant.linear import QuantizedLinear, quantized_mm
 from src.quant.convert import apply_quantization
+from src.quant.linear import QuantizedLinear, quantized_mm
 from src.quant.quantize import dequantize_operand, quantize_operand
-from src.utils.config import (
-    ModelConfig,
-    QuantizationConfig,
-    TrainConfig,
-    TrainingConfig,
+from src.quant.utils import is_fp8, is_int8s, is_quantized
+from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+
+
+def _fp8_capable():
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
+
+
+fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
+cuda_only = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the scaled GEMM kernels need CUDA"
 )
 
-_E4M3 = "fp8_e4m3"
+
+E4M3 = "fp8_e4m3"
+FP8_FORMATS = sorted(_FP8_FORMATS)
+INT_FORMATS = sorted(_INT8_FORMATS)
+ALL_QUANT_FORMATS = FP8_FORMATS + INT_FORMATS
+PASSTHROUGH_FORMATS = sorted(QUANT_PASSTHROUGH)
+ALL_FORMATS = ALL_QUANT_FORMATS + PASSTHROUGH_FORMATS
+
+FP8_E4M3_W8A8_DTYPES = {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "bf16"}
+FP8_E4M3_W16A8_DTYPES = {"weight": "bf16", "act": "fp8_e4m3", "grad_out": "bf16"}
+FP8_E4M3_W8A16_DTYPES = {"weight": "fp8_e4m3", "act": "bf16", "grad_out": "bf16"}
+FP8_E5M2_W8A8_DTYPES = {"weight": "fp8_e5m2", "act": "fp8_e5m2", "grad_out": "bf16"}
+FP8_E5M2_W16A8_DTYPES = {"weight": "bf16", "act": "fp8_e5m2", "grad_out": "bf16"}
+FP8_E5M2_W8A16_DTYPES = {"weight": "fp8_e5m2", "act": "bf16", "grad_out": "bf16"}
+FP8_E4M3_W8A8G8_DTYPES = {
+    "weight": "fp8_e4m3",
+    "act": "fp8_e4m3",
+    "grad_out": "fp8_e4m3",
+}
+FP8_E4M3_W8A8_E5M2_G8_DTYPES = {
+    "weight": "fp8_e4m3",
+    "act": "fp8_e4m3",
+    "grad_out": "fp8_e5m2",
+}
+FP8_E5M2_W8A8G8_DTYPES = {
+    "weight": "fp8_e5m2",
+    "act": "fp8_e5m2",
+    "grad_out": "fp8_e5m2",
+}
+FP8_E5M2_W8A8_E4M3_G8_DTYPES = {
+    "weight": "fp8_e5m2",
+    "act": "fp8_e5m2",
+    "grad_out": "fp8_e4m3",
+}
+INT8_W8A8_DTYPES = {"weight": "int8", "act": "int8", "grad_out": "bf16"}
+INT8_W8A8G8_DTYPES = {"weight": "int8", "act": "int8", "grad_out": "int8"}
+INT8_W16A8_DTYPES = {"weight": "bf16", "act": "int8", "grad_out": "bf16"}
+INT8_W8A16_DTYPES = {"weight": "int8", "act": "bf16", "grad_out": "bf16"}
+INT7_W8A16_DTYPES = {"weight": "int7", "act": "bf16", "grad_out": "bf16"}
+INT6_W8A16_DTYPES = {"weight": "int6", "act": "bf16", "grad_out": "bf16"}
+INT5_W8A16_DTYPES = {"weight": "int5", "act": "bf16", "grad_out": "bf16"}
+INT4_W8A16_DTYPES = {"weight": "int4", "act": "bf16", "grad_out": "bf16"}
+
+FP8_E4M3_W8A8G8_GWHP_DTYPES = {
+    "weight": "fp8_e4m3",
+    "act": {"fwd": "fp8_e4m3", "wgrad": "bf16"},
+    "grad_out": {"dgrad": "fp8_e4m3", "wgrad": "bf16"},
+}
+FP8_E4M3_W8A8G8_GIHP_DTYPES = {
+    "weight": {"fwd": "fp8_e4m3", "dgrad": "bf16"},
+    "act": "fp8_e4m3",
+    "grad_out": {"dgrad": "bf16", "wgrad": "fp8_e4m3"},
+}
+FP8_E4M3_W8A8_E5M2_G8_GWHP_DTYPES = {
+    "weight": "fp8_e4m3",
+    "act": {"fwd": "fp8_e4m3", "wgrad": "bf16"},
+    "grad_out": {"dgrad": "fp8_e5m2", "wgrad": "bf16"},
+}
+FP8_E4M3_W8A8_E5M2_G8_GIHP_DTYPES = {
+    "weight": {"fwd": "fp8_e4m3", "dgrad": "bf16"},
+    "act": "fp8_e4m3",
+    "grad_out": {"dgrad": "bf16", "wgrad": "fp8_e5m2"},
+}
+FP8_E5M2_W8A8G8_GWHP_DTYPES = {
+    "weight": "fp8_e5m2",
+    "act": {"fwd": "fp8_e5m2", "wgrad": "bf16"},
+    "grad_out": {"dgrad": "fp8_e5m2", "wgrad": "bf16"},
+}
+FP8_E5M2_W8A8G8_GIHP_DTYPES = {
+    "weight": {"fwd": "fp8_e5m2", "dgrad": "bf16"},
+    "act": "fp8_e5m2",
+    "grad_out": {"dgrad": "bf16", "wgrad": "fp8_e5m2"},
+}
+FP8_E5M2_W8A8_E4M3_G8_GWHP_DTYPES = {
+    "weight": "fp8_e5m2",
+    "act": {"fwd": "fp8_e5m2", "wgrad": "bf16"},
+    "grad_out": {"dgrad": "fp8_e4m3", "wgrad": "bf16"},
+}
+FP8_E5M2_W8A8_E4M3_G8_GIHP_DTYPES = {
+    "weight": {"fwd": "fp8_e5m2", "dgrad": "bf16"},
+    "act": "fp8_e5m2",
+    "grad_out": {"dgrad": "bf16", "wgrad": "fp8_e4m3"},
+}
+INT8_W8A8G8_GWHP_DTYPES = {
+    "weight": "int8",
+    "act": {"fwd": "int8", "wgrad": "bf16"},
+    "grad_out": {"dgrad": "int8", "wgrad": "bf16"},
+}
+INT8_W8A8G8_GIHP_DTYPES = {
+    "weight": {"fwd": "int8", "dgrad": "bf16"},
+    "act": "int8",
+    "grad_out": {"dgrad": "bf16", "wgrad": "int8"},
+}
+
+FORWARD_DTYPES = [
+    FP8_E4M3_W8A8_DTYPES,
+    FP8_E4M3_W16A8_DTYPES,
+    FP8_E4M3_W8A16_DTYPES,
+    INT8_W8A8_DTYPES,
+    INT8_W16A8_DTYPES,
+    INT8_W8A16_DTYPES,
+    INT7_W8A16_DTYPES,
+    INT6_W8A16_DTYPES,
+    INT5_W8A16_DTYPES,
+    INT4_W8A16_DTYPES,
+]
+
+BACKWARD_DTYPES = [
+    FP8_E4M3_W8A8_DTYPES,
+    FP8_E4M3_W16A8_DTYPES,
+    FP8_E4M3_W8A16_DTYPES,
+    FP8_E5M2_W8A8_DTYPES,
+    FP8_E5M2_W16A8_DTYPES,
+    FP8_E5M2_W8A16_DTYPES,
+    FP8_E4M3_W8A8G8_DTYPES,
+    FP8_E4M3_W8A8_E5M2_G8_DTYPES,
+    FP8_E5M2_W8A8G8_DTYPES,
+    FP8_E5M2_W8A8_E4M3_G8_DTYPES,
+    INT8_W8A8_DTYPES,
+    INT8_W16A8_DTYPES,
+    INT8_W8A16_DTYPES,
+    INT7_W8A16_DTYPES,
+    INT6_W8A16_DTYPES,
+    INT5_W8A16_DTYPES,
+    INT4_W8A16_DTYPES,
+    FP8_E4M3_W8A8G8_GWHP_DTYPES,
+    FP8_E4M3_W8A8G8_GIHP_DTYPES,
+    FP8_E4M3_W8A8_E5M2_G8_GWHP_DTYPES,
+    FP8_E4M3_W8A8_E5M2_G8_GIHP_DTYPES,
+    FP8_E5M2_W8A8G8_GWHP_DTYPES,
+    FP8_E5M2_W8A8G8_GIHP_DTYPES,
+    FP8_E5M2_W8A8_E4M3_G8_GWHP_DTYPES,
+    FP8_E5M2_W8A8_E4M3_G8_GIHP_DTYPES,
+    INT8_W8A8G8_GWHP_DTYPES,
+    INT8_W8A8G8_GIHP_DTYPES,
+]
 
 
-def _scale(gran, bs=0, scale_dtype=torch.float32):
+def _scale(granularity, block_shape=(0, 0), scale_dtype=torch.float32):
     return {
-        "granularity": gran,
-        "block_shape": (1, bs) if bs else (0, 0),
+        "granularity": granularity,
+        "block_shape": block_shape,
         "scale_dtype": scale_dtype,
     }
 
 
-_MXFP8 = _scale("blockwise", 32, torch.float8_e8m0fnu)
+TENSORWISE = _scale("tensorwise")
+ROWWISE = _scale("rowwise")
+# A blockwise contract extent must be a multiple of 16, and the outer extent is either
+# 1 (a K-vector) or the same extent (a square tile).
+BLOCKWISE1D_16 = _scale("blockwise", (1, 16))
+BLOCKWISE1D_32 = _scale("blockwise", (1, 32))
+BLOCKWISE1D_64 = _scale("blockwise", (1, 64))
+BLOCKWISE1D_128 = _scale("blockwise", (1, 128))
+BLOCKWISE2D_16 = _scale("blockwise", (16, 16))
+BLOCKWISE2D_32 = _scale("blockwise", (32, 32))
+BLOCKWISE2D_64 = _scale("blockwise", (64, 64))
+BLOCKWISE2D_128 = _scale("blockwise", (128, 128))
+# e8m0 scales are the mx grid, so their extent must be a multiple of 32. The 2D-64 tile
+# composes the outer-axis expansion with the mxfp8 K-replication fast path (rep_k == 2).
+MXFP8 = _scale("blockwise", (1, 32), torch.float8_e8m0fnu)
+BLOCKWISE2D_64_E8M0 = _scale("blockwise", (64, 64), torch.float8_e8m0fnu)
 
 
-def test_mxfp8_oracle_scale_uses_power_of_two_scales():
-    _, scale = quantize_operand(torch.ones(1, 32), -1, _E4M3, _MXFP8)
-    log2_scale = torch.log2(scale)
-    assert torch.equal(log2_scale, log2_scale.round())
+ALL_SCALES = [
+    TENSORWISE,
+    ROWWISE,
+    BLOCKWISE1D_16,
+    BLOCKWISE1D_32,
+    BLOCKWISE1D_64,
+    BLOCKWISE1D_128,
+    BLOCKWISE2D_16,
+    BLOCKWISE2D_32,
+    BLOCKWISE2D_64,
+    BLOCKWISE2D_128,
+    MXFP8,
+    BLOCKWISE2D_64_E8M0,
+]
+
+SCALE_DTYPE_NAMES = {torch.float32: "fp32", torch.float8_e8m0fnu: "fp8_e8m0"}
 
 
 def _roundtrip(x, contract_dim, fmt, scale_cfg):
     """dequant(quant(x)) — the operand the quantized GEMM actually multiplies."""
+    if not is_quantized(fmt):
+        return x
     xq, scale = quantize_operand(x, contract_dim, fmt, scale_cfg)
     return dequantize_operand(xq, scale, contract_dim, scale_cfg)
 
 
-def _fp8_capable():
-    if not torch.cuda.is_available():
-        return False
-    return torch.cuda.get_device_capability() >= (8, 9)
-
-
-fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
-# mxfp8 is a scaling scheme (power-of-two blockwise), not Blackwell-only anymore;
-# it now runs through the same per-format scaled GEMM ops as any other CUDA fp8/int path.
-mxfp8_only = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="mxfp8 needs CUDA"
-)
-
-
-def _cfg(grad="bf16"):
-    # recipe fills weight/act=fp8_e4m3; grad_out overridden in both its GEMMs
-    return QuantizationConfig(enabled=True, dtype={"recipe": "fp8", "grad_out": grad})
-
-
-def _record_rounding(monkeypatch):
-    """Collect (fmt, stochastic_rounding) for every operand the linear quantizes."""
-    seen = []
-    original = quant_linear.quantize_operand
-
-    def record(
-        x,
-        contract_dim,
-        fmt,
-        scale_cfg,
-        offs=None,
-        ragged_dim=None,
-        stochastic_rounding=False,
-    ):
-        seen.append((fmt, stochastic_rounding))
-        return original(
-            x, contract_dim, fmt, scale_cfg, offs, ragged_dim, stochastic_rounding
-        )
-
-    monkeypatch.setattr(quant_linear, "quantize_operand", record)
-    return seen
-
-
-def test_rounding_is_scoped_to_the_grad_out_tensor(monkeypatch):
-    # The recipe gives weight/act e4m3 and grad_out e5m2, so the format identifies
-    # which tensor each quantize call is for.
-    seen = _record_rounding(monkeypatch)
-    cfg = TrainingConfig(
-        mixed_precision="no",
-        quantization={
-            "enabled": True,
-            "dtype": {"recipe": "fp8"},
-            "rounding": {"grad_out": "SR"},
-        },
-    ).quantization[0]
-    linear = QuantizedLinear.from_module(nn.Linear(4, 3, bias=False), cfg)
-    linear(torch.randn(2, 4, requires_grad=True)).sum().backward()
-
-    # fwd quantizes act and weight; dgrad grad_out and weight; wgrad grad_out and act
-    assert [fmt for fmt, _ in seen] == [
-        "fp8_e4m3",
-        "fp8_e4m3",
-        "fp8_e5m2",
-        "fp8_e4m3",
-        "fp8_e5m2",
-        "fp8_e4m3",
-    ]
-    assert all(sr == (fmt == "fp8_e5m2") for fmt, sr in seen)
-
-
-def test_rounding_is_supported_on_the_forward_tensors(monkeypatch):
-    seen = _record_rounding(monkeypatch)
-    cfg = TrainingConfig(
-        mixed_precision="no",
-        quantization={
-            "enabled": True,
-            "dtype": {"weight": "int4"},
-            "rounding": {"weight": "SR"},
-        },
-    ).quantization[0]
-    linear = QuantizedLinear.from_module(nn.Linear(4, 3, bias=False), cfg)
-    linear(torch.randn(2, 4))
-    # act/grad_out stay at the compute dtype, so the weight is the only operand
-    assert seen == [("int4", True)]
-
-
-def test_quantized_linear_only_quantizes_during_training(monkeypatch):
-    calls = []
-    original = quant_linear.quantized_mm
-
-    def record(
-        a,
-        b,
-        a_fmt,
-        b_fmt,
-        out_dtype,
-        scale_cfg,
-        bias=None,
-        a_stochastic_rounding=False,
-        b_stochastic_rounding=False,
-        a_stats=None,
-        b_stats=None,
-    ):
-        calls.append(None)
-        return original(
-            a,
-            b,
-            a_fmt,
-            b_fmt,
-            out_dtype,
-            scale_cfg,
-            bias=bias,
-            a_stochastic_rounding=a_stochastic_rounding,
-            b_stochastic_rounding=b_stochastic_rounding,
-            a_stats=a_stats,
-            b_stats=b_stats,
-        )
-
-    monkeypatch.setattr(quant_linear, "quantized_mm", record)
-    linear = QuantizedLinear.from_module(
-        nn.Linear(4, 3, device="cpu"),
-        TrainingConfig(
-            quantization={"enabled": True, "dtype": {"weight": "int4"}}
-        ).quantization[0],
+def _mm_ref(a, a_fmt, b, b_fmt, scale_cfg):
+    """The GEMM quantized_mm actually performs, dequantized where that path dequantizes:
+    a same-family pair lands on a fused kernel that works in its fp32 accumulator, any
+    other pairing falls back and rounds the dequantized operand to bf16 first."""
+    dtype = (
+        torch.float32 if is_quantized(a_fmt) and is_quantized(b_fmt) else torch.bfloat16
     )
-    x = torch.randn(2, 4, device="cpu")
+    return _roundtrip(a, -1, a_fmt, scale_cfg).to(dtype) @ _roundtrip(
+        b, -2, b_fmt, scale_cfg
+    ).to(dtype)
 
-    linear.train()
-    linear(x)
-    linear.eval()
-    actual = linear(x)
 
-    assert len(calls) == 1
+def _fmts(dtype):
+    """Every format a dtype cell names, flattening the per-GEMM specs."""
+    for spec in dtype.values():
+        yield from spec.values() if isinstance(spec, dict) else (spec,)
+
+
+def _fmt(dtype, tensor, gemm):
+    """The format `dtype` names for one tensor in one GEMM; a plain string covers both
+    of that tensor's GEMMs."""
+    spec = dtype[tensor]
+    return spec[gemm] if isinstance(spec, dict) else spec
+
+
+def _rel(got, ref):
+    return (got.float() - ref.float()).norm() / ref.float().norm()
+
+
+def _rule(dtype, scale_cfg=None, rounding=None):
+    """Build one resolved rule. Goes through TrainingConfig because that is what fills
+    the tensors a partial `dtype` dict leaves out. `scale_cfg` is a resolved config, the
+    same constant the kernels take, restated here in the config's vocabulary -- one key
+    renamed, not a call into the resolver, so a test comparing against `scale_cfg` does
+    not lean on the resolution it is checking."""
+    spec = {"enabled": True, "dtype": dict(dtype)}
+    if scale_cfg is not None:
+        spec["scale"] = {
+            **scale_cfg,
+            "scale_dtype": SCALE_DTYPE_NAMES[scale_cfg["scale_dtype"]],
+        }
+    if rounding is not None:
+        spec["rounding"] = dict(rounding)
+    return TrainingConfig(mixed_precision="no", quantization=spec).quantization[0]
+
+
+# --- quantized_mm ---
+
+
+# The passthrough formats, paired with the tensor dtype each one names.
+PASSTHROUGH_DTYPES = [
+    ("fp32", torch.float32),
+    ("fp16", torch.float16),
+    ("bf16", torch.bfloat16),
+]
+OUT_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+
+
+@pytest.mark.parametrize("out_dtype", OUT_DTYPES)
+@pytest.mark.parametrize("fmt,dtype", PASSTHROUGH_DTYPES)
+def test_quantized_mm_passthrough(fmt, dtype, out_dtype):
+    """An unquantized pair never reaches a kernel: the matmul runs in the operand
+    dtype, the unfused branch is the one that has to add the bias, and only the
+    finished sum is cast to out_dtype. Exact compares, since no kernel is involved."""
+    torch.manual_seed(0)
+    a = torch.randn(20, 32, dtype=dtype)
+    b = torch.randn(32, 40, dtype=dtype)
+    bias = torch.randn(40, dtype=dtype)
+    out = quantized_mm(a, b, fmt, fmt, out_dtype, {})
+    assert out.dtype == out_dtype
+    torch.testing.assert_close(out, (a @ b).to(out_dtype), atol=0, rtol=0)
     torch.testing.assert_close(
-        actual, nn.functional.linear(x, linear.weight, linear.bias)
+        quantized_mm(a, b, fmt, fmt, out_dtype, {}, bias=bias),
+        (a @ b + bias).to(out_dtype),
+        atol=0,
+        rtol=0,
     )
 
 
-def test_quantized_linear_preserves_source_eval_mode():
-    source = nn.Linear(4, 3, device="cpu")
-    source.eval()
-    linear = QuantizedLinear.from_module(
-        source,
-        TrainingConfig(
-            quantization={"enabled": True, "dtype": {"weight": "int4"}}
-        ).quantization[0],
+@cuda_only
+@pytest.mark.parametrize("scale_cfg", ALL_SCALES)
+@pytest.mark.parametrize("b_fmt", ALL_FORMATS)
+@pytest.mark.parametrize("a_fmt", ALL_FORMATS)
+def test_quantized_mm_precision(a_fmt, b_fmt, scale_cfg):
+    """Every format pair stays within tolerance of its own dequant oracle on every
+    scale config: what is left is accumulation order, not quantization. `bias` only
+    shifts that result, so it never passes through the scales."""
+    if (is_fp8(a_fmt) or is_fp8(b_fmt)) and not _fp8_capable():
+        pytest.skip("fp8 needs SM >= 8.9")
+    torch.manual_seed(0)
+    a = torch.randn(256, 512, device="cuda")
+    b = torch.randn(512, 128, device="cuda")
+    bias = torch.randn(128, device="cuda")
+    ref = _roundtrip(a, -1, a_fmt, scale_cfg) @ _roundtrip(b, -2, b_fmt, scale_cfg)
+
+    torch.testing.assert_close(
+        quantized_mm(a, b, a_fmt, b_fmt, torch.float32, scale_cfg),
+        ref,
+        rtol=0,
+        atol=3e-4,
+    )
+    torch.testing.assert_close(
+        quantized_mm(a, b, a_fmt, b_fmt, torch.float32, scale_cfg, bias=bias),
+        ref + bias,
+        rtol=0,
+        atol=3e-4,
     )
 
-    assert not linear.training
+
+STATS_CASES = [
+    ("int8", "int8", False, False, False),  # training passes none: fold skipped
+    ("int8", "bf16", True, True, False),  # only `a` is a quantized format
+    ("int8", "int8", True, True, True),
+]
 
 
-@fp8_only
-def test_from_linear_copies_weights():
-    lin = nn.Linear(64, 32, bias=True).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(lin, _cfg())
-    assert torch.equal(q.weight, lin.weight)
-    assert torch.equal(q.bias, lin.bias)
-    assert q.weight.requires_grad
-
-
-@fp8_only
-def test_forward_matches_roundtrip_oracle():
-    torch.manual_seed(0)
-    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(lin, _cfg())
-    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-    out = q(x)
-    ref = (
-        _roundtrip(x, -1, _E4M3, _scale("tensorwise"))
-        @ _roundtrip(lin.weight, -1, _E4M3, _scale("tensorwise")).t()
-    )
-    assert out.shape == (64, 96) and out.dtype == torch.bfloat16
-    rel = (out.float() - ref.float()).norm() / ref.float().norm()
-    assert rel < 0.05
-
-
-@fp8_only
-def test_backward_finite_grads_and_dtypes():
-    torch.manual_seed(0)
-    lin = nn.Linear(128, 96, bias=True).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(lin, _cfg())
-    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    q(x).square().mean().backward()
-    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
-    assert q.weight.grad.dtype == q.weight.dtype
-    assert q.bias.grad.dtype == q.bias.dtype
-    assert x.grad is not None and torch.isfinite(x.grad).all()
-    assert x.grad.dtype == x.dtype
-
-
-@fp8_only
-def test_rowwise_forward_and_backward():
-    torch.manual_seed(0)
-    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
-    cfg = QuantizationConfig(
-        enabled=True, dtype={"recipe": "fp8"}, scale={"granularity": "rowwise"}
-    )
-    q = QuantizedLinear.from_module(lin, cfg)
-    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    out = q(x)
-    # rowwise oracle: per-row act, per-column weight (reduce over K)
-    ref = (
-        _roundtrip(x, -1, _E4M3, _scale("rowwise"))
-        @ _roundtrip(lin.weight, -1, _E4M3, _scale("rowwise")).t()
-    )
-    rel = (out.float() - ref.float()).norm() / ref.float().norm()
-    assert rel < 0.05
-    out.square().mean().backward()
-    assert torch.isfinite(q.weight.grad).all() and torch.isfinite(x.grad).all()
-
-
-@fp8_only
-def test_high_precision_wgrad_changes_the_weight_gradient():
-    torch.manual_seed(0)
-    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
-    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-
-    def grad_weight(hp):
-        dtype = {"grad_out": {"wgrad": "bf16"}} if hp else {}
-        cfg = QuantizationConfig(enabled=True, dtype={"recipe": "fp8", **dtype})
-        q = QuantizedLinear.from_module(lin, cfg)
-        q(x.clone()).square().mean().backward()
-        return q.weight.grad
-
-    g_hp = grad_weight(True)
-    g_fp8 = grad_weight(False)
-    assert torch.isfinite(g_hp).all() and torch.isfinite(g_fp8).all()
-    # hp wgrad skips fp8 rounding of grad/act, so it differs from the fp8 wgrad
-    rel = (g_hp.float() - g_fp8.float()).norm() / g_fp8.float().norm()
-    assert rel > 1e-3
-
-
-@fp8_only
-def test_preserves_batch_dims():
-    lin = nn.Linear(64, 48, bias=False).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(lin, _cfg())
-    x = torch.randn(2, 16, 64, device="cuda", dtype=torch.bfloat16)
-    assert q(x).shape == (2, 16, 48)
-
-
-@fp8_only
-@pytest.mark.parametrize("grad", ["bf16", "fp8_e5m2"])
-def test_grad_fmt_both_train(grad):
-    torch.manual_seed(0)
-    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(lin, _cfg(grad=grad))
-    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    q(x).square().mean().backward()
-    assert torch.isfinite(q.weight.grad).all()
-
-
-@fp8_only
-def test_runs_under_bf16_autocast():
-    torch.manual_seed(0)
-    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.float32)  # fp32 master
-    q = QuantizedLinear.from_module(lin, _cfg())
-    x = torch.randn(64, 128, device="cuda", dtype=torch.float32, requires_grad=True)
-    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        out = q(x)
-    assert out.dtype == torch.bfloat16  # follows autocast
-    out.square().mean().backward()
-    assert q.weight.grad.dtype == torch.float32  # grad matches fp32 master
-    assert torch.isfinite(q.weight.grad).all()
-
-
-# --- int8-family quantized_mm dispatch (migrated from the old test_int8.py) ---
-
-
-int_gpu = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="int gemm kernel needs CUDA"
-)
-
-
-def test_gemm_passthrough_is_plain_matmul():
+@pytest.mark.parametrize("a_fmt,b_fmt,with_stats,a_folded,b_folded", STATS_CASES)
+def test_quantized_mm_records_stats(a_fmt, b_fmt, with_stats, a_folded, b_folded):
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    out = quantized_mm(a, b, "bf16", "bf16", torch.float32, {})
-    assert torch.allclose(out, a @ b, atol=1e-4)
-
-
-def test_gemm_records_nothing_without_stats():
-    """Training passes no accumulators, so the fold is skipped outright."""
-    a, b = torch.randn(20, 32), torch.randn(32, 40)
-    set_quantization_monitoring_status(True)
-    try:
-        out = quantized_mm(a, b, "int8", "int8", torch.float32, _scale("tensorwise"))
-    finally:
-        set_quantization_monitoring_status(False)
-    assert torch.isfinite(out).all()
-
-
-def test_gemm_records_only_the_operands_whose_format_is_quantized():
-    """int x bf16: only `a` is a quantized format, so only its accumulator moves."""
-    a, b = torch.randn(20, 32), torch.randn(32, 40)
-    a_stats = QuantizationStats("act/x", 1, a.device)
-    b_stats = QuantizationStats("weight/x", 1, b.device)
+    a_stats = QuantizationStats("act/x", 1, a.device) if with_stats else None
+    b_stats = QuantizationStats("weight/x", 1, b.device) if with_stats else None
     set_quantization_monitoring_status(True)
     try:
         out = quantized_mm(
             a,
             b,
-            "int8",
-            "bf16",
+            a_fmt,
+            b_fmt,
             torch.float32,
-            _scale("tensorwise"),
+            TENSORWISE,
             a_stats=a_stats,
             b_stats=b_stats,
         )
     finally:
         set_quantization_monitoring_status(False)
     assert torch.isfinite(out).all()
-    assert a_stats.numel.item() == a.numel()
-    assert b_stats.numel.item() == 0
+    if with_stats:
+        assert a_stats.numel.item() == (a.numel() if a_folded else 0)
+        assert b_stats.numel.item() == (b.numel() if b_folded else 0)
 
 
-def test_gemm_applies_bias_on_the_fallback_path():
-    """bf16 x bf16 never reaches the kernel, so the unfused branch must add it too."""
-    a, b = torch.randn(20, 32), torch.randn(32, 40)
-    bias = torch.randn(40)
-    out = quantized_mm(a, b, "bf16", "bf16", torch.float32, {}, bias=bias)
-    assert torch.allclose(out, a @ b + bias, atol=1e-4)
+# --- QuantizedLinear ---
 
 
-@fp8_only
-def test_gemm_applies_bias_in_the_fused_kernel():
-    """fp8 x fp8 on CUDA takes fp8_scaled_mm, so the bias rides its epilogue."""
-    torch.manual_seed(0)
-    a = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(128, 96, device="cuda", dtype=torch.bfloat16)
-    bias = torch.randn(96, device="cuda", dtype=torch.bfloat16)
-    cfg = _scale("rowwise")
-    with_bias = quantized_mm(
-        a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg, bias=bias
-    )
-    without = quantized_mm(a, b, "fp8_e4m3", "fp8_e4m3", torch.bfloat16, cfg)
-    torch.testing.assert_close(
-        with_bias.float(), without.float() + bias.float(), rtol=2e-2, atol=2e-2
-    )
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("eval_mode", [False, True])
+def test_quantized_linear_from_module(bias, eval_mode):
+    source = nn.Linear(64, 32, bias=bias)
+    if eval_mode:
+        source.eval()
+    q = QuantizedLinear.from_module(source, _rule({"recipe": "fp8"}))
+    assert torch.equal(q.weight, source.weight) and q.weight.requires_grad
+    assert q.training is not eval_mode  # from_module preserves the source's mode
+    if bias:
+        assert torch.equal(q.bias, source.bias)
+    else:
+        assert q.bias is None
 
 
 @fp8_only
-def test_quantized_linear_adds_bias_exactly_once():
-    """Guards the fused wiring: a leftover post-GEMM add would double the bias."""
+@pytest.mark.parametrize("scale_cfg", ALL_SCALES)
+@pytest.mark.parametrize("dtype", FORWARD_DTYPES)
+@pytest.mark.parametrize("bias", [False, True])
+def test_quantized_linear_forward_precision(dtype, scale_cfg, bias):
+    """A scale config has to reach the kernel intact, so the oracle rebuilds the same
+    operands; rounded to bf16 as the accumulator does, only one-ulp disagreement is
+    left. A loose bound would pass against an unquantized GEMM, 3.6e-2 away."""
+    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and any(
+        is_int8s(fmt) for fmt in _fmts(dtype)
+    ):
+        pytest.skip("an e8m0 scale is defined only over fp8 elements")
+    act_fmt, weight_fmt = _fmt(dtype, "act", "fwd"), _fmt(dtype, "weight", "fwd")
     torch.manual_seed(0)
-    lin = nn.Linear(128, 96, bias=True).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(lin, _cfg())
-    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
-    with_bias = q(x)
-    with torch.no_grad():
-        bias = q.bias.clone()
-        q.bias.zero_()
-    torch.testing.assert_close(
-        (with_bias - q(x)).float(),
-        bias.float().expand(64, 96),
-        rtol=2e-2,
-        atol=2e-2,
-    )
+    lin = nn.Linear(256, 128, bias=bias).cuda().to(torch.bfloat16)
+    q = QuantizedLinear.from_module(lin, _rule(dtype, scale_cfg))
+    x = torch.randn(2, 128, 256, device="cuda", dtype=torch.bfloat16)
 
-
-@pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
-def test_int8s_gemm_mixed_family_uses_fake_quant(fmt):
-    a, b = torch.randn(20, 32), torch.randn(32, 40)  # int x bf16 -> fallback
-    out = quantized_mm(a, b, fmt, "bf16", torch.float32, _scale("tensorwise"))
-    assert out.shape == (20, 40) and torch.isfinite(out).all()
-
-
-@int_gpu
-@pytest.mark.parametrize("fmt", sorted(_INT8_FORMATS))
-def test_int8s_gemm_dispatches_to_kernel(fmt):
-    torch.manual_seed(0)
-    a = torch.randn(64, 128, device="cuda")
-    b = torch.randn(128, 96, device="cuda")
-    out = quantized_mm(a, b, fmt, fmt, torch.float32, _scale("rowwise"))
-    ref = _roundtrip(a, -1, fmt, _scale("rowwise")) @ _roundtrip(
-        b, -2, fmt, _scale("rowwise")
-    )
-    assert (out - ref).norm() / ref.norm() < 0.02
-
-
-# --- mxfp8 (blockwise) on all three GEMMs ---
-
-
-@mxfp8_only
-def test_quant_linear_mxfp8_forward_matches_oracle():
-    torch.manual_seed(0)
-    lin = nn.Linear(256, 256, bias=False).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(
-        lin, QuantizationConfig(enabled=True, dtype={"recipe": "mxfp8"})
-    )
-    x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
     out = q(x)
-    # forward blocks x along in-features (-1) and w along in-features (-1).
-    ref = (
-        _roundtrip(x, -1, _E4M3, _MXFP8) @ _roundtrip(lin.weight, -1, _E4M3, _MXFP8).t()
-    )
-    assert out.shape == (256, 256) and out.dtype == torch.bfloat16
-    rel = (out.float() - ref.float()).norm() / ref.float().norm()
-    assert rel < 0.05
+    # forward blocks x along in-features (-1) and w along in-features (-1); the batch
+    # dims are flattened before the GEMM, so the oracle flattens them too
+    ref2d = _mm_ref(x.flatten(0, -2), act_fmt, lin.weight.t(), weight_fmt, scale_cfg)
+    if bias:
+        # both paths add it before the downcast: the kernel in its epilogue, the
+        # fallback right after the matmul
+        ref2d = ref2d + lin.bias.to(ref2d.dtype)
+    ref = ref2d.to(torch.bfloat16).unflatten(0, x.shape[:-1])
+    assert out.shape == (2, 128, 128) and out.dtype == torch.bfloat16
+    assert _rel(out, ref) < 3e-4
 
 
-@mxfp8_only
-def test_quant_linear_mxfp8_backward_finite():
+# 250 is not a multiple of 32, so it exercises the wgrad contraction pad
+N_TOKENS = [256, 250]
+
+
+@fp8_only
+@pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
+@pytest.mark.parametrize("scale_cfg", ALL_SCALES)
+@pytest.mark.parametrize("n_tokens", N_TOKENS)
+@pytest.mark.parametrize("bias", [False, True])
+def test_quantized_linear_backward_precision(dtype, scale_cfg, n_tokens, bias):
+    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and any(
+        is_int8s(fmt) for fmt in _fmts(dtype)
+    ):
+        pytest.skip("an e8m0 scale is defined only over fp8 elements")
     torch.manual_seed(0)
-    lin = nn.Linear(256, 256, bias=True).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(
-        lin, QuantizationConfig(enabled=True, dtype={"recipe": "mxfp8"})
+    lin = nn.Linear(256, 128, bias=bias).cuda().to(torch.bfloat16)
+    q = QuantizedLinear.from_module(lin, _rule(dtype, scale_cfg))
+
+    x = torch.randn(
+        2, n_tokens // 2, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
-    x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    q(x).square().mean().backward()
-    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
-    assert q.weight.grad.dtype == q.weight.dtype
-    assert x.grad is not None and torch.isfinite(x.grad).all()
-    assert q.bias.grad is not None and torch.isfinite(q.bias.grad).all()
 
-
-@mxfp8_only
-def test_mxfp8_wgrad_unaligned_tokens():
-    # M=250 tokens (not a multiple of 32) exercises the wgrad contraction pad.
-    torch.manual_seed(0)
-    lin = nn.Linear(256, 256, bias=False).cuda().to(torch.bfloat16)
-    q = QuantizedLinear.from_module(
-        lin, QuantizationConfig(enabled=True, dtype={"recipe": "mxfp8"})
-    )
-    x = torch.randn(250, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    q(x).square().mean().backward()
-    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
-    assert q.weight.grad.shape == (256, 256)
-    assert x.grad is not None and torch.isfinite(x.grad).all()
-
-
-def test_mxfp8_fake_quant_fallback_on_cpu():
-    # A one-sided mxfp8 rule (weight quantized, act passthrough) exercises the
-    # mxfp8 fake-quant path inside quantized_mm without touching the real GEMM — on CPU.
-    torch.manual_seed(0)
-    cfg = QuantizationConfig(
-        enabled=True,
-        dtype={"weight": "fp8_e4m3", "act": "bf16", "grad_out": "bf16"},
-        scale={"recipe": "mxfp8"},
-    )
-    lin = nn.Linear(64, 64, bias=False).to(torch.float32)
-    q = QuantizedLinear.from_module(lin, cfg)
-    x = torch.randn(32, 64, requires_grad=True)
     out = q(x)
-    assert out.shape == (32, 64) and torch.isfinite(out).all()
+    g = torch.randn_like(out)
+    out.backward(g)
+
+    # dx = g @ W and dW = gᵀ @ X, each quantized with its own GEMM's formats
+    g2d, x2d = g.flatten(0, -2), x.detach().flatten(0, -2)
+    dx_ref = _mm_ref(
+        g2d,
+        _fmt(dtype, "grad_out", "dgrad"),
+        lin.weight,
+        _fmt(dtype, "weight", "dgrad"),
+        scale_cfg,
+    )
+    dw_ref = _mm_ref(
+        g2d.t(),
+        _fmt(dtype, "grad_out", "wgrad"),
+        x2d,
+        _fmt(dtype, "act", "wgrad"),
+        scale_cfg,
+    )
+    expected = [(x.grad, dx_ref.unflatten(0, x.shape[:-1])), (q.weight.grad, dw_ref)]
+    if bias:
+        expected.append((q.bias.grad, g2d.sum(0)))  # db never passes through a GEMM
+    for (grad, ref), like in zip(expected, (x, q.weight) + ((q.bias,) if bias else ())):
+        assert torch.isfinite(grad).all()
+        assert grad.dtype == like.dtype  # grads follow the master parameter's dtype
+        assert grad.shape == like.shape  # dx comes back in the input's batched shape
+        # the oracle lands in the master dtype the grads are stored in
+        assert _rel(grad, ref.to(grad.dtype)) < 3e-4
+
+
+def test_quantized_linear_only_quantizes_during_training(monkeypatch):
+    calls = []
+    original = quant_linear.quantized_mm
+    monkeypatch.setattr(
+        quant_linear,
+        "quantized_mm",
+        lambda *a, **kw: (calls.append(None), original(*a, **kw))[1],
+    )
+    q = QuantizedLinear.from_module(nn.Linear(4, 3), _rule({"weight": "int4"}))
+    x = torch.randn(2, 4)
+
+    q.train()
+    q(x)
+    q.eval()
+    actual = q(x)
+
+    assert len(calls) == 1
+    torch.testing.assert_close(actual, nn.functional.linear(x, q.weight, q.bias))
+
+
+# (the tensor whose rounding is set, the GEMMs that consume it)
+SR_CASES = [
+    ("weight", ("fwd", "dgrad")),
+    ("act", ("fwd", "wgrad")),
+    ("grad_out", ("dgrad", "wgrad")),
+]
+
+
+@fp8_only
+@pytest.mark.parametrize("enable_sr", [False, True])
+@pytest.mark.parametrize("tensor,gemms", SR_CASES)
+def test_quantized_linear_stochastic_rounding(tensor, gemms, enable_sr):
+    """SR draws a fresh random per call, so it has to reach exactly the GEMMs that
+    consume the tensor it is set on: those stop reproducing across a repeated step,
+    while every GEMM still rounding to nearest comes back bit-identical -- and under an
+    explicit RNE, all three do."""
+    torch.manual_seed(0)
+    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.bfloat16)
+    rule = _rule(
+        FP8_E4M3_W8A8_E5M2_G8_DTYPES, None, {tensor: "SR" if enable_sr else "RNE"}
+    )
+    q = QuantizedLinear.from_module(lin, rule)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    g = torch.randn(64, 96, device="cuda", dtype=torch.bfloat16)
+
+    def step():
+        q.zero_grad(set_to_none=True)
+        x.grad = None
+        out = q(x)
+        out.backward(g)
+        return {
+            "fwd": out.detach().clone(),
+            "wgrad": q.weight.grad.clone(),
+            "dgrad": x.grad.clone(),
+        }
+
+    first, second = step(), step()
+    stochastic = gemms if enable_sr else ()
+    for gemm, got in first.items():
+        assert torch.equal(got, second[gemm]) is (gemm not in stochastic)
+
+
+@fp8_only
+def test_quantized_linear_autocast():
+    torch.manual_seed(0)
+    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.float32)  # fp32 master
+    q = QuantizedLinear.from_module(lin, _rule({"recipe": "fp8"}))
+    x = torch.randn(64, 128, device="cuda", dtype=torch.float32, requires_grad=True)
+
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        out = q(x)
+    assert out.dtype == torch.bfloat16  # follows autocast
     out.square().mean().backward()
-    assert torch.isfinite(q.weight.grad).all() and torch.isfinite(x.grad).all()
+    assert q.weight.grad.dtype == torch.float32  # grad matches the fp32 master
+    assert torch.isfinite(q.weight.grad).all()
 
 
-# --- end-to-end: a full model trains one step through the converter ---
+@fp8_only
+def test_quantized_linear_compiles_fullgraph():
+    torch.manual_seed(0)
+    lin = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
+    q = QuantizedLinear.from_module(lin, _rule({"recipe": "fp8"}, BLOCKWISE1D_128))
+    x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    out = torch.compile(q, fullgraph=True)(x)
+    out.square().mean().backward()
+
+    assert out.shape == (64, 128) and torch.isfinite(out).all()
+    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
 
 
-def _model_cfg():
-    return TrainConfig(
+@fp8_only
+def test_quantized_linear_trains_a_full_model():
+    """End to end through the converter: a built TransformerLM takes one step."""
+    config = TrainConfig(
         max_seq_len=64,
         model=ModelConfig(
             d_model=64,
@@ -516,13 +571,8 @@ def _model_cfg():
             quantization={"enabled": True, "dtype": {"recipe": "fp8"}},
         ),
     )
-
-
-@fp8_only
-def test_quantized_model_trains_one_step():
-    cfg = _model_cfg()
-    model = build_model(cfg).cuda().to(torch.bfloat16)
-    apply_quantization(model, cfg)
+    model = build_model(config).cuda().to(torch.bfloat16)
+    apply_quantization(model, config)
     assert any(isinstance(m, QuantizedLinear) for m in model.modules())
 
     ids = torch.randint(0, 128, (2, 64), device="cuda")
@@ -531,67 +581,7 @@ def test_quantized_model_trains_one_step():
         logits, _ = model(ids, position_ids)
         loss = logits.float().log_softmax(-1).mean().neg()
     loss.backward()
+
     assert torch.isfinite(loss).item()
-    qw = next(m.weight for m in model.modules() if isinstance(m, QuantizedLinear))
-    assert qw.grad is not None and torch.isfinite(qw.grad).all()
-
-
-@fp8_only
-def test_compiled_quant_linear_blockwise_fwd_bwd():
-    torch.manual_seed(0)
-    lin = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
-    cfg = QuantizationConfig(
-        enabled=True,
-        dtype={"recipe": "fp8"},
-        scale={"granularity": "blockwise", "block_shape": (1, 128)},
-    )
-    q = QuantizedLinear.from_module(lin, cfg)
-    x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    compiled = torch.compile(q, fullgraph=True)
-    out = compiled(x)
-    out.square().mean().backward()
-    assert out.shape == (64, 128) and torch.isfinite(out).all()
-    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
-    assert x.grad is not None and torch.isfinite(x.grad).all()
-
-
-@fp8_only
-def test_quantized_linear_forward_backward_with_square_tiles():
-    """End to end: the module runs and produces finite grads at a 2D block shape."""
-    cfg = QuantizationConfig(
-        enabled=True,
-        dtype={"recipe": "fp8"},
-        scale={
-            "granularity": "blockwise",
-            "block_shape": (32, 32),
-            "scale_dtype": "fp32",
-        },
-    )
-    layer = QuantizedLinear.from_module(nn.Linear(128, 64), cfg)
-    x = torch.randn(16, 128, requires_grad=True)
-    y = layer(x)
-    y.sum().backward()
-    assert y.shape == (16, 64)
-    assert torch.isfinite(x.grad).all()
-    assert torch.isfinite(layer.weight.grad).all()
-
-
-@fp8_only
-@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float8_e8m0fnu])
-@pytest.mark.parametrize("tile", [32, 64])
-def test_quantized_mm_2d_matches_fp32_dequant_reference(tile, scale_dtype):
-    """The real kernel path against an fp32 oracle, both scale dtypes.
-
-    tile=64 with `torch.float8_e8m0fnu` also exercises rep_k == 2, composing the 2D
-    outer-axis expansion with the mxfp8 K-replication fast path.
-    """
-    scale_cfg = {
-        "granularity": "blockwise",
-        "block_shape": (tile, tile),
-        "scale_dtype": scale_dtype,
-    }
-    a = torch.randn(256, 512, device="cuda")
-    b = torch.randn(512, 128, device="cuda")
-    out = quantized_mm(a, b, _E4M3, _E4M3, torch.float32, scale_cfg)
-    ref = _roundtrip(a, -1, _E4M3, scale_cfg) @ _roundtrip(b, -2, _E4M3, scale_cfg)
-    torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
+    weight = next(m.weight for m in model.modules() if isinstance(m, QuantizedLinear))
+    assert weight.grad is not None and torch.isfinite(weight.grad).all()
