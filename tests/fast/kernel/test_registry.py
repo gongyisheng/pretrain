@@ -1,33 +1,89 @@
 import pytest
 
 from src.kernel.registry import KernelRegistry, register_kernel
-from src.kernel.spec import CPU, KernelSpec, cuda
+from src.kernel.spec import CPU, KernelSpec
 
 
-def _spec(op="test.op", backend="triton", capabilities=frozenset()):
-    return KernelSpec(
-        op=op,
-        backend=backend,
-        fn=lambda *a, **k: None,
-        build="jit",
-        autograd=False,
-        capabilities=capabilities,
-    )
+def _fn():
+    return "ran"
 
 
-def test_register_then_look_up_implementations():
+def _spec(**overrides):
+    kwargs = dict(op="test.op", backend="triton", fn=_fn, build="jit", autograd=False)
+    return KernelSpec(**(kwargs | overrides))
+
+
+REGISTERED_KERNELS = [
+    ("test.op", "cublaslt"),
+    ("gemm.fp8_scaled_mm", "eager"),
+    ("test.op", "triton"),
+    ("test.op", "eager"),
+]
+
+LOOKUP_CASES = [
+    ("test.op", ("cublaslt", "triton", "eager")),
+    ("gemm.fp8_scaled_mm", ("eager",)),
+    ("test.missing", ()),
+]
+
+REGISTER_KERNEL_CASES = [
+    (
+        dict(
+            op="test.full",
+            backend="eager",
+            build="eager",
+            autograd=True,
+            capabilities=frozenset({CPU}),
+            reference=True,
+        ),
+        KernelSpec(
+            op="test.full",
+            backend="eager",
+            fn=_fn,
+            build="eager",
+            autograd=True,
+            capabilities=frozenset({CPU}),
+            reference=True,
+        ),
+    ),
+    (
+        dict(op="test.defaults", backend="triton", build="jit", autograd=False),
+        KernelSpec(
+            op="test.defaults",
+            backend="triton",
+            fn=_fn,
+            build="jit",
+            autograd=False,
+            capabilities=frozenset(),
+            reference=False,
+        ),
+    ),
+]
+
+
+@pytest.fixture
+def registry(monkeypatch):
+    """A fresh global registry, so decorator tests never leak across runs."""
+    fresh = KernelRegistry()
+    monkeypatch.setattr("src.kernel.registry.KERNEL_REGISTRY", fresh)
+    return fresh
+
+
+@pytest.mark.parametrize("op,expected", LOOKUP_CASES)
+def test_kernel_registry_implementations(op, expected):
     registry = KernelRegistry()
-    spec = _spec()
-    registry.register(spec)
+    specs = {key: _spec(op=key[0], backend=key[1]) for key in REGISTERED_KERNELS}
+    for spec in specs.values():
+        registry.register(spec)
 
-    assert registry.implementations("test.op") == (spec,)
+    assert registry.implementations(op) == tuple(
+        specs[(op, backend)] for backend in expected
+    )
+    # pre-instance register, not pre-class
+    assert KernelRegistry().implementations(op) == ()
 
 
-def test_implementations_is_empty_for_an_unknown_op():
-    assert KernelRegistry().implementations("test.missing") == ()
-
-
-def test_duplicate_op_and_backend_is_rejected():
+def test_kernel_registery_register_raise_error():
     registry = KernelRegistry()
     registry.register(_spec())
 
@@ -35,42 +91,18 @@ def test_duplicate_op_and_backend_is_rejected():
         registry.register(_spec())
 
 
-def test_one_function_registers_under_several_ops():
-    registry = KernelRegistry()
-
-    def kernel():
-        return None
-
-    for op in ("gemm.int8_scaled_mm", "gemm.fp8_scaled_mm"):
-        registry.register(
-            KernelSpec(
-                op=op,
-                backend="triton",
-                fn=kernel,
-                build="jit",
-                autograd=False,
-                capabilities=frozenset({cuda((8, 0))}),
-            )
-        )
-
-    assert registry.implementations("gemm.int8_scaled_mm")[0].fn is kernel
-    assert registry.implementations("gemm.fp8_scaled_mm")[0].fn is kernel
+@pytest.mark.parametrize("kwargs,expected", REGISTER_KERNEL_CASES)
+def test_register_kernel(registry, kwargs, expected):
+    assert register_kernel(**kwargs)(_fn) is _fn
+    assert registry.implementations(kwargs["op"]) == (expected,)
 
 
-def test_register_kernel_decorator_carries_capabilities():
-    @register_kernel(
-        op="test.decorated",
-        backend="eager",
-        build="eager",
-        autograd=True,
-        capabilities=frozenset({CPU}),
+def test_register_kernel_raise_error(registry):
+    decorate = register_kernel(
+        op="test.dup", backend="eager", build="eager", autograd=False
     )
-    def kernel():
-        return "ran"
+    decorate(_fn)
+    assert len(registry.implementations("test.dup")) == 1
 
-    from src.kernel.registry import KERNEL_REGISTRY
-
-    spec = KERNEL_REGISTRY.implementations("test.decorated")[0]
-
-    assert spec.capabilities == frozenset({CPU})
-    assert kernel() == "ran"
+    with pytest.raises(ValueError, match="kernel already registered"):
+        decorate(_fn)

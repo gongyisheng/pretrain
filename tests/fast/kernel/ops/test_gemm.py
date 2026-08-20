@@ -1,3 +1,7 @@
+"""Shape and argument validation performed by the gemm ops before dispatch."""
+
+from dataclasses import dataclass, field
+
 import pytest
 import torch
 
@@ -13,183 +17,146 @@ from src.kernel.ops.gemm import (
 
 E, M, K, N = 4, 32, 64, 48
 
-SCALED_MM_OPS = [int8_scaled_mm, fp8_scaled_mm, mxfp8_scaled_mm]
-SCALED_GROUPED_MM_OPS = [
+SCALED_MM_OPS = (int8_scaled_mm, fp8_scaled_mm, mxfp8_scaled_mm)
+SCALED_GROUPED_MM_OPS = (
     int8_scaled_grouped_mm,
     fp8_scaled_grouped_mm,
     mxfp8_scaled_grouped_mm,
-]
+)
 OP_IDS = ["int8", "fp8", "mxfp8"]
 
+# Default operand and scale shapes per layout, given the K block count.
+LAYOUT_SHAPES = {
+    "mm": lambda blocks: {
+        "aq": (M, K),
+        "bq": (K, N),
+        "sa": (M, blocks),
+        "sb": (blocks, N),
+    },
+    "ragged_m": lambda blocks: {
+        "aq": (M, K),
+        "bq": (E, K, N),
+        "sa": (M, blocks),
+        "sb": (E, blocks, N),
+    },
+    "ragged_n": lambda blocks: {
+        "aq": (E, M, K),
+        "bq": (K, N),
+        "sa": (E, M, blocks),
+        "sb": (blocks, N),
+    },
+    # Ragged K carries one scale block per group instead of one per dense K block.
+    "ragged_k": lambda blocks: {
+        "aq": (M, K),
+        "bq": (K, N),
+        "sa": (M, E),
+        "sb": (E, N),
+    },
+}
+OFFS_STRIDE = {"ragged_m": M // E, "ragged_n": N // E, "ragged_k": K // E}
 
-def _offs(groups=E, stride=M // E):
-    return torch.arange(1, groups + 1, dtype=torch.int32) * stride
+
+@dataclass(frozen=True, slots=True)
+class MMCase:
+    """A workload: the layout, the shapes to override, and the expected message."""
+
+    name: str
+    layout: str
+    match: str = ""
+    block_size: int = 0
+    shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    non_contiguous_offs: bool = False
 
 
-def _non_contiguous_offs():
-    wide = torch.zeros(E * 2, dtype=torch.int32)
-    wide[::2] = _offs()
-    return wide[::2]
-
-
-def _mm_args(**overrides):
+def make_inputs(case):
+    """Build zero-filled operands and unit scales for `case`."""
+    blocks = -(-K // case.block_size) if case.block_size else 1
+    shapes = LAYOUT_SHAPES[case.layout](blocks) | case.shapes
     args = {
-        "aq": torch.zeros(M, K, dtype=torch.int8),
-        "bq": torch.zeros(K, N, dtype=torch.int8),
-        "sa": torch.ones(M, 1),
-        "sb": torch.ones(1, N),
+        "aq": torch.zeros(shapes["aq"], dtype=torch.int8),
+        "bq": torch.zeros(shapes["bq"], dtype=torch.int8),
+        "sa": torch.ones(shapes["sa"]),
+        "sb": torch.ones(shapes["sb"]),
         "out_dtype": torch.bfloat16,
-        "block_size": 0,
+        "block_size": case.block_size,
     }
-    args.update(overrides)
+    if case.layout == "mm":
+        return args
+    offs = torch.arange(1, E + 1, dtype=torch.int32) * OFFS_STRIDE[case.layout]
+    if case.non_contiguous_offs:
+        wide = torch.zeros(E * 2, dtype=torch.int32)
+        wide[::2] = offs
+        offs = wide[::2]
+    args["offs"] = offs
     return args
 
 
-def _ragged_m_args(**overrides):
-    args = {
-        "aq": torch.zeros(M, K, dtype=torch.int8),
-        "bq": torch.zeros(E, K, N, dtype=torch.int8),
-        "sa": torch.ones(M, 1),
-        "sb": torch.ones(E, 1, N),
-        "offs": _offs(),
-        "out_dtype": torch.bfloat16,
-        "block_size": 0,
-    }
-    args.update(overrides)
-    return args
+SCALED_MM_ERROR_CASES = (
+    MMCase("contraction", "mm", "contraction mismatch", shapes={"bq": (K + 32, N)}),
+    MMCase("sa_blocks", "mm", "sa block count", 32, {"sa": (M, 4)}),
+    MMCase("sb_blocks", "mm", "sb block count", 32, {"sb": (4, N)}),
+)
 
-
-def _ragged_n_args(**overrides):
-    args = {
-        "aq": torch.zeros(E, M, K, dtype=torch.int8),
-        "bq": torch.zeros(K, N, dtype=torch.int8),
-        "sa": torch.ones(E, M, 1),
-        "sb": torch.ones(1, N),
-        "offs": _offs(stride=N // E),
-        "out_dtype": torch.bfloat16,
-        "block_size": 0,
-    }
-    args.update(overrides)
-    return args
-
-
-def _ragged_k_args(**overrides):
-    # 2D x 2D: the contraction is ragged, so sa/sb carry one block per group
-    # rather than one sized against the dense K count.
-    args = {
-        "aq": torch.zeros(M, K, dtype=torch.int8),
-        "bq": torch.zeros(K, N, dtype=torch.int8),
-        "sa": torch.ones(M, E),
-        "sb": torch.ones(E, N),
-        "offs": _offs(stride=K // E),
-        "out_dtype": torch.bfloat16,
-        "block_size": 0,
-    }
-    args.update(overrides)
-    return args
-
-
-SCALED_MM_ERROR_CASES = [
-    pytest.param(
-        _mm_args(bq=torch.zeros(K + 32, N, dtype=torch.int8)),
-        "contraction mismatch",
-        id="contraction",
+SCALED_GROUPED_MM_ERROR_CASES = (
+    MMCase("offs_non_contiguous", "ragged_m", "offs must be contiguous", 0, {}, True),
+    MMCase(
+        "contraction", "ragged_m", "contraction mismatch", shapes={"bq": (E, K + 32, N)}
     ),
-    pytest.param(
-        _mm_args(sa=torch.ones(M, 4), sb=torch.ones(2, N), block_size=32),
-        "sa block count",
-        id="sa_blocks",
-    ),
-    pytest.param(
-        _mm_args(sa=torch.ones(M, 2), sb=torch.ones(4, N), block_size=32),
-        "sb block count",
-        id="sb_blocks",
-    ),
-]
-
-SCALED_GROUPED_MM_ERROR_CASES = [
-    pytest.param(
-        _ragged_m_args(offs=_non_contiguous_offs()),
-        "offs must be contiguous",
-        id="offs_non_contiguous",
-    ),
-    pytest.param(
-        _ragged_m_args(bq=torch.zeros(E, K + 32, N, dtype=torch.int8)),
-        "contraction mismatch",
-        id="contraction",
-    ),
-    pytest.param(
-        _ragged_m_args(sa=torch.ones(M, 4), block_size=32),
-        "sa block count",
-        id="ragged_m_sa_blocks",
-    ),
-    pytest.param(
-        _ragged_m_args(sb=torch.ones(E, 1, N + 1)),
-        "sb block count",
-        id="ragged_m_sb_shape",
-    ),
-    pytest.param(
-        _ragged_n_args(sa=torch.ones(E, M, 2)),
-        "sa block count",
-        id="ragged_n_sa_shape",
-    ),
-    pytest.param(
-        _ragged_n_args(sb=torch.ones(1, N + 1)),
-        "sb block count",
-        id="ragged_n_sb_shape",
-    ),
-    pytest.param(
-        _ragged_k_args(sa=torch.ones(M + 1, E)),
-        "sa rows",
-        id="ragged_k_sa_rows",
-    ),
-    pytest.param(
-        _ragged_k_args(sb=torch.ones(E, N + 1)),
-        "sb cols",
-        id="ragged_k_sb_cols",
-    ),
-    pytest.param(
-        _ragged_k_args(sa=torch.ones(M, E + 1)),
-        "sa block count",
-        id="ragged_k_scale_pair",
-    ),
-    pytest.param(
-        # block_size 0 means one scale per group, so blocks must equal offs groups.
-        _ragged_k_args(sa=torch.ones(M, E + 1), sb=torch.ones(E + 1, N)),
+    MMCase("ragged_m_sa_blocks", "ragged_m", "sa block count", 32, {"sa": (M, 4)}),
+    MMCase("ragged_m_sb_shape", "ragged_m", "sb block count", 0, {"sb": (E, 1, N + 1)}),
+    MMCase("ragged_n_sa_shape", "ragged_n", "sa block count", 0, {"sa": (E, M, 2)}),
+    MMCase("ragged_n_sb_shape", "ragged_n", "sb block count", 0, {"sb": (1, N + 1)}),
+    MMCase("ragged_k_sa_rows", "ragged_k", "sa rows", 0, {"sa": (M + 1, E)}),
+    MMCase("ragged_k_sb_cols", "ragged_k", "sb cols", 0, {"sb": (E, N + 1)}),
+    MMCase("ragged_k_scale_pair", "ragged_k", "sa block count", 0, {"sa": (M, E + 1)}),
+    # block_size 0 means one scale per group, so blocks must equal the offs groups.
+    MMCase(
+        "ragged_k_offs_groups",
+        "ragged_k",
         "offs groups",
-        id="ragged_k_offs_groups",
+        0,
+        {"sa": (M, E + 1), "sb": (E + 1, N)},
     ),
-]
+)
 
-GROUPED_MM_ERROR_CASES = [
-    pytest.param(
-        (torch.zeros(M, K), torch.zeros(E, K, N), _non_contiguous_offs()),
-        "offs must be contiguous",
-        id="offs_non_contiguous",
+GROUPED_MM_ERROR_CASES = (
+    MMCase("offs_non_contiguous", "ragged_m", "offs must be contiguous", 0, {}, True),
+    MMCase(
+        "contraction", "ragged_m", "contraction mismatch", shapes={"bq": (E, K + 32, N)}
     ),
-    pytest.param(
-        (torch.zeros(M, K), torch.zeros(E, K + 32, N), _offs()),
-        "contraction mismatch",
-        id="contraction",
-    ),
-]
+)
 
-
-@pytest.mark.parametrize(("args", "match"), GROUPED_MM_ERROR_CASES)
-def test_grouped_mm_raise_error(args, match):
-    with pytest.raises(ValueError, match=match):
-        grouped_mm(*args)
+OUTPUT_SHAPE_CASES = (
+    (MMCase("ragged_m", "ragged_m"), (M, N)),
+    (MMCase("ragged_k", "ragged_k"), (E, M, N)),
+)
 
 
 @pytest.mark.parametrize("op", SCALED_MM_OPS, ids=OP_IDS)
-@pytest.mark.parametrize(("args", "match"), SCALED_MM_ERROR_CASES)
-def test_scaled_mm_raise_error(op, args, match):
-    with pytest.raises(ValueError, match=match):
-        op(**args)
+@pytest.mark.parametrize("case", SCALED_MM_ERROR_CASES, ids=lambda case: case.name)
+def test_scaled_mm_raise_error(op, case):
+    with pytest.raises(ValueError, match=case.match):
+        op(**make_inputs(case))
 
 
 @pytest.mark.parametrize("op", SCALED_GROUPED_MM_OPS, ids=OP_IDS)
-@pytest.mark.parametrize(("args", "match"), SCALED_GROUPED_MM_ERROR_CASES)
-def test_scaled_grouped_mm_raise_error(op, args, match):
-    with pytest.raises(ValueError, match=match):
-        op(**args)
+@pytest.mark.parametrize(
+    "case", SCALED_GROUPED_MM_ERROR_CASES, ids=lambda case: case.name
+)
+def test_scaled_grouped_mm_raise_error(op, case):
+    with pytest.raises(ValueError, match=case.match):
+        op(**make_inputs(case))
+
+
+@pytest.mark.parametrize("case", GROUPED_MM_ERROR_CASES, ids=lambda case: case.name)
+def test_grouped_mm_raise_error(case):
+    args = make_inputs(case)
+    with pytest.raises(ValueError, match=case.match):
+        grouped_mm(args["aq"], args["bq"], args["offs"])
+
+
+@pytest.mark.parametrize(
+    ("case", "shape"), OUTPUT_SHAPE_CASES, ids=lambda arg: getattr(arg, "name", None)
+)
+def test_scaled_grouped_mm_output_shape(case, shape):
+    assert int8_scaled_grouped_mm(**make_inputs(case)).shape == shape
