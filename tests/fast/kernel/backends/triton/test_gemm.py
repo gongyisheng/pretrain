@@ -10,6 +10,7 @@ from tests.fast.kernel.backends.helper import (
     GROUPED_LAYOUTS,
     GROUPED_ERROR_LAYOUTS,
     GROUPED_MM_CASES,
+    MXFP8_SCALED_MM_CASES,
     MXFP8_FORMAT_CASES,
     MXFP8_SCALE_CASES,
     MXFP8_SCALE_ERROR_CASES,
@@ -107,7 +108,7 @@ def test_scaled_mm_raise_error(case, format, scale, with_bias):
         triton_mm.scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
-@pytest.mark.parametrize("case", SCALED_MM_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("case", MXFP8_SCALED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("format", MXFP8_FORMAT_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("scale", MXFP8_SCALE_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
@@ -137,7 +138,7 @@ def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias, out_dtype):
     assert rel < 1e-4, rel
 
 
-@pytest.mark.parametrize("case", SCALED_MM_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("case", MXFP8_SCALED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("format", MXFP8_FORMAT_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("scale", MXFP8_SCALE_ERROR_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
