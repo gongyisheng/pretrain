@@ -92,7 +92,9 @@ def test_scaled_mm_precision(case, format, scale, with_bias, out_dtype):
     assert actual.shape == expected.shape
     assert actual.dtype == out_dtype.dtype
     assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, expected, rtol=format.rtol, atol=format.atol)
+    torch.testing.assert_close(
+        actual, expected, rtol=out_dtype.rtol, atol=out_dtype.atol
+    )
 
 
 @pytest.mark.parametrize("case", SCALED_MM_CASES, ids=lambda case: case.name)
@@ -133,7 +135,9 @@ def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias, out_dtype):
     assert actual.shape == expected.shape
     assert actual.dtype == out_dtype.dtype
     assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, expected, rtol=format.rtol, atol=format.atol)
+    torch.testing.assert_close(
+        actual, expected, rtol=out_dtype.rtol, atol=out_dtype.atol
+    )
     rel = (actual.float() - expected.float()).norm() / expected.float().norm()
     assert rel < 1e-4, rel
 
@@ -187,7 +191,9 @@ def test_scaled_grouped_mm_precision(case, scale, format, layout, with_bias, out
     assert actual.shape == expected.shape
     assert actual.dtype == out_dtype.dtype
     assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, expected, rtol=format.rtol, atol=format.atol)
+    torch.testing.assert_close(
+        actual, expected, rtol=out_dtype.rtol, atol=out_dtype.atol
+    )
 
 
 @pytest.mark.parametrize("case", SCALED_GROUPED_MM_CASES, ids=lambda case: case.name)
@@ -264,9 +270,11 @@ def test_mxfp8_scaled_grouped_mm_precision(
     assert actual.shape == expected.shape
     assert actual.dtype == out_dtype.dtype
     assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, expected, rtol=format.rtol, atol=format.atol)
+    torch.testing.assert_close(
+        actual, expected, rtol=out_dtype.rtol, atol=out_dtype.atol
+    )
     rel = (actual.float() - expected.float()).norm() / expected.float().norm()
-    assert rel < 1e-4, rel
+    assert rel < 5e-6, rel
 
 
 @pytest.mark.parametrize("case", SCALED_GROUPED_MM_CASES, ids=lambda case: case.name)

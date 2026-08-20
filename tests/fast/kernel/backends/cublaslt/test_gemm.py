@@ -7,6 +7,7 @@ import src.kernel.backends.cublaslt._C  # noqa: F401
 from src.kernel.backends.cublaslt import gemm as cublaslt_mm
 from src.kernel.backends.eager import gemm as eager_mm
 from tests.fast.kernel.backends.helper import (
+    BF16_OUT,
     BIAS_CASES,
     MXFP8_FORMAT_CASES,
     MXFP8_SCALE_CASES,
@@ -29,6 +30,8 @@ def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias):
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("cuBLASLt mxfp8 scaled MM requires SM100+")
 
+    # the kernel returns bf16 and rejects every other request by contract, so
+    # unlike the Triton tests there is no out_dtype axis to bound against
     aq, bq, sa, sb, out_dtype, block_size, bias = make_scaled_mm_inputs(
         case, format, scale, scale_dtype=torch.float8_e8m0fnu, with_bias=with_bias
     )
@@ -36,10 +39,10 @@ def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias):
     expected = eager_mm.scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
     assert actual.shape == expected.shape
-    assert actual.dtype == out_dtype
+    assert actual.dtype is BF16_OUT.dtype
     assert actual.stride() == (actual.shape[1], 1)
     assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, expected, rtol=format.rtol, atol=format.atol)
+    torch.testing.assert_close(actual, expected, rtol=BF16_OUT.rtol, atol=BF16_OUT.atol)
     rel = (actual.float() - expected.float()).norm() / expected.float().norm()
     assert rel < 1e-4, rel
 

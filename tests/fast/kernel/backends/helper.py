@@ -48,8 +48,6 @@ class QuantFormatCase:
     name: str
     a_format: str
     b_format: str
-    rtol: float
-    atol: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,14 +102,14 @@ MXFP8_SCALED_MM_CASES = (
 )
 
 QUANT_FORMAT_CASES = (
-    QuantFormatCase("int8xint8", "int8", "int8", 2e-2, 2e-2),
-    QuantFormatCase("e4m3xe4m3", "fp8_e4m3", "fp8_e4m3", 2e-2, 2e-2),
-    QuantFormatCase("e5m2xe5m2", "fp8_e5m2", "fp8_e5m2", 5e-2, 5e-2),
-    QuantFormatCase("e5m2xe4m3", "fp8_e5m2", "fp8_e4m3", 5e-2, 5e-2),
-    QuantFormatCase("e4m3xe5m2", "fp8_e4m3", "fp8_e5m2", 5e-2, 5e-2),
+    QuantFormatCase("int8xint8", "int8", "int8"),
+    QuantFormatCase("e4m3xe4m3", "fp8_e4m3", "fp8_e4m3"),
+    QuantFormatCase("e5m2xe5m2", "fp8_e5m2", "fp8_e5m2"),
+    QuantFormatCase("e5m2xe4m3", "fp8_e5m2", "fp8_e4m3"),
+    QuantFormatCase("e4m3xe5m2", "fp8_e4m3", "fp8_e5m2"),
 )
 
-MXFP8_FORMAT_CASES = (QuantFormatCase("e4m3xe4m3", "fp8_e4m3", "fp8_e4m3", 2e-2, 2e-2),)
+MXFP8_FORMAT_CASES = (QuantFormatCase("e4m3xe4m3", "fp8_e4m3", "fp8_e4m3"),)
 
 TENSORWISE_SCALE = QuantScaleCase("tensorwise", "tensorwise", (0, 0), 0)
 ROWWISE_SCALE = QuantScaleCase("rowwise", "rowwise", (1, 0), 0)
@@ -162,10 +160,10 @@ SCALED_GROUPED_MM_CASES = (
     ScaledGroupedMMCase("scaled-grouped-tail", 163, 48, RAGGED_COUNTS),
 )
 
-OUT_DTYPE_CASES = (
-    OutDtypeCase("bf16", torch.bfloat16, rtol=2e-2, atol=2e-2),
-    OutDtypeCase("fp16", torch.float16, rtol=2e-3, atol=2e-3),
-)
+BF16_OUT = OutDtypeCase("bf16", torch.bfloat16, rtol=2e-2, atol=2e-2)
+FP16_OUT = OutDtypeCase("fp16", torch.float16, rtol=2e-3, atol=2e-3)
+
+OUT_DTYPE_CASES = (BF16_OUT, FP16_OUT)
 
 
 def _make_random_tensor(
