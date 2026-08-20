@@ -1,4 +1,4 @@
-"""Shared formats, scale configs, and reference helpers for quantization tests."""
+"""Quantization test helpers."""
 
 import pytest
 import torch
@@ -162,7 +162,7 @@ def scale_of(granularity, block_shape=(0, 0), scale_dtype=torch.float32):
 
 TENSORWISE = scale_of("tensorwise")
 ROWWISE = scale_of("rowwise")
-# Blockwise contract extents are multiples of 16; outer extents are 1 or square.
+# Blockwise: contract extents are multiples of 16; outer extents are 1 or square.
 BLOCKWISE1D_16 = scale_of("blockwise", (1, 16))
 BLOCKWISE1D_32 = scale_of("blockwise", (1, 32))
 BLOCKWISE1D_64 = scale_of("blockwise", (1, 64))
@@ -171,7 +171,7 @@ BLOCKWISE2D_16 = scale_of("blockwise", (16, 16))
 BLOCKWISE2D_32 = scale_of("blockwise", (32, 32))
 BLOCKWISE2D_64 = scale_of("blockwise", (64, 64))
 BLOCKWISE2D_128 = scale_of("blockwise", (128, 128))
-# E8M0 MX scales require a multiple-of-32 extent; 2D-64 also covers `rep_k == 2`.
+# E8M0 scales need a multiple-of-32 extent; 2D-64 covers `rep_k == 2`.
 MXFP8 = scale_of("blockwise", (1, 32), torch.float8_e8m0fnu)
 BLOCKWISE2D_64_E8M0 = scale_of("blockwise", (64, 64), torch.float8_e8m0fnu)
 
@@ -195,7 +195,7 @@ SCALE_DTYPE_NAMES = {torch.float32: "fp32", torch.float8_e8m0fnu: "fp8_e8m0"}
 
 
 def roundtrip(x, contract_dim, fmt, scale_cfg):
-    """Return the dequantized operand used by quantized GEMM."""
+    """Return a quantized operand after dequantization."""
     if not is_quantized(fmt):
         return x
     xq, scale = quantize_operand(x, contract_dim, fmt, scale_cfg)
@@ -203,19 +203,15 @@ def roundtrip(x, contract_dim, fmt, scale_cfg):
 
 
 def fused_op_exists(a_fmt, b_fmt):
-    """Whether the pair has a fused scaled GEMM: both quantized, same family. Anything
-    else -- cross-family, or one side unquantized -- takes the dequant fallback."""
+    """Whether both formats use the same fused scaled-GEMM family."""
     return (is_fp8(a_fmt) and is_fp8(b_fmt)) or (is_int8s(a_fmt) and is_int8s(b_fmt))
 
 
 def mm_ref(a, a_fmt, b, b_fmt, scale_cfg):
-    """The GEMM quantized_mm actually performs, dequantized where that path dequantizes:
-    a fused kernel works in its fp32 accumulator, while the fallback rounds the
-    dequantized operand back to the operands' own dtype first. Getting that point wrong
-    costs a bf16 rounding, which reads as ~2e-3 of error that is not there.
+    """Reference GEMM with fused and fallback precision behavior.
 
-    Returns fp32: both paths accumulate in fp32 and round once at the output, so the
-    caller adds any bias here and casts the sum, rather than rounding twice.
+    Fused GEMMs accumulate in fp32. The fallback first restores operand dtype, then
+    accumulates in fp32. Return fp32 so callers add bias and cast only once.
     """
     dtype = torch.float32 if fused_op_exists(a_fmt, b_fmt) else a.dtype
     return (
@@ -225,10 +221,10 @@ def mm_ref(a, a_fmt, b, b_fmt, scale_cfg):
 
 
 def skip_unsupported_dtype_scale(dtype, scale_cfg):
-    """Skip a cell QuantizationConfig will not build: an e8m0 scale is the mx grid,
-    defined only over fp8 elements, per-GEMM specs included. The kernels are looser than
-    this -- quantized_mm takes int codes with e8m0 scales fine -- so the constraint is
-    the config's, and the op-level tests need no such guard."""
+    """Skip E8M0 scales with integer formats, which QuantizationConfig rejects.
+
+    This config constraint does not apply to op-level tests.
+    """
     has_int = any(
         is_int8s(fmt)
         for spec in dtype.values()
@@ -239,7 +235,7 @@ def skip_unsupported_dtype_scale(dtype, scale_cfg):
 
 
 def operand_fmt(dtype, tensor, gemm):
-    """Return a tensor's format for one GEMM; strings apply to both GEMMs."""
+    """Return a tensor format for one GEMM; strings apply to both."""
     spec = dtype[tensor]
     return spec[gemm] if isinstance(spec, dict) else spec
 
@@ -249,10 +245,9 @@ def rel(got, ref):
 
 
 def rule(dtype, scale_cfg=None, rounding=None):
-    """Build a resolved rule, filling omitted dtype slots through TrainingConfig.
+    """Build a resolved rule through TrainingConfig.
 
-    Convert `scale_cfg` to config syntax by renaming `scale_dtype` without resolving it
-    again, keeping comparisons independent.
+    Rename `scale_dtype` for config syntax without resolving it again.
     """
     spec = {"enabled": True, "dtype": dict(dtype)}
     if scale_cfg is not None:

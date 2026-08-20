@@ -14,7 +14,7 @@ from src.model.transformer import TransformerLM
 from src.training.optimizer import AdamWOptimizer, LionOptimizer
 from src.metrics import functional as metric_utils
 from src.utils.config import ModelConfig, TrainConfig
-from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
+from tests.fast.helper import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 # ---------------------------------------------------------------------------
 # Small model configs matching real architectures. Factories rather than

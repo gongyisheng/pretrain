@@ -6,7 +6,7 @@ from src.utils.masking_utils import (
     build_intra_doc_attention_mask,
     build_position_ids,
 )
-from tests.fast.helpers import ATTN_IMPLEMENTATION, skip_if_unsupported
+from tests.fast.helper import ATTN_IMPLEMENTATION, skip_if_unsupported
 
 
 EOT = 0  # token ID used as end-of-text in these tests

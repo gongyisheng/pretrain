@@ -17,7 +17,7 @@ from src.metrics.quant import set_quantization_monitoring_status
 from src.quant.convert import apply_quantization
 from src.quant.moe import QuantizedSparseMoEBlock
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
-from tests.fast.helpers import make_attn_mask
+from tests.fast.helper import make_attn_mask
 
 
 D_MODEL = 64
