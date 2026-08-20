@@ -102,7 +102,6 @@ MXFP8_SCALED_MM_CASES = (
     ScaledMMCase("moe-down", 192, 512),
     ScaledMMCase("tail", 112, 144, m=80),
 )
-MXFP8_SCALED_MM_ERROR_CASES = (ScaledMMCase("nonmultiple", 100, 130, m=70),)
 
 QUANT_FORMAT_CASES = (
     QuantFormatCase("int8xint8", "int8", "int8", 2e-2, 2e-2),
