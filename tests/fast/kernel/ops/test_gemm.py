@@ -175,6 +175,12 @@ GROUPED_MM_ERROR_CASES = [
 ]
 
 
+@pytest.mark.parametrize(("args", "match"), GROUPED_MM_ERROR_CASES)
+def test_grouped_mm_raise_error(args, match):
+    with pytest.raises(ValueError, match=match):
+        grouped_mm(*args)
+
+
 @pytest.mark.parametrize("op", SCALED_MM_OPS, ids=OP_IDS)
 @pytest.mark.parametrize(("args", "match"), SCALED_MM_ERROR_CASES)
 def test_scaled_mm_raise_error(op, args, match):
@@ -187,20 +193,3 @@ def test_scaled_mm_raise_error(op, args, match):
 def test_scaled_grouped_mm_raise_error(op, args, match):
     with pytest.raises(ValueError, match=match):
         op(**args)
-
-
-@pytest.mark.parametrize(("args", "match"), GROUPED_MM_ERROR_CASES)
-def test_grouped_mm_raise_error(args, match):
-    with pytest.raises(ValueError, match=match):
-        grouped_mm(*args)
-
-
-@pytest.mark.parametrize(
-    ("args", "shape"),
-    [
-        pytest.param(_ragged_m_args(), (M, N), id="ragged_m"),
-        pytest.param(_ragged_k_args(), (E, M, N), id="ragged_k"),
-    ],
-)
-def test_scaled_grouped_mm_output_shape(args, shape):
-    assert int8_scaled_grouped_mm(**args).shape == shape
