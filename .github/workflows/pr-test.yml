@@ -20,13 +20,20 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  SPLIT_BY_TEST: -n 12 --dist load
+  SPLIT_BY_FILE: -n 6 --dist loadfile
+
 jobs:
   prepare:
     runs-on: [self-hosted]
     outputs:
       has_data: ${{ steps.detect.outputs.has_data }}
+      has_kernel: ${{ steps.detect.outputs.has_kernel }}
       has_layers: ${{ steps.detect.outputs.has_layers }}
+      has_metrics: ${{ steps.detect.outputs.has_metrics }}
       has_model: ${{ steps.detect.outputs.has_model }}
+      has_quant: ${{ steps.detect.outputs.has_quant }}
       has_training: ${{ steps.detect.outputs.has_training }}
       has_utils: ${{ steps.detect.outputs.has_utils }}
     steps:
@@ -38,8 +45,11 @@ jobs:
           script: |
             if (context.eventName === 'workflow_dispatch' || context.eventName === 'push') {
               core.setOutput('has_data', 'true');
+              core.setOutput('has_kernel', 'true');
               core.setOutput('has_layers', 'true');
+              core.setOutput('has_metrics', 'true');
               core.setOutput('has_model', 'true');
+              core.setOutput('has_quant', 'true');
               core.setOutput('has_training', 'true');
               core.setOutput('has_utils', 'true');
               return;
@@ -56,15 +66,31 @@ jobs:
 
             // Each flag maps a source subtree to its test directory:
             //   src/data      -> tests/fast/data
+            //   src/kernel    -> tests/fast/kernel
             //   src/layers    -> tests/fast/layers
+            //   src/metrics   -> tests/fast/metrics
             //   src/model     -> tests/fast/model
+            //   src/quant     -> tests/fast/quant
             //   src/utils     -> tests/fast/utils
+            // has_quant also fires on src/kernel, since the quantized GEMM paths
+            // call straight into those kernels.
+            // has_metrics and has_quant each fire on the other's subtree: the
+            // quantization fold is called from inside quantized_gemm, so
+            // src/metrics/quant.py is on the quant hot path, and src/metrics reads
+            // back through src/quant's dequantize and format helpers.
             // has_training (tests/fast/training + tests/e2e) is the integration
             // catch-all: any src/ change runs it, since the end-to-end training
             // path can break from a change anywhere in the stack.
             const has_data = matchAny([/^src\/data\//]);
+            const has_kernel = matchAny([/^src\/kernel\//]);
             const has_layers = matchAny([/^src\/layers\//]);
+            const has_metrics = matchAny([/^src\/metrics\//, /^src\/quant\//]);
             const has_model = matchAny([/^src\/model\//]);
+            const has_quant = matchAny([
+              /^src\/quant\//,
+              /^src\/kernel\//,
+              /^src\/metrics\//,
+            ]);
             const has_utils = matchAny([/^src\/utils\//]);
             const has_training = matchAny([
               /^src\//,
@@ -72,12 +98,15 @@ jobs:
             ]);
 
             core.setOutput('has_data', String(has_data));
+            core.setOutput('has_kernel', String(has_kernel));
             core.setOutput('has_layers', String(has_layers));
+            core.setOutput('has_metrics', String(has_metrics));
             core.setOutput('has_model', String(has_model));
+            core.setOutput('has_quant', String(has_quant));
             core.setOutput('has_training', String(has_training));
             core.setOutput('has_utils', String(has_utils));
 
-            core.info(`has_data=${has_data} has_layers=${has_layers} has_model=${has_model} has_training=${has_training} has_utils=${has_utils}`);
+            core.info(`has_data=${has_data} has_kernel=${has_kernel} has_layers=${has_layers} has_metrics=${has_metrics} has_model=${has_model} has_quant=${has_quant} has_training=${has_training} has_utils=${has_utils}`);
 
   lint:
     runs-on: [self-hosted]
@@ -114,10 +143,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      # `--reinstall-package pretrain` forces rebuild of the C++ `_bpe_engine`
-      # extension. The .so is built into the source tree, which actions/checkout
-      # wipes each run; uv's cache-keys see unchanged .cpp/.h and would otherwise
-      # skip the rebuild, leaving the .so missing.
+      # forces rebuild of the C++ `_bpe_engine` extension
       - run: uv sync --frozen --reinstall-package pretrain
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
@@ -126,7 +152,7 @@ jobs:
         env:
           CUDA_VISIBLE_DEVICES: ""
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/data/ -v
+        run: uv run pytest tests/fast/data/ $SPLIT_BY_TEST
 
   test-layers:
     needs: [prepare]
@@ -145,20 +171,90 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      - name: Pick free GPU
-        id: pick
+      - name: Run layer tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
-          idx=$(uv run python tests/ci/gpu_lock_exec.py)
-          echo "index=$idx" >> "$GITHUB_OUTPUT"
-          echo "Picked GPU $idx"
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/layers/ $SPLIT_BY_FILE
 
-      - name: Run layer tests
+  test-kernel:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_kernel == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # Rebuild the checkout-local CUDA extension; actions/checkout removes the
+      # previously built .so while the shared uv environment remains installed.
+      - run: uv sync --frozen --reinstall-package pretrain
         env:
-          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/layers/ -v
+
+      - name: Run kernel tests
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+        run: |
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/kernel/ $SPLIT_BY_TEST
+
+  test-quant:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_quant == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # Rebuild the checkout-local CUDA extension; actions/checkout removes the
+      # previously built .so while the shared uv environment remains installed.
+      - run: uv sync --frozen --reinstall-package pretrain
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+
+      - name: Run quant tests
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+        run: |
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/quant/ $SPLIT_BY_TEST
+
+  test-metrics:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_metrics == 'true'
+    runs-on: [self-hosted]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - run: uv sync --frozen
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+
+      # No tokenizer/dataset restore: these tests use a fake tokenizer and never
+      # touch .bin files, so they need neither the HF download nor the C++ rebuild.
+      - name: Run metrics tests
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+        run: |
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/metrics/ $SPLIT_BY_TEST
 
   test-model:
     needs: [prepare]
@@ -177,20 +273,12 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      - name: Pick free GPU
-        id: pick
+      - name: Run model tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
-          idx=$(uv run python tests/ci/gpu_lock_exec.py)
-          echo "index=$idx" >> "$GITHUB_OUTPUT"
-          echo "Picked GPU $idx"
-
-      - name: Run model tests
-        env:
-          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
-          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/model/ -v
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/model/ $SPLIT_BY_FILE
 
   test-utils:
     needs: [prepare]
@@ -209,20 +297,12 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
 
-      - name: Pick free GPU
-        id: pick
+      - name: Run utils tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
-          idx=$(uv run python tests/ci/gpu_lock_exec.py)
-          echo "index=$idx" >> "$GITHUB_OUTPUT"
-          echo "Picked GPU $idx"
-
-      - name: Run utils tests
-        env:
-          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
-          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: uv run pytest tests/fast/utils/ -v
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest tests/fast/utils/ $SPLIT_BY_FILE
 
   test-training:
     needs: [prepare]
@@ -237,23 +317,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      # `--reinstall-package pretrain` forces rebuild of the C++ `_bpe_engine`
-      # extension. The training tests import `src.data.bpe`, whose .so is built
-      # into the source tree that actions/checkout wipes each run; uv's cache-keys
-      # see unchanged .cpp/.h and would otherwise skip the rebuild, leaving the
-      # .so missing and collection failing on import.
+      # forces rebuild of the C++ `_bpe_engine` extension
       - run: uv sync --frozen --reinstall-package pretrain
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-
-      - name: Pick free GPU
-        id: pick
-        env:
-          UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
-        run: |
-          idx=$(uv run python tests/ci/gpu_lock_exec.py)
-          echo "index=$idx" >> "$GITHUB_OUTPUT"
-          echo "Picked GPU $idx"
 
       - name: Restore tokenizer + dataset
         env:
@@ -269,10 +336,10 @@ jobs:
 
       - name: Run training tests
         env:
-          CUDA_VISIBLE_DEVICES: ${{ steps.pick.outputs.index }}
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
         run: |
-          uv run pytest \
-            tests/fast/training/ \
-            tests/e2e/ \
-            -v
+          uv run python tests/ci/gpu_lock_exec.py -- \
+            uv run pytest \
+              tests/fast/training/ \
+              tests/e2e/ \
+              $SPLIT_BY_FILE

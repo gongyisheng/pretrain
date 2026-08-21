@@ -8,14 +8,7 @@ from src.utils.config import ModelConfig
 
 
 class TransformerBlock(nn.Module):
-    """Pre-norm transformer block: attn slot then mlp slot.
-
-    The residual strategy (`residual_cls`) owns each slot's combine logic; the
-    block just forwards `pre → sublayer → combine` and threads `ctx` between
-    slots. mlp returns (out, aux_loss); aux_loss is None for dense MLP and a
-    load-balancing loss for MoE. Forward returns (x, ctx, aux_loss); ctx is None
-    under StandardResidual.
-    """
+    """Pre-norm transformer block: attn slot then mlp slot, returns (x, ctx, aux_loss)."""
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
@@ -38,12 +31,7 @@ class TransformerBlock(nn.Module):
 
     @staticmethod
     def compute_flops(config: ModelConfig, max_seq_len: int, layer_idx: int) -> int:
-        """Forward FLOPs per token for one block: attn + mlp + the two pre-norms
-        (~3 FLOPs/element each) + the residual combine for both slots. `layer_idx`
-        resolves this block's per-layer attn and mlp from the config (blocks may
-        differ, e.g. mixed mha/gqa or dense/MoE stacks), and the residual term is
-        also depth-dependent for some strategies (e.g. attn_res).
-        """
+        """Forward FLOPs per token for one block: attn + mlp + two pre-norms + residuals."""
         attn_cls_name, attn_kwargs = config.resolve_attn(layer_idx)
         attn = ATTN_REGISTRY[attn_cls_name].compute_flops(
             config.d_model, max_seq_len, **attn_kwargs
@@ -60,12 +48,6 @@ class TransformerBlock(nn.Module):
     def compute_parameters(
         config: ModelConfig, active: bool = False, *, layer_idx: int
     ) -> int:
-        """Trainable params for one block: the two pre-norms + attn + mlp + the
-        residual params for both slots. `active=True` makes MoE count only the
-        k routed experts; it's a no-op for dense MLP. `layer_idx` resolves this
-        block's attn and mlp from the per-layer schema, since blocks may now
-        differ (mixed mha/gqa or dense/MoE stacks).
-        """
         norm = 2 * NORM_REGISTRY[config.norm_cls].compute_parameters(
             config.d_model, **config.norm_kwargs
         )

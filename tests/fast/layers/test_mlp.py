@@ -3,18 +3,18 @@
 import pytest
 import torch
 
+from src.kernel.ops.gemm import grouped_mm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.mlp import (
     DenseMLPBlock,
     ExpertBias,
     ExpertLoad,
+    GroupedGemmFn,
     MLP_REGISTRY,
     MoERouter,
     MOE_ROUTER_SCORE_FNS,
     SparseMoEBlock,
     grouped_mlp,
-    gated_mlp,
-    ungated_mlp,
 )
 from tests.fast.layers._refs import (
     COMPOUND_DTYPES,
@@ -23,6 +23,10 @@ from tests.fast.layers._refs import (
     moe_router_ref,
     sparse_moe_block_ref,
 )
+
+
+def grouped_mm_eager(a, b, offs, bias=None):
+    return grouped_mm(a, b, offs, bias=bias, backend="eager")
 
 
 ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
@@ -945,7 +949,6 @@ def test_grouped_mlp_matches_per_group_loop(
     b_in = torch.randn(E, out_dim, dtype=dtype) * 0.1 if use_bias else None
     b_down = torch.randn(E, D, dtype=dtype) * 0.1 if use_bias else None
 
-    row_expert_ids = torch.repeat_interleave(torch.arange(E), torch.tensor(counts))
     offs = torch.tensor(counts).cumsum(0).to(torch.int32)
 
     got = grouped_mlp(
@@ -955,36 +958,25 @@ def test_grouped_mlp_matches_per_group_loop(
         act,
         offs,
         gated,
-        row_expert_ids=row_expert_ids,
         b_in=b_in,
         b_down=b_down,
     )
 
-    # Reference: run each group through the existing 2D fused op.
+    # Oracle: run each group through the existing 2D fused op.
     ref = torch.empty_like(got)
     start = 0
     for e, c in enumerate(counts):
         if c == 0:
             continue
         xs = x[start : start + c]
+        h = torch.addmm(b_in[e], xs, w_in[e].mT) if use_bias else xs @ w_in[e].mT
         if gated:
-            ref[start : start + c] = gated_mlp(
-                xs,
-                w_in[e],
-                w_down[e],
-                act,
-                b_in[e] if use_bias else None,
-                b_down[e] if use_bias else None,
-            )
+            gate, up = h.chunk(2, dim=-1)
+            h = act(gate, up)
         else:
-            ref[start : start + c] = ungated_mlp(
-                xs,
-                w_in[e],
-                w_down[e],
-                act,
-                b_in[e] if use_bias else None,
-                b_down[e] if use_bias else None,
-            )
+            h = act(h)
+        out = torch.addmm(b_down[e], h, w_down[e].mT) if use_bias else h @ w_down[e].mT
+        ref[start : start + c] = out
         start += c
 
     assert got.dtype == dtype
@@ -1296,11 +1288,10 @@ def test_sparse_moe_latent_flops_less_than_dense_moe():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="grouped GEMM is CUDA only")
 @pytest.mark.parametrize("gated", [True, False])
-def test_sparse_moe_block_compiles_fullgraph(gated):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_sparse_moe_block_compiles_fullgraph(gated, dtype):
     torch.manual_seed(0)
     blk = (
         SparseMoEBlock(
@@ -1315,13 +1306,190 @@ def test_sparse_moe_block_compiles_fullgraph(gated):
             expert_bias=True,
         )
         .cuda()
-        .to(torch.bfloat16)
+        .to(dtype)
     )
     for p in blk.parameters():
         if p.ndim >= 2:
             torch.nn.init.normal_(p, std=0.02)
-    x = torch.randn(2, 8, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(2, 8, 64, device="cuda", dtype=dtype, requires_grad=True)
     compiled = torch.compile(blk, fullgraph=True)
     out, _ = compiled(x)
     out.float().sum().backward()
     assert out.shape == x.shape and x.grad is not None
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+def test_moe_expert_mm_seam_is_pluggable():
+    torch.manual_seed(0)
+    blk = (
+        SparseMoEBlock(
+            d_model=32,
+            intermediate_size=48,
+            n_routed_experts=4,
+            n_routed_experts_per_token=2,
+        )
+        .cuda()
+        .bfloat16()
+    )
+    # default seam is the bf16 grouped GEMM wrapped for autograd
+    assert blk.expert_mm.__func__ is SparseMoEBlock.expert_mm
+
+    seen = []
+
+    def spy(a, b, offs, bias=None, projection=None):
+        seen.append(projection)
+        return grouped_mm(a, b, offs, bias=bias)
+
+    blk.expert_mm = spy
+    x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16)
+    out, _ = blk(x)
+    assert out.shape == x.shape
+    # one seam, called once per projection, each tagged so a swapped-in
+    # implementation can tell the block input from the post-activation hidden state
+    assert seen == ["gate_up", "down"]
+
+
+_GG_LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")
+
+
+def _make_grouped_layout(layout, counts=(64, 0, 130, 46), M=32, K=64, N=48, seed=0):
+    """Build operands for one grouped ragged layout."""
+    torch.manual_seed(seed)
+    G, R = len(counts), sum(counts)
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+
+    def rand(dim0, dim1, dim2=None):
+        shape = (dim0, dim1) if dim2 is None else (dim0, dim1, dim2)
+        return torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
+
+    if layout == "ragged_m":  # (R,K) x (G,K,N) -> (R,N)
+        return rand(R, K), rand(G, N, K).mT, offs
+    if layout == "ragged_k":  # (M,R) x (R,N) -> (G,M,N)
+        return rand(R, M).mT, rand(R, N), offs
+    return rand(G, M, K), rand(K, R), offs  # ragged_n: (G,M,K) x (K,R) -> (M,R)
+
+
+def _run_grouped_mm_apply(a0, b0, offs, grad, backend, include_backend):
+    a = a0.clone().requires_grad_(True)
+    b = b0.clone().requires_grad_(True)
+    if include_backend:
+        out = GroupedGemmFn.apply(a, b, None, offs, backend)
+    else:
+        out = GroupedGemmFn.apply(a, b, None, offs)
+    out.backward(grad)
+    return out, a.grad, b.grad
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+@pytest.mark.parametrize(
+    ("backend", "include_backend"),
+    [(None, False), ("triton", True)],
+    ids=["four_inputs", "forced_backend"],
+)
+def test_grouped_mm_fn_apply_backward_arity(backend, include_backend):
+    a0, b0, offs = _make_grouped_layout("ragged_m")
+    grad = torch.randn(a0.shape[0], b0.shape[-1], device="cuda", dtype=torch.bfloat16)
+
+    out, grad_a, grad_b = _run_grouped_mm_apply(
+        a0, b0, offs, grad, backend, include_backend
+    )
+
+    assert torch.isfinite(out).all()
+    assert torch.isfinite(grad_a).all()
+    assert torch.isfinite(grad_b).all()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+def test_grouped_mm_fn_explicit_none_backend_matches_omitted_backend():
+    a0, b0, offs = _make_grouped_layout("ragged_m")
+    grad = torch.randn(a0.shape[0], b0.shape[-1], device="cuda", dtype=torch.bfloat16)
+
+    omitted = _run_grouped_mm_apply(a0, b0, offs, grad, None, False)
+    explicit_none = _run_grouped_mm_apply(a0, b0, offs, grad, None, True)
+
+    for got, expected in zip(explicit_none, omitted):
+        torch.testing.assert_close(got, expected)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+@pytest.mark.parametrize("layout", _GG_LAYOUTS)
+def test_grouped_mm_fn_grads_match_torch(layout):
+    """Each layout's dgrad/wgrad lands in another layout of the same set, so
+    GroupedGemmFn is only correct once all three are."""
+    a0, b0, offs = _make_grouped_layout(layout)
+
+    def run(fn):
+        a = a0.clone().requires_grad_(True)
+        b = b0.clone().requires_grad_(True)
+        out = fn(a, b)
+        (out * out).sum().backward()
+        return out, a.grad, b.grad
+
+    ref = run(lambda a, b: grouped_mm_eager(a, b, offs))
+    got = run(lambda a, b: GroupedGemmFn.apply(a, b, None, offs))
+    for g, r in zip(got, ref):
+        torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+@pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
+def test_grouped_mm_fn_bias_grads_match_eager(layout):
+    a0, b0, offs = _make_grouped_layout(layout)
+    G, N = offs.shape[0], 48
+    bias0 = torch.randn(G, N, device="cuda", dtype=torch.bfloat16)
+    grad_out = torch.randn_like(grouped_mm_eager(a0, b0, offs, bias0))
+
+    def run(fn):
+        a, b = a0.clone().requires_grad_(True), b0.clone().requires_grad_(True)
+        bias = bias0.clone().requires_grad_(True)
+        out = fn(a, b, bias)
+        out.backward(grad_out)
+        return out, a.grad, b.grad, bias.grad
+
+    ref = run(lambda a, b, bias: grouped_mm_eager(a, b, offs, bias))
+    got = run(lambda a, b, bias: GroupedGemmFn.apply(a, b, bias, offs))
+    for index, (g, r) in enumerate(zip(got, ref)):
+        if layout == "ragged_m" and index == 3:
+            torch.testing.assert_close(g.float(), r.float(), rtol=8e-2, atol=1.0)
+        else:
+            torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
+)
+def test_grouped_mm_fn_compiles_fullgraph_and_matches_eager():
+    # Forward compiles with no graph break; the Function's backward runs eager
+    # (Dynamo cannot trace the autograd engine under fullgraph), so we compile
+    # forward and call backward outside the traced region, matching eager.
+    torch.manual_seed(0)
+    counts = [64, 0, 130, 41]
+    R, K, N = sum(counts), 64, 48
+    offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
+    a0 = torch.randn(R, K, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(len(counts), N, K, device="cuda", dtype=torch.bfloat16) * 0.1
+
+    def fwd(a, b):
+        return GroupedGemmFn.apply(a, b, None, offs)
+
+    def run(f):
+        a = a0.clone().requires_grad_(True)
+        wv = w.clone().requires_grad_(True)
+        c = f(a, wv.mT)
+        c.sum().backward()
+        return c, a.grad, wv.grad
+
+    eager = run(fwd)
+    comp = run(torch.compile(fwd, fullgraph=True))
+    for e, c in zip(eager, comp):
+        torch.testing.assert_close(c.float(), e.float(), rtol=2e-2, atol=2e-2)

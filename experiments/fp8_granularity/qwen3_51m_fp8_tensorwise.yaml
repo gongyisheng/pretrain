@@ -31,10 +31,13 @@ training:
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  quant:
+  quantization:
     enabled: true
-    dtype_recipe: fp8
-    scaling:
+    dtype:
+      weight: fp8_e4m3
+      act: fp8_e4m3
+      grad_out: fp8_e5m2
+    scale:
       granularity: tensorwise
     exclude: [lm_head]
   grad_clip: 1.0
@@ -43,17 +46,20 @@ training:
   eval_every: 100
   eval_steps: 100
 optimizer:
-  name: adamw
+  name: muon
   lr: 5e-4
   weight_decay: 0.1
   betas:
   - 0.9
   - 0.95
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_adjust_lr_fn: match_rms_adamw
 scheduler:
   name: cosine
   warmup_steps: 1500
   min_lr: 5e-5
 logging:
-  wandb_project: pretrain-fp8
+  wandb_project: pretrain-fp8-granularity
   wandb_run_name: qwen3-51m-fp8-tensorwise
   log_every: 10

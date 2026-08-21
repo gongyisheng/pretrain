@@ -35,7 +35,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   seed: 42
-  quant:
+  quantization:
     enabled: false
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_muon/qwen3_51m_bf16_adamw/

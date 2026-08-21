@@ -1,7 +1,7 @@
 """Experiment-tracking dispatch — the layer that talks to W&B.
 
 Kept separate from metric computation (`metric_utils`) and assembly
-(`MetricsTracker`) so the rest of the stack logs to an abstraction, not to
+(`MetricsCollector`) so the rest of the stack logs to an abstraction, not to
 wandb directly. If a second backend (TensorBoard, MLflow) is ever needed,
 generalize this into a registry of backends behind the same `log` interface.
 """

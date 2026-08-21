@@ -1,0 +1,48 @@
+from collections.abc import Callable
+from typing import Any
+
+from src.kernel.spec import BuildMode, CapabilityRequirement, KernelSpec
+
+
+class KernelRegistry:
+    def __init__(self):
+        self._specs: dict[str, dict[str, KernelSpec]] = {}
+
+    def register(self, spec: KernelSpec) -> None:
+        by_backend = self._specs.setdefault(spec.op, {})
+        if spec.backend in by_backend:
+            raise ValueError(
+                f"kernel already registered: op={spec.op!r}, backend={spec.backend!r}"
+            )
+        by_backend[spec.backend] = spec
+
+    def implementations(self, op: str) -> tuple[KernelSpec, ...]:
+        return tuple(self._specs.get(op, {}).values())
+
+
+KERNEL_REGISTRY = KernelRegistry()
+
+
+def register_kernel(
+    op: str,
+    backend: str,
+    build: BuildMode,
+    autograd: bool,
+    capabilities: frozenset[CapabilityRequirement] = frozenset(),
+    reference: bool = False,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        KERNEL_REGISTRY.register(
+            KernelSpec(
+                op=op,
+                backend=backend,
+                fn=fn,
+                build=build,
+                autograd=autograd,
+                capabilities=capabilities,
+                reference=reference,
+            )
+        )
+        return fn
+
+    return decorator

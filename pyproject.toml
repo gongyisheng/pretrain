@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "pybind11>=2.11", "wheel"]
+requires = ["setuptools>=64", "pybind11>=2.11", "torch>=2.12.1,<2.13", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Pretraining experiments — different architectures, datasets, hyperparameters"
 requires-python = ">=3.12"
 dependencies = [
-    "torch>=2.10",
+    "torch>=2.12.1,<2.13",
     "tokenizers>=0.22",
     "regex>=2024.0",
     "datasets>=4.5",
@@ -20,29 +20,44 @@ dependencies = [
     "numpy>=2.4",
     "pyarrow>=17.0",
     "triton>=3.6",
+    "cuda-python>=13.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-n 6 --dist loadfile"
 
 [dependency-groups]
 dev = [
     "pytest>=9.0",
+    "pytest-xdist>=3.6",
+    "pybind11>=2.11",
     "transformers>=4.51",
     "ruff>=0.15.6",
     "pre-commit>=4.0",
     "matplotlib>=3.9",
 ]
 
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+
 [tool.uv]
-# Rebuild the editable install (and therefore the C++ `_bpe_engine` extension)
-# when any of these files change. Default cache-keys only watch pyproject.toml,
-# so without this an edit to a .cpp/.h file would be picked up only after an
+no-build-isolation-package = ["pretrain"]
+# Rebuild the editable install (and therefore the native extensions) when any
+# of these files change. Default cache-keys only watch pyproject.toml, so
+# without this an edit to a .cpp/.h file would be picked up only after an
 # explicit `uv sync --reinstall-package pretrain`.
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "setup.py" },
     { file = "src/data/bpe/**/*.cpp" },
     { file = "src/data/bpe/**/*.h" },
+    { file = "src/kernel/backends/cublaslt/csrc/**/*.cpp" },
+    { file = "src/kernel/backends/cublaslt/csrc/**/*.cu" },
 ]

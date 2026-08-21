@@ -6,7 +6,7 @@ from src.layers.mlp import DenseMLPBlock
 from src.model import build_model
 from src.model.transformer import TransformerLM
 from src.utils.config import ModelConfig, TrainConfig
-from tests.fast.helpers import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
+from tests.fast.helper import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
 
 
 def _cfg(max_seq_len=32, **model_over):

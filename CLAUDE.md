@@ -1,10 +1,8 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project
 
-Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML), W&B logging. One unified model (`TransformerLM`) assembled from registered components: `mha`/`gqa`/`mla` attention, `dense`/`moe` MLP, `rmsnorm`/`layernorm` norm, `rope`/`learned` pos_emb. Layer ops are plain functions fused by the whole-model `torch.compile(model)` in the trainer, not per-op decorators.
+Single-GPU LLM pretraining research codebase: pure PyTorch, YAML-configured, with W&B logging. `TransformerLM` is the one model class and is assembled from registered attention (`mha`/`gqa`/`mla`), MLP (`dense`/`moe`), norm (`rmsnorm`/`layernorm`), positional-embedding (`rope`/`learned`), and residual components. The trainer compiles the whole model with `torch.compile(model)`; layer operations remain plain functions rather than individually compiled decorators.
 
 ## Commands
 
@@ -12,10 +10,15 @@ Single-GPU LLM pretraining research codebase. Pure PyTorch, config-driven (YAML)
 # Install
 uv sync
 
-# Tests
-uv run pytest                          # all tests
-uv run pytest tests/fast/model/test_transformer.py       # single file
-uv run pytest tests/fast/model/test_transformer.py -k "test_forward"  # single test
+# Tests: always pass -n explicitly. Run fast and e2e trees separately.
+uv run pytest tests/fast -n 6
+uv run pytest tests/fast/layers -n 6
+uv run pytest tests/fast/quant/test_moe.py -n 6
+uv run pytest tests/fast/kernel -n 12 --dist load
+uv run pytest tests/fast/quant -n 12 --dist load
+uv run pytest tests/fast/metrics -n 12 --dist load
+uv run pytest tests/e2e -n 0
+uv run pytest tests/fast/model/test_transformer.py -n 0 -k "test_forward"
 
 # Lint
 uv run ruff check src/ tests/
@@ -26,95 +29,50 @@ uv run python scripts/train.py --config configs/gpt2_124m.yaml
 uv run python scripts/train.py --config configs/qwen3_51m.yaml --no-wandb
 uv run python scripts/train.py --config configs/gpt2_124m.yaml --resume checkpoints/step_1000.pt
 
-# CLI config overrides
+# CLI config override
 uv run python scripts/train.py --config configs/gpt2_124m.yaml --optimizer.lr=1e-4
 
 # Data preprocessing
 uv run python scripts/preprocess_data.py --config configs/gpt2_124m.yaml
 
-# Full pipeline (preprocess + train)
+# Full pipeline
 nohup uv run bash scripts/run_pipeline.sh > pipeline.log 2>&1 &
 ```
 
 ## Architecture
 
-### Layers vs. models
-
-Reusable building blocks live in `src/layers/`: `norm.py` (RMSNorm/LayerNorm, `NORM_REGISTRY`), `pos_emb.py` (RoPE + learned, `POS_EMB_REGISTRY`), `attention.py` (MHA + GQA + MLA, `ATTN_REGISTRY`; MLA = `MultiHeadLatentAttention`, DeepSeek-V2/V3 low-rank KV/Q compression with decoupled RoPE — `qk_rope_head_dim` carries position, the shared RoPE is sized to it in `transformer.py`), `activation.py` (unary `relu/gelu/silu` + gated variants, `UNGATED_ACTIVATIONS`/`GATED_ACTIVATIONS`), `mlp.py` (`DenseMLPBlock` + `SparseMoEBlock`, `MLP_REGISTRY`; SwiGLU = `DenseMLPBlock(activation="silu", gated=True)`), `residual.py` (`StandardResidual`/`AttnResidual`, `RESIDUAL_REGISTRY`), `block.py` (`TransformerBlock`). `SparseMoEBlock` also supports LatentMoE (arXiv:2601.18089) via `latent_moe: true` + `latent_dim: ℓ`: routed experts run in a compressed latent space ℓ (shared `latent_down_proj` d→ℓ before dispatch, `latent_up_proj` ℓ→d after aggregation); the router and shared experts stay at `d`, and `intermediate_size` is unchanged. Reinvest the α = d/ℓ savings manually by setting `n_routed_experts` (=αN) and `n_routed_experts_per_token` (=αK). The single unified architecture `TransformerLM` lives in `src/model/transformer.py` and is the only model class. `build_model(cfg)` in `src/model/__init__.py` constructs it from the config. Layer ops (rmsnorm, rope, `gated_mlp`/`ungated_mlp`, `_sdpa`, gated activations, moe routing/scatter/ffn) are plain module-level functions in their owning file, fused by the whole-model `torch.compile(model)` in the trainer — no per-op `@torch.compile` decorators. Explicit `torch.compile` is reserved for code that has no fused eager path or runs outside the compiled model: `loss.py` (loss is computed in the trainer, outside `self.model`) and `flex_attention`/`create_block_mask` (`_flex_attn`, `_create_block_mask_compiled`). Loss functions live in `src/training/loss.py` (`LOSS_REGISTRY`, `compute_loss`), selected via `config.training.loss_fn`.
-
-GPT-2-style configs use `attn: [{attn_cls: mha, attn_kwargs: {...}}]`, `mlp: [{mlp_cls: dense, mlp_kwargs: {activation: gelu, gated: false, bias: true}}]`, `norm_cls: layernorm`, `pos_emb_cls: learned`. Qwen3-style configs use `attn: [{attn_cls: gqa, attn_kwargs: {...}}]`, `mlp: [{mlp_cls: dense, mlp_kwargs: {...}}]`, `norm_cls: rmsnorm`, `pos_emb_cls: rope`. MoE configs use `mlp: [{mlp_cls: moe, mlp_kwargs: {...}}]`.
-
-### Model registry
-
-`build_model(config)` in `src/model/__init__.py` constructs `TransformerLM`, which dispatches to components through the registries: `ATTN_REGISTRY`, `MLP_REGISTRY`, `NORM_REGISTRY`, `POS_EMB_REGISTRY`, `RESIDUAL_REGISTRY`. To add a new component: implement the class, add it to the relevant registry in its owning layer file.
-
-### Config system
-
-`src/utils/config.py` defines nested dataclasses (`TrainConfig` → `ModelConfig`, `DataConfig`, `TrainingConfig`, `OptimizerConfig`, `SchedulerConfig`, `LoggingConfig`, `DebugConfig`). Loaded from YAML with CLI override support.
-
-`ModelConfig` uses a cls+kwargs schema for norm/pos_emb/residual: `norm_cls`/`norm_kwargs`, `pos_emb_cls`/`pos_emb_kwargs`, `residual_cls`/`residual_kwargs`. Each `*_cls` names a registry key; each `*_kwargs` dict is forwarded directly to the component constructor. Component classes own their parameter defaults. `attn` and `mlp` are both per-layer lists of `{attn_cls, attn_kwargs, layer_idx?}` / `{mlp_cls, mlp_kwargs, layer_idx?}` items — a single item with no `layer_idx` applies uniformly to every layer (the common case); additional items can scope an override to specific layers via `layer_idx: [...]`, and at most one item may omit `layer_idx` to act as the fallback/complement for whichever layers the others didn't claim. `ModelConfig.resolve_attn(i)`/`resolve_mlp(i)` return the resolved `(cls, kwargs)` for layer `i`; `layer_attn_classes()`/`layer_mlp_classes()`, `is_moe`, `moe_layer_kwargs`, and `aux_loss_coef` are derived from the same per-layer resolution. Canonical `model:` key order is `d_model`, `n_layers`, `vocab_size`, then `attn`, `mlp`, then the rest (enforced by the migration script and checked by `test_configs_model_key_order_d_model_n_layers_vocab_size_attn_mlp_first`). Mixed attention across layers is supported (e.g. `mha` on layer 0, `gqa` elsewhere) provided every rope-bearing layer shares one rope head-dim — `qk_rope_head_dim` for `mla`, `d_model // n_heads` otherwise — else `TransformerLM` raises at construction (same "validate & share" rule the trainer applies to `attn_implementation`, which must also agree across all layers since one attention mask is built and shared across the whole model). Top-level `ModelConfig` fields: `d_model`, `n_layers`, `vocab_size`, `dropout_embd`, `tie_word_embeddings`, `lm_head_bias`.
-
-### Data pipeline
-
-Raw text → BPE tokenizer (50K vocab, `tokenizers` library) → concatenated uint16 `.bin` files (memory-mapped via numpy). `PretrainDataset` serves fixed-length chunks with next-token targets. Train/val split is 99/1.
-
-### Training
-
-`Trainer` in `src/training/trainer.py`: mixed precision (fp16/bf16), gradient accumulation, gradient clipping, activation checkpointing, CUDA stream prefetching, full checkpoint/resume (model + optimizer + scheduler + RNG states). Spike detection in `src/training/debug.py` watches for gradient norm anomalies.
+Reusable building blocks live in `src/layers/`; `TransformerLM` is in `src/model/transformer.py`, and `build_model(cfg)` in `src/model/__init__.py` constructs it through component registries. Losses are selected by `config.training.loss_fn` in `src/training/loss.py`. The data path is raw text → BPE tokenizer → concatenated uint16 `.bin` files; `PretrainDataset` supplies fixed-length next-token chunks. `Trainer` provides mixed precision, accumulation, clipping, activation checkpointing, prefetching, and checkpoint/resume.
 
 ## Development Rules
 
-### Workflow for layer/model changes
+Run relevant tests before and after layer/model changes. For performance-sensitive work, benchmark with `benchmarks/bench_train.py` before and after.
 
-1. Run related tests before and after changes to confirm nothing breaks.
-2. For perf-sensitive changes, run `benchmarks/bench_train.py` before/after to guard against regressions.
+Files under `docs/superpowers/` are local working artifacts and must never be committed. Keep the directory ignored; if any file there is already tracked, remove it from Git tracking while preserving the local file.
 
-### Config defaults and validation
+### GPU work
 
-All default config values and validation logic live in `ModelConfig.__post_init__` (and the other dataclasses) in `src/utils/config.py` — not in component constructors. Components (attention/mlp/etc.) take resolved values as explicit args; `__post_init__` fills `*_kwargs` defaults via `setdefault` and raises on invalid combinations. This keeps `config.py` the single source of truth for what a config means (e.g. MLA head dims default off `d_model // n_heads` there, and `transformer.py` reads them back from the populated per-layer `attn_kwargs` via `resolve_attn`).
+Always run `nvidia-smi` before GPU tests, training, or benchmarks, then pin a free device with `CUDA_VISIBLE_DEVICES=<idx>`. Do not assume GPU count or VRAM. Training is single-device; another GPU only isolates concurrent runs.
 
-### Dtype handling
+### Tests
 
-Fused ops must support float32, float16, and bfloat16. Never hardcode a dtype or cast input tensors to a specific dtype. Preserve the caller's dtype throughout — accept it, compute in it (or an explicitly documented accumulation dtype like float32 for reductions), and return in it.
+Always specify `-n`: use `-n 6` by default, including subsets and single files; use `-n 12 --dist load` for `kernel`, `quant`, and `metrics`; use `-n 0` only for e2e or debugging.
+
+Keep test files API-focused and test only public APIs. Merge cases for the same API into one parameterized test and fold related properties into it rather than adding near-duplicates. Name general and error tests `test_<api>` and `test_<api>_raise_error`; name class/property variants `test_<class>_<api>_<property>` and `test_<class>_<api>_<property>_raise_error`; use `test_<api>_precision` for oracle checks.
+
+Build reusable, independent parameter axes with one argument per `pytest.mark.parametrize` decorator and explicit module-level case lists from product constants. Use tuples only for bound expectations or illegal Cartesian combinations; skip invalid cells with the reason. Name quantization cases by per-tensor storage width, such as `w8a8`, `w16a8`, and `g8` (int4–int8 weights are `w8`).
+
+Derive numeric tolerances from the worst case across the full grid, with a non-round 3–10× margin. Prefer `atol` with `rtol=0` for magnitude-independent error, match the oracle to the stored dtype, and use exact comparison when both paths run the same operations. Assert effects directly, including what changes and what remains bit-identical.
+
+### Configuration and components
+
+`src/utils/config.py` owns config defaults and validation: `ModelConfig.__post_init__` fills resolved kwargs and rejects invalid combinations. Components receive explicit resolved values. Norm, positional embedding, and residual use `*_cls` plus `*_kwargs`; attention and MLP are per-layer `{*_cls, *_kwargs, layer_idx?}` lists. One unscoped entry applies to every unclaimed layer; scoped entries override named layers, and at most one unscoped fallback is allowed. `resolve_attn(i)` and `resolve_mlp(i)` are the source of per-layer resolution.
+
+Keep canonical `model:` key order: `d_model`, `n_layers`, `vocab_size`, `attn`, `mlp`, then remaining keys. All rope-bearing layers must share a rope head dimension, and all layers must use the same `attn_implementation`. Add a component in its owning layer file and register it in the corresponding registry.
+
+### Dtypes
+
+Fused operations must support float32, float16, and bfloat16. Preserve the caller's dtype throughout; only use an explicitly documented accumulation dtype (such as float32 for reductions).
 
 ### Experiments
 
-`experiments/` contains self-contained experiment folders (e.g., `scaling_law/`, `attn_res/`) each with their own configs, run scripts, and results. Scaling law experiments sweep model sizes (16M–145M) across both architectures.
-
-Every experiment folder must include a `README.md` with: hypothesis, setup table (configs, key params, approx param counts), run command, results table (filled in after running), and notes.
-
-Experiment YAML configs should explicitly set `batch_size`, `gradient_accumulation_steps`, `checkpoint_every`, `eval_every`, and `eval_steps` to the default values from `src/utils/config.py`. Use `batch_size: 16`, `gradient_accumulation_steps: 16`, `checkpoint_every: 5000`, `eval_every: 100`, `eval_steps: 25` unless the experiment intentionally changes them (`checkpoint_every` is raised to 5000 from the config default of 500 to avoid excessive checkpoint writes across many runs).
-
-Model configs use the cls+kwargs schema (norm/pos_emb/residual); `attn` and `mlp` are both lists of `{attn_cls, attn_kwargs, layer_idx?}` / `{mlp_cls, mlp_kwargs, layer_idx?}` items. Canonical `model:` key order is `d_model`, `n_layers`, `vocab_size`, then `attn`, `mlp`, then the rest. A Qwen3-style 57M config looks like:
-```yaml
-model:
-  d_model: 512
-  n_layers: 8
-  vocab_size: 50257
-  attn:
-    - {attn_cls: gqa, attn_kwargs: {n_heads: 8, n_kv_heads: 4, qk_norm: true}}
-  mlp:
-    - {mlp_cls: dense, mlp_kwargs: {activation: silu, gated: true}}
-  norm_cls: rmsnorm
-  pos_emb_cls: rope
-  pos_emb_kwargs: {rope_theta: 10000.0}
-```
-A single `attn`/`mlp` item with no `layer_idx` applies uniformly to every layer (as above). To override specific layers, add more items with `layer_idx: [...]`; at most one item per list may omit `layer_idx`, and it acts as the fallback for whichever layers the others didn't claim.
-
-MoE replaces the single dense item with `mlp: [{mlp_cls: moe, mlp_kwargs: {n_routed_experts: N, n_routed_experts_per_token: K, n_shared_experts: 0, ...}}]`, and can add further items scoped with `layer_idx` (e.g. to keep layer 0 dense while the rest are MoE). For LatentMoE add `latent_moe: true, latent_dim: <ℓ>` to a moe item's `mlp_kwargs` (ℓ < d_model; `latent_dim` is required when `latent_moe` is on). Mixed attention across layers works the same way (e.g. `mha` on layer 0, `gqa` on the rest via `attn: [{attn_cls: mha, attn_kwargs: {...}, layer_idx: [0]}, {attn_cls: gqa, attn_kwargs: {...}}]`), as long as every rope-bearing layer shares one rope head-dim (`TransformerLM` raises otherwise) and every layer shares the same `attn_implementation` (the trainer builds one attention mask shared across all layers).
-
-Standard LR by model size (from scaling law experiments, `min_lr` = `lr / 10`):
-
-| Model size | lr | min_lr |
-|---|---|---|
-| ~16M | 1e-3 | 1e-4 |
-| ~30M | 8e-4 | 8e-5 |
-| ~57M | 6e-4 | 6e-5 |
-| ~124-145M | 6e-4 | 6e-5 |
-
-Training duration and warmup:
-- `total_tokens` = model params x 20-40 (Chinchilla range, 30x is a good default)
-- `max_steps` = `total_tokens` / (`batch_size` x `gradient_accumulation_steps` x `max_seq_len`)
-- `warmup_steps` = 2%-5% of `max_steps`
-
-In experiment `run.sh` scripts, build sweep config lists with nested `for` loops over the swept axes (e.g., `lrs`, `wds`) appending to a `configs` array, rather than enumerating every `lr × wd` combination by hand. Keeps the grid auditable and easy to extend.
+Each `experiments/` folder is self-contained and must include a `README.md` covering the hypothesis, setup table (configs, key parameters, approximate parameter count), run command, results table, and notes. Experiment YAML must explicitly set `batch_size: 16`, `gradient_accumulation_steps: 16`, `checkpoint_every: 5000`, `eval_every: 100`, and `eval_steps: 25` unless intentionally changed. Build sweep config lists in `run.sh` with nested loops over swept axes.

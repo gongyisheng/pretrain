@@ -10,6 +10,7 @@ import tempfile
 
 import numpy as np
 import pytest
+import torch
 
 from src.training.trainer import Trainer
 from src.utils.config import (
@@ -20,6 +21,10 @@ from src.utils.config import (
     SchedulerConfig,
     TrainConfig,
     TrainingConfig,
+)
+
+cuda_only = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="quantized trainer test needs CUDA"
 )
 
 
@@ -119,7 +124,7 @@ def _tiny_moe_config(tmp_dir):
             batch_size=4,
             gradient_accumulation_steps=1,
             max_steps=5,
-            # Dropless MoE requires bf16 (torch._grouped_mm is bf16-only under compile).
+            # Dropless MoE uses the Triton grouped GEMM reduced-precision path.
             mixed_precision="bf16",
             grad_clip=1.0,
             checkpoint_dir=os.path.join(tmp_dir, "ckpt"),
@@ -184,3 +189,124 @@ def test_trainer_rejects_unknown_loss_fn(mock_memmap):
         cfg.training.loss_fn = "not_a_real_loss"
         with pytest.raises(ValueError, match="unknown loss_fn"):
             Trainer(cfg, wandb_enabled=False)
+
+
+# ---------------------------------------------------------------------------
+# quant metrics wiring: flag off -> no hooks, no train-quant/ keys (runs everywhere);
+# flag on -> train-quant/ keys dispatched (needs CUDA, see cuda_only below).
+# ---------------------------------------------------------------------------
+
+
+def test_quant_metrics_without_a_quant_recipe(mock_memmap):
+    """With no quantization recipe, the install pass finds no quantized sites, so
+    there is no accumulator to fold into and no train-quant/ key is dispatched --
+    independent of log_quant_metrics, which now defaults to True."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        trainer = Trainer(_tiny_config(tmp), wandb_enabled=False)
+        # the install pass never ran, so no accumulator exists to fold into
+        assert not any(
+            type(m).__name__ == "QuantizationStats" for m in trainer.model.modules()
+        )
+        logged = []
+        trainer.logger.register_on_log_hook(
+            lambda step, metrics: logged.append(metrics)
+        )
+        trainer.train()
+        assert not any(
+            k.startswith("train-quant/") for metrics in logged for k in metrics
+        )
+
+
+def _tiny_fp8_config(tmp_dir):
+    """_tiny_config, but on cuda with a tensorwise fp8 quant rule (mirrors
+    tests/fast/quant/test_converter.py's `_cfg`) and quant metrics on."""
+    cfg = _tiny_config(tmp_dir)
+    cfg.training = TrainingConfig(
+        batch_size=4,
+        gradient_accumulation_steps=1,
+        max_steps=2,
+        device="cuda",
+        mixed_precision="bf16",
+        grad_clip=1.0,
+        checkpoint_dir=os.path.join(tmp_dir, "ckpt"),
+        checkpoint_every=100,
+        eval_every=100,
+        eval_steps=2,
+        enable_torch_compile=False,
+        quantization={"enabled": True, "dtype": {"recipe": "fp8"}},
+    )
+    cfg.logging.log_quant_metrics = True
+    cfg.logging.log_every = 1
+    return cfg
+
+
+@cuda_only
+def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
+    """log_quant_metrics=True with an fp8 quant recipe: at least one train-quant/
+    key from the diagnostic pass reaches the logger."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        cfg = _tiny_fp8_config(tmp)
+
+        trainer = Trainer(cfg, wandb_enabled=False)
+        logged = []
+        trainer.logger.register_on_log_hook(
+            lambda step, metrics: logged.append(metrics)
+        )
+        trainer.train()
+        assert any(k.startswith("train-quant/") for metrics in logged for k in metrics)
+
+
+def test_activation_norms_reach_both_train_and_val_keys(mock_memmap):
+    """One run, both windows: the train window opens on a log step, the val window
+    on every eval."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        cfg = _tiny_config(tmp)
+        cfg.logging.log_activation_norms = True
+        cfg.logging.log_every = 1
+        cfg.training.eval_every = 1
+
+        trainer = Trainer(cfg, wandb_enabled=False)
+        logged = []
+        trainer.logger.register_on_log_hook(
+            lambda step, metrics: logged.append(metrics)
+        )
+        trainer.train()
+
+        assert any(k.startswith("train-act/norm/") for m in logged for k in m)
+        assert any(k.startswith("val-act/norm/") for m in logged for k in m)
+
+
+@cuda_only
+def test_quant_diagnostics_do_not_change_training(mock_memmap):
+    """The diagnostic pass runs its own fwd/bwd; the trained loss must not move.
+
+    Dropout is on so the training forward consumes RNG — without the diagnostic's
+    RNG restore its own forward advances the stream and the next step's loss moves.
+    Needs >2 steps: loss logging is deferred one step (losses[0] is always 0.0), so
+    a run of 2 only ever reports step 1's loss, which precedes every diagnostic.
+    """
+    losses = {}
+    for log_quant_metrics in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed_data(mock_memmap, tmp)
+            cfg = _tiny_fp8_config(tmp)
+            cfg.model.dropout_embd = 0.1
+            cfg.training.max_steps = 4
+            cfg.logging.log_quant_metrics = log_quant_metrics
+            cfg.logging.log_every = 1
+            trainer = Trainer(cfg, wandb_enabled=False)
+            logged = []
+            trainer.logger.register_on_log_hook(
+                lambda step, metrics: logged.append(metrics)
+            )
+            trainer.train()
+            losses[log_quant_metrics] = [
+                m["train/loss"] for m in logged if "train/loss" in m
+            ]
+    # guard the comparison: 4 entries, and the post-diagnostic ones are real losses
+    assert len(losses[False]) == cfg.training.max_steps
+    assert all(loss > 0 for loss in losses[False][2:])
+    assert losses[True] == losses[False]

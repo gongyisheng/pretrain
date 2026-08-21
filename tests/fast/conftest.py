@@ -6,8 +6,17 @@ Selection order:
   2. cuda if torch.cuda.is_available() else cpu
 """
 
+import os
+
 import pytest
 import torch
+
+
+# Persist Triton autotune timings to the on-disk cache: each (shape, dtype, scale
+# width) key is then benchmarked once instead of once per xdist worker per run. The
+# cache key covers the kernel source hash, so editing a kernel invalidates it. Set
+# before any kernel module is imported, since Autotuner reads the knob at decoration.
+os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
 
 
 def pytest_addoption(parser):
@@ -51,6 +60,27 @@ def _set_default_device(request):
     torch.set_default_device(device)
     yield device
     torch.set_default_device(prev)
+
+
+@pytest.fixture(autouse=True)
+def _disable_tf32():
+    """Force full-precision float32 matmul for every fast test.
+
+    The Trainer (and e2e smoke tests that build one) enable TF32 process-wide
+    via torch.set_float32_matmul_precision("high"). Since e2e is collected
+    before tests/fast, that leaks into the float32 numerical-parity tests here.
+    Reset to full precision around each test so parity checks are deterministic.
+    """
+    prev_precision = torch.get_float32_matmul_precision()
+    prev_cuda_tf32 = torch.backends.cuda.matmul.allow_tf32
+    prev_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    yield
+    torch.set_float32_matmul_precision(prev_precision)
+    torch.backends.cuda.matmul.allow_tf32 = prev_cuda_tf32
+    torch.backends.cudnn.allow_tf32 = prev_cudnn_tf32
 
 
 @pytest.fixture(scope="session")

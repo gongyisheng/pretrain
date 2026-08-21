@@ -6,7 +6,7 @@ from tokenizers import Tokenizer
 
 from src.data.tokenizer import load_tokenizer
 from src.training.trainer import TokenizerTrainer
-from src.utils.metric_utils import compute_bytes_per_token
+from src.metrics.functional import compute_bytes_per_token
 from src.utils.config import (
     LoggingConfig,
     ModelConfig,
@@ -40,7 +40,6 @@ def _trainer(
     save_path,
     vocab_size: int,
     method: str,
-    *,
     eval_every: int = 5000,
     checkpoint_every: int = 5000,
     wandb_enabled: bool = False,

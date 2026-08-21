@@ -1,12 +1,13 @@
-"""Build configuration for the C++ _bpe_engine extension under src/data/bpe/.
+"""Build configuration for the project's native extensions.
 
 Pure-Python packages are still declared in pyproject.toml; this file exists
-only because pybind11's Pybind11Extension needs a setup.py hook for the C++
-extension build. `uv sync` invokes this automatically.
+because the extension builders need a setup.py hook. `uv sync` invokes this
+automatically.
 """
 
-from pybind11.setup_helpers import Pybind11Extension, build_ext
+from pybind11.setup_helpers import Pybind11Extension
 from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 ext_modules = [
     Pybind11Extension(
@@ -22,4 +23,20 @@ ext_modules = [
     )
 ]
 
-setup(ext_modules=ext_modules, cmdclass={"build_ext": build_ext})
+if CUDA_HOME is not None:
+    ext_modules.append(
+        CUDAExtension(
+            "src.kernel.backends.cublaslt._C",
+            [
+                "src/kernel/backends/cublaslt/csrc/gemm.cpp",
+                "src/kernel/backends/cublaslt/csrc/cuda_build_sentinel.cu",
+            ],
+            libraries=["cublasLt"],
+            extra_compile_args={"cxx": ["-O3"]},
+        )
+    )
+
+setup(
+    ext_modules=ext_modules,
+    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=False)},
+)

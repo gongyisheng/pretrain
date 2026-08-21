@@ -45,6 +45,7 @@ tmp/
 
 # dev folder
 experiments/moe_dev/
+experiments/quant_dev/
 
 # benchmark outputs
 benchmarks/results/

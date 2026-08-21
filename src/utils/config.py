@@ -1,22 +1,31 @@
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Union
+import torch
 import yaml
 
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 from src.layers.attention import ATTN_REGISTRY
 from src.layers.mlp import MLP_REGISTRY, MOE_ROUTER_SCORE_FNS
 from src.layers.pos_emb import POS_EMB_REGISTRY
-from src.quant import (
+from src.quant.constants import (
     QUANT_FORMATS,
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,
-    QUANT_OPERANDS,
+    QUANT_PASSTHROUGH,
+    QUANT_ROUNDING,
+    QUANT_SCALE_RECIPES,
+    QUANT_TENSOR_GEMMS,
+    QUANT_TENSORS,
 )
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 _DEVICES = frozenset({"auto", "cuda", "cpu"})
+_SCALE_DTYPES = {
+    "fp32": torch.float32,
+    "fp8_e8m0": torch.float8_e8m0fnu,
+}
 
 
 @dataclass
@@ -294,47 +303,167 @@ class TokenizerTrainingConfig:
             self.method_kwargs.setdefault("max_superword_words", 4)
 
 
+def _resolve_quant_dtype(dtype: dict) -> dict:
+    """Expand `{tensor: fmt | {gemm: fmt}}` to `{tensor: {gemm: fmt}}`, validating.
+
+    A scalar means "that format in every GEMM consuming the tensor"; a dict scopes it,
+    and may name only some of them -- the rest are filled by the recipe, or by
+    `TrainingConfig` with the compute dtype. Idempotent, so a resolved dict survives
+    the to_dict/load round trip.
+    """
+    resolved = {}
+    for tensor, value in dtype.items():
+        if tensor not in QUANT_TENSOR_GEMMS:
+            raise ValueError(
+                f"unknown quant dtype key: {tensor!r}; "
+                f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
+            )
+        gemms = QUANT_TENSOR_GEMMS[tensor]
+        per_gemm = (
+            dict(value) if isinstance(value, dict) else dict.fromkeys(gemms, value)
+        )
+        for gemm, fmt in per_gemm.items():
+            if gemm not in gemms:
+                raise ValueError(
+                    f"quant dtype {tensor!r} cannot be scoped to {gemm!r}: "
+                    f"only {list(gemms)} consume it"
+                )
+            if fmt not in QUANT_FORMATS:
+                raise ValueError(
+                    f"unknown quant fmt for {tensor}.{gemm}: {fmt!r}; "
+                    f"expected one of {sorted(QUANT_FORMATS)}"
+                )
+        resolved[tensor] = per_gemm
+    return resolved
+
+
 @dataclass
-class QuantConfig:
+class QuantizationConfig:
     enabled: bool = False
-    dtype_recipe: Optional[str] = None
-    dtype: dict = field(default_factory=dict)  # {weight/act/grad: fmt}
-    scaling: dict = field(default_factory=dict)  # {granularity, block_size}
+    # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
+    dtype: dict = field(default_factory=dict)
+    scale: dict = field(default_factory=dict)  # {granularity, block_shape}
+    rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
     include: List[str] = field(default_factory=list)
-    exclude: List[str] = field(default_factory=lambda: ["lm_head"])
+    exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
     def __post_init__(self):
         if not self.enabled:
             return
 
-        if self.dtype_recipe is not None:
-            if self.dtype_recipe not in QUANT_DTYPE_RECIPES:
+        for tensor, mode in self.rounding.items():
+            if tensor not in QUANT_TENSOR_GEMMS:
                 raise ValueError(
-                    f"unknown quant dtype_recipe: {self.dtype_recipe!r}; "
+                    f"unknown quant rounding key: {tensor!r}; "
+                    f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
+                )
+            if mode not in QUANT_ROUNDING:
+                raise ValueError(
+                    f"unknown quant rounding for {tensor}: {mode!r}; "
+                    f"expected one of {sorted(QUANT_ROUNDING)}"
+                )
+        self.rounding = {t: self.rounding.get(t, "RNE") for t in QUANT_TENSORS}
+
+        dtype_recipe = self.dtype.pop("recipe", None)
+        self.dtype = _resolve_quant_dtype(self.dtype)
+
+        # A dtype recipe fills the slots left open, the way a scale recipe fills
+        # scale. It is applied after the expansion so that a tensor scoped to one
+        # GEMM still takes the recipe's format in the other.
+        if dtype_recipe is not None:
+            if dtype_recipe not in QUANT_DTYPE_RECIPES:
+                raise ValueError(
+                    f"unknown quant dtype recipe: {dtype_recipe!r}; "
                     f"expected one of {sorted(QUANT_DTYPE_RECIPES)}"
                 )
-            for operand, fmt in QUANT_DTYPE_RECIPES[self.dtype_recipe].items():
-                self.dtype.setdefault(operand, fmt)  # explicit dtype wins
+            for tensor, fmt in QUANT_DTYPE_RECIPES[dtype_recipe].items():
+                for gemm in QUANT_TENSOR_GEMMS[tensor]:
+                    self.dtype.setdefault(tensor, {}).setdefault(gemm, fmt)
+            # mxfp8 is an fp8 element paired with the "mxfp8" scale scheme; seed it.
+            if dtype_recipe == "mxfp8":
+                self.scale.setdefault("recipe", "mxfp8")
 
-        self.scaling.setdefault("granularity", "tensorwise")
-        granularity = self.scaling["granularity"]
+        # A scale recipe fills the scale dict the same way (recipe key popped from scale).
+        recipe = self.scale.pop("recipe", None)
+        if recipe is not None:
+            if recipe not in QUANT_SCALE_RECIPES:
+                raise ValueError(
+                    f"unknown quant scale recipe: {recipe!r}; "
+                    f"expected one of {sorted(QUANT_SCALE_RECIPES)}"
+                )
+            for key, val in QUANT_SCALE_RECIPES[recipe].items():
+                self.scale.setdefault(key, val)  # explicit scale keys win
+
+        self.scale.setdefault("granularity", "tensorwise")
+        granularity = self.scale["granularity"]
         if granularity not in QUANT_GRANULARITY:
             raise ValueError(
                 f"unknown quant granularity: {granularity!r}; "
                 f"expected one of {sorted(QUANT_GRANULARITY)}"
             )
 
-        for operand, fmt in self.dtype.items():
-            if operand not in QUANT_OPERANDS:
+        if self.scale.get("scale_dtype") is None:
+            self.scale["scale_dtype"] = "fp32"
+        scale_dtype = self.scale["scale_dtype"]
+        if scale_dtype not in ("fp32", "fp8_e8m0"):
+            raise ValueError(
+                f"unknown quant scale_dtype: {scale_dtype!r}; "
+                "expected 'fp32' or 'fp8_e8m0'"
+            )
+        if scale_dtype == "fp8_e8m0" and granularity != "blockwise":
+            raise ValueError(
+                "quant scale_dtype 'fp8_e8m0' requires granularity 'blockwise'"
+            )
+        if "block_size" in self.scale:
+            raise ValueError(
+                "quant scale key 'block_size' was replaced by 'block_shape', a "
+                "(outer, contract) pair; use block_shape: [1, N] for the old behaviour"
+            )
+        if granularity == "blockwise":
+            block_shape = self.scale.get("block_shape")
+            if (
+                not isinstance(block_shape, (list, tuple))
+                or len(block_shape) != 2
+                or not all(isinstance(v, int) for v in block_shape)
+            ):
                 raise ValueError(
-                    f"unknown quant dtype key: {operand!r}; "
-                    f"expected one of {sorted(QUANT_OPERANDS)}"
+                    "quant granularity 'blockwise' requires block_shape, a pair of "
+                    f"ints (outer, contract), got {block_shape!r}"
                 )
-            if fmt not in QUANT_FORMATS:
+            outer, contract = block_shape
+            if outer != 1 and outer != contract:
                 raise ValueError(
-                    f"unknown quant fmt for {operand}: {fmt!r}; "
-                    f"expected one of {sorted(QUANT_FORMATS)}"
+                    "quant block_shape must be 1D (1, N) or a square tile (N, N), "
+                    f"got {block_shape!r}"
                 )
+            if contract <= 0 or contract % 16 != 0:
+                raise ValueError(
+                    "quant block_shape contract extent must be a positive multiple "
+                    f"of 16, got {contract}"
+                )
+            if scale_dtype == "fp8_e8m0" and contract % 32 != 0:
+                raise ValueError(
+                    "quant scale_dtype 'fp8_e8m0' needs a contract extent that is a "
+                    f"multiple of 32, the mx scale vector, got {contract}"
+                )
+            self.scale["block_shape"] = (outer, contract)
+        else:
+            # block_shape only means anything blockwise. Normalize it to the sentinel
+            # every consumer reads as "one scale block per contraction segment", so
+            # nothing downstream has to re-check the granularity to know that.
+            self.scale["block_shape"] = (0, 0)
+
+        # mxfp8 (blockwise + fp8_e8m0) is defined only over fp8 elements.
+        if granularity == "blockwise" and scale_dtype == "fp8_e8m0":
+            for tensor, per_gemm in self.dtype.items():
+                for gemm, fmt in per_gemm.items():
+                    if fmt not in QUANT_PASSTHROUGH and not fmt.startswith("fp8"):
+                        raise ValueError(
+                            f"mxfp8 scale requires an fp8 element for "
+                            f"{tensor}.{gemm}, got {fmt!r}"
+                        )
+
+        self.scale["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
 
 
 @dataclass
@@ -358,7 +487,9 @@ class TrainingConfig:
     eval_batch_size: int = 16
     eval_train: bool = False  # for SFT
     intra_doc_masking: bool = True
-    quant: Union[QuantConfig, dict, list] = field(default_factory=QuantConfig)
+    quantization: Union[QuantizationConfig, dict, list] = field(
+        default_factory=QuantizationConfig
+    )
 
     def __post_init__(self):
         if self.device not in _DEVICES:
@@ -375,17 +506,22 @@ class TrainingConfig:
                 f"unknown loss_fn: {self.loss_fn!r}; "
                 f"expected one of {sorted(LOSS_REGISTRY)}"
             )
-        rules = self.quant if isinstance(self.quant, list) else [self.quant]
+        rules = (
+            self.quantization
+            if isinstance(self.quantization, list)
+            else [self.quantization]
+        )
         amp_dtype = "fp32" if self.mixed_precision == "no" else self.mixed_precision
         normalized = []
         for rule in rules:
             if isinstance(rule, dict):
-                rule = QuantConfig(**rule)
+                rule = QuantizationConfig(**rule)
             if rule.enabled:
-                for operand in QUANT_OPERANDS:
-                    rule.dtype.setdefault(operand, amp_dtype)
+                for tensor, gemms in QUANT_TENSOR_GEMMS.items():
+                    for gemm in gemms:
+                        rule.dtype.setdefault(tensor, {}).setdefault(gemm, amp_dtype)
             normalized.append(rule)
-        self.quant = normalized
+        self.quantization = normalized
 
 
 @dataclass
@@ -433,11 +569,13 @@ class LoggingConfig:
     wandb_run_name: str = ""
     wandb_group: str = ""
     log_every: int = 10
-    log_layer_grad_norms: bool = True  # log per-layer gradient norms to W&B
-    log_optimizer_step_norms: bool = True  # log ||Δθ|| and ||m||; extra 1x param memory
-    log_optimizer_svd_metrics: bool = (
-        True  # log per-2D-weight srank/pr; costly, SVD per weight
-    )
+    log_grad_norms: bool = True
+    log_weight_norms: bool = True
+    log_activation_norms: bool = True
+    log_grad_svd_metrics: bool = True
+    log_weight_svd_metrics: bool = True
+    log_optimizer_step_norms: bool = True
+    log_quant_metrics: bool = True
 
 
 @dataclass
@@ -459,15 +597,21 @@ class TrainConfig:
 
     def _validate_moe_compile_precision(self):
         m = self.model
-        if m.is_moe and self.training.mixed_precision != "bf16":
+        if m.is_moe and self.training.mixed_precision not in ("bf16", "fp16"):
             raise ValueError(
-                "dropless MoE requires "
-                f"training.mixed_precision='bf16'; got {self.training.mixed_precision!r}. "
-                "torch._grouped_mm is bf16-only under torch.compile."
+                "dropless MoE requires training.mixed_precision='bf16' or 'fp16'; "
+                f"got {self.training.mixed_precision!r}."
             )
 
     def to_dict(self):
-        return asdict(self)
+        config = asdict(self)
+        for rule in config["training"]["quantization"]:
+            scale_dtype = rule["scale"].get("scale_dtype")
+            for name, dtype in _SCALE_DTYPES.items():
+                if scale_dtype is dtype:
+                    rule["scale"]["scale_dtype"] = name
+                    break
+        return config
 
 
 def _apply_overrides(config: TrainConfig, overrides: List[str]):
@@ -573,8 +717,8 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         _coerce_kwargs(item["attn_kwargs"])
     for item in config.model.mlp:
         _coerce_kwargs(item["mlp_kwargs"])
-    for rule in config.training.quant:
-        _coerce_kwargs(rule.scaling)
+    for rule in config.training.quantization:
+        _coerce_kwargs(rule.scale)
 
     if overrides:
         _apply_overrides(config, overrides)

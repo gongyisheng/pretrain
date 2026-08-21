@@ -1,10 +1,10 @@
 {
   "gpu": "NVIDIA GeForce RTX 5060 Ti",
   "hostname": "pc3",
-  "commit": "35bd36f",
+  "commit": "774ee01",
   "config": "experiments/device_parity/qwen3_57m.yaml",
-  "val_loss": 3.1337,
-  "val_ppl": 22.96,
-  "wallclock_sec": 173532,
-  "finished_at": "2026-05-16T17:02:35-07:00"
+  "val_loss": 3.1328,
+  "val_ppl": 22.94,
+  "wallclock_sec": 144902,
+  "finished_at": "2026-07-20T10:29:04-07:00"
 }

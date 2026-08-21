@@ -1,56 +1,43 @@
 import torch
 import torch.nn as nn
 
-from src.kernel.gemm import grouped_gemm
+from src.kernel.ops.gemm import grouped_mm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
-def gated_mlp(
-    x: torch.Tensor,
-    w_gate_up: torch.Tensor,
-    w_down: torch.Tensor,
-    act_fn,
-    b_gate_up: torch.Tensor = None,
-    b_down: torch.Tensor = None,
-) -> torch.Tensor:
-    """Fused gated MLP: gate_up matmul → chunk → act(gate, up) → down matmul.
+class GroupedGemmFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a, b, bias, offs, backend: str | None = None):
+        ctx.has_backend_arg = len(ctx.needs_input_grad) == 5
+        y = grouped_mm(a, b, offs, bias=bias, backend=backend)
+        ctx.save_for_backward(a, b, offs)
+        ctx.bias_needs_grad = ctx.needs_input_grad[2]
+        ctx.backend = backend
+        return y
 
-    Shapes: x (..., D); w_gate_up (2*I, D); w_down (D, I); 1D biases. Leading
-    dims broadcast through `@`.
-    """
-    gate_up = x @ w_gate_up.mT
-    if b_gate_up is not None:
-        gate_up = gate_up + (
-            b_gate_up if b_gate_up.ndim == 1 else b_gate_up.unsqueeze(-2)
+    @staticmethod
+    def backward(ctx, grad_c):
+        a, b, offs = ctx.saved_tensors
+        grad_bias = None
+        if ctx.bias_needs_grad:
+            if grad_c.ndim == 3:
+                grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
+            else:
+                ones = grad_c.new_ones(1, grad_c.shape[0])
+                grad_bias = grouped_mm(ones, grad_c, offs, backend=ctx.backend).squeeze(
+                    1
+                )
+        grads = (
+            grouped_mm(grad_c, b.mT, offs, backend=ctx.backend),
+            grouped_mm(a.mT, grad_c, offs, backend=ctx.backend),
+            grad_bias,
+            None,
         )
-    gate, up = gate_up.chunk(2, dim=-1)
-    hidden = act_fn(gate, up)
-    out = hidden @ w_down.mT
-    if b_down is not None:
-        out = out + (b_down if b_down.ndim == 1 else b_down.unsqueeze(-2))
-    return out
+        return (*grads, None) if ctx.has_backend_arg else grads
 
 
-def ungated_mlp(
-    x: torch.Tensor,
-    w_up: torch.Tensor,
-    w_down: torch.Tensor,
-    act_fn,
-    b_up: torch.Tensor = None,
-    b_down: torch.Tensor = None,
-) -> torch.Tensor:
-    """Fused ungated MLP: up matmul → act(up) → down matmul.
-
-    Shapes (parallel to gated_mlp): x (..., D); w_up (I, D); w_down (D, I).
-    """
-    up = x @ w_up.mT
-    if b_up is not None:
-        up = up + (b_up if b_up.ndim == 1 else b_up.unsqueeze(-2))
-    hidden = act_fn(up)
-    out = hidden @ w_down.mT
-    if b_down is not None:
-        out = out + (b_down if b_down.ndim == 1 else b_down.unsqueeze(-2))
-    return out
+def grouped_mm_fn(a, b, offs, bias=None, projection=None, backend: str | None = None):
+    return GroupedGemmFn.apply(a, b, bias, offs, backend)
 
 
 def grouped_mlp(
@@ -60,20 +47,10 @@ def grouped_mlp(
     act_fn,
     offs: torch.Tensor,
     gated: bool,
-    row_expert_ids: torch.Tensor = None,
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
+    expert_mm=grouped_mm_fn,
 ) -> torch.Tensor:
-    """Dropless MoE expert FFN over expert-sorted tokens via grouped GEMM.
-
-    x is (R, D) with rows grouped by expert and `offs` the (E,) int32 cumulative
-    end-offsets (offs[-1] == R). Weights keep nn.Linear (E, out, in) layout; the
-    transposed view w.mT is the (E, in, out) form the grouped GEMM expects.
-    Empty groups (count 0) are handled by the grouped GEMM. Bias, when given,
-    is added per row using row_expert_ids. Under autocast, operands are cast to
-    the autocast dtype (e.g. bf16) so the grouped GEMM receives the expected
-    dtype, mirroring what autocast does for ordinary matmuls.
-    """
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
         dt = torch.get_autocast_dtype(dev)
@@ -84,43 +61,22 @@ def grouped_mlp(
             b_in = b_in.to(dt)
         if b_down is not None:
             b_down = b_down.to(dt)
-    h = grouped_gemm(x, w_in.mT, offs)
-    if b_in is not None:
-        h = h + b_in[row_expert_ids]
+    # the per-expert bias is (E, out) and rides in the GEMM epilogue
+    h = expert_mm(x, w_in.mT, offs, bias=b_in, projection="gate_up")
     if gated:
         gate, up = h.chunk(2, dim=-1)
         h = act_fn(gate, up)
     else:
         h = act_fn(h)
-    out = grouped_gemm(h, w_down.mT, offs)
-    if b_down is not None:
-        out = out + b_down[row_expert_ids]
-    return out
+    return expert_mm(h, w_down.mT, offs, bias=b_down, projection="down")
 
 
 class DenseMLPBlock(nn.Module):
-    """Configurable dense feed-forward block.
-
-    Two structural variants selected by `gated`:
-      - gated=False: down_proj(activation(up_proj(x)))
-      - gated=True (GLU family): down_proj(activation(gate, up)) where
-        (gate, up) = chunk(gate_up_proj(x), 2, dim=-1)
-
-    `activation` is one of ``"relu"`` / ``"gelu"`` / ``"silu"``. Combinations:
-        gated=True + activation="silu" → SwiGLU
-        gated=True + activation="gelu" → GeGLU
-        gated=True + activation="relu" → ReGLU
-
-    Bias defaults to False (modern LLM convention); pass `bias=True` for the
-    GPT-2 / classic Transformer convention.
-
-    Returns a tuple (out, None) to match the uniform MLP block contract.
-    """
+    """Dense feed-forward block, ungated or GLU-family (gated=True + silu = SwiGLU)."""
 
     def __init__(
         self,
         d_model: int,
-        *,
         intermediate_size: int,
         activation: str = "silu",
         gated: bool = True,
@@ -148,7 +104,7 @@ class DenseMLPBlock(nn.Module):
         return self.dropout(self.down_proj(hidden)), None
 
     @classmethod
-    def compute_flops(cls, d_model, *, intermediate_size, gated=True, bias=False, **_):
+    def compute_flops(cls, d_model, intermediate_size, gated=True, bias=False, **_):
         d_ff = intermediate_size
         if gated:
             matmul = 6 * d_model * d_ff
@@ -178,13 +134,7 @@ class DenseMLPBlock(nn.Module):
 
 
 class ExpertBias(nn.Module):
-    """Auxiliary-loss-free load-balancing bias (arXiv:2408.15664).
-
-    A per-expert bias added to gating scores for top-k selection only (it never
-    enters the combine weights). It is not a learned parameter — `update` nudges
-    it toward uniform load with a fixed-rate sign rule. The buffer is fp32-pinned
-    via _apply so the small update steps survive bf16/fp16 model casts.
-    """
+    """Auxiliary-loss-free load-balancing bias (arXiv:2408.15664), top-k selection only."""
 
     def __init__(self, n_experts: int, update_rate: float = 0.001):
         super().__init__()
@@ -244,15 +194,7 @@ MOE_ROUTER_SCORE_FNS = {
 
 
 class MoERouter(nn.Module):
-    """MoE top-k router with fp32-pinned gate weight.
-
-    bf16/fp16 rounding of close-competing logits before softmax can flip top-k
-    picks, and low-precision storage can't accept sub-ULP gradient updates.
-    Gate weight stays fp32 via _apply; forward disables autocast around the GEMM.
-
-    With `expert_bias`, an independent `ExpertBias` submodule shifts the gating
-    scores for selection only (combine weights stay the original softmax probs).
-    """
+    """MoE top-k router with fp32-pinned gate weight."""
 
     def __init__(
         self,
@@ -305,14 +247,14 @@ class MoERouter(nn.Module):
             self.expert_bias.update(expert_counts)
 
     @classmethod
-    def compute_flops(cls, d_model: int, n_experts: int, *, expert_bias=False) -> int:
+    def compute_flops(cls, d_model: int, n_experts: int, expert_bias=False) -> int:
         flops = 2 * d_model * n_experts  # gate matmul (no bias)
         if expert_bias:
             flops += ExpertBias.compute_flops(n_experts)
         return flops
 
     @classmethod
-    def compute_parameters(cls, d_model: int, n_experts: int, *, expert_bias=False):
+    def compute_parameters(cls, d_model: int, n_experts: int, expert_bias=False):
         params = d_model * n_experts  # gate, no bias
         if expert_bias:
             params += ExpertBias.compute_parameters(n_experts)
@@ -320,29 +262,11 @@ class MoERouter(nn.Module):
 
 
 class SparseMoEBlock(nn.Module):
-    """Sparse Mixture-of-Experts MLP block (dropless dispatch).
-
-    Expert weights are stored as stacked (E, out, in) tensors. Tokens are sorted
-    by expert and run through a variable-group GEMM (`grouped_mlp` /
-    torch._grouped_mm) with no padding and no dropped tokens.
-
-    Per forward pass:
-      - Tokens are routed to top-k experts via MoERouter.
-      - Experts run via the path above; outputs are gathered back with routing weights.
-      - A load-balancing auxiliary loss (Switch Transformer formula) is returned.
-
-    Mirrors DenseMLPBlock's gated/ungated split: by default `gated=True, activation="silu"`
-    (SwiGLU experts); set `gated=False` for ungated experts.
-
-    Note: aux_loss scale grows linearly with n_routed_experts_per_token (k). Under balanced
-    routing the expected value is approximately k. The block applies `aux_loss_coef` itself,
-    so the returned aux is already scaled — each layer may use a different coef.
-    """
+    """Sparse Mixture-of-Experts MLP block, returns (out, scaled aux_loss)"""
 
     def __init__(
         self,
         d_model: int,
-        *,
         intermediate_size: int,
         n_routed_experts: int,
         n_routed_experts_per_token: int,
@@ -441,6 +365,14 @@ class SparseMoEBlock(nn.Module):
 
         self.expert_load = ExpertLoad(n_routed_experts)
 
+    def expert_mm(self, a, b, offs, bias=None, projection=None):
+        """The expert GEMM seam, one call per projection.
+
+        A method so a subclass can override it -- QuantizedSparseMoEBlock does -- while
+        an instance can still assign over it to spy on or replace the GEMM.
+        """
+        return grouped_mm_fn(a, b, offs, bias=bias, projection=projection)
+
     def forward(self, x: torch.Tensor):
         # x: (B, S, D)
         B, S, D = x.shape
@@ -469,7 +401,7 @@ class SparseMoEBlock(nn.Module):
         expert_counts = torch.bincount(expert_ids_sorted, minlength=E)
         self.expert_load.record_load(expert_counts.detach(), self.training)
         # offs[-1] == R (all rows counted exactly once across experts) — the
-        # precondition grouped_gemm relies on; rows past offs[-1] would be uninitialized.
+        # precondition grouped_mm relies on; rows past offs[-1] would be uninitialized.
         offs = expert_counts.cumsum(0).to(torch.int32)
         x_sorted = tokens[token_ids_sorted]
 
@@ -481,9 +413,9 @@ class SparseMoEBlock(nn.Module):
             self.act_fn,
             offs,
             self.gated,
-            row_expert_ids=expert_ids_sorted if b_in is not None else None,
             b_in=b_in,
             b_down=self.expert_down_bias,
+            expert_mm=self.expert_mm,
         )
         expert_out = expert_out * weights_sorted
         expert_out = self.expert_dropout(expert_out)
@@ -529,7 +461,6 @@ class SparseMoEBlock(nn.Module):
     def compute_flops(
         cls,
         d_model,
-        *,
         intermediate_size,
         n_routed_experts,
         n_routed_experts_per_token=2,
@@ -569,7 +500,6 @@ class SparseMoEBlock(nn.Module):
     def compute_parameters(
         cls,
         d_model,
-        *,
         intermediate_size,
         n_routed_experts,
         n_routed_experts_per_token=2,

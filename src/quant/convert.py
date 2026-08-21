@@ -1,73 +1,57 @@
 from __future__ import annotations
 
-import warnings
-
 import torch.nn as nn
 
-from src.quant import QUANT_PASSTHROUGH, fp8
-from src.quant.linear import QuantLinear
-from src.quant.utils import resolve_rule
-
-# Per-format hardware capability: fmt -> (predicate, requirement message). Formats
-# absent here impose no requirement (e.g. passthrough dtypes, and int8 which runs
-# on any modern GPU). Extend as int4/fp4 land.
-# TODO: fold into a per-format backend when the backend registry is introduced.
-_FMT_HARDWARE = {
-    fmt: (fp8.is_supported, fp8.HARDWARE_REQUIREMENT)
-    for fmt in ("fp8", "fp8_e4m3", "fp8_e5m2")
-}
+from src.layers.mlp import SparseMoEBlock
+from src.quant.constants import QUANT_PASSTHROUGH
+from src.quant.linear import QuantizedLinear
+from src.quant.moe import QuantizedSparseMoEBlock
+from src.quant.utils import resolve_quantization_config
 
 
-def _quantizes(rule) -> bool:
-    """Whether a rule quantizes any operand (vs. all passthrough dtypes)."""
-    return any(fmt not in QUANT_PASSTHROUGH for fmt in rule.dtype.values())
-
-
-def _check_hardware(rules) -> None:
-    """Raise if any enabled rule uses a fmt this hardware can't run."""
-    for rule in rules:
-        if not rule.enabled:
-            continue
-        for fmt in rule.dtype.values():
-            requirement = _FMT_HARDWARE.get(fmt)
-            if requirement is not None and not requirement[0]():
-                raise RuntimeError(
-                    f"quant dtype {fmt!r} requires {requirement[1]}. "
-                    "Disable quant or run on supported hardware."
-                )
+def _is_passthrough(quantization_config) -> bool:
+    return quantization_config is None or all(
+        fmt in QUANT_PASSTHROUGH
+        for per_gemm in quantization_config.dtype.values()
+        for fmt in per_gemm.values()
+    )
 
 
 def apply_quantization(model: nn.Module, config) -> nn.Module:
-    """Swap eligible nn.Linear modules to QuantLinear per the run's quant rules.
-
-    `config.training.quant` is a list of rules; each Linear takes the first
-    enabled rule whose include/exclude matches its FQN (see `resolve_rule`).
-    No-op when no rule is enabled. Must run BEFORE torch.compile so the tracer
-    sees the swapped modules.
+    """Swap eligible nn.Linear / SparseMoEBlock modules to their quantized
+    counterparts per the run's quant configurations.
     """
-    rules = config.training.quant
-    if not any(rule.enabled for rule in rules):
+    quantization_configs = config.training.quantization
+    if not any(qc.enabled for qc in quantization_configs):
         return model
-
-    _check_hardware(rules)
 
     embedding_weight_ids = {
         id(m.weight) for m in model.modules() if isinstance(m, nn.Embedding)
     }
 
-    for parent_fqn, parent in model.named_modules():
+    # nn.Linear swaps to QuantizedLinear; SparseMoEBlock (whose routed experts are
+    # stacked Parameters, unreachable as Linears) retypes to QuantizedSparseMoEBlock.
+    for parent_name, parent in model.named_modules():
         for child_name, child in list(parent.named_children()):
-            if not isinstance(child, nn.Linear):
+            if not isinstance(child, (nn.Linear, SparseMoEBlock)):
                 continue
-            fqn = f"{parent_fqn}.{child_name}" if parent_fqn else child_name
-            rule = resolve_rule(fqn, rules)
-            if rule is None or not _quantizes(rule):
+            full_name = f"{parent_name}.{child_name}" if parent_name else child_name
+            quantization_config = resolve_quantization_config(
+                full_name, quantization_configs
+            )
+            # skip configs that leave every operand in a passthrough dtype
+            if _is_passthrough(quantization_config):
                 continue
-            if id(child.weight) in embedding_weight_ids:
-                warnings.warn(
-                    f"quant: skipping {fqn!r} — its weight is tied to an embedding; "
-                    "swapping would break the tie."
-                )
-                continue
-            setattr(parent, child_name, QuantLinear.from_linear(child, rule))
+            if isinstance(child, nn.Linear):
+                if id(child.weight) in embedding_weight_ids:
+                    print(
+                        f"quant: skipping {full_name!r} — its weight is tied to an "
+                        "embedding; swapping would break the tie."
+                    )
+                    continue
+                quantized_cls = QuantizedLinear
+            else:
+                quantized_cls = QuantizedSparseMoEBlock
+            qmod = quantized_cls.from_module(child, quantization_config)
+            setattr(parent, child_name, qmod)
     return model

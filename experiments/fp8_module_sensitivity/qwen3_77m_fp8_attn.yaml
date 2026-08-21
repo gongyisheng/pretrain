@@ -36,10 +36,13 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   seed: 42
-  quant:
+  quantization:
     enabled: true
-    dtype_recipe: fp8
-    scaling:
+    dtype:
+      weight: fp8_e4m3
+      act: fp8_e4m3
+      grad_out: fp8_e5m2
+    scale:
       granularity: tensorwise
     include: [blocks.*.attn.*]
     exclude: []

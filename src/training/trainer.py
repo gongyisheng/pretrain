@@ -17,11 +17,15 @@ from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
 from src.quant.convert import apply_quantization
+from src.metrics.collector import MetricsCollector, TokenizerMetricsCollector
+from src.metrics.convert import (
+    apply_activation_monitoring,
+    apply_quantization_monitoring,
+)
+from src.metrics.functional import count_correct
 from src.training.optimizer import build_optimizer, build_scheduler
-from src.training.metrics import MetricsTracker, TokenizerMetricsTracker
 from src.training.loss import LOSS_REGISTRY, compute_loss, compute_loss_chunked
 from src.utils.config import TrainConfig
-from src.utils.metric_utils import count_correct
 from src.utils.tracking_utils import WandbLogger
 from src.utils.masking_utils import (
     build_causal_attention_mask,
@@ -71,12 +75,11 @@ class Trainer:
             eot_id = self.tokenizer.token_to_id("<|endoftext|>")
             self.eot_token_id = eot_id if eot_id is not None else 0
         else:
-            self.eot_token_id = 0  # fallback for tests without a real tokenizer
-        # EOT doubles as the padding token (no dedicated pad token in the current tokenizer)
+            self.eot_token_id = 0
         self.pad_token_id = self.eot_token_id
 
         # Model
-        self.model = build_model(config).to(self.device)
+        self.eager_model = build_model(config).to(self.device)
 
         # Data
         if not os.path.isdir(config.data.data_dir):
@@ -147,11 +150,14 @@ class Trainer:
             worker_init_fn=Trainer._worker_init_fn,
         )
 
-        # Quantization: swap eligible nn.Linear modules to QuantLinear
-        apply_quantization(self.model, config)
+        # Quantization: swap eligible nn.Linear modules to QuantizedLinear
+        # (before torch.compile).
+        apply_quantization(self.eager_model, config)
+        self.logger = WandbLogger(config, enabled=wandb_enabled)
+        self.metrics = MetricsCollector(config, self.device, logger=self.logger)
 
         # Optimizer & scheduler
-        self.optimizer = build_optimizer(self.model, config)
+        self.optimizer = build_optimizer(self.eager_model, config)
         self.scheduler = build_scheduler(self.optimizer, config)
 
         # Mixed precision
@@ -173,12 +179,16 @@ class Trainer:
 
         inductor_config.assert_indirect_indexing = False
 
-        if config.training.enable_torch_compile:
-            self.model = torch.compile(self.model)
+        if config.logging.log_activation_norms:
+            apply_activation_monitoring(self.eager_model)
+        if config.logging.log_quant_metrics:
+            apply_quantization_monitoring(self.eager_model)
 
-        # Metrics and Logging
-        self.logger = WandbLogger(config, enabled=wandb_enabled)
-        self.metrics = MetricsTracker(config, self.device, logger=self.logger)
+        if config.training.enable_torch_compile:
+            self.model = torch.compile(self.eager_model)
+        else:
+            self.model = self.eager_model
+
         self.metrics.print_model_summary()
 
         # Checkpoint dir
@@ -228,9 +238,9 @@ class Trainer:
         )
         while self.step < stop_at:
             self.optimizer.zero_grad(set_to_none=True)
+            self.metrics.train_step_begin(self.model, self.step)
 
-            # Read previous step's loss NOW (GPU has been computing since we launched it)
-            # This overlaps the .item() sync with the current step's data prefetch
+            # Read previous step's loss
             if prev_loss_tensor is not None:
                 accum_loss = prev_loss_tensor.item()
 
@@ -350,8 +360,7 @@ class Trainer:
                     f"Loss is {accum_loss} at step {self.step}, stopping training"
                 )
 
-            self.metrics.snapshot_pre_step(self.model, self.step)
-            scale_before = self.scaler.get_scale()
+            self.metrics.snapshot_pre_step(self.model, self.step, self.scaler)
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
@@ -361,7 +370,6 @@ class Trainer:
                 model=self.model,
                 optimizer=self.optimizer,
                 scaler=self.scaler,
-                scale_before=scale_before,
                 aux_loss=aux_loss,
             )
             self.model.post_step()
@@ -399,7 +407,7 @@ class Trainer:
         pbar.close()
         self.logger.finish()
 
-    def _forward_batch(self, batch):
+    def _forward_batch(self, batch, model=None):
         """Move a (input_ids, position_ids, labels) batch to device, build the
         attention mask, and run a forward pass under autocast. Returns
         (logits, labels, aux_loss). Loss is left to the caller — wrap it in
@@ -426,14 +434,14 @@ class Trainer:
                     self.device,
                     attn_implementation=self.config.model.attn_implementation,
                 )
-            logits, aux_loss = self.model(
+            logits, aux_loss = (model if model is not None else self.model)(
                 input_ids, position_ids=position_ids, attn_mask=attn_mask
             )
         return logits, labels, aux_loss
 
     @torch.no_grad()
     def _evaluate(self):
-        self.metrics.eval_begin()
+        self.metrics.eval_begin(self.model)
         for i, batch in enumerate(self.val_loader):
             if (
                 self.config.training.eval_steps > 0
@@ -457,12 +465,18 @@ class Trainer:
                 eot_token_id=self.eot_token_id,
             )
 
+        # Shut the val window before the train-accuracy pass, whose forwards would
+        # otherwise fold into it.
+        self.metrics.eval_end()
+
         train_avg_acc = None
         if self.config.task == "sft" and self.config.training.eval_train:
             train_avg_acc = self._evaluate_train_acc()
 
-        # Assembly + dispatch + the printed summary line all live in MetricsTracker.
-        self.metrics.log_eval(step=self.step, train_avg_acc=train_avg_acc)
+        # Assembly + dispatch + the printed summary line all live in MetricsCollector.
+        self.metrics.log_eval(
+            step=self.step, model=self.model, train_avg_acc=train_avg_acc
+        )
 
         if self.config.task == "pretrain":
             self._generate_sample()
@@ -494,31 +508,25 @@ class Trainer:
         """
         if self.tokenizer is None:
             return
-        # <|endoftext|> (token 0) acts as BOS, prompting the model to start a new document
-        idx = torch.zeros((1, 1), dtype=torch.long, device=self.device)
-        for _ in range(max_new_tokens):
-            # truncate context to max_seq_len if generation grows long
-            idx_cond = idx[:, -self.config.max_seq_len :]
-            B, S = idx_cond.shape
-            pos_ids = torch.arange(S, device=self.device).unsqueeze(0).expand(B, S)
-            attn_mask = build_causal_attention_mask(
-                B,
-                S,
-                self.device,
-                attn_implementation=self.config.model.attn_implementation,
-            )
+        B, S = 1, max_new_tokens + 1
+        idx = torch.zeros((B, S), dtype=torch.long, device=self.device)
+        idx[0, 0] = self.eot_token_id
+        pos_ids = torch.arange(S, device=self.device).unsqueeze(0)
+        attn_mask = build_causal_attention_mask(
+            B,
+            S,
+            self.device,
+            attn_implementation=self.config.model.attn_implementation,
+        )
+        for pos in range(S - 1):
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                logits, _ = self.model(
-                    idx_cond, position_ids=pos_ids, attn_mask=attn_mask
+                logits, _ = self.eager_model(
+                    idx, position_ids=pos_ids, attn_mask=attn_mask
                 )
-            logits = logits[:, -1, :]  # take last token's logits
-            probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(
-                probs, num_samples=1
-            )  # sample from distribution
-            idx = torch.cat([idx, next_token], dim=1)
+            probs = F.softmax(logits[:, pos, :], dim=-1)
+            idx[0, pos + 1] = torch.multinomial(probs, num_samples=1)
         token_ids = idx[0].tolist()
         generated_text = self.tokenizer.decode(token_ids)
         self.logger.log_text("val-sample/generations", generated_text, step=self.step)
@@ -618,7 +626,7 @@ class TokenizerTrainer:
         os.makedirs(config.tokenizer_training.checkpoint_dir, exist_ok=True)
 
         self.logger = WandbLogger(config, enabled=wandb_enabled)
-        self.metrics = TokenizerMetricsTracker(self.logger)
+        self.metrics = TokenizerMetricsCollector(self.logger)
         self.eval_texts: list[str] = []
 
     # ---- Shared helpers ----

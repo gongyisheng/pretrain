@@ -1,20 +1,35 @@
+import copy
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
 
+from src.layers.mlp import SparseMoEBlock
+from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
-from src.quant.linear import QuantLinear
-from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+from src.quant.linear import QuantizedLinear
+from src.quant.moe import QuantizedSparseMoEBlock
+from src.utils.config import (
+    ModelConfig,
+    QuantizationConfig,
+    TrainConfig,
+    TrainingConfig,
+)
+
+INT_FORMATS = sorted(_INT8_FORMATS)
 
 
-def _fp8_capable():
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
+def _spec(recipe="fp8", scale=None, **overrides):
+    """A fresh quantization rule dict. Never share one: QuantizationConfig resolves
+    recipes by popping them out of the nested dict it is handed."""
+    spec = {"enabled": True, "dtype": {"recipe": recipe}, **overrides}
+    if scale is not None:
+        spec["scale"] = {"recipe": scale}
+    return spec
 
 
-fp8_only = pytest.mark.skipif(not _fp8_capable(), reason="fp8 needs SM >= 8.9")
-
-
-class _Tiny(nn.Module):
+class _Dense(nn.Module):
     def __init__(self, tie=False):
         super().__init__()
         self.token_emb = nn.Embedding(64, 32)
@@ -25,7 +40,23 @@ class _Tiny(nn.Module):
             self.lm_head.weight = self.token_emb.weight
 
 
-def _cfg(quant, mixed_precision="bf16"):
+class _MoE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.token_emb = nn.Embedding(64, 32)
+        self.mlp = SparseMoEBlock(
+            d_model=32,
+            intermediate_size=48,
+            n_routed_experts=4,
+            n_routed_experts_per_token=2,
+        )
+        self.lm_head = nn.Linear(32, 64, bias=False)
+
+
+def _cfg(quantization):
+    # QuantizationConfig resolves recipes by popping them out of the dict it is
+    # handed, so a case table entry must not be the dict it consumes.
+    quantization = copy.deepcopy(quantization)
     return TrainConfig(
         model=ModelConfig(
             d_model=32,
@@ -33,75 +64,83 @@ def _cfg(quant, mixed_precision="bf16"):
             vocab_size=64,
             attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
         ),
-        training=TrainingConfig(mixed_precision=mixed_precision, quant=quant),
+        training=TrainingConfig(mixed_precision="bf16", quantization=quantization),
     )
 
 
-def test_disabled_is_noop():
-    m = _Tiny()
-    apply_quantization(m, _cfg({"enabled": False}))
-    assert isinstance(m.attn["q_proj"], nn.Linear)
-    assert not isinstance(m.attn["q_proj"], QuantLinear)
-
-
-@pytest.mark.skipif(_fp8_capable(), reason="testing the unsupported-hardware branch")
-def test_raises_without_capable_gpu():
-    m = _Tiny()
-    with pytest.raises(RuntimeError, match="compute capability"):
-        apply_quantization(m, _cfg({"enabled": True, "dtype_recipe": "fp8"}))
-
-
-@fp8_only
-def test_swaps_and_excludes_lm_head():
-    m = _Tiny().cuda().to(torch.bfloat16)
-    apply_quantization(m, _cfg({"enabled": True, "dtype_recipe": "fp8"}))
-    assert isinstance(m.attn["q_proj"], QuantLinear)
-    assert isinstance(m.mlp["down_proj"], QuantLinear)
-    assert isinstance(m.lm_head, nn.Linear) and not isinstance(m.lm_head, QuantLinear)
-    assert isinstance(m.token_emb, nn.Embedding)
-
-
-@fp8_only
-def test_tie_guard_skips_tied_lm_head():
-    m = _Tiny(tie=True).cuda().to(torch.bfloat16)
-    # exclude nothing: tie guard alone must keep lm_head unswapped
-    cfg = _cfg({"enabled": True, "dtype_recipe": "fp8", "exclude": []})
-    with pytest.warns(UserWarning, match="tied"):
-        apply_quantization(m, cfg)
-    assert isinstance(m.lm_head, nn.Linear) and not isinstance(m.lm_head, QuantLinear)
-    assert isinstance(m.attn["q_proj"], QuantLinear)  # non-tied still swapped
-
-
-@fp8_only
-def test_include_restricts_scope():
-    m = _Tiny().cuda().to(torch.bfloat16)
-    cfg = _cfg(
-        {"enabled": True, "dtype_recipe": "fp8", "include": ["*attn*"], "exclude": []}
-    )
-    apply_quantization(m, cfg)
-    assert isinstance(m.attn["q_proj"], QuantLinear)
-    assert isinstance(m.mlp["down_proj"], nn.Linear)  # not in include
-
-
-@fp8_only
-def test_list_of_rules_first_match_wins():
-    m = _Tiny().cuda().to(torch.bfloat16)
-    cfg = _cfg(
+APPLY_CASES = [
+    # (quantization, swapped fqns, untouched fqns)
+    ({"enabled": False}, (), ("attn.q_proj", "mlp.down_proj")),
+    # fp8 and mxfp8 both swap with no hardware preflight, and lm_head is excluded
+    # by default while the embedding is never a candidate at all.
+    (_spec("fp8"), ("attn.q_proj", "mlp.down_proj"), ("lm_head", "token_emb")),
+    (_spec("mxfp8"), ("attn.q_proj", "mlp.down_proj"), ("lm_head", "token_emb")),
+    # an include allowlist restricts the scope
+    (
+        _spec(include=["*attn*"], exclude=[]),
+        ("attn.q_proj",),
+        ("mlp.down_proj",),
+    ),
+    # a list of rules: each fqn takes the first rule that claims it
+    (
         [
-            {
-                "enabled": True,
-                "dtype_recipe": "fp8",
-                "include": ["*attn*"],
-                "exclude": [],
-            },
-            {
-                "enabled": True,
-                "dtype_recipe": "fp8",
-                "include": ["*mlp*"],
-                "exclude": [],
-            },
-        ]
-    )
-    apply_quantization(m, cfg)
-    assert isinstance(m.attn["q_proj"], QuantLinear)
-    assert isinstance(m.mlp["down_proj"], QuantLinear)
+            _spec(include=["*attn*"], exclude=[]),
+            _spec(include=["*mlp*"], exclude=[]),
+        ],
+        ("attn.q_proj", "mlp.down_proj"),
+        ("lm_head",),
+    ),
+    # the int8 series is weight-only but still swaps the module
+    *[(_spec(fmt), ("attn.q_proj",), ("lm_head",)) for fmt in INT_FORMATS],
+]
+
+
+@pytest.mark.parametrize("quantization,swapped,untouched", APPLY_CASES)
+def test_apply_quantization(quantization, swapped, untouched):
+    model = _Dense()
+    apply_quantization(model, _cfg(quantization))
+    for fqn in swapped:
+        assert isinstance(model.get_submodule(fqn), QuantizedLinear), fqn
+    for fqn in untouched:
+        assert not isinstance(model.get_submodule(fqn), QuantizedLinear), fqn
+
+
+def test_apply_quantization_skips_a_tied_lm_head(capsys):
+    # exclude nothing: the tie guard alone must keep lm_head unswapped, loudly
+    model = _Dense(tie=True)
+    apply_quantization(model, _cfg(_spec(exclude=[])))
+    assert "tied" in capsys.readouterr().out
+    assert not isinstance(model.lm_head, QuantizedLinear)
+    assert isinstance(model.attn["q_proj"], QuantizedLinear)  # non-tied still swapped
+
+
+MOE_CASES = [
+    (_spec(scale="rowwise"), QuantizedSparseMoEBlock, False),
+    (_spec(scale="rowwise", exclude=["mlp"]), SparseMoEBlock, True),
+]
+
+
+@pytest.mark.parametrize("quantization,seam_owner,gate_swapped", MOE_CASES)
+def test_apply_quantization_moe(quantization, seam_owner, gate_swapped):
+    model = _MoE()
+    apply_quantization(model, _cfg(quantization))
+    assert isinstance(model.mlp.expert_gate_up, torch.nn.Parameter)
+    assert model.mlp.expert_mm.__func__ is seam_owner.expert_mm
+    assert isinstance(model.mlp.router.gate, QuantizedLinear) is gate_swapped
+
+
+def test_apply_quantization_attaches_no_metric_state():
+    model = _Dense()
+    apply_quantization(model, _cfg(_spec("fp8")))
+    swapped = [m for m in model.modules() if isinstance(m, QuantizedLinear)]
+    assert swapped and all(not hasattr(m, "quantization_probe") for m in swapped)
+
+
+def test_apply_quantization_accepts_a_bare_config_namespace():
+    # the converter only reads config.training.quantization, so a plain namespace of
+    # already-built rules is enough — nothing else on TrainConfig is consulted
+    model = nn.Sequential(nn.Linear(64, 64))
+    rule = QuantizationConfig(enabled=True, dtype={"recipe": "int8"}, include=["0"])
+    config = SimpleNamespace(training=SimpleNamespace(quantization=[rule]))
+    apply_quantization(model, config)
+    assert isinstance(model[0], QuantizedLinear)

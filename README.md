@@ -16,6 +16,21 @@ uv sync
 uv run wandb login   # required unless you pass --no-wandb to train.py
 ```
 
+## Test
+
+Tests run in parallel by default (`-n 6 --dist loadfile`, set in `pyproject.toml`). Run the
+two trees separately — a combined `-n 6` run can exhaust GPU memory on a 16 GB card:
+
+```bash
+uv run pytest tests/fast                 # all fast tests, ~2 min
+uv run pytest tests/e2e -n 0             # e2e serially, one CUDA context
+uv run pytest tests/fast/model/test_transformer.py                    # single file
+uv run pytest tests/fast/model/test_transformer.py -k "test_forward"  # single test
+uv run pytest -n 0                       # serial, for a debugger or clean output
+```
+
+See `CLAUDE.md` for per-directory worker tuning.
+
 ## Data & tokenizer
 
 Option A — download prebuilt tokenizer and tokenized `.bin` files from [gongyisheng/openwebtext-exp](https://huggingface.co/datasets/gongyisheng/openwebtext-exp) (recommended, skips ~hours of preprocessing):
