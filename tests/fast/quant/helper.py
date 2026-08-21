@@ -191,6 +191,15 @@ ALL_SCALES = [
     BLOCKWISE2D_64_E8M0,
 ]
 
+SCALES_COARSE_TO_FINE = [
+    TENSORWISE,
+    ROWWISE,
+    BLOCKWISE1D_128,
+    BLOCKWISE1D_64,
+    BLOCKWISE1D_32,
+    BLOCKWISE1D_16,
+]
+
 SCALE_DTYPE_NAMES = {torch.float32: "fp32", torch.float8_e8m0fnu: "fp8_e8m0"}
 
 
