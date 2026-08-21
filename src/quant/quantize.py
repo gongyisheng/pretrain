@@ -41,7 +41,7 @@ def _compute_scale(
         # Clamp E8M0 exponents, preserving its full lower range; `log2(0)` selects 2**-127.
         exp = torch.ceil(torch.log2(amax / str_to_qmax(fmt)))
         # E8M0 cast corrects CUDA `exp2(-127)` being one ULP low.
-        return torch.exp2(exp.clamp(-127, 127)).to(scale_dtype).float()
+        return torch.exp2(exp.clamp(-127, 127)).to(scale_dtype)
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 
@@ -50,7 +50,7 @@ def _compute_codes(
 ) -> torch.Tensor:
     """Scale float32 `xf` by broadcastable float32 `scale` and cast to `fmt`."""
     qmax = str_to_qmax(fmt)
-    xq = (xf / scale).clamp(-qmax, qmax)
+    xq = (xf / scale.float()).clamp(-qmax, qmax)
     if is_int8s(fmt):
         if stochastic_rounding:
             lower = torch.floor(xq)

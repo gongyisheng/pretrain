@@ -47,6 +47,12 @@ def _check_out_dtype(out_dtype: torch.dtype, feature: str) -> None:
         raise ValueError(f"{feature} requires out_dtype=bfloat16, got {out_dtype}")
 
 
+def _check_e4m3_element(tensor: torch.Tensor, feature: str) -> None:
+    """This backend's descriptor is e4m3-only; e5m2 operands belong to Triton."""
+    if tensor.dtype is not torch.float8_e4m3fn:
+        raise ValueError(f"{feature} requires float8_e4m3fn, got {tensor.dtype}")
+
+
 def _check_mxfp8_scaled_mm(
     aq: torch.Tensor, bq: torch.Tensor, out_dtype: torch.dtype, block_size: int
 ) -> None:
@@ -57,6 +63,8 @@ def _check_mxfp8_scaled_mm(
     _check_layout(bq, ((bq.shape[1], 1), (1, bq.shape[0])), "MXFP8 GEMM B")
     _check_dimension_multiple_of_16(aq, "MXFP8 GEMM A")
     _check_dimension_multiple_of_16(bq, "MXFP8 GEMM B")
+    _check_e4m3_element(aq, "MXFP8 GEMM A")
+    _check_e4m3_element(bq, "MXFP8 GEMM B")
 
 
 def supports_mxfp8_scaled_mm(

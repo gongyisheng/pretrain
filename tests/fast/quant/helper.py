@@ -229,11 +229,23 @@ def mm_ref(a, a_fmt, b, b_fmt, scale_cfg):
     )
 
 
-def skip_unsupported_dtype_scale(dtype, scale_cfg):
-    """Skip E8M0 scales with integer formats, which QuantizationConfig rejects.
+def skip_unsupported_fmt_scale(fmt, scale_cfg):
+    """Skip an E8M0 scale on an integer format, a pair QuantizationConfig rejects."""
+    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and is_int8s(fmt):
+        pytest.skip("an e8m0 scale is defined only over fp8 elements")
 
-    This config constraint does not apply to op-level tests.
-    """
+
+def skip_unsupported_ragged_k_scale(scale_cfg):
+    """Skip a wider-than-32 E8M0 block on a ragged K axis."""
+    if (
+        scale_cfg["scale_dtype"] is torch.float8_e8m0fnu
+        and scale_cfg["block_shape"][1] != 32
+    ):
+        pytest.skip("mxfp8 ragged-K needs a 32-wide scale block")
+
+
+def skip_unsupported_dtype_scale(dtype, scale_cfg):
+    """Skip E8M0 scales with integer formats, which QuantizationConfig rejects."""
     has_int = any(
         is_int8s(fmt)
         for spec in dtype.values()

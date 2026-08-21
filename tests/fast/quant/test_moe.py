@@ -32,6 +32,8 @@ from tests.fast.quant.helper import (
     rel,
     rule,
     skip_unsupported_dtype_scale,
+    skip_unsupported_ragged_k_scale,
+    skip_unsupported_fmt_scale,
 )
 
 
@@ -81,6 +83,10 @@ GROUPED_LAYOUTS = ["ragged_m", "ragged_k", "ragged_n"]
 @pytest.mark.parametrize("bias", [False, True])
 def test_quantized_grouped_mm_precision(a_fmt, b_fmt, scale_cfg, layout, bias):
     """Compare each layout with per-expert dequantized GEMM, including optional bias."""
+    skip_unsupported_fmt_scale(a_fmt, scale_cfg)
+    skip_unsupported_fmt_scale(b_fmt, scale_cfg)
+    if layout == "ragged_k":
+        skip_unsupported_ragged_k_scale(scale_cfg)
     if bias and layout != "ragged_m":
         pytest.skip(
             "bias is defined per expert over the row axis, which only ragged-M has"
@@ -241,6 +247,8 @@ def test_scaled_grouped_gemm_fn_forward_precision(dtype, scale_cfg, bias):
 def test_scaled_grouped_gemm_fn_backward_precision(dtype, scale_cfg, bias):
     """Check backward precision and fp32 bias-gradient accumulation."""
     skip_unsupported_dtype_scale(dtype, scale_cfg)
+    # The wgrad of a grouped GEMM contracts over the ragged axis.
+    skip_unsupported_ragged_k_scale(scale_cfg)
     a, b, offs = _make(COUNTS, K=64, N=48)
     bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16) * 0.1
     a_q, b_q = a.clone().requires_grad_(True), b.clone().requires_grad_(True)

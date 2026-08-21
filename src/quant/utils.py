@@ -60,11 +60,7 @@ def _resolve_gemm_quantization_family(
     block_shape: tuple[int, int],
 ) -> str | None:
     if is_fp8(a_fmt) and is_fp8(b_fmt):
-        if (
-            a_fmt == b_fmt == "fp8_e4m3"
-            and scale_dtype == torch.float8_e8m0fnu
-            and tuple(block_shape) == (1, 32)
-        ):
+        if scale_dtype == torch.float8_e8m0fnu:
             return "mxfp8"
         return "fp8"
     if is_int8s(a_fmt) and is_int8s(b_fmt):

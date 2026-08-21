@@ -23,6 +23,7 @@ from tests.fast.quant.helper import (
     roundtrip,
     rule,
     skip_unsupported_dtype_scale,
+    skip_unsupported_fmt_scale,
 )
 
 
@@ -60,6 +61,8 @@ def test_quantized_mm_passthrough(fmt, dtype, out_dtype):
 @pytest.mark.parametrize("a_fmt", ALL_FORMATS)
 def test_quantized_mm_precision(a_fmt, b_fmt, scale_cfg, bias):
     """Compare each format pair with its dequantization oracle."""
+    skip_unsupported_fmt_scale(a_fmt, scale_cfg)
+    skip_unsupported_fmt_scale(b_fmt, scale_cfg)
     torch.manual_seed(0)
     a = torch.randn(256, 512, device="cuda")
     b = torch.randn(512, 128, device="cuda")

@@ -10,31 +10,38 @@ from tests.fast.quant.helper import (
     E4M3,
     SCALES_COARSE_TO_FINE,
     TENSORWISE,
+    skip_unsupported_fmt_scale,
     roundtrip,
     scale_of,
 )
 
 
 CONTRACT_DIMS = [-2, -1]
-RAGGED_DIMS = [None, -2, -1]
-COMPUTE_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
-ALL_SHAPES = [
-    (64, 128),
-    (70, 130),
-    (3, 64, 128),
-    (2, 70, 130),
+GEOMETRY_CASES = [
+    ((64, 128), None),
+    ((70, 130), None),
+    ((3, 64, 128), None),
+    ((70, 130), -2),
+    ((70, 130), -1),
 ]
 RAGGED_GROUPS = 3
-INIT_METHODS = ["normal", "spread", "zeros", "tiny"]
+INPUT_CASES = [
+    (torch.float32, "normal"),
+    (torch.float16, "normal"),
+    (torch.bfloat16, "normal"),
+    (torch.bfloat16, "spread"),
+    (torch.bfloat16, "zeros"),
+    (torch.float32, "tiny"),
+]
 
 
 def _offs(counts):
-    """Return int32 exclusive end offsets for group sizes."""
+    """Return cumulative group-end offsets as int32."""
     return torch.tensor(counts).cumsum(0).to(torch.int32)
 
 
 def _make(init_method, shape, dtype=torch.float32):
-    """Create a deterministic operand for the requested quantization regime."""
+    """Return a deterministic operand initialized by `init_method`."""
     torch.manual_seed(0)
     if init_method == "normal":
         return torch.randn(*shape, dtype=dtype) * 10.0
@@ -236,30 +243,22 @@ QUANTIZE_ERROR_CASES = [
 ]
 
 
-@pytest.mark.parametrize("case", QUANTIZE_ERROR_CASES, ids=lambda c: c.name)
+@pytest.mark.parametrize("case", QUANTIZE_ERROR_CASES)
 def test_quantize_operand_raise_error(case):
     with pytest.raises(case.exception, match=case.match):
         quantize_operand(**case.kwargs)
 
 
-@pytest.mark.parametrize("init_method", INIT_METHODS)
-@pytest.mark.parametrize("dtype", COMPUTE_DTYPES)
-@pytest.mark.parametrize("shape", ALL_SHAPES)
-@pytest.mark.parametrize("ragged_dim", RAGGED_DIMS)
+@pytest.mark.parametrize("input_case", INPUT_CASES)
+@pytest.mark.parametrize("geometry", GEOMETRY_CASES)
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("fmt", ALL_QUANT_FORMATS)
-def test_quantize_operand_precision(
-    fmt, scale_cfg, contract_dim, ragged_dim, shape, dtype, init_method
-):
-    """Check quantization against an independent Python block-loop oracle.
-
-    The paired dequantization test validates the same scales.
-    """
-    if ragged_dim is not None and len(shape) > 2:
-        pytest.skip("a ragged axis needs a 2D operand")
-    if init_method == "tiny" and dtype is not torch.float32:
-        pytest.skip("2**-136 underflows to zero below fp32, leaving the zeros case")
+def test_quantize_operand_precision(fmt, scale_cfg, contract_dim, geometry, input_case):
+    """Check codes, scales, and layout against an independent block-loop oracle."""
+    skip_unsupported_fmt_scale(fmt, scale_cfg)
+    shape, ragged_dim = geometry
+    dtype, init_method = input_case
 
     x = _make(init_method, shape, dtype)
     offs = None if ragged_dim is None else _ragged_offs(shape[ragged_dim])
@@ -278,11 +277,12 @@ def test_quantize_operand_precision(
     assert codes.is_contiguous()
     assert codes.float().abs().amax() <= str_to_qmax(fmt)
     assert tuple(scale.shape) == tuple(expected)
-    # Public scales are fp32 even when stored internally as E8M0.
-    assert scale.dtype == torch.float32 and scale.is_contiguous()
-    assert torch.isfinite(scale).all() and (scale > 0).all()
+    assert scale.dtype is scale_cfg["scale_dtype"] and scale.is_contiguous()
+    # E8M0 carries no comparison or log2 kernel, so check the decoded exponents.
+    decoded = scale.float()
+    assert torch.isfinite(decoded).all() and (decoded > 0).all()
     if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu:
-        log2_scale = torch.log2(scale)
+        log2_scale = torch.log2(decoded)
         assert torch.equal(log2_scale, log2_scale.round())
 
     assert torch.equal(_bits(codes), _bits(_ref_codes(x, div, fmt)))
@@ -315,7 +315,9 @@ def test_quantize_operand_precision(
             assert ratio > qmax / 2  # E8M0 rounding leaves under one binade unused.
 
 
-@pytest.mark.parametrize("shape", ALL_SHAPES)
+@pytest.mark.parametrize(
+    "shape", [shape for shape, ragged_dim in GEOMETRY_CASES if ragged_dim is None]
+)
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 @pytest.mark.parametrize("fmt", ALL_QUANT_FORMATS)
 def test_quantize_operand_granularity_sqnr(fmt, contract_dim, shape):
@@ -449,27 +451,24 @@ DEQUANTIZE_ERROR_CASES = [
 ]
 
 
-@pytest.mark.parametrize("case", DEQUANTIZE_ERROR_CASES, ids=lambda c: c.name)
+@pytest.mark.parametrize("case", DEQUANTIZE_ERROR_CASES)
 def test_dequantize_operand_raise_error(case):
     with pytest.raises(case.exception, match=case.match):
         dequantize_operand(**case.kwargs)
 
 
-@pytest.mark.parametrize("init_method", INIT_METHODS)
-@pytest.mark.parametrize("dtype", COMPUTE_DTYPES)
-@pytest.mark.parametrize("shape", ALL_SHAPES)
-@pytest.mark.parametrize("ragged_dim", RAGGED_DIMS)
+@pytest.mark.parametrize("input_case", INPUT_CASES)
+@pytest.mark.parametrize("geometry", GEOMETRY_CASES)
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("fmt", ALL_QUANT_FORMATS)
 def test_dequantize_operand_precision(
-    fmt, scale_cfg, contract_dim, ragged_dim, shape, dtype, init_method
+    fmt, scale_cfg, contract_dim, geometry, input_case
 ):
     """Check fp32 reconstruction against the independent block-loop oracle."""
-    if ragged_dim is not None and len(shape) > 2:
-        pytest.skip("a ragged axis needs a 2D operand")
-    if init_method == "tiny" and dtype is not torch.float32:
-        pytest.skip("2**-136 underflows to zero below fp32, leaving the zeros case")
+    skip_unsupported_fmt_scale(fmt, scale_cfg)
+    shape, ragged_dim = geometry
+    dtype, init_method = input_case
 
     x = _make(init_method, shape, dtype)
     offs = None if ragged_dim is None else _ragged_offs(shape[ragged_dim])

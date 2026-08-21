@@ -114,8 +114,8 @@ GEMM_FAMILY_CASES = [
     ("int8", "int8", _FP32, (0, 0), "int8"),
     ("fp8_e4m3", "fp8_e4m3", _FP32, (1, 32), "fp8"),
     ("fp8_e4m3", "fp8_e4m3", _E8M0, (1, 32), "mxfp8"),
-    ("fp8_e5m2", "fp8_e4m3", _E8M0, (1, 32), "fp8"),  # mx needs e4m3 on both sides
-    ("fp8_e4m3", "fp8_e4m3", _E8M0, (1, 64), "fp8"),  # mx needs a 32-wide block
+    ("fp8_e5m2", "fp8_e4m3", _E8M0, (1, 32), "mxfp8"),
+    ("fp8_e4m3", "fp8_e4m3", _E8M0, (1, 64), "mxfp8"),
     ("int8", "fp8_e4m3", _FP32, (0, 0), None),  # mixed family has no op
     ("bf16", "bf16", _FP32, (0, 0), None),
 ]

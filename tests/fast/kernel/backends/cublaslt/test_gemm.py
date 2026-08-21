@@ -21,6 +21,30 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="cuBLASLt MM kernels are CUDA only"
 )
 
+MXFP8_SUPPORT_CASES = (
+    (torch.float8_e4m3fn, torch.float8_e4m3fn, 32, True),
+    (torch.float8_e5m2, torch.float8_e4m3fn, 32, False),
+    (torch.float8_e4m3fn, torch.float8_e5m2, 32, False),
+    (torch.float8_e4m3fn, torch.float8_e4m3fn, 64, False),
+)
+
+
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype,block_size,supported",
+    MXFP8_SUPPORT_CASES,
+    ids=["e4m3-1x32", "e5m2-a", "e5m2-b", "block-64"],
+)
+def test_supports_mxfp8_scaled_mm(a_dtype, b_dtype, block_size, supported):
+    """The probe must decline whatever the kernel rejects, or the selector routes
+    a call here that the C++ contract then refuses instead of falling to Triton."""
+    aq = torch.zeros(256, 512, device="cuda").to(a_dtype)
+    bq = torch.zeros(512, 128, device="cuda").to(b_dtype)
+
+    assert (
+        cublaslt_mm.supports_mxfp8_scaled_mm(aq, bq, torch.bfloat16, block_size)
+        is supported
+    )
+
 
 @pytest.mark.parametrize("case", MXFP8_SCALED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("format", MXFP8_FORMAT_CASES, ids=lambda case: case.name)
