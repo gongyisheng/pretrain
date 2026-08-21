@@ -61,7 +61,10 @@ def _resolve_gemm_quantization_family(
 ) -> str | None:
     if is_fp8(a_fmt) and is_fp8(b_fmt):
         if scale_dtype == torch.float8_e8m0fnu:
-            return "mxfp8"
+            # 1D (1x32) or 2D (32X32)
+            if a_fmt == "fp8_e4m3" and b_fmt == "fp8_e4m3" and block_shape[1] == 32:
+                return "mxfp8"
+            return "mxfp8_plus"
         return "fp8"
     if is_int8s(a_fmt) and is_int8s(b_fmt):
         return "int8"
@@ -75,6 +78,8 @@ def scaled_mm_op(
     block_shape: tuple[int, int],
 ) -> str | None:
     family = _resolve_gemm_quantization_family(a_fmt, b_fmt, scale_dtype, block_shape)
+    if family == "mxfp8_plus":
+        family = "mxfp8"
     return None if family is None else f"gemm.{family}_scaled_mm"
 
 
@@ -85,6 +90,8 @@ def scaled_grouped_mm_op(
     block_shape: tuple[int, int],
 ) -> str | None:
     family = _resolve_gemm_quantization_family(a_fmt, b_fmt, scale_dtype, block_shape)
+    if family == "mxfp8_plus":
+        family = "mxfp8"
     return None if family is None else f"gemm.{family}_scaled_grouped_mm"
 
 

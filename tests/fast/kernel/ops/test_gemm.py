@@ -17,8 +17,12 @@ from src.kernel.ops.gemm import (
 
 E, M, K, N = 4, 32, 64, 48
 
-SCALED_MM_OPS = (int8_scaled_mm, fp8_scaled_mm, mxfp8_scaled_mm)
-SCALED_GROUPED_MM_OPS = (
+SCALED_MM_FUNCS = (
+    int8_scaled_mm,
+    fp8_scaled_mm,
+    mxfp8_scaled_mm,
+)
+SCALED_GROUPED_MM_FUNCS = (
     int8_scaled_grouped_mm,
     fp8_scaled_grouped_mm,
     mxfp8_scaled_grouped_mm,
@@ -132,14 +136,14 @@ OUTPUT_SHAPE_CASES = (
 )
 
 
-@pytest.mark.parametrize("op", SCALED_MM_OPS, ids=OP_IDS)
+@pytest.mark.parametrize("op", SCALED_MM_FUNCS, ids=OP_IDS)
 @pytest.mark.parametrize("case", SCALED_MM_ERROR_CASES, ids=lambda case: case.name)
 def test_scaled_mm_raise_error(op, case):
     with pytest.raises(ValueError, match=case.match):
         op(**make_inputs(case))
 
 
-@pytest.mark.parametrize("op", SCALED_GROUPED_MM_OPS, ids=OP_IDS)
+@pytest.mark.parametrize("op", SCALED_GROUPED_MM_FUNCS, ids=OP_IDS)
 @pytest.mark.parametrize(
     "case", SCALED_GROUPED_MM_ERROR_CASES, ids=lambda case: case.name
 )

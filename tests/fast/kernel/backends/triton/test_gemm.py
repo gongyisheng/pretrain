@@ -11,9 +11,9 @@ from tests.fast.kernel.backends.helper import (
     GROUPED_ERROR_LAYOUTS,
     GROUPED_MM_CASES,
     MXFP8_SCALED_MM_CASES,
-    MXFP8_FORMAT_CASES,
-    MXFP8_SCALE_CASES,
-    MXFP8_SCALE_ERROR_CASES,
+    MXFP8_PLUS_FORMAT_CASES,
+    MXFP8_PLUS_SCALE_CASES,
+    MXFP8_PLUS_SCALE_ERROR_CASES,
     OUT_DTYPE_CASES,
     QUANT_FORMAT_CASES,
     QUANT_SCALE_CASES,
@@ -111,8 +111,8 @@ def test_scaled_mm_raise_error(case, format, scale, with_bias):
 
 
 @pytest.mark.parametrize("case", MXFP8_SCALED_MM_CASES, ids=lambda case: case.name)
-@pytest.mark.parametrize("format", MXFP8_FORMAT_CASES, ids=lambda case: case.name)
-@pytest.mark.parametrize("scale", MXFP8_SCALE_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("format", MXFP8_PLUS_FORMAT_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("scale", MXFP8_PLUS_SCALE_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
 @pytest.mark.parametrize("out_dtype", OUT_DTYPE_CASES, ids=lambda case: case.name)
 def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias, out_dtype):
@@ -143,15 +143,22 @@ def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias, out_dtype):
 
 
 @pytest.mark.parametrize("case", MXFP8_SCALED_MM_CASES, ids=lambda case: case.name)
-@pytest.mark.parametrize("format", MXFP8_FORMAT_CASES, ids=lambda case: case.name)
-@pytest.mark.parametrize("scale", MXFP8_SCALE_ERROR_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("format", MXFP8_PLUS_FORMAT_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize(
+    "scale", MXFP8_PLUS_SCALE_ERROR_CASES, ids=lambda case: case.name
+)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
 def test_mxfp8_scaled_mm_raise_error(case, format, scale, with_bias):
     """Raise error on wrong scale"""
     aq, bq, sa, sb, out_dtype, block_size, bias = make_scaled_mm_inputs(
-        case, format, scale, with_bias=with_bias
+        case,
+        format,
+        scale,
+        with_bias=with_bias,
+        scale_dtype=torch.float8_e8m0fnu,
     )
-    with pytest.raises(Exception):
+    message = f"mxfp8 block_size must be a nonzero multiple of 32, got {block_size}"
+    with pytest.raises(ValueError, match=message):
         triton_mm.mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
@@ -234,8 +241,8 @@ def test_scaled_grouped_mm_raise_error_on_layout(
 
 @pytest.mark.parametrize("case", SCALED_GROUPED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
-@pytest.mark.parametrize("format", MXFP8_FORMAT_CASES, ids=lambda case: case.name)
-@pytest.mark.parametrize("scale", MXFP8_SCALE_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("format", MXFP8_PLUS_FORMAT_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("scale", MXFP8_PLUS_SCALE_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
 @pytest.mark.parametrize("out_dtype", OUT_DTYPE_CASES, ids=lambda case: case.name)
 def test_mxfp8_scaled_grouped_mm_precision(
@@ -279,13 +286,24 @@ def test_mxfp8_scaled_grouped_mm_precision(
 
 @pytest.mark.parametrize("case", SCALED_GROUPED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
-@pytest.mark.parametrize("format", MXFP8_FORMAT_CASES, ids=lambda case: case.name)
-@pytest.mark.parametrize("scale", MXFP8_SCALE_ERROR_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("format", MXFP8_PLUS_FORMAT_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize(
+    "scale", MXFP8_PLUS_SCALE_ERROR_CASES, ids=lambda case: case.name
+)
 def test_mxfp8_scaled_grouped_mm_raise_error(case, layout, format, scale):
     aq, bq, sa, sb, offs, out_dtype, block_size, bias = make_scaled_grouped_mm_inputs(
-        case, layout, format, scale, with_bias=False
+        case,
+        layout,
+        format,
+        scale,
+        with_bias=False,
+        scale_dtype=torch.float8_e8m0fnu,
     )
-    with pytest.raises(Exception):
+    message = (
+        "mxfp8 grouped GEMM requires block_size a nonzero multiple "
+        f"of 32, got {block_size}"
+    )
+    with pytest.raises(ValueError, match=message):
         triton_mm.mxfp8_scaled_grouped_mm(
             aq, bq, sa, sb, offs, out_dtype, block_size, bias=bias
         )

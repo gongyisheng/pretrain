@@ -78,7 +78,12 @@ def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias):
 def test_mxfp8_scaled_mm_raise_error(case, format, scale, with_bias):
     """Raise error on wrong scale"""
     aq, bq, sa, sb, out_dtype, block_size, bias = make_scaled_mm_inputs(
-        case, format, scale, with_bias=with_bias
+        case,
+        format,
+        scale,
+        with_bias=with_bias,
+        scale_dtype=torch.float8_e8m0fnu,
     )
-    with pytest.raises(Exception):
+    message = f"MXFP8 GEMM requires block_size=32, got {block_size}"
+    with pytest.raises(ValueError, match=message):
         cublaslt_mm.scaled_mm_mxfp8(aq, bq, sa, sb, out_dtype, block_size, bias)

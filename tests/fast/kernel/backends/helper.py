@@ -110,6 +110,12 @@ QUANT_FORMAT_CASES = (
 )
 
 MXFP8_FORMAT_CASES = (QuantFormatCase("e4m3xe4m3", "fp8_e4m3", "fp8_e4m3"),)
+MXFP8_PLUS_FORMAT_CASES = (
+    *MXFP8_FORMAT_CASES,
+    QuantFormatCase("e5m2xe5m2", "fp8_e5m2", "fp8_e5m2"),
+    QuantFormatCase("e5m2xe4m3", "fp8_e5m2", "fp8_e4m3"),
+    QuantFormatCase("e4m3xe5m2", "fp8_e4m3", "fp8_e5m2"),
+)
 
 TENSORWISE_SCALE = QuantScaleCase("tensorwise", "tensorwise", (0, 0), 0)
 ROWWISE_SCALE = QuantScaleCase("rowwise", "rowwise", (1, 0), 0)
@@ -148,6 +154,22 @@ MXFP8_SCALE_CASES = (
 )
 
 MXFP8_SCALE_ERROR_CASES = (
+    TENSORWISE_SCALE,
+    ROWWISE_SCALE,
+    BLOCKWISE1D_8_SCALE,
+    BLOCKWISE1D_16_SCALE,
+    BLOCKWISE1D_48_SCALE,
+    BLOCKWISE1D_64_SCALE,
+    BLOCKWISE2D_64_SCALE,
+)
+
+MXFP8_PLUS_SCALE_CASES = (
+    *MXFP8_SCALE_CASES,
+    BLOCKWISE1D_64_SCALE,
+    BLOCKWISE2D_64_SCALE,
+)
+
+MXFP8_PLUS_SCALE_ERROR_CASES = (
     TENSORWISE_SCALE,
     ROWWISE_SCALE,
     BLOCKWISE1D_8_SCALE,

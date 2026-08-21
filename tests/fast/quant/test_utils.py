@@ -108,30 +108,26 @@ def test_resolve_quantization_config(rules, fqn, expected):
 
 _FP32, _E8M0 = torch.float32, torch.float8_e8m0fnu
 
-# (a_fmt, b_fmt, scale_dtype, block_shape, family) — the family names the op for both
-# scaled_mm and scaled_grouped_mm, so the two routers share one case list.
-GEMM_FAMILY_CASES = [
+# Both strict `mxfp8` and internal `mxfp8_plus` collapse to the same public op.
+GEMM_OP_CASES = [
     ("int8", "int8", _FP32, (0, 0), "int8"),
     ("fp8_e4m3", "fp8_e4m3", _FP32, (1, 32), "fp8"),
     ("fp8_e4m3", "fp8_e4m3", _E8M0, (1, 32), "mxfp8"),
     ("fp8_e5m2", "fp8_e4m3", _E8M0, (1, 32), "mxfp8"),
     ("fp8_e4m3", "fp8_e4m3", _E8M0, (1, 64), "mxfp8"),
-    ("int8", "fp8_e4m3", _FP32, (0, 0), None),  # mixed family has no op
+    ("fp8_e4m3", "fp8_e4m3", _E8M0, (32, 32), "mxfp8"),
+    ("int8", "fp8_e4m3", _FP32, (0, 0), None),
     ("bf16", "bf16", _FP32, (0, 0), None),
 ]
 
 
-@pytest.mark.parametrize(
-    "a_fmt,b_fmt,scale_dtype,block_shape,family", GEMM_FAMILY_CASES
-)
+@pytest.mark.parametrize("a_fmt,b_fmt,scale_dtype,block_shape,family", GEMM_OP_CASES)
 def test_scaled_mm_op(a_fmt, b_fmt, scale_dtype, block_shape, family):
     expected = None if family is None else f"gemm.{family}_scaled_mm"
     assert scaled_mm_op(a_fmt, b_fmt, scale_dtype, block_shape) == expected
 
 
-@pytest.mark.parametrize(
-    "a_fmt,b_fmt,scale_dtype,block_shape,family", GEMM_FAMILY_CASES
-)
+@pytest.mark.parametrize("a_fmt,b_fmt,scale_dtype,block_shape,family", GEMM_OP_CASES)
 def test_scaled_grouped_mm_op(a_fmt, b_fmt, scale_dtype, block_shape, family):
     expected = None if family is None else f"gemm.{family}_scaled_grouped_mm"
     assert scaled_grouped_mm_op(a_fmt, b_fmt, scale_dtype, block_shape) == expected

@@ -8,19 +8,9 @@ from src.kernel.registry import register_kernel
 from src.kernel.spec import cuda
 
 
-# ---------------------------------------------------------------------------
-# Config + helpers
-# ---------------------------------------------------------------------------
-
-
 @functools.lru_cache(maxsize=None)
 def _num_sms(device: torch.device | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
-
-
-# ---------------------------------------------------------------------------
-# Grouped GEMM (bf16/fp16 ragged MoE): ragged over M, N, or K
-# ---------------------------------------------------------------------------
 
 
 _GROUPED_CFG = [
@@ -82,21 +72,18 @@ def _grouped_mm_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """Ragged grouped GEMM over any one of M, N, K, with an optional (G,N) bias.
+    """Ragged grouped GEMM over one of M, N, or K, with optional (G,N) bias.
 
-    Which dim `offs` partitions follows from the operand ranks, as in
-    torch._grouped_mm. The tile grid is always (M, N) and the reduction always over
-    K, so one tile body serves all three layouts. The ragged dim's extent is passed
-    as 0 (its bounds come from `offs`) to keep the autotune key stable.
+    Operand ranks select the partitioned dimension as in torch._grouped_mm. The tile
+    grid is (M,N), reduction is K, and the ragged extent is 0 to stabilize autotuning.
 
-    The bias is per group, broadcast over the output's row dim -- a superset of
-    torch._grouped_mm, which rejects bias.
+    Bias is per group and broadcasts over output rows.
     """
     M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
     K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
 
-    # this persistent program owns pid, pid+NUM_SMS, ...
+    # Persistent program: pid, pid + NUM_SMS, ...
     global_tile_idx = tl.program_id(0)
     group_tile_start = tl.zeros((), dtype=tl.int64)
     m_end = 0  # offs are END-offsets, so the previous end is the next start
@@ -128,8 +115,7 @@ def _grouped_mm_kernel(
         num_n_tiles = tl.cdiv(n_size, BLOCK_N)
         num_m_tiles = tl.cdiv(m_size, BLOCK_M)
         group_tile_count = num_m_tiles * num_n_tiles
-        # an empty ragged M/N group has no tiles; an empty ragged K group still
-        # stores its zero slice
+        # Empty M/N groups have no tiles; empty K groups still store zeros.
         while global_tile_idx < group_tile_start + group_tile_count:
             group_tile_idx = global_tile_idx - group_tile_start
             tile_m = group_tile_idx // num_n_tiles
@@ -178,7 +164,6 @@ def _grouped_mm_kernel(
         group_tile_start += group_tile_count
 
 
-# Default dispatch reaches this entry for bf16 and fp16.
 @register_kernel(
     op="gemm.grouped_mm",
     backend="triton",
@@ -193,7 +178,7 @@ def grouped_mm(
     offs: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Ragged grouped GEMM matching torch._grouped_mm's layout convention.
+    """Ragged grouped GEMM using torch._grouped_mm's layout convention.
 
     Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
         (M,K) x (G,K,N) -> (M,N)    ragged M
@@ -210,7 +195,7 @@ def grouped_mm(
     if not a_is_2d and not b_is_2d:
         raise NotImplementedError("3D x 3D not supported")
     G = offs.shape[0]
-    # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
+    # Pass the ragged extent as 0; it is unused and keeps the autotune key stable.
     if a_is_2d and not b_is_2d:  # (M,K) x (G,K,N) -> (M,N), ragged M
         M, N, K = 0, b.shape[2], a.shape[1]
         output_size = (a.shape[0], N)
@@ -223,8 +208,7 @@ def grouped_mm(
         M, N, K = a.shape[1], 0, a.shape[2]
         output_size = (M, b.shape[1])
 
-    # pad the last dim to 16 bytes like torch._grouped_mm, so the output is itself a
-    # legal torch._grouped_mm operand when backward feeds it back
+    # Match torch._grouped_mm's 16-byte trailing alignment for backward operands.
     align = 16 // a.dtype.itemsize
     padded = (output_size[-1] + align - 1) // align * align
     stride = (M * padded, padded, 1) if len(output_size) == 3 else (padded, 1)
@@ -258,10 +242,6 @@ def grouped_mm(
     )
     return c
 
-
-# ---------------------------------------------------------------------------
-# Scaled GEMM (quantized): fp8 / int8, tensorwise|rowwise|blockwise scaling
-# ---------------------------------------------------------------------------
 
 _SCALED_CFG = [
     (32, 128, 32, 4, 4),
@@ -330,7 +310,7 @@ def _scaled_mm_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """C[m,n] = Σ_b sa[m,b] · sb[b,n] · (Σ_{k∈b} aq[m,k] · bq[k,n]) + bias[n]."""
+    """Scaled GEMM with per-block accumulation and optional bias."""
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -339,9 +319,8 @@ def _scaled_mm_kernel(
     n_mask = offs_n < N
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for scale_block_idx in range(n_scale_blocks):
-        # BLOCK_K floors at 32 (fp8/int8 tl.dot rejects K < 32), so a 16-wide scale
-        # block runs one 32-wide tile; block_end, not the trip count, keeps the extra
-        # lanes out of this block's scale.
+        # tl.dot requires K >= 32. A 16-wide scale block therefore uses one 32-wide
+        # tile; block_end keeps its extra lanes out of this block's scale.
         block_end = tl.minimum(K, scale_block_idx * SCALE_BLOCK_SIZE + SCALE_BLOCK_SIZE)
         block_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k_in_block in range(0, SCALE_BLOCK_SIZE, BLOCK_K):
@@ -365,8 +344,7 @@ def _scaled_mm_kernel(
             other=0.0,
         )
         acc += sa[:, None] * block_acc * sb[None, :]
-    # on acc, not block_acc: the bias is unscaled, so folding it into a per-block
-    # partial would scale it and add it once per block
+    # Bias is unscaled: apply it to acc, not each scaled block partial.
     if HAS_BIAS:
         bias = tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)
         acc += bias[None, :]
@@ -431,17 +409,13 @@ def _mxfp8_scaled_mm_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """C[m,n] = Σ_k sa[m,k/32] · sb[k/32,n] · aq[m,k] · bq[k,n] + bias[n], mxfp8 only.
+    """MXFP8 scaled GEMM; scales apply per 32-element K group, then bias is added.
 
-    The scales never reach the accumulator here: `tl.dot_scaled` lowers to
-    `mma.sync...kind::mxf8f6f4.block_scale` (SASS `QMMA.SF`), which applies the e8m0
-    factors per 32-element group inside the MMA. That is why there is no scale-block
-    loop -- and why this runs on the faster of the two fp8 tensor-core paths, ~2.4x
-    the epilogue-scaling kernel next door on the same shapes.
+    `tl.dot_scaled` applies e8m0 factors per 32-element group inside the MMA, so
+    scales do not enter the accumulator or require a scale-block loop.
 
-    `sa`/`sb` are the e8m0 exponent bytes viewed as uint8. `sb` is read transposed
-    through its strides -- the instruction wants B's scales indexed (N, K/32) while
-    `quantize_operand` produces (K/32, N) -- which costs nothing on a tensor this small.
+    `sa`/`sb` are e8m0 exponent bytes viewed as uint8. `sb` is read through transposed
+    strides because the instruction indexes B scales as (N, K/32).
     """
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -464,7 +438,7 @@ def _mxfp8_scaled_mm_kernel(
             mask=k_mask[:, None] & n_mask[None, :],
             other=0.0,
         )
-        # a masked-off scale rides along with a zeroed operand, so its value is moot
+        # A masked scale multiplies a zeroed operand, so its value is irrelevant.
         sk = k0 // 32 + offs_sk
         sk_mask = sk < n_scale_blocks
         sa = tl.load(
@@ -512,25 +486,16 @@ def scaled_mm(
     block_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Scaled GEMM, (M,K) x (K,N) -> (M,N), with per-scale-block accumulation.
+    """Scaled GEMM, (M,K) x (K,N) -> (M,N).
 
-    `block_size` 0 means one scale block spanning the whole contraction.
-    `SCALE_BLOCK_SIZE` below is derived from `n_scale_blocks` rather than from that
-    sentinel because a blockwise width >= K also collapses to one block, and would
-    otherwise leave the kernel restarting its accumulator on a boundary K never
-    reaches.
-
-    `bias` is an optional (N,) tensor broadcast over the rows, added to the fp32
-    accumulator after scaling.
-
-    Callers must supply compatible CUDA tensors. The multi-block `block_size` guard is
-    retained because violating it silently produces incorrect results.
+    `block_size` 0 means one scale block over K; nonzero multi-block widths must be
+    powers of two at least 16. Optional `(N,)` bias is broadcast over rows and added
+    after scaling. Inputs must be compatible CUDA tensors.
     """
     M, K = aq.shape
     N = bq.shape[1]
     n_scale_blocks = sa.shape[1]
-    # SCALE_BLOCK_SIZE tiles K in the epilogue-scaling kernel below; a non-power-of-two
-    # or sub-16 width is not rejected by Triton, it just computes the wrong answer.
+    # This width tiles K below; invalid widths are not rejected by Triton but miscompute.
     if n_scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1) != 0):
         raise ValueError(
             f"block_size must be a power of two >= 16 when it tiles K, got {block_size}"
@@ -586,14 +551,12 @@ def mxfp8_scaled_mm(
     block_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Scaled GEMM, (M,K) x (K,N) -> (M,N), mxfp8 only.
+    """MXFP8 scaled GEMM, (M,K) x (K,N) -> (M,N).
 
-    Callers must supply compatible CUDA tensors. The block-size guard is required
-    before scale replication: a zero or non-32-multiple width cannot reach the MMA.
+    Inputs must be compatible CUDA tensors; `block_size` must be a nonzero multiple
+    of 32.
     """
-    # block_size 0 is the "one block spans all of K" sentinel, not a real width -- 0 %
-    # 32 == 0 in Python, so it must be excluded explicitly or it would collapse rep_k
-    # to 0 and hand the kernel a zero-width scale tensor.
+    # Zero means one block over K, not a width; reject it before modulo/replication.
     if block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
         raise ValueError(
             f"mxfp8 block_size must be a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}"
@@ -605,18 +568,13 @@ def mxfp8_scaled_mm(
     def grid(meta):
         return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
 
-    # The MMA's scale vector is fixed at 32. A wider scale block is the same scale
-    # repeated across consecutive 32-wide groups, so replicating here reaches the
-    # block-scaled MMA rather than falling back to epilogue scaling. block_size 32
-    # leaves both repeats as no-ops.
+    # The MMA scale vector is 32 wide; replicate wider host blocks across 32-wide groups.
     rep_k = block_size // _MXFP8_BLOCK_SIZE
-    # ceil, not floor: the quantizer pads a trailing partial block whenever
-    # block_size does not divide K, and sa/sb legitimately carry that column.
+    # Use ceil: quantization pads and retains a trailing partial scale block.
     n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
     sa_mx = sa.repeat_interleave(rep_k, 1)[:, :n_mx]
     sb_mx = sb.repeat_interleave(rep_k, 0)[:n_mx]
-    # e8m0 holds a bare exponent, so `_compute_scale` already produced exact powers
-    # of two and this cast is lossless; the kernel wants those bytes, not floats.
+    # e8m0 stores a bare exponent; the kernel consumes its bytes, not float scales.
     sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
     sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
     wrap_triton(_mxfp8_scaled_mm_kernel)[grid](
@@ -646,11 +604,6 @@ def mxfp8_scaled_mm(
         HAS_BIAS=bias is not None,
     )
     return c
-
-
-# ---------------------------------------------------------------------------
-# Scaled grouped GEMM (quantized ragged MoE): fp8 / int8 with block scaling
-# ---------------------------------------------------------------------------
 
 
 _SCALED_GROUPED_CFG = [
@@ -748,28 +701,22 @@ def _scaled_grouped_mm_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """Ragged scaled grouped GEMM over any one of M, N, K, with block scaling.
+    """Ragged grouped GEMM over one of M, N, or K, with block scaling.
 
-    Same layout model as _grouped_mm_kernel. The quantized addition is
-    `scale_block_idx`, the index along the contraction axis -- global when the
-    contraction is dense, per-group re-tiled and carried across the group loop when
-    the contraction is itself ragged.
+    Layouts match `_grouped_mm_kernel`. `scale_block_idx` is global for dense K and
+    re-tiled per group for ragged K, with a cursor carried across groups.
 
-    SCALE_BLOCK_SIZE is the scale block's width along the contraction axis; 0 means
-    one block spanning the whole segment. row/tensorwise are that case and cannot
-    state a width instead: a ragged contraction has a per-group segment length known
-    only at runtime, while SCALE_BLOCK_SIZE is a constexpr. An empty group also owns
-    one scale row, which cdiv(0, width) would skip, leaving the cursor a row behind
-    for every group after it.
+    `SCALE_BLOCK_SIZE` is the contraction-axis width; 0 means one block per segment.
+    Ragged K cannot use that sentinel because segment lengths are runtime values. Empty
+    groups still own one scale row; otherwise `cdiv(0, width)` leaves the cursor behind.
 
-    The optional bias is per group, broadcast over the output's row dim, and added
-    to the fp32 accumulator after the scales so it never passes through them.
+    Bias is per group, broadcasts over output rows, and is added after scaling.
     """
     M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
     K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
 
-    # this persistent program owns pid, pid+NUM_SMS, ...
+    # Persistent program: pid, pid + NUM_SMS, ...
     global_tile_idx = tl.program_id(0)
     group_tile_start = tl.zeros((), dtype=tl.int64)
     m_end = 0  # offs are END-offsets, so the previous end is the next start
@@ -795,8 +742,7 @@ def _scaled_grouped_mm_kernel(
             k_start = k_end
             k_end = tl.load(offs_ptr + g)
             k_size = k_end - k_start
-            # blocks re-tile inside each group, so the cursor carries across g; the
-            # group loop visits g in order, so no prefix scan is needed
+            # Blocks re-tile inside each group; the ordered cursor needs no prefix scan.
             scale_block_start = scale_block_end
             scale_block_end = scale_block_start + (
                 1 if SCALE_BLOCK_SIZE == 0 else tl.cdiv(k_size, SCALE_BLOCK_SIZE)
@@ -831,11 +777,10 @@ def _scaled_grouped_mm_kernel(
                         + (scale_block_idx - scale_block_start) * SCALE_BLOCK_SIZE
                     )
                     r1 = tl.minimum(r0 + SCALE_BLOCK_SIZE, k_start + k_size)
-                # one scale block: accumulate in fp32, then apply both scales once
+                # Accumulate one block in fp32, then apply both scales once.
                 block_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-                # a computed trip count rather than `while k < r1`: Triton's software
-                # pipeliner runs on scf.for, so a while loop would serialize the
-                # global loads instead of overlapping them with the dots
+                # Use a computed range: Triton's pipeliner overlaps loads with dots,
+                # whereas a while loop would serialize them.
                 for step in range(tl.cdiv(r1 - r0, BLOCK_K)):
                     offs_k = r0 + step * BLOCK_K + tl.arange(0, BLOCK_K)  # absolute
                     k_mask = offs_k < r1
@@ -875,8 +820,7 @@ def _scaled_grouped_mm_kernel(
                     other=0.0,
                 )
                 acc += sa[:, None] * block_acc * sb[None, :]
-            # on acc, not block_acc: the bias is unscaled, so folding it into a
-            # per-block partial would scale it and add it once per block
+            # Bias is unscaled: apply it to acc, not each scaled block partial.
             if HAS_BIAS:
                 bias_ptrs = (
                     bias_ptr + g * stride_biasg + (n_start + offs_n) * stride_biasn
@@ -948,19 +892,17 @@ def _mxfp8_scaled_grouped_mm_kernel(
     A_FORMAT: tl.constexpr,
     B_FORMAT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    SCALE_BLOCK_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """Ragged scaled grouped GEMM, mxfp8 only: same layout model as the kernel below,
-    but the e8m0 scales go into the MMA (`QMMA.SF`) instead of the accumulator.
+    """Ragged MXFP8 grouped GEMM; e8m0 scales enter the MMA (`QMMA.SF`).
 
-    The scale-block index is `scale_block_start + k0 // 32 + i` for the i-th 32-wide
-    group of the tile. `scale_block_start` is 0 whenever the contraction is dense, and
-    otherwise carries across the group loop exactly as it does next door -- a ragged
-    contraction re-tiles its scale blocks inside each group, so group g's blocks begin
-    where g-1's ended. BLOCK_K is a multiple of 32, so a tile's 32-wide groups never
-    straddle a scale block.
+    Each 32-wide MMA group uses `scale_block_start + (k0 + 32 * i) // SCALE_BLOCK_SIZE`.
+    Ragged-K uses native blocks and carries the cursor across groups; dense-K uses 32,
+    after host-side scale replication. Both widths are multiples of 32, so groups do
+    not straddle scale blocks.
     """
     M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
@@ -993,12 +935,12 @@ def _mxfp8_scaled_grouped_mm_kernel(
             k_end = tl.load(offs_ptr + g)
             k_size = k_end - k_start
             scale_block_start = scale_block_end
-            scale_block_end = scale_block_start + tl.cdiv(k_size, 32)
+            scale_block_end = scale_block_start + tl.cdiv(k_size, SCALE_BLOCK_SIZE)
         else:
             k_start = 0
             k_size = K
             scale_block_start = 0
-            scale_block_end = tl.cdiv(K, 32)
+            scale_block_end = tl.cdiv(K, SCALE_BLOCK_SIZE)
 
         num_n_tiles = tl.cdiv(n_size, BLOCK_N)
         num_m_tiles = tl.cdiv(m_size, BLOCK_M)
@@ -1031,7 +973,7 @@ def _mxfp8_scaled_grouped_mm_kernel(
                     mask=k_mask[:, None] & n_mask[None, :],
                     other=0.0,
                 )
-                sbi = scale_block_start + k0 // 32 + offs_sk
+                sbi = scale_block_start + (k0 + offs_sk * 32) // SCALE_BLOCK_SIZE
                 sk_mask = sbi < scale_block_end
                 sa = tl.load(
                     sa_ptr
@@ -1089,35 +1031,29 @@ def mxfp8_scaled_grouped_mm(
     block_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Ragged scaled grouped GEMM, layout picked from the operand ranks, mxfp8 only.
+    """Ragged MXFP8 grouped GEMM; layout follows operand ranks.
 
     Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
         (M,K) x (E,K,N) -> (M,N)    ragged M
         (M,K) x (K,N)   -> (E,M,N)  ragged K
         (E,M,K) x (K,N) -> (M,N)    ragged N
 
-    `sa`/`sb` mirror their operand's axis order with the contraction axis replaced by
-    the scale-block axis, so transposing an operand transposes its scale too.
+    `sa`/`sb` mirror their operand axes with K replaced by the scale-block axis; a
+    transposed operand must have its scale tensor transposed accordingly.
 
-    `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
-    the fp32 accumulator in the epilogue so it never passes through the scales.
+    `bias` is optional (E,N), broadcasts over output rows, and is added after scaling.
 
-    Callers must supply compatible CUDA tensors. Ragged-K needs native 32-wide scale
-    blocks; ragged-M and ragged-N may use any nonzero multiple of 32.
+    Callers must supply compatible CUDA tensors. `block_size` may be any nonzero
+    multiple of 32.
     """
     is_ragged_k = aq.ndim == 2 and bq.ndim == 2
-    if is_ragged_k:
-        if block_size != _MXFP8_BLOCK_SIZE:
-            raise ValueError(
-                f"mxfp8 ragged-K grouped GEMM requires block_size == {_MXFP8_BLOCK_SIZE}, got {block_size}"
-            )
-    elif block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
+    if block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
         raise ValueError(
             f"mxfp8 grouped GEMM requires block_size a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}"
         )
     a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
     E = offs.shape[0]
-    # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
+    # Pass the ragged extent as 0; it is unused and keeps the autotune key stable.
     if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
         M, N, K = 0, bq.shape[2], aq.shape[1]
         output_size = (aq.shape[0], N)
@@ -1132,16 +1068,15 @@ def mxfp8_scaled_grouped_mm(
     num_sms = _num_sms(aq.device)
 
     if is_ragged_k:
+        # Ragged-K re-tiles blocks per group; global replication would misplace later
+        # groups, so the kernel indexes native-width blocks directly.
         sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
         sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
     else:
-        # Same replication trick as dense `mxfp8_scaled_mm`: K is shared by every group here,
-        # so one repeat_interleave over the whole scale-block axis is exact. The
-        # axis is always last for sa and second-to-last for sb, in both the 2-D
-        # and 3-D (E, ...) shapes, so this covers ragged M and ragged N alike.
+        # K is shared by every group, so replication over each scale axis is exact for
+        # ragged M and N.
         rep_k = block_size // _MXFP8_BLOCK_SIZE
-        # ceil, not floor: the quantizer pads a trailing partial block whenever
-        # block_size does not divide K, and sa/sb legitimately carry that column.
+        # Use ceil: quantization pads and retains a trailing partial scale block.
         n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
         sa_mx = sa.repeat_interleave(rep_k, dim=-1).narrow(-1, 0, n_mx)
         sb_mx = sb.repeat_interleave(rep_k, dim=-2).narrow(-2, 0, n_mx)
@@ -1182,6 +1117,7 @@ def mxfp8_scaled_grouped_mm(
         A_FORMAT=_MXFP8_FORMAT[aq.dtype],
         B_FORMAT=_MXFP8_FORMAT[bq.dtype],
         HAS_BIAS=bias is not None,
+        SCALE_BLOCK_SIZE=block_size if is_ragged_k else _MXFP8_BLOCK_SIZE,
     )
     return c
 
@@ -1211,19 +1147,18 @@ def scaled_grouped_mm(
     block_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Ragged scaled grouped GEMM, layout picked from the operand ranks.
+    """Ragged scaled grouped GEMM; layout follows operand ranks.
 
     Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
         (M,K) x (E,K,N) -> (M,N)    ragged M
         (M,K) x (K,N)   -> (E,M,N)  ragged K
         (E,M,K) x (K,N) -> (M,N)    ragged N
 
-    `sa`/`sb` mirror their operand's axis order with the contraction axis replaced by
-    the scale-block axis, so transposing an operand transposes its scale too.
+    `sa`/`sb` mirror their operand axes with K replaced by the scale-block axis; a
+    transposed operand must have its scale tensor transposed accordingly.
     `block_size` 0 means one scale block spanning the whole contraction segment.
 
-    `bias` is an optional (E,N) tensor broadcast over the output's row dim, added to
-    the fp32 accumulator in the epilogue so it never passes through the scales.
+    `bias` is optional (E,N), broadcasts over output rows, and is added after scaling.
 
     Callers must supply compatible CUDA tensors. `block_size` may be zero for one
     scale block; nonzero widths must be powers of two of at least 16, matching dense
@@ -1237,7 +1172,7 @@ def scaled_grouped_mm(
     if not a_is_2d and not b_is_2d:
         raise NotImplementedError("3D x 3D not supported")
     E = offs.shape[0]
-    # the ragged dim's extent is passed as 0: unused, and keeps the autotune key stable
+    # Pass the ragged extent as 0; it is unused and keeps the autotune key stable.
     if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
         M, N, K = 0, bq.shape[2], aq.shape[1]
         output_size = (aq.shape[0], N)

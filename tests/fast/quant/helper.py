@@ -171,8 +171,7 @@ BLOCKWISE2D_16 = scale_of("blockwise", (16, 16))
 BLOCKWISE2D_32 = scale_of("blockwise", (32, 32))
 BLOCKWISE2D_64 = scale_of("blockwise", (64, 64))
 BLOCKWISE2D_128 = scale_of("blockwise", (128, 128))
-# E8M0 scales need a multiple-of-32 extent; 2D-64 covers `rep_k == 2`.
-MXFP8 = scale_of("blockwise", (1, 32), torch.float8_e8m0fnu)
+BLOCKWISE1D_32_E8M0 = scale_of("blockwise", (1, 32), torch.float8_e8m0fnu)
 BLOCKWISE2D_64_E8M0 = scale_of("blockwise", (64, 64), torch.float8_e8m0fnu)
 
 
@@ -187,7 +186,7 @@ ALL_SCALES = [
     BLOCKWISE2D_32,
     BLOCKWISE2D_64,
     BLOCKWISE2D_128,
-    MXFP8,
+    BLOCKWISE1D_32_E8M0,
     BLOCKWISE2D_64_E8M0,
 ]
 
