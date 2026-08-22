@@ -346,6 +346,11 @@ class QuantizationConfig:
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
+    # Restrict the rule to these transformer block indices, like the per-layer
+    # attn/mlp layer_idx; None means the rule applies to every layer. The list
+    # is validated against ModelConfig.n_layers in TrainConfig, the only place
+    # that knows the model depth.
+    layer_idx: Optional[List[int]] = None
 
     def __post_init__(self):
         if not self.enabled:
@@ -594,6 +599,29 @@ class TrainConfig:
 
     def __post_init__(self):
         self._validate_moe_compile_precision()
+        self._validate_quant_layer_idx()
+
+    def _validate_quant_layer_idx(self):
+        """Validate each quant rule's layer_idx against the model depth.
+
+        Mirrors the per-layer attn/mlp layer_idx checks: an absent value covers
+        every layer, and explicit entries are unique indices in [0, n_layers).
+        It lives here rather than in QuantizationConfig because only TrainConfig
+        knows both the rules and ModelConfig.n_layers.
+        """
+        n = self.model.n_layers
+        for rule in self.training.quantization:
+            layer_idx = rule.layer_idx
+            if layer_idx is None:
+                continue
+            if len(set(layer_idx)) != len(layer_idx):
+                dupe = next(layer for layer in layer_idx if layer_idx.count(layer) > 1)
+                raise ValueError(
+                    f"layer {dupe} listed more than once in one quant rule's layer_idx"
+                )
+            for layer in layer_idx:
+                if not (0 <= layer < n):
+                    raise ValueError(f"layer_idx {layer} out of range [0, {n})")
 
     def _validate_moe_compile_precision(self):
         m = self.model

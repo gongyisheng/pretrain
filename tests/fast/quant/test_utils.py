@@ -4,6 +4,7 @@ import torch
 from src.quant.constants import _FP8_FORMATS, _INT8_FORMATS
 from src.quant.utils import (
     is_fp8,
+    layer_idx_from_fqn,
     resolve_quantization_config,
     scaled_grouped_mm_op,
     scaled_mm_op,
@@ -58,12 +59,13 @@ def test_is_fp8(fmt):
 # --- module selection ---
 
 
-def _rule(include=(), exclude=(), enabled=True):
+def _rule(include=(), exclude=(), enabled=True, layer_idx=None):
     return QuantizationConfig(
         enabled=enabled,
         dtype={"recipe": "fp8"},
         include=list(include),
         exclude=list(exclude),
+        layer_idx=layer_idx,
     )
 
 
@@ -102,6 +104,67 @@ RESOLVE_CASES = [
 def test_resolve_quantization_config(rules, fqn, expected):
     got = resolve_quantization_config(fqn, rules)
     assert got is (None if expected is None else rules[expected])
+
+
+# --- layer-restricted rules (layer_idx) ---
+
+LAYER_IDX_FROM_FQN_CASES = [
+    ("blocks.3.attn.q_proj", 3),
+    ("blocks.0.mlp.down_proj", 0),
+    ("blocks.12.mlp", 12),
+    ("blocks.0", None),  # a bare block is not a quantizable submodule
+    ("lm_head", None),  # outside any block
+    ("attn.q_proj", None),  # no block prefix (e.g. top-level test model)
+    ("embedding", None),
+    ("blocks.lm_head.weight", None),  # non-numeric suffix
+]
+
+
+@pytest.mark.parametrize("fqn,expected", LAYER_IDX_FROM_FQN_CASES)
+def test_layer_idx_from_fqn(fqn, expected):
+    assert layer_idx_from_fqn(fqn) is expected
+
+
+# (rule layer_idx, fqn, expected) — include/exclude are the rule defaults (all)
+SHOULD_QUANTIZE_LAYER_CASES = [
+    (None, "blocks.0.attn.q_proj", True),  # no layer_idx means every layer
+    (None, "lm_head", True),
+    ([0], "blocks.0.attn.q_proj", True),
+    ([0, 2], "blocks.2.mlp.down_proj", True),
+    ([0, 2], "blocks.1.attn.q_proj", False),
+    ([9], "blocks.0.attn.q_proj", False),
+    ([0], "lm_head", False),  # outside any block can't claim a layer
+    ([1], "blocks.10.attn.q_proj", False),  # exact prefix match, no prefix abuse
+    ([10], "blocks.10.attn.q_proj", True),
+]
+
+
+@pytest.mark.parametrize("layer_idx,fqn,expected", SHOULD_QUANTIZE_LAYER_CASES)
+def test_should_quantize_layer_idx(layer_idx, fqn, expected):
+    assert should_quantize(fqn, _rule(layer_idx=layer_idx)) is expected
+
+
+def test_should_quantize_layer_idx_composes_with_include():
+    rule = _rule(include=["*.attn.*"], layer_idx=[0])
+    assert should_quantize("blocks.0.attn.q_proj", rule) is True
+    assert should_quantize("blocks.0.mlp.down_proj", rule) is False  # not attn
+    assert should_quantize("blocks.1.attn.q_proj", rule) is False  # wrong layer
+
+
+def test_resolve_quantization_config_layer_rules_first_match_wins():
+    layered = _rule(layer_idx=[1])  # a specific layer
+    vanilla = _rule()  # a catch-all
+    rules = [layered, vanilla]
+    assert resolve_quantization_config("blocks.1.attn.q_proj", rules) is layered
+    assert resolve_quantization_config("blocks.0.attn.q_proj", rules) is vanilla
+    assert resolve_quantization_config("lm_head", rules) is vanilla
+
+
+def test_resolve_quantization_config_layer_rule_does_not_claim_lm_head():
+    # a layer-restricted rule alone must not swallow the head/tied weights
+    rules = [_rule(layer_idx=[0])]
+    assert resolve_quantization_config("lm_head", rules) is None
+    assert resolve_quantization_config("blocks.0.attn.q_proj", rules) is rules[0]
 
 
 # --- GEMM op routing ---

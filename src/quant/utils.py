@@ -40,7 +40,28 @@ def is_quantized(fmt: str) -> bool:
     return is_fp8(fmt) or is_int8s(fmt)
 
 
+def layer_idx_from_fqn(fqn: str) -> Optional[int]:
+    """Block index ``fqn`` lives in, or None when it is outside any block.
+
+    TransformerLM stores its per-layer blocks in an ``nn.ModuleList`` named
+    ``blocks``, so a block submodule's fqn is ``blocks.<idx>.<rest>`` (e.g.
+    ``blocks.3.attn.q_proj``). Embeddings, the final norm, lm_head, etc. live
+    outside any block and yield None.
+    """
+    prefix, dot, rest = fqn.partition(".")
+    if dot and prefix == "blocks":
+        idx, dot, _ = rest.partition(".")
+        if dot and idx.isdigit():
+            return int(idx)
+    return None
+
+
 def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:
+    # A layer-restricted rule only claims modules inside one of its blocks.
+    if cfg.layer_idx is not None:
+        layer = layer_idx_from_fqn(fqn)
+        if layer is None or layer not in cfg.layer_idx:
+            return False
 
     def matches(patterns: list[str]) -> bool:
         leaf = fqn.rsplit(".", 1)[-1]

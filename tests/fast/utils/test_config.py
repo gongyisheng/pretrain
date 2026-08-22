@@ -955,6 +955,55 @@ def test_quant_include_defaults_empty():
     assert q2.include == ["*.mlp.*"]
 
 
+def test_quant_layer_idx_default_none():
+    assert QuantizationConfig().layer_idx is None
+
+
+def test_quant_layer_idx_round_trips_through_training_config():
+    r = _only_rule(
+        TrainingConfig(
+            quantization={
+                "enabled": True,
+                "dtype": {"recipe": "fp8"},
+                "layer_idx": [0, 2],
+            }
+        )
+    )
+    assert r.layer_idx == [0, 2]
+    assert r.enabled is True
+
+
+def _train_config_with_quant_layer_idx(layer_idx, n_layers=4):
+    # layer_idx is validated against the model depth at TrainConfig construction,
+    # the only level that knows both the rules and n_layers (like attn/mlp).
+    return TrainConfig(
+        model=ModelConfig(d_model=32, n_layers=n_layers),
+        training=TrainingConfig(quantization={"enabled": True, "layer_idx": layer_idx}),
+    )
+
+
+def test_quant_layer_idx_within_range_accepted():
+    cfg = _train_config_with_quant_layer_idx([0, 3])
+    assert cfg.training.quantization[0].layer_idx == [0, 3]
+
+
+@pytest.mark.parametrize("layer_idx", [[-1], [4], [0, 5]])
+def test_quant_layer_idx_out_of_range_raises(layer_idx):
+    with pytest.raises(ValueError, match="out of range"):
+        _train_config_with_quant_layer_idx(layer_idx)
+
+
+def test_quant_layer_idx_duplicate_raises():
+    with pytest.raises(ValueError, match="more than once"):
+        _train_config_with_quant_layer_idx([1, 1])
+
+
+def test_quant_layer_idx_none_skips_validation():
+    # a rule without layer_idx covers every layer and needs no depth check
+    r = _train_config_with_quant_layer_idx(None).training.quantization[0]
+    assert r.layer_idx is None
+
+
 def test_quant_disabled_skips_validation():
     # inert when off: bad fmt is not checked
     QuantizationConfig(enabled=False, dtype={"weight": "not_a_fmt"})

@@ -53,14 +53,14 @@ class _MoE(nn.Module):
         self.lm_head = nn.Linear(32, 64, bias=False)
 
 
-def _cfg(quantization):
+def _cfg(quantization, n_layers=1):
     # QuantizationConfig resolves recipes by popping them out of the dict it is
     # handed, so a case table entry must not be the dict it consumes.
     quantization = copy.deepcopy(quantization)
     return TrainConfig(
         model=ModelConfig(
             d_model=32,
-            n_layers=1,
+            n_layers=n_layers,
             vocab_size=64,
             attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
         ),
@@ -144,3 +144,62 @@ def test_apply_quantization_accepts_a_bare_config_namespace():
     config = SimpleNamespace(training=SimpleNamespace(quantization=[rule]))
     apply_quantization(model, config)
     assert isinstance(model[0], QuantizedLinear)
+
+
+class _Block(nn.Module):
+    """One layer of a stacked model: the attn/mlp split TransformerLM quantizes."""
+
+    def __init__(self):
+        super().__init__()
+        self.attn = nn.ModuleDict({"q_proj": nn.Linear(32, 32, bias=False)})
+        self.mlp = nn.ModuleDict({"down_proj": nn.Linear(32, 32, bias=False)})
+
+
+class _Stacked(nn.Module):
+    """Mini TransformerLM: per-layer blocks under `blocks`, standalone lm_head."""
+
+    def __init__(self, n_layers):
+        super().__init__()
+        self.blocks = nn.ModuleList([_Block() for _ in range(n_layers)])
+        self.lm_head = nn.Linear(32, 64, bias=False)
+
+
+def _blocks_flattened(model):
+    return [
+        quantized
+        for block in model.blocks
+        for quantized in (block.attn["q_proj"], block.mlp["down_proj"])
+    ]
+
+
+def test_apply_quantization_layer_idx_restricts_layers():
+    model = _Stacked(n_layers=4)
+    apply_quantization(model, _cfg(_spec("fp8", layer_idx=[0, 2]), n_layers=4))
+    got = _blocks_flattened(model)
+    assert [isinstance(m, QuantizedLinear) for m in got] == [
+        True,
+        True,  # block 0
+        False,
+        False,  # block 1
+        True,
+        True,  # block 2
+        False,
+        False,  # block 3
+    ]
+    assert not isinstance(model.lm_head, QuantizedLinear)  # outside every block
+
+
+def test_apply_quantization_layer_rules_compose_with_fallback():
+    # first-match-wins across rules: a layer-specific rule plus a catch-all that
+    # covers the remaining blocks and the head
+    quantization = [
+        _spec("int8", include=["*.mlp.*"], layer_idx=[1]),
+        _spec("fp8", exclude=[]),
+    ]
+    model = _Stacked(n_layers=3)
+    apply_quantization(model, _cfg(quantization, n_layers=3))
+    for i, block in enumerate(model.blocks):
+        attn_fwd = block.attn["q_proj"].quantization_config.dtype["weight"]["fwd"]
+        assert attn_fwd == "fp8_e4m3"  # fallback covers attn everywhere
+        mlp_fwd = block.mlp["down_proj"].quantization_config.dtype["weight"]["fwd"]
+        assert mlp_fwd == ("int8" if i == 1 else "fp8_e4m3")
