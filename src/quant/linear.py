@@ -37,6 +37,10 @@ def quantized_mm(
         scale_cfg.get("scale_dtype"),
         block_shape,
     )
+    if op is not None and scale_cfg.get("rotation") is not None:
+        # Rotation happens inside the (de)quantize round trip, which the fused
+        # kernels know nothing about, so fall back to the emulated GEMM.
+        op = None
 
     aq = sa = bq = sb = None
     if is_quantized(a_fmt):

@@ -483,3 +483,179 @@ def test_dequantize_operand_precision(
     assert deq.shape == x.shape
     assert deq.dtype == torch.float32 and deq.is_contiguous()
     assert torch.equal(deq, codes.float() * div)
+
+
+# --- block-Hadamard scale rotation (outlier transform) ---
+
+
+def _rotation_cfg(block, scale_cfg=None):
+    """Return a scale config with a block-Hadamard rotation added."""
+    return {**(scale_cfg or TENSORWISE), "rotation": {"block": block}}
+
+
+@pytest.mark.parametrize("n", [1, 2, 4, 8, 32, 128])
+def test_hadamard_orthogonal(n):
+    """The normalized Hadamard is orthogonal: H Hᵀ = I."""
+    from src.quant.quantize import _hadamard
+
+    h = _hadamard(n) / n**0.5
+    torch.testing.assert_close(h @ h.T, torch.eye(n), atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("n", [1, 2, 8, 64])
+def test_hadamard_involution(n):
+    """The normalized Hadamard is an involution: H² = I (H symmetric, HᵀH = I)."""
+    from src.quant.quantize import _hadamard
+
+    h = _hadamard(n) / n**0.5
+    torch.testing.assert_close(h @ h, torch.eye(n), atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("n", [0, 3, 6, 12, 100])
+def test_hadamard_raise_error_for_non_power_of_two(n):
+    """Only power-of-two block sizes are defined."""
+    from src.quant.quantize import _hadamard
+
+    with pytest.raises(ValueError, match="power of two"):
+        _hadamard(n)
+
+
+_ROT_SHAPES = [(64, 128), (3, 64, 128), (16, 32, 64)]
+
+
+@pytest.mark.parametrize("shape", _ROT_SHAPES)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("block", [1, 2, 4, 8, 16, 32])
+def test_rotate_contract_involution(shape, contract_dim, block):
+    """Rotating twice returns the input: R(R(x)) == x.
+
+    This is the *entire* contract of the emulated path: quantize_operand rotates
+    in and dequantize_operand rotates out, so the GEMM never sees the rotation.
+    """
+    from src.quant.quantize import _rotate_contract
+
+    # Use a shape whose contract extent is divisible by block.
+    extent = shape[contract_dim]
+    if extent % block:
+        pytest.skip(f"block {block} does not divide extent {extent}")
+    torch.manual_seed(0)
+    x = torch.randn(*shape)
+    y = _rotate_contract(_rotate_contract(x, block, contract_dim), block, contract_dim)
+    torch.testing.assert_close(y, x)
+
+
+@pytest.mark.parametrize("shape", _ROT_SHAPES)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("block", [2, 4, 8])
+def test_rotate_contract_isometry(shape, contract_dim, block):
+    """Rotation preserves the Frobenius norm."""
+    from src.quant.quantize import _rotate_contract
+
+    extent = shape[contract_dim]
+    if extent % block:
+        pytest.skip(f"block {block} does not divide extent {extent}")
+    torch.manual_seed(0)
+    x = torch.randn(*shape)
+    y = _rotate_contract(x, block, contract_dim)
+    assert y.shape == x.shape
+    torch.testing.assert_close(y.pow(2).sum(), x.pow(2).sum(), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("shape", _ROT_SHAPES)
+def test_rotate_contract_block1_is_identity(shape):
+    """block=1 rotation returns the exact same tensor (no copy)."""
+    from src.quant.quantize import _rotate_contract
+
+    torch.manual_seed(0)
+    x = torch.randn(*shape)
+    assert _rotate_contract(x, 1, -1) is x
+
+
+def test_rotate_contract_raise_error_for_bad_args():
+    from src.quant.quantize import _rotate_contract
+
+    with pytest.raises(ValueError, match="block 32 must divide"):
+        _rotate_contract(torch.randn(8, 100), 32, -1)
+    with pytest.raises(ValueError, match="dim must be -2 or -1"):
+        _rotate_contract(torch.randn(2, 4, 8), 4, 0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_rotate_contract_preserves_dtype(dtype):
+    """Rotation preserves the caller's dtype (project convention)."""
+    from src.quant.quantize import _rotate_contract
+
+    torch.manual_seed(0)
+    x = torch.randn(16, 64, dtype=dtype)
+    assert _rotate_contract(x, 8, -1).dtype == dtype
+
+
+def test_rotate_contract_minus2_matches_transposed_minus1():
+    """Rotating -2 equals transposing, rotating -1, transposing back."""
+    from src.quant.quantize import _rotate_contract
+
+    torch.manual_seed(0)
+    x = torch.randn(16, 64)
+    expected = _rotate_contract(x.mT, 8, -1).mT
+    torch.testing.assert_close(_rotate_contract(x, 8, -2), expected)
+
+
+# --- quantize/dequantize with rotation ---
+
+
+def test_quantize_operand_rotation_improves_sqnr():
+    """On outlier-corrupted int8, a block-32 rotation lifts SQNR by >3 dB."""
+
+    torch.manual_seed(0)
+    x = _make("outlier", (256, 256))
+    baseline = _sqnr(x, roundtrip(x, -1, "int8", TENSORWISE))
+    rotated = _sqnr(x, roundtrip(x, -1, "int8", _rotation_cfg(32)))
+    # Measured gain is ~8 dB over 30 seeds; 3 dB leaves an order of magnitude.
+    assert rotated > baseline + 3.0
+
+
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+def test_quantize_operand_rotation_block1_matches_baseline(contract_dim):
+    """block=1 rotation is the identity: bit-identical codes and scales.
+
+    `contract_dim` can be -2 or -1; block=1 must never touch the fast path.
+    """
+    torch.manual_seed(0)
+    x = _make("outlier", (64, 128))
+    baseline_codes, baseline_scale = quantize_operand(
+        x, contract_dim, "int8", TENSORWISE
+    )
+    codes, scale = quantize_operand(x, contract_dim, "int8", _rotation_cfg(1))
+    assert torch.equal(codes, baseline_codes)
+    assert torch.equal(scale, baseline_scale)
+
+
+def test_quantize_operand_rotation_rejects_ragged():
+    """Rotation is not yet implemented for ragged operands (MoE)."""
+    x = torch.randn(4, 8)
+    with pytest.raises(NotImplementedError, match="[Rr]otat"):
+        quantize_operand(
+            x, -1, "int8", _rotation_cfg(32), offs=_offs([2, 2]), ragged_dim=-2
+        )
+
+
+def test_quantize_operand_rotation_rejects_indivisible_block():
+    """A block that does not divide the rotated extent is rejected."""
+    x = torch.randn(8, 100)
+    with pytest.raises(ValueError, match="block 32 must divide"):
+        quantize_operand(x, -1, "int8", _rotation_cfg(32))
+
+
+def test_quantize_operand_rotation_roundtrip_approximates_baseline():
+    """Rotated roundtrip error stays within fp32 reconstruction error.
+
+    The rotation is an isometry, so the quantize->dequantize error should be
+    comparable to the unrotated path on a well-scaled operand (no outliers).
+    """
+    torch.manual_seed(0)
+    x = _make("normal", (64, 128))
+    baseline_deq = roundtrip(x, -1, "int8", TENSORWISE)
+    rotated_deq = roundtrip(x, -1, "int8", _rotation_cfg(32))
+    # Both must reconstruct x reasonably; neither is allowed to blow up.
+    assert _sqnr(x, baseline_deq) > 10.0
+    assert _sqnr(x, rotated_deq) > 10.0

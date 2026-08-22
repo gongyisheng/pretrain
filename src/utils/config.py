@@ -463,6 +463,16 @@ class QuantizationConfig:
                             f"{tensor}.{gemm}, got {fmt!r}"
                         )
 
+        rotation = self.scale.get("rotation")
+        if rotation is not None:
+            block = rotation.get("block") if isinstance(rotation, dict) else None
+            if not isinstance(block, int) or block < 1 or block & (block - 1):
+                raise ValueError(
+                    "quant scale 'rotation' must be {block: <power of two>}, "
+                    f"got {rotation!r}"
+                )
+            self.scale["rotation"] = {"block": block}
+
         self.scale["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
 
 
