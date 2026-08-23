@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn.functional as F
 
 from src.quant.constants import EPS
+from src.quant.rotation import Rotation
 from src.quant.utils import (
     is_fp8,
     is_int8s,
@@ -13,49 +12,6 @@ from src.quant.utils import (
     str_to_qmax,
     str_to_dtype,
 )
-
-
-def _hadamard(n: int) -> torch.Tensor:
-    """Return the ``n x n`` normalized Walsh-Hadamard matrix.
-
-    The normalized Hadamard is orthogonal (``H @ H.T == n*I/n == I``), symmetric,
-    and therefore an involution (``H @ H == I``). ``n`` must be a power of two.
-    """
-    if n <= 0 or n & (n - 1):
-        raise ValueError(f"block must be a positive power of two, got {n}")
-    h = torch.ones(1, 1)
-    while h.shape[0] < n:
-        h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)])
-    return h
-
-
-def _rotate_contract(x: torch.Tensor, block: int, contract_dim: int) -> torch.Tensor:
-    """Mix `x`'s `contract_dim` axis in blocks by a normalized Hadamard.
-
-    Preconditions `x` for quantization the QuaRot/SpinQuant way: each block of
-    `block` contiguous elements is right-multiplied by a shared orthogonal
-    Hadamard, which deflates an amax-starving outlier in one element by spreading
-    it across the block.  The transform is an involution (applying it twice
-    returns the input) and an isometry (it preserves the Frobenius norm), so
-    `dequantize_operand` un-rotates by applying it again.
-
-    `block=1` is the identity and returns `x` unchanged, so a rotation-enabled
-    config degrades gracefully to the unrotated path without a fast-path branch
-    at call sites.
-    """
-    _check_tile_dim(contract_dim)
-    if block == 1:
-        return x
-    length = x.shape[contract_dim]
-    if length % block:
-        raise ValueError(f"block {block} must divide the rotated extent {length}")
-    h = (_hadamard(block) / math.sqrt(block)).to(x.dtype)  # (B, B), orthogonal
-    if contract_dim == -1:
-        xb = x.reshape(*x.shape[:-1], -1, block)  # (..., K/B, B)
-        # Shared H per block, matching x @ blockdiag(H, H, ...); reshape back folds
-        # the per-block output axes into the original shape.
-        return (xb @ h).reshape(x.shape)
-    return _rotate_contract(x.mT, block, -1).mT
 
 
 def _scale_block_map(
@@ -393,6 +349,7 @@ def quantize_operand(
     offs: torch.Tensor | None = None,
     ragged_dim: int | None = None,
     stochastic_rounding: bool = False,
+    rotation: Rotation | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize `x` with scales along `contract_dim`.
 
@@ -401,22 +358,14 @@ def quantize_operand(
     ragged axis. Returns codes in `fmt` and fp32 or E8M0 scales with the outer axis
     expanded and the contraction axis blockwise.
 
-    A ``scale_cfg["rotation"] = {"block": B}`` preconditions `x` by a
-    block-diagonal Hadamard before quantizing, deflating an amax-starving
-    outlier's effect on the scale. The rotation is an involution, so
-    `dequantize_operand` undoes it; it is rejected on ragged operands (not yet
-    supported).
+    `rotation` preconditions `x` before quantizing and is inverted by
+    `dequantize_operand`. Rotations are rejected on ragged operands.
     """
     _check_dims(x, contract_dim, ragged_dim, offs)
-    rotation = scale_cfg.get("rotation")
     if rotation is not None:
         if offs is not None:
-            raise NotImplementedError(
-                "scale rotation (block-Hadamard) is not implemented for ragged "
-                "operands: the rotation would mix scale blocks across group "
-                "boundaries, breaking per-group amax"
-            )
-        x = _rotate_contract(x, rotation["block"], contract_dim)
+            raise NotImplementedError("rotation is not supported for ragged operands")
+        x = rotation(x, contract_dim)
     granularity = scale_cfg["granularity"]
     block_outer, block_size = scale_cfg["block_shape"]
     scale_dtype = scale_cfg["scale_dtype"]
@@ -464,9 +413,12 @@ def dequantize_operand(
     scale_cfg: dict,
     offs: torch.Tensor | None = None,
     ragged_dim: int | None = None,
+    rotation: Rotation | None = None,
 ) -> torch.Tensor:
     """Dequantize `xq` in fp32 using `quantize_operand`'s scale layout."""
     _check_dims(xq, contract_dim, ragged_dim, offs)
+    if rotation is not None and offs is not None:
+        raise NotImplementedError("rotation is not supported for ragged operands")
     block_size = scale_cfg["block_shape"][1]
     qf, sf = xq.float(), scale.float()
     if ragged_dim == contract_dim and offs is not None:
@@ -480,6 +432,6 @@ def dequantize_operand(
         contract_dim,
         length,
     )
-    if scale_cfg.get("rotation") is not None:
-        deq = _rotate_contract(deq, scale_cfg["rotation"]["block"], contract_dim)
+    if rotation is not None:
+        deq = rotation.inverse(deq, contract_dim)
     return deq

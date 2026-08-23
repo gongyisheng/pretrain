@@ -1,38 +1,27 @@
-"""Per-operand quantization health, folded in where the quantization happens.
-
-`QuantizationStats` holds the running sums a logging window accumulates. The fold
-lives here, next to the accumulator it fills; the read is
-`src.metrics.functional.compute_quantization_metrics`, which walks the model for
-these modules. The two are split because the reported metrics are not averageable
-across micro-batches but their operands are: sqnr is a log of a ratio of two sums.
-"""
-
 import torch
 
 from src.quant.quantize import dequantize_operand
+from src.quant.rotation import Rotation
 
 
-# Read inside the compiled forward/backward, so flipping it specializes the graph.
-# Separate from the activation flag: the two features have independent config flags
-# and this fold is far costlier, so their cadences are free to diverge.
+# Flipping this re-specializes the compiled graph. Independent of the activation
+# flag because this fold is far costlier, so their cadences are free to diverge.
 _RECORDING = [False]
 
 
 class QuantizationStats(torch.nn.Module):
-    """One GEMM operand's running quantization-error sums over a window.
+    """Running quantization-error sums for one GEMM operand over a window.
 
-    `n_groups` is 1 for a plain `QuantizedLinear` operand and the expert count for a
-    grouped one, where every metric is reduced per expert before being combined --
-    one cold, badly scaled expert has to show up rather than be averaged away by
-    whichever experts hold the most tokens.
+    `n_groups` is 1 for a dense operand and the expert count for a grouped one,
+    where metrics are reduced per expert so a cold expert is not averaged away.
     """
 
     FIELDS = ("src_sq", "err_sq", "under", "numel", "nonzero")
 
     def __init__(self, key: str, n_groups: int, device: torch.device):
         super().__init__()
-        # the full metric key, resolved at install time: which GEMM and operand this
-        # accumulator belongs to is not a module path, so nothing can re-derive it
+        # Resolved at install time: which GEMM/operand this belongs to is not a
+        # module path, so nothing can re-derive it.
         self.key = key
         self.grouped = n_groups > 1
         for name in self.FIELDS:
@@ -47,44 +36,44 @@ class QuantizationStats(torch.nn.Module):
             getattr(self, name).zero_()
 
 
-def accumulate_quantization_sums(source_tensor, codes, dequantized_tensor, offs=None):
+def accumulate_quantization_sums(
+    source_tensor,
+    codes,
+    dequantized_tensor,
+    offs=None,
+    rotated_source=None,
+):
     """One operand's quantization-error partial sums, for folding into a window.
 
     Returns `(src_sq, err_sq, under, numel, nonzero)`, each a 1D fp32 tensor:
-    length 1 for a dense operand, length n_experts for a grouped one.
+    length 1 for a dense operand, length n_experts for a grouped one. These are
+    sums, not metrics, because sqnr (a log of a ratio) does not accumulate --
+    `compute_quantization_metrics` divides once at read time over the window.
 
-    Two counts, two jobs: `numel` is every element, and stays the validity signal
-    that marks an expert as having received tokens at all; `nonzero` counts the
-    elements that could underflow, which is what the rate divides by.
+    `numel` counts every element (the validity signal for whether an expert got
+    tokens); `nonzero` counts elements that could underflow (the rate's denominator).
+    `codes == 0` is exact for rounding-to-zero since scales are positive.
+    `rotated_source` is the source in the codes' (rotated) basis, used only for the
+    underflow/nonzero mask; `source` and `dequantized` stay in the original basis so
+    energy and reconstruction error are rotation-agnostic.
 
-    `codes` are the low-precision values themselves, and scales are positive, so
-    `codes == 0` is exactly the operand rounding to zero. There is no matching
-    saturation count: every scale lands amax at or below qmax by construction, so
-    the clamp in `_compute_codes` cannot bind for any amax fp32 can hold.
-
-    With `offs` (cumulative end-offsets) the sums are per expert. One grouped GEMM
-    covers every expert and each is quantized against its own amax, so reducing over
-    the whole operand would let the experts holding the most tokens set the number --
-    one cold, badly scaled expert has to show up. Stacked expert weights carry the
+    `offs` (cumulative end-offsets) switches the reduction to per-expert so a cold,
+    badly scaled expert is not averaged away. Stacked expert weights carry the
     expert on dim 0; dispatched rows are ragged along `offs`.
-
-    These are sums, not the reported metrics, precisely because the reported metrics
-    do not accumulate: sqnr is a log of a ratio. `compute_quantization_metrics`
-    divides once, at read time, over the whole window.
     """
     source = source_tensor.float()
+    mask_source = source if rotated_source is None else rotated_source.float()
     dequantized = dequantized_tensor.float()
-    code_values = codes.float()  # fp8 has no abs/eq kernels of its own
+    code_values = codes.float()
     squares = source.square()
     err_squares = (source - dequantized).square()
-    nonzero_mask = source != 0
+    nonzero_mask = mask_source != 0
     underflows = (nonzero_mask & (code_values == 0)).float()
 
     if offs is None:
         src_sq = squares.sum().reshape(1)
         err_sq = err_squares.sum().reshape(1)
         under = underflows.sum().reshape(1)
-        # bool mask reduced straight to fp32 -- no full-size float temporary needed
         nonzero = nonzero_mask.sum(dtype=torch.float32).reshape(1)
         numel = torch.full_like(src_sq, source.numel())
     elif source.ndim == 3:  # stacked expert weights, expert on dim 0
@@ -93,10 +82,10 @@ def accumulate_quantization_sums(source_tensor, codes, dequantized_tensor, offs=
         under = underflows.flatten(1).sum(1)
         nonzero = nonzero_mask.flatten(1).sum(1, dtype=torch.float32)
         numel = torch.full_like(src_sq, source[0].numel())
-    else:  # dispatched rows, ragged along offs -- a row belongs to exactly one expert
+    else:  # dispatched rows, ragged along offs
         n_groups = offs.shape[0]
-        # right=True: row r belongs to the group whose end-offset first exceeds r
         rows = torch.arange(source.shape[0], device=offs.device)
+        # right=True: row r belongs to the group whose end-offset first exceeds r
         ids = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
 
         def by_expert(t):
@@ -107,7 +96,7 @@ def accumulate_quantization_sums(source_tensor, codes, dequantized_tensor, offs=
             by_expert(squares),
             by_expert(err_squares),
             by_expert(underflows),
-            by_expert(nonzero_mask.float()),  # index_add_ needs a float tensor
+            by_expert(nonzero_mask.float()),
         )
         starts = torch.cat([offs.new_zeros(1), offs[:-1]])
         numel = ((offs - starts) * source.shape[1]).to(src_sq.dtype)
@@ -124,26 +113,23 @@ def record_operand(
     scale_cfg,
     offs=None,
     ragged_dim=None,
+    rotation: Rotation | None = None,
 ) -> None:
-    """Fold one quantized operand into `stats`, if there is one and it is armed.
+    """Fold one quantized operand into `stats`, if armed.
 
-    Called from inside `quantized_mm`/`quantized_grouped_mm`, immediately after the
-    quantize that produced `codes`, so `source` and `codes` are the exact tensors the
-    GEMM consumes.
+    Called right after the quantize that produced `codes`, so `source`/`codes` are
+    the exact tensors the GEMM consumes.
 
-    `offs` reaches the dequantize and the sums differently on purpose. The sums branch
-    on `offs` itself to choose a per-expert rather than a global reduction, so they get
-    the real one -- narrowing it to match `ragged_dim` would silently drop grouped
-    weight metrics to one global number. `dequantize_operand` reads `offs` only on the
-    ragged path, so it gets one only when `ragged_dim` is set; passing it unpaired
-    would be dead weight there and trips its given-together check.
+    `offs` is passed to the sums unconditionally (per-expert reduction needs the real
+    one) but to `dequantize_operand` only on the ragged path (`ragged_dim` set);
+    passing it unpaired there is dead weight and trips its given-together check.
     """
     if stats is None or not _RECORDING[0]:
         return
-    # detach first: `codes`/`scale` are live graph nodes in the forward, so folding
-    # them in would make the accumulator buffers require grad and retain the step's
-    # graph. Measurement must not join the computation it measures.
+    # Detach first: `codes`/`scale` are live graph nodes, so folding them in would
+    # make the accumulator buffers require grad and retain the step's graph.
     source, codes, scale = source.detach(), codes.detach(), scale.detach()
+    rotated_source = None if rotation is None else rotation(source, contract_dim)
     dequantized = dequantize_operand(
         codes,
         scale,
@@ -151,8 +137,15 @@ def record_operand(
         scale_cfg,
         offs=offs if ragged_dim is not None else None,
         ragged_dim=ragged_dim,
+        rotation=rotation,
     )
-    sums = accumulate_quantization_sums(source, codes, dequantized, offs=offs)
+    sums = accumulate_quantization_sums(
+        source,
+        codes,
+        dequantized,
+        offs=offs,
+        rotated_source=rotated_source,
+    )
     for name, value in zip(stats.FIELDS, sums):
         getattr(stats, name).add_(value)
 

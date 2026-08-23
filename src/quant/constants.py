@@ -43,20 +43,21 @@ QUANT_DTYPE_RECIPES = {
     },
 }
 
-# The three tensors a quantized linear holds, and which GEMMs consume each. A dtype is
-# a property of a tensor; scoping it to a GEMM is how one tensor takes two dtypes:
+# The three GEMM operations and tensors held by a differentiable linear.
+GEMM_OPS = ("fwd", "dgrad", "wgrad")
+GEMM_TENSORS = ("weight", "act", "grad_out")
+
+# Each tensor is consumed by two operations. A dtype is a property of a tensor;
+# scoping it to an operation is how one tensor takes two dtypes:
 #
 #   fwd    y  = act @ weightᵀ
 #   dgrad  dx = grad_out @ weight
 #   wgrad  dw = grad_outᵀ @ act
-QUANT_TENSOR_GEMMS = {
+GEMM_OPS_BY_TENSOR = {
     "weight": ("fwd", "dgrad"),
     "act": ("fwd", "wgrad"),
     "grad_out": ("dgrad", "wgrad"),
 }
-
-QUANT_TENSORS = tuple(QUANT_TENSOR_GEMMS)
-
 
 # --- format property maps ---------------------------------------------------
 
