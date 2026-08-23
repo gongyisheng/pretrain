@@ -3,7 +3,13 @@ import pytest
 
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.metrics.functional import _quantization_metrics, compute_quantization_metrics
-from src.metrics.quant import QuantizationStats, accumulate_quantization_sums
+from src.metrics.quant import (
+    QuantizationStats,
+    accumulate_quantization_sums,
+    record_operand,
+    set_quantization_monitoring_status,
+)
+from src.quant.rotation import HadamardRotation
 
 _TENSORWISE = {
     "granularity": "tensorwise",
@@ -162,6 +168,34 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
     q, scale = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
     m = _metrics(x, dequantize_operand(q, scale, -1, _TENSORWISE), q)
     assert m["underflow_rate"].item() > 0.9
+
+
+def test_record_operand_rotation_aligns_underflow_with_codes():
+    source = torch.ones(1, 4)
+    rotation = HadamardRotation(block_size=4, random_sign=False)
+    codes, scale = quantize_operand(source, -1, "int8", _TENSORWISE, rotation=rotation)
+    stats = QuantizationStats("act/x", 1, source.device)
+
+    set_quantization_monitoring_status(True)
+    try:
+        record_operand(
+            stats,
+            source,
+            codes,
+            scale,
+            -1,
+            _TENSORWISE,
+            rotation=rotation,
+        )
+    finally:
+        set_quantization_monitoring_status(False)
+
+    dequantized = dequantize_operand(codes, scale, -1, _TENSORWISE, rotation=rotation)
+    assert stats.err_sq.item() == pytest.approx(
+        (source - dequantized).square().sum().item()
+    )
+    assert stats.under.item() == 0.0
+    assert stats.nonzero.item() == 1.0
 
 
 # --- accumulation: the property the fold/read split exists to provide ---
