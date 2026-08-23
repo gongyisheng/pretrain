@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run FP8 tensor-dtype cells at Qwen3 51M.
-# Usage: nohup bash experiments/fp8_tensor_dtype/run.sh > logs/fp8_tensor_dtype.log 2>&1 &
+# Usage: nohup bash experiments/fp8_tensor_dtype/run_51m.sh > logs/fp8_tensor_dtype_51m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
