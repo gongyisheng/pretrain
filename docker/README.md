@@ -10,10 +10,10 @@ build time, so no local build context is needed.
 ## Build
 
 ```bash
-docker build -f docker/Dockerfile -t pretrain_sm120 docker/
+docker build -f docker/Dockerfile -t pretrain docker/
 
 # from a specific branch/tag (default: main)
-docker build -f docker/Dockerfile --build-arg GIT_REF=v0.1.0 -t pretrain_sm120 docker/
+docker build -f docker/Dockerfile --build-arg GIT_REF=v0.1.0 -t pretrain docker/
 ```
 
 ## Run
@@ -22,18 +22,24 @@ docker build -f docker/Dockerfile --build-arg GIT_REF=v0.1.0 -t pretrain_sm120 d
 docker run --rm -it --gpus all --env-file .env \
   -v "$PWD/data:/workspace/data" \
   -v "$PWD/checkpoints:/workspace/checkpoints" \
-  pretrain_sm120
+  pretrain
 ```
 
-Drops into a shell with the venv on `PATH`:
+On start it downloads the dataset (`gongyisheng/openwebtext-exp` into
+`/workspace`, idempotent) then drops into a shell with the venv on `PATH`:
 
 ```bash
 uv run pytest tests/fast -n 6
 uv run python scripts/train.py --config configs/gpt2_124m.yaml --no-wandb
 ```
 
-## Notes
+Mount `-v "$PWD/data:/workspace/data"` so the download persists across
+containers. For a private dataset, pass `-e HF_TOKEN=...`.
 
-- Image reflects the **pushed** repo, not local uncommitted changes.
-- `-march=native` pins the BPE extension to this host's CPU — build and run on the same machine.
-- Rebuild re-clones when the branch head moves (`ADD ...commits/${GIT_REF}` cache-bust).
+## Publish
+
+```bash
+docker login                                                  # use an access token
+docker tag pretrain <dockerhub-user>/pretrain:latest
+docker push <dockerhub-user>/pretrain:latest
+```

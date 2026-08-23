@@ -5,7 +5,7 @@
 #
 # Source is cloned from GitHub at build time, so no local build context is
 # needed — build with a tiny context (the docker/ dir works fine):
-#   docker build -f docker/Dockerfile -t pretrain_sm120 docker/
+#   docker build -f docker/Dockerfile -t pretrain docker/
 #
 # Pin a branch/tag to build from (default: main):
 #   docker build -f docker/Dockerfile --build-arg GIT_REF=v0.1.0 -t <tag> docker/
@@ -51,4 +51,8 @@ WORKDIR /workspace
 # in-container edits take effect immediately.
 RUN uv sync --frozen
 
+# Downloads the dataset on container start, then runs the given command.
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
