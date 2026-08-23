@@ -6,7 +6,7 @@ from src.layers.mlp import SparseMoEBlock
 from src.quant.constants import QUANT_PASSTHROUGH
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
-from src.quant.rotation import build_rotation
+from src.quant.rotation import build_rotation, build_rotation_key
 from src.quant.utils import resolve_quantization_config
 
 
@@ -26,14 +26,21 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
     if not any(qc.enabled for qc in quantization_configs):
         return model
 
-    rotation_configs = [
-        quantization_config.rotation
-        for quantization_config in quantization_configs
-        if quantization_config.enabled and quantization_config.rotation is not None
-    ]
-    rotation = build_rotation(rotation_configs[0]) if rotation_configs else None
-    if rotation is not None:
-        model.quant_rotation = rotation
+    rotations = {}
+    for quantization_config in quantization_configs:
+        if not quantization_config.enabled or quantization_config.rotation is None:
+            continue
+        key = build_rotation_key(
+            quantization_config.rotation,
+            quantization_config.include,
+            quantization_config.exclude,
+        )
+        # Rules that agree on both the transform and the scope share one Rotation.
+        if key not in rotations:
+            rotations[key] = build_rotation(quantization_config.rotation)
+            print(f"quant: rotation {key} <- {quantization_config.rotation}")
+    if rotations:
+        model.quant_rotations = nn.ModuleDict(rotations)
 
     embedding_weight_ids = {
         id(m.weight) for m in model.modules() if isinstance(m, nn.Embedding)
@@ -62,10 +69,17 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
                 quantized_cls = QuantizedLinear
             else:
                 quantized_cls = QuantizedSparseMoEBlock
+            rotation = None
+            if quantization_config.rotation is not None:
+                rotation = rotations[
+                    build_rotation_key(
+                        quantization_config.rotation,
+                        quantization_config.include,
+                        quantization_config.exclude,
+                    )
+                ]
             qmod = quantized_cls.from_module(
-                child,
-                quantization_config,
-                rotation=rotation if quantization_config.rotation is not None else None,
+                child, quantization_config, rotation=rotation
             )
             setattr(parent, child_name, qmod)
     return model

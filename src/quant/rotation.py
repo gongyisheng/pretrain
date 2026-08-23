@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -12,11 +13,11 @@ import torch.nn as nn
 class Rotation(nn.Module, ABC):
     @abstractmethod
     def forward(self, x: torch.Tensor, contract_dim: int) -> torch.Tensor:
-        """Apply the rotation along a GEMM contraction dimension."""
+        """Rotate along a GEMM contraction dimension."""
 
     @abstractmethod
     def inverse(self, x: torch.Tensor, contract_dim: int) -> torch.Tensor:
-        """Apply the inverse rotation along a GEMM contraction dimension."""
+        """Undo the rotation along a GEMM contraction dimension."""
 
 
 class HadamardRotation(Rotation):
@@ -57,9 +58,7 @@ class HadamardRotation(Rotation):
                 )
             signs = signs.clone()
         elif random_sign:
-            # CPU-pinned: CUDA's Philox and CPU's MT19937 draw differently from the
-            # same seed, so a default-device generator would tie the signs to
-            # wherever the model happened to be built.
+            # Pin draws to CPU for reproducible signs across devices.
             generator = torch.Generator().manual_seed(seed)
             draws = torch.rand(block_size, generator=generator, device="cpu")
             signs = torch.where(draws < 0.5, -1.0, 1.0)
@@ -115,7 +114,36 @@ class HadamardRotation(Rotation):
 ROTATION_REGISTRY: dict[str, type[Rotation]] = {"hadamard": HadamardRotation}
 
 
-def build_rotation(rotation: Mapping[str, Any] | None) -> Rotation | None:
+def build_rotation_key(
+    rotation: dict,
+    include: list[str],
+    exclude: list[str],
+) -> str:
+    """Build a stable key from canonical rotation config and module scope."""
+    rotation_cls = rotation["rotation_cls"]
+    # Normalize defaults so omitted and explicit defaults share one identity.
+    signature = inspect.signature(ROTATION_REGISTRY[rotation_cls])
+    kwargs = {
+        name: parameter.default
+        for name, parameter in signature.parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+    kwargs.update(rotation["rotation_kwargs"])
+    identity = json.dumps(
+        {
+            "rotation_cls": rotation_cls,
+            "rotation_kwargs": kwargs,
+            "include": sorted(include),
+            "exclude": sorted(exclude),
+        },
+        sort_keys=True,
+    )
+    # Keep 64 digest bits for compact, readable state_dict paths.
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    return f"{rotation_cls}-{digest}"
+
+
+def build_rotation(rotation: dict | None) -> Rotation | None:
     if rotation is None:
         return None
     try:

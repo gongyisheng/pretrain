@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Union
 import torch
@@ -479,6 +480,15 @@ class QuantizationConfig:
                     f"got {rotation_kwargs!r}"
                 )
             rotation_kwargs = dict(rotation_kwargs)
+            # build_rotation_key serializes these to derive a stable identity, and the
+            # config itself must survive the YAML round trip.
+            try:
+                json.dumps(rotation_kwargs, sort_keys=True)
+            except TypeError as error:
+                raise ValueError(
+                    f"quant rotation 'rotation_kwargs' must hold only YAML/JSON "
+                    f"values, got {rotation_kwargs!r}"
+                ) from error
 
             gemms = self.rotation.get("gemms", list(GEMM_OPS))
             if isinstance(gemms, str):
@@ -562,26 +572,6 @@ class TrainingConfig:
                     rule.rotation["rotation_kwargs"].setdefault("seed", self.seed)
             normalized.append(rule)
         self.quantization = normalized
-
-        # A single shared Rotation lives at the model root (apply_quantization
-        # builds it once), so every enabled rule that rotates must agree on the
-        # rotation class and kwargs; only the gemms scoping may differ per rule.
-        rotations = [
-            rule.rotation
-            for rule in normalized
-            if rule.enabled and rule.rotation is not None
-        ]
-        if rotations:
-            reference = rotations[0]
-            for rotation in rotations[1:]:
-                if (
-                    rotation["rotation_cls"],
-                    rotation["rotation_kwargs"],
-                ) != (reference["rotation_cls"], reference["rotation_kwargs"]):
-                    raise ValueError(
-                        "conflicting quant rotation configurations: all enabled "
-                        "rotations must use the same rotation_cls and rotation_kwargs"
-                    )
 
 
 @dataclass
