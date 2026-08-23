@@ -3,12 +3,13 @@
 # Single-stage dev/interactive image for the pretrain codebase.
 #   Python 3.12  •  CUDA 13.2  •  torch 2.12 (cu132 wheels)
 #
-# Source is cloned from GitHub at build time, so no local build context is
-# needed — build with a tiny context (the docker/ dir works fine):
+# The image is a pure environment: source is cloned and deps are synced by
+# entrypoint.sh at container START (not build), so the image needs no local
+# build context and never goes stale. Build with a tiny context:
 #   docker build -f docker/Dockerfile -t pretrain docker/
 #
-# Pin a branch/tag to build from (default: main):
-#   docker build -f docker/Dockerfile --build-arg GIT_REF=v0.1.0 -t <tag> docker/
+# Pick the branch/tag to run at `docker run` time (default: main):
+#   docker run -e GIT_REF=v0.1.0 pretrain
 #
 # The cu132 CUDA-13.2 devel base gives us nvcc + cublasLt, required to compile:
 #   - src/data/bpe/_bpe_engine            (pybind11, C++17, OpenMP, -march=native)
@@ -36,22 +37,16 @@ ENV CUDA_HOME=/usr/local/cuda \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
-ARG GIT_REPO=https://github.com/gongyisheng/pretrain.git
-ARG GIT_REF=main
-
-# Bust the clone layer's cache whenever the ref moves: the commits API response
-# changes on every push, so a rebuild re-clones (harmless for pinned tags).
-ADD https://api.github.com/repos/gongyisheng/pretrain/commits/${GIT_REF} /tmp/commit.json
-RUN git clone --depth 1 --branch ${GIT_REF} ${GIT_REPO} /workspace
+# Repo + ref are ENV (not ARG) so they can be overridden at `docker run` time
+# with `-e GIT_REF=...`; entrypoint.sh clones/updates /workspace/pretrain on start.
+ENV GIT_REPO=https://github.com/gongyisheng/pretrain.git \
+    GIT_REF=main
 
 WORKDIR /workspace
 
-# setup.py compiles both native extensions during `uv sync`; the CUDA devel
-# base supplies nvcc + cublasLt. Editable install points at /workspace/src, so
-# in-container edits take effect immediately.
-RUN uv sync --frozen
-
-# Downloads the dataset on container start, then runs the given command.
+# entrypoint.sh clones the repo, runs `uv sync --frozen` (setup.py compiles both
+# native extensions — the CUDA devel base supplies nvcc + cublasLt), downloads
+# the dataset, then runs the given command — all at container start.
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
