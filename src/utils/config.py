@@ -12,11 +12,13 @@ from src.quant.constants import (
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,
     QUANT_PASSTHROUGH,
+    GEMM_OPS_BY_TENSOR,
+    GEMM_TENSORS,
     QUANT_ROUNDING,
     QUANT_SCALE_RECIPES,
-    QUANT_TENSOR_GEMMS,
-    QUANT_TENSORS,
+    GEMM_OPS,
 )
+from src.quant.rotation import ROTATION_REGISTRY
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
 
@@ -303,40 +305,6 @@ class TokenizerTrainingConfig:
             self.method_kwargs.setdefault("max_superword_words", 4)
 
 
-def _resolve_quant_dtype(dtype: dict) -> dict:
-    """Expand `{tensor: fmt | {gemm: fmt}}` to `{tensor: {gemm: fmt}}`, validating.
-
-    A scalar means "that format in every GEMM consuming the tensor"; a dict scopes it,
-    and may name only some of them -- the rest are filled by the recipe, or by
-    `TrainingConfig` with the compute dtype. Idempotent, so a resolved dict survives
-    the to_dict/load round trip.
-    """
-    resolved = {}
-    for tensor, value in dtype.items():
-        if tensor not in QUANT_TENSOR_GEMMS:
-            raise ValueError(
-                f"unknown quant dtype key: {tensor!r}; "
-                f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
-            )
-        gemms = QUANT_TENSOR_GEMMS[tensor]
-        per_gemm = (
-            dict(value) if isinstance(value, dict) else dict.fromkeys(gemms, value)
-        )
-        for gemm, fmt in per_gemm.items():
-            if gemm not in gemms:
-                raise ValueError(
-                    f"quant dtype {tensor!r} cannot be scoped to {gemm!r}: "
-                    f"only {list(gemms)} consume it"
-                )
-            if fmt not in QUANT_FORMATS:
-                raise ValueError(
-                    f"unknown quant fmt for {tensor}.{gemm}: {fmt!r}; "
-                    f"expected one of {sorted(QUANT_FORMATS)}"
-                )
-        resolved[tensor] = per_gemm
-    return resolved
-
-
 @dataclass
 class QuantizationConfig:
     enabled: bool = False
@@ -344,6 +312,7 @@ class QuantizationConfig:
     dtype: dict = field(default_factory=dict)
     scale: dict = field(default_factory=dict)  # {granularity, block_shape}
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
+    rotation: Optional[dict] = None
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
@@ -352,20 +321,41 @@ class QuantizationConfig:
             return
 
         for tensor, mode in self.rounding.items():
-            if tensor not in QUANT_TENSOR_GEMMS:
+            if tensor not in GEMM_OPS_BY_TENSOR:
                 raise ValueError(
                     f"unknown quant rounding key: {tensor!r}; "
-                    f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
+                    f"expected one of {sorted(GEMM_OPS_BY_TENSOR)}"
                 )
             if mode not in QUANT_ROUNDING:
                 raise ValueError(
                     f"unknown quant rounding for {tensor}: {mode!r}; "
                     f"expected one of {sorted(QUANT_ROUNDING)}"
                 )
-        self.rounding = {t: self.rounding.get(t, "RNE") for t in QUANT_TENSORS}
+        self.rounding = {t: self.rounding.get(t, "RNE") for t in GEMM_TENSORS}
 
         dtype_recipe = self.dtype.pop("recipe", None)
-        self.dtype = _resolve_quant_dtype(self.dtype)
+        for tensor, value in self.dtype.items():
+            if tensor not in GEMM_OPS_BY_TENSOR:
+                raise ValueError(
+                    f"unknown quant dtype key: {tensor!r}; "
+                    f"expected one of {sorted(GEMM_OPS_BY_TENSOR)}"
+                )
+            gemms = GEMM_OPS_BY_TENSOR[tensor]
+            per_gemm = (
+                dict(value) if isinstance(value, dict) else dict.fromkeys(gemms, value)
+            )
+            for gemm, fmt in per_gemm.items():
+                if gemm not in gemms:
+                    raise ValueError(
+                        f"quant dtype {tensor!r} cannot be scoped to {gemm!r}: "
+                        f"only {list(gemms)} consume it"
+                    )
+                if fmt not in QUANT_FORMATS:
+                    raise ValueError(
+                        f"unknown quant fmt for {tensor}.{gemm}: {fmt!r}; "
+                        f"expected one of {sorted(QUANT_FORMATS)}"
+                    )
+            self.dtype[tensor] = per_gemm
 
         # A dtype recipe fills the slots left open, the way a scale recipe fills
         # scale. It is applied after the expansion so that a tensor scoped to one
@@ -377,7 +367,7 @@ class QuantizationConfig:
                     f"expected one of {sorted(QUANT_DTYPE_RECIPES)}"
                 )
             for tensor, fmt in QUANT_DTYPE_RECIPES[dtype_recipe].items():
-                for gemm in QUANT_TENSOR_GEMMS[tensor]:
+                for gemm in GEMM_OPS_BY_TENSOR[tensor]:
                     self.dtype.setdefault(tensor, {}).setdefault(gemm, fmt)
             # mxfp8 is an fp8 element paired with the "mxfp8" scale scheme; seed it.
             if dtype_recipe == "mxfp8":
@@ -463,17 +453,55 @@ class QuantizationConfig:
                             f"{tensor}.{gemm}, got {fmt!r}"
                         )
 
-        rotation = self.scale.get("rotation")
-        if rotation is not None:
-            block = rotation.get("block") if isinstance(rotation, dict) else None
-            if not isinstance(block, int) or block < 1 or block & (block - 1):
-                raise ValueError(
-                    "quant scale 'rotation' must be {block: <power of two>}, "
-                    f"got {rotation!r}"
-                )
-            self.scale["rotation"] = {"block": block}
-
         self.scale["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
+        if self.rotation is not None:
+            if not isinstance(self.rotation, dict):
+                raise ValueError(
+                    "quant 'rotation' must be {rotation_cls, rotation_kwargs, gemms}, "
+                    f"got {self.rotation!r}"
+                )
+            unknown = set(self.rotation) - {"rotation_cls", "rotation_kwargs", "gemms"}
+            if unknown:
+                raise ValueError(f"unknown quant rotation keys: {sorted(unknown)}")
+            rotation_cls = self.rotation.get("rotation_cls", "hadamard")
+            if (
+                not isinstance(rotation_cls, str)
+                or rotation_cls not in ROTATION_REGISTRY
+            ):
+                raise ValueError(
+                    f"unknown rotation_cls: {rotation_cls!r}; "
+                    f"expected one of {sorted(ROTATION_REGISTRY)}"
+                )
+            rotation_kwargs = self.rotation.get("rotation_kwargs", {})
+            if not isinstance(rotation_kwargs, dict):
+                raise ValueError(
+                    f"quant rotation 'rotation_kwargs' must be a dict, "
+                    f"got {rotation_kwargs!r}"
+                )
+            rotation_kwargs = dict(rotation_kwargs)
+
+            gemms = self.rotation.get("gemms", list(GEMM_OPS))
+            if isinstance(gemms, str):
+                gemms = [gemms]
+            if not isinstance(gemms, list) or not gemms:
+                raise ValueError(
+                    f"quant rotation 'gemms' must be a non-empty list of "
+                    f"{list(GEMM_OPS)}, got {gemms!r}"
+                )
+            for gemm in gemms:
+                if gemm not in GEMM_OPS:
+                    raise ValueError(
+                        f"unknown rotation gemm: {gemm!r}; "
+                        f"expected one of {list(GEMM_OPS)}"
+                    )
+            if len(set(gemms)) != len(gemms):
+                raise ValueError(f"quant rotation 'gemms' has duplicates: {gemms!r}")
+
+            self.rotation = {
+                "rotation_cls": rotation_cls,
+                "rotation_kwargs": rotation_kwargs,
+                "gemms": gemms,
+            }
 
 
 @dataclass
@@ -527,11 +555,33 @@ class TrainingConfig:
             if isinstance(rule, dict):
                 rule = QuantizationConfig(**rule)
             if rule.enabled:
-                for tensor, gemms in QUANT_TENSOR_GEMMS.items():
+                for tensor, gemms in GEMM_OPS_BY_TENSOR.items():
                     for gemm in gemms:
                         rule.dtype.setdefault(tensor, {}).setdefault(gemm, amp_dtype)
+                if rule.rotation and rule.rotation["rotation_cls"] == "hadamard":
+                    rule.rotation["rotation_kwargs"].setdefault("seed", self.seed)
             normalized.append(rule)
         self.quantization = normalized
+
+        # A single shared Rotation lives at the model root (apply_quantization
+        # builds it once), so every enabled rule that rotates must agree on the
+        # rotation class and kwargs; only the gemms scoping may differ per rule.
+        rotations = [
+            rule.rotation
+            for rule in normalized
+            if rule.enabled and rule.rotation is not None
+        ]
+        if rotations:
+            reference = rotations[0]
+            for rotation in rotations[1:]:
+                if (
+                    rotation["rotation_cls"],
+                    rotation["rotation_kwargs"],
+                ) != (reference["rotation_cls"], reference["rotation_kwargs"]):
+                    raise ValueError(
+                        "conflicting quant rotation configurations: all enabled "
+                        "rotations must use the same rotation_cls and rotation_kwargs"
+                    )
 
 
 @dataclass
