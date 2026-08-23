@@ -7,10 +7,9 @@ cd "$(dirname "$0")/../.."
 
 configs=(qwen3_404m_bf16)
 
-for tensor_dtypes in w8a16 w16a8 w8a8 w8a8g8; do
+for tensor_dtypes in w8a16 w16a8 w8a8 w8a8g8 w8a8_e5m2_g8; do
     configs+=("qwen3_404m_fp8_e4m3_${tensor_dtypes}")
 done
-configs+=("qwen3_404m_fp8_e4m3_w8a8_e5m2_g8")
 
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
