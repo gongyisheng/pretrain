@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from functools import lru_cache
+from functools import wraps
 from typing import Any, Callable
 
 import torch
@@ -12,7 +12,22 @@ class KernelSelectionError(RuntimeError):
     pass
 
 
-@lru_cache(maxsize=None)
+def compile_safe_cache(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Unbounded cache Dynamo can trace: it reads the dict rather than being
+    ignored and re-tracing the body, as it does for `functools.lru_cache`."""
+    cache: dict[tuple[Any, ...], Any] = {}
+
+    @wraps(fn)
+    def wrapper(*args: Any) -> Any:
+        if args not in cache:
+            cache[args] = fn(*args)
+        return cache[args]
+
+    wrapper.cache_clear = cache.clear
+    return wrapper
+
+
+@compile_safe_cache
 def _platform_for(device_type: str, device_index: int | None) -> PlatformInfo:
     if device_type != "cuda":
         return PlatformInfo(device_type)
@@ -75,7 +90,7 @@ def select_kernel(
     )
 
 
-@lru_cache(maxsize=None)
+@compile_safe_cache
 def _resolve(
     op: str, backend: str | None, device_type: str, device_index: int | None
 ) -> Callable[..., Any]:
