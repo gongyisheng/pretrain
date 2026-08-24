@@ -17,8 +17,11 @@
 FROM nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+# python3-dev supplies Python.h — pybind11 needs it whenever uv builds the
+# native extensions against the system interpreter instead of a managed one.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
+        python3-dev \
         git \
         curl \
         ca-certificates \
