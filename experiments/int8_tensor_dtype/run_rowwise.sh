@@ -1,14 +1,15 @@
 #!/bin/bash
 # Run int8..int4 tensor-dtype cells (W8A16, W8A8; rowwise) vs bf16 at 51M on Qwen3.
-# Usage: nohup bash experiments/int8_tensor_dtype/run.sh > logs/int8_tensor_dtype.log 2>&1 &
+# Usage: nohup bash experiments/int8_tensor_dtype/run_rowwise.sh > logs/int8_tensor_dtype_rowwise.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
 
-configs=(qwen3_51m_bf16)
+# bf16 baseline is granularity-independent; it runs in run_baseline.sh.
+configs=()
 for bits in 8 7 6 5 4; do
     for layout in w8a16 w8a8; do
-        configs+=("qwen3_51m_int${bits}_${layout}")
+        configs+=("rowwise/qwen3_51m_int${bits}_${layout}_rowwise")
     done
 done
 
@@ -20,4 +21,4 @@ for config in "${configs[@]}"; do
     echo ""
 done
 
-echo "=== 51M int8_tensor_dtype runs complete ==="
+echo "=== 51M int8_tensor_dtype rowwise runs complete ==="

@@ -34,14 +34,14 @@ training:
   quantization:
     enabled: true
     dtype:
-      weight: int6
+      weight: int4
       act: bf16
       grad_out: bf16
     scale:
       granularity: rowwise
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int8_tensor_dtype/qwen3_51m_int6_w8a16/
+  checkpoint_dir: checkpoints/int8_tensor_dtype/qwen3_51m_int4_w8a16_rowwise/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -61,5 +61,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-int8-tensor-dtype
-  wandb_run_name: qwen3-51m-int6-w8a16
+  wandb_run_name: qwen3-51m-int4-w8a16-rowwise
   log_every: 10
