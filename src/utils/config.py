@@ -440,11 +440,14 @@ class QuantizationConfig:
                 "quant 'rotation' must be {rotation_cls, rotation_kwargs, gemms}, "
                 f"got {self.rotation!r}"
             )
+        if "rotation_cls" not in self.rotation:
+            self.rotation = None
+            return
         unknown = set(self.rotation) - {"rotation_cls", "rotation_kwargs", "gemms"}
         if unknown:
             raise ValueError(f"unknown quant rotation keys: {sorted(unknown)}")
 
-        rotation_cls = self.rotation.get("rotation_cls", "hadamard")
+        rotation_cls = self.rotation["rotation_cls"]
         _check_one_of("rotation_cls", rotation_cls, ROTATION_REGISTRY)
 
         rotation_kwargs = self.rotation.get("rotation_kwargs", {})
