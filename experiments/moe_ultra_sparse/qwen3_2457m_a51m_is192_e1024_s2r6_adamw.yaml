@@ -31,15 +31,16 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 16
-  gradient_accumulation_steps: 16
+  batch_size: 64
+  gradient_accumulation_steps: 4
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
   checkpoint_dir: checkpoints/moe_ultra_sparse/qwen3_2457m_a51m_is192_e1024_s2r6_adamw/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
+  eval_batch_size: 64
 optimizer:
   name: adamw
   lr: 1e-3

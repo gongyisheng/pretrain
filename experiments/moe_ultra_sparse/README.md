@@ -52,9 +52,9 @@ Config filename = ckpt dir = W&B run name. Eight runs = 4 pool sizes × 2 optimi
 Reference points from [`moe_sparsity`](../moe_sparsity/) (Muon only, same backbone):
 `E=64` → 188M (the `qwen3_188m_a51m` benchmark), `E=128` → 339M, `E=256` → 642M.
 
-Training (all runs): batch 16 × grad-accum 16 × seq 1024 = 0.26M tokens/step (effective batch
+Training (all runs): batch 64 × grad-accum 4 × seq 1024 = 0.26M tokens/step (effective batch
 256, matching `moe_sparsity`), `max_steps` 50000 (~13.1B tokens), cosine LR 1e-3 → 1e-4, warmup
-1500, `grad_clip` 1.0, bf16, OpenWebText. `eval_every=100`, `eval_steps=25`,
+1500, `grad_clip` 1.0, bf16, OpenWebText. `eval_every=100`, `eval_steps=100`, `eval_batch_size=64`,
 `checkpoint_every=5000`, `log_every=100`. Muon runs use the hybrid `MuonAdamWOptimizer`
 (`momentum=0.95`, `nesterov`, `match_rms_adamw`): 2D/3D hidden weights incl. the stacked expert
 tensors → Muon; embeddings, `lm_head`, router gate, and 1D norm scales → AdamW.
@@ -101,20 +101,21 @@ W&B project: `pretrain-moe-ultra-sparse`.
   | 1024 | 2.46B | 36.6 GiB | 27.5 GiB |
 
   On a 45 GiB L40S the `E=1024` **AdamW** cell leaves only ~8 GiB for activations, compile
-  workspace, and MoE dispatch buffers — expect it to be tight and to need a free GPU. If it OOMs,
-  halve `batch_size` and double `gradient_accumulation_steps` (effective batch is preserved), or
-  enable activation checkpointing; drop the cell rather than changing the effective batch.
+  workspace, and MoE dispatch buffers — and at `batch_size 64` activations are 4× what they'd be
+  at batch 16, so the larger-`E` AdamW cells are expected to be tight. If a cell OOMs, halve
+  `batch_size` and double `gradient_accumulation_steps` (effective batch is preserved), or enable
+  activation checkpointing; drop the cell rather than changing the effective batch.
 - Active params (~51M) and FLOPs/token are constant across all 8 runs. Step time still grows with
   `E`: the router softmax/sigmoid is over `E` classes and the gather/scatter touches a larger
   expert table, so wall-clock is not flat even though FLOPs/token is.
 - **Router saturation is the thing to watch.** With `k/E < 1%`, each expert receives ~0.6% of
-  tokens per step — roughly 100 tokens per expert per micro-batch at batch 16 × seq 1024. Track
+  tokens per step — roughly 400 tokens per expert per micro-batch at batch 64 × seq 1024. Track
   per-expert load and the `expert_bias` drift: if a large fraction of experts are effectively
   never selected, the pool is dead weight and the val-loss curve should flatten accordingly.
 - The Muon arm is a direct scale-up of [`moe_muon_optm`](../moe_muon_optm/)'s open question. That
   experiment ran `E=64` with a capacity factor and aux loss; here routing is aux-loss-free and the
   pool is 6-16× larger, so per-expert gradients are correspondingly sparser. A Muon advantage that
   shrinks or inverts as `E` grows is the signal that Newton–Schulz is amplifying noise.
-- Comparability with `moe_sparsity`: same backbone, same effective batch (256) and token budget,
-  but this sweep uses `batch_size 16 × accum 16` (vs `64 × 4`) to cut activation memory, and
-  `eval_steps 25` (vs 100), so val loss here is a noisier estimate of the same quantity.
+- Comparability with `moe_sparsity`: same backbone, same effective batch (256), token budget,
+  micro-batch shape (`64 × 4`), and eval protocol (`eval_steps 100`, `eval_batch_size 64`), so val
+  loss is directly comparable across the two sweeps.
