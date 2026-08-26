@@ -46,9 +46,36 @@ def quantized_grouped_mm(
         src_a, contract_a, a_offs, a_ragged_dim = a, -1, None, None
         b_offs, b_ragged_dim = offs, -1
     elif ragged_k:
-        # Ragged K: map both operands and transpose A for quantization.
-        src_a, contract_a, a_offs, a_ragged_dim = a.mT, -2, offs, -2
-        b_offs, b_ragged_dim = offs, -2
+        # Ragged K: both operands share their contraction axis.
+        src_a, contract_a, a_ragged_dim = a, -1, -1
+        b_ragged_dim = -2
+        if rotation is not None:
+            alignment = rotation.alignment
+            if alignment > 1:
+                n_rows, n_groups = src_a.shape[-1], offs.shape[0]
+                starts = torch.cat([offs.new_zeros(1), offs[:-1]])
+                counts = offs - starts
+                ceil_inputs = counts + alignment - 1
+                padded_blocks = torch.div(ceil_inputs, alignment, rounding_mode="floor")
+                padded_counts = padded_blocks * alignment
+                padded_offs = padded_counts.cumsum(0).to(offs.dtype)
+                padded_starts = torch.cat([padded_offs.new_zeros(1), padded_offs[:-1]])
+                rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
+                group = torch.searchsorted(offs, rows, right=True)
+                group.clamp_(max=n_groups - 1)
+                index = (padded_starts[group] + rows - starts[group]).long()
+                max_padded_rows = n_rows + n_groups * alignment
+                n_padded = -(-max_padded_rows // alignment) * alignment
+                src_a_shape = (src_a.shape[-2], n_padded)
+                padded_src_a = src_a.new_zeros(src_a_shape, dtype=torch.float32)
+                padded_src_a.index_copy_(1, index, src_a.float())
+                src_a = padded_src_a
+                b_shape = (n_padded, b.shape[-1])
+                padded_b = b.new_zeros(b_shape, dtype=torch.float32)
+                padded_b.index_copy_(0, index, b.float())
+                b = padded_b
+                offs = padded_offs
+        a_offs, b_offs = offs, offs
     else:
         # Ragged M: only A is mapped.
         src_a, contract_a, a_offs, a_ragged_dim = a, -1, offs, -2
@@ -103,9 +130,9 @@ def quantized_grouped_mm(
 
     if op is not None:
         return SCALED_MM_OPS[op](
-            aq.mT if ragged_k else aq,
+            aq,
             bq,
-            sa.mT if ragged_k else sa,
+            sa,
             sb,
             offs,
             out_dtype,
@@ -134,7 +161,7 @@ def quantized_grouped_mm(
             rotation=rotation,
         ).to(b.dtype)
     y = grouped_mm(
-        (src_a.mT if ragged_k else src_a).to(out_dtype),
+        src_a.to(out_dtype),
         b.to(out_dtype),
         offs,
         bias=None if bias is None else bias.to(out_dtype),

@@ -156,6 +156,28 @@ def _check_dims(
         raise ValueError(f"a ragged axis needs a 2D operand, got {x.ndim}D")
 
 
+def _check_rotation_dims(
+    contract_dim: int,
+    ragged_dim: int | None,
+    offs: torch.Tensor | None,
+    rotation: Rotation,
+) -> None:
+    """Require ragged contraction groups to begin on rotation-block boundaries."""
+    if ragged_dim != contract_dim:
+        return
+    aligned = torch.all(offs.remainder(rotation.alignment) == 0)
+    if torch.compiler.is_compiling():
+        # Fullgraph cannot trace the synchronous check; fail invalid compiled
+        # callers rather than silently mix rotation blocks across groups.
+        torch._assert_async(
+            aligned, "ragged contraction boundaries must align with rotation blocks"
+        )
+    else:
+        torch._assert(
+            aligned, "ragged contraction boundaries must align with rotation blocks"
+        )
+
+
 def _quantize_segmented_contraction(
     xf: torch.Tensor,
     contract_dim: int,
@@ -357,12 +379,12 @@ def quantize_operand(
     expanded and the contraction axis blockwise.
 
     `rotation` preconditions `x` before quantizing and is inverted by
-    `dequantize_operand`. Rotations are rejected on ragged operands.
+    `dequantize_operand`. On a ragged contraction axis, every group boundary must
+    align with a rotation block so the transform cancels within each GEMM group.
     """
     _check_dims(x, contract_dim, ragged_dim, offs)
     if rotation is not None:
-        if offs is not None:
-            raise NotImplementedError("rotation is not supported for ragged operands")
+        _check_rotation_dims(contract_dim, ragged_dim, offs, rotation)
         x = rotation(x, contract_dim)
     granularity = scale_cfg["granularity"]
     block_outer, block_size = scale_cfg["block_shape"]
@@ -415,21 +437,21 @@ def dequantize_operand(
 ) -> torch.Tensor:
     """Dequantize `xq` in fp32 using `quantize_operand`'s scale layout."""
     _check_dims(xq, contract_dim, ragged_dim, offs)
-    if rotation is not None and offs is not None:
-        raise NotImplementedError("rotation is not supported for ragged operands")
+    if rotation is not None:
+        _check_rotation_dims(contract_dim, ragged_dim, offs, rotation)
     block_size = scale_cfg["block_shape"][1]
     qf, sf = xq.float(), scale.float()
     if ragged_dim == contract_dim and offs is not None:
         row_blocks, _ = _scale_block_map(offs, xq.shape[contract_dim], block_size)
         deq = (qf * sf.index_select(contract_dim, row_blocks)).contiguous()
-        return deq
-    length = xq.shape[contract_dim]
-    deq = _untile(
-        _tile(qf, contract_dim, block_size or length)
-        * sf.unsqueeze(-1 if contract_dim == -1 else -2),
-        contract_dim,
-        length,
-    )
+    else:
+        length = xq.shape[contract_dim]
+        deq = _untile(
+            _tile(qf, contract_dim, block_size or length)
+            * sf.unsqueeze(-1 if contract_dim == -1 else -2),
+            contract_dim,
+            length,
+        )
     if rotation is not None:
         deq = rotation.inverse(deq, contract_dim)
     return deq

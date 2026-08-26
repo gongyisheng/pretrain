@@ -17,6 +17,14 @@ class Rotation(nn.Module, ABC):
     def inverse(self, x: torch.Tensor, contract_dim: int) -> torch.Tensor:
         """Undo the rotation along a GEMM contraction dimension."""
 
+    @property
+    def alignment(self) -> int:
+        """Rows a ragged contraction must be padded to before this rotation cancels.
+
+        1 for an elementwise transform, which needs no alignment at all.
+        """
+        return 1
+
 
 class HadamardRotation(Rotation):
     def __init__(
@@ -38,8 +46,6 @@ class HadamardRotation(Rotation):
             )
         if type(random_sign) is not bool:
             raise ValueError(f"random_sign must be a bool, got {random_sign!r}")
-        if type(seed) is not int or seed < 0:
-            raise ValueError(f"seed must be a non-negative int, got {seed!r}")
         if sign_vector is not None:
             try:
                 signs = torch.as_tensor(sign_vector, dtype=torch.float32)
@@ -63,10 +69,29 @@ class HadamardRotation(Rotation):
         else:
             signs = None
 
+        # Sylvester construction, entries +-1. Kept unscaled so every product in the
+        # transform is an exact sign flip; the 1/sqrt(block) normalization is applied
+        # to the operand first, which also keeps fp16 sums inside fp32's range.
+        hadamard = torch.ones(1, 1)
+        while hadamard.shape[0] < block_size:
+            hadamard = torch.cat(
+                [
+                    torch.cat([hadamard, hadamard], 1),  # (N, 2N)
+                    torch.cat([hadamard, -hadamard], 1),  # (N, 2N)
+                ],
+                0,
+            )  # (2N, 2N)
+
         self.block_size = block_size
         self.random_sign = random_sign
         self.seed = seed
         self.register_buffer("sign_vector", signs)
+        # Derived from block_size, so it stays out of checkpoints.
+        self.register_buffer("hadamard", hadamard, persistent=False)
+
+    @property
+    def alignment(self) -> int:
+        return self.block_size
 
     def forward(self, x: torch.Tensor, contract_dim: int) -> torch.Tensor:
         return self._transform(x, contract_dim, inverse=False)
@@ -86,26 +111,29 @@ class HadamardRotation(Rotation):
             raise ValueError(
                 f"block {self.block_size} must divide the rotated extent {length}"
             )
-        if contract_dim == -2:
-            return self._transform(x.mT, -1, inverse).mT.contiguous()
 
-        blocks = x.float().reshape(*x.shape[:-1], -1, self.block_size)
-        blocks = blocks * (1 / math.sqrt(self.block_size))
+        hadamard = self.hadamard.to(device=x.device, dtype=torch.float32)
         signs = self.sign_vector
         if signs is not None:
-            signs = signs.to(x.device)
-            if not inverse:
+            signs = signs.to(device=x.device, dtype=torch.float32)
+        scale = 1 / math.sqrt(self.block_size)
+        if contract_dim == -1:
+            blocks = x.float().reshape(*x.shape[:-1], -1, self.block_size) * scale
+            if signs is not None and not inverse:
                 blocks = blocks * signs
-        stride = 1
-        while stride < self.block_size:
-            pairs = blocks.reshape(*blocks.shape[:-1], -1, 2, stride)
-            left, right = pairs.unbind(-2)
-            blocks = torch.stack((left + right, left - right), dim=-2).reshape(
-                blocks.shape
+            blocks = blocks @ hadamard
+            if signs is not None and inverse:
+                blocks = blocks * signs
+        else:
+            blocks = (
+                x.float().reshape(*x.shape[:-2], -1, self.block_size, x.shape[-1])
+                * scale
             )
-            stride *= 2
-        if signs is not None and inverse:
-            blocks = blocks * signs
+            if signs is not None and not inverse:
+                blocks = blocks * signs[:, None]
+            blocks = hadamard @ blocks
+            if signs is not None and inverse:
+                blocks = blocks * signs[:, None]
         return blocks.reshape(x.shape).to(x.dtype)
 
 

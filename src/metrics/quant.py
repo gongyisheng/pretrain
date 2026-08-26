@@ -41,6 +41,7 @@ def accumulate_quantization_sums(
     codes,
     dequantized_tensor,
     offs=None,
+    ragged_dim=None,
     rotated_source=None,
 ):
     """One operand's quantization-error partial sums, for folding into a window.
@@ -59,7 +60,8 @@ def accumulate_quantization_sums(
 
     `offs` (cumulative end-offsets) switches the reduction to per-expert so a cold,
     badly scaled expert is not averaged away. Stacked expert weights carry the
-    expert on dim 0; dispatched rows are ragged along `offs`.
+    expert on dim 0; a 2D dispatched operand is ragged along `ragged_dim`, which
+    defaults to rows for existing callers.
     """
     source = source_tensor.float()
     mask_source = source if rotated_source is None else rotated_source.float()
@@ -82,15 +84,20 @@ def accumulate_quantization_sums(
         under = underflows.flatten(1).sum(1)
         nonzero = nonzero_mask.flatten(1).sum(1, dtype=torch.float32)
         numel = torch.full_like(src_sq, source[0].numel())
-    else:  # dispatched rows, ragged along offs
+    elif source.ndim == 2:
+        ragged_dim = -2 if ragged_dim is None else ragged_dim
+        if ragged_dim not in (-2, -1):
+            raise ValueError(f"ragged_dim must be -2 or -1, got {ragged_dim}")
         n_groups = offs.shape[0]
-        rows = torch.arange(source.shape[0], device=offs.device)
-        # right=True: row r belongs to the group whose end-offset first exceeds r
-        ids = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
+        ragged_length = source.shape[ragged_dim]
+        dense_dim = -1 if ragged_dim == -2 else -2
+        positions = torch.arange(ragged_length, device=offs.device)
+        # right=True maps a position to the group whose end offset first exceeds it.
+        ids = torch.searchsorted(offs, positions, right=True).clamp_(max=n_groups - 1)
 
         def by_expert(t):
-            per_row = t.flatten(1).sum(1)
-            return per_row.new_zeros(n_groups).index_add_(0, ids, per_row)
+            per_position = t.sum(dense_dim)
+            return per_position.new_zeros(n_groups).index_add_(0, ids, per_position)
 
         src_sq, err_sq, under, nonzero = (
             by_expert(squares),
@@ -99,7 +106,9 @@ def accumulate_quantization_sums(
             by_expert(nonzero_mask.float()),
         )
         starts = torch.cat([offs.new_zeros(1), offs[:-1]])
-        numel = ((offs - starts) * source.shape[1]).to(src_sq.dtype)
+        numel = ((offs - starts) * source.shape[dense_dim]).to(src_sq.dtype)
+    else:
+        raise ValueError(f"grouped source must be 2D or 3D, got {source.ndim}D")
 
     return src_sq, err_sq, under, numel, nonzero
 
@@ -144,6 +153,7 @@ def record_operand(
         codes,
         dequantized,
         offs=offs,
+        ragged_dim=ragged_dim,
         rotated_source=rotated_source,
     )
     for name, value in zip(stats.FIELDS, sums):

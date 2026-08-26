@@ -164,15 +164,16 @@ def _bench_wgrad_point(E, K, N, scheme):
     a, _, offs = _make(E, M_FIXED, K, N)
     g = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16) * 0.1
     fmt = _fmt(scheme)
-    aq, sa = quantize_operand(a, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
+    a = a.mT
+    aq, sa = quantize_operand(a, -1, fmt, _ROWWISE, offs=offs, ragged_dim=-1)
     gq, sg = quantize_operand(g, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
     ref = _scaled_grouped_mm(
-        fmt, aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0, backend="eager"
+        fmt, aq, gq, sa, sg, offs, torch.bfloat16, 0, backend="eager"
     )
 
     def triton_fn():
         return _scaled_grouped_mm(
-            fmt, aq.mT, gq, sa.mT, sg, offs, torch.bfloat16, 0, backend="triton"
+            fmt, aq, gq, sa, sg, offs, torch.bfloat16, 0, backend="triton"
         )
 
     triton_out = triton_fn()
