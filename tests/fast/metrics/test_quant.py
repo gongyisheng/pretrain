@@ -19,6 +19,7 @@ _TENSORWISE = {
 
 METRICS = ("sqnr", "underflow_rate")
 SPREAD_METRICS = ("sqnr_min", "underflow_rate_max")
+RAGGED_DIM_CASES = [(-2, False), (-1, True)]
 
 
 # --- compute_quantization_metrics: a pure function of (source, dequantized, codes) ---
@@ -95,6 +96,30 @@ def test_an_all_zero_expert_stays_valid():
     numel, nonzero = sums[-2], sums[-1]
     assert (numel > 0).all()
     assert nonzero[1].item() == 0.0 and nonzero[2].item() == 0.0
+
+
+@pytest.mark.parametrize("ragged_dim,transpose", RAGGED_DIM_CASES)
+def test_accumulate_quantization_sums_ragged_dim(ragged_dim, transpose):
+    source = torch.arange(1, 11, dtype=torch.float32).reshape(5, 2)
+    if transpose:
+        source = source.mT
+    offs = torch.tensor([2, 5])
+    sums = accumulate_quantization_sums(
+        source,
+        source,
+        source,
+        offs=offs,
+        ragged_dim=ragged_dim,
+    )
+    expected = (
+        torch.tensor([30.0, 355.0]),
+        torch.zeros(2),
+        torch.zeros(2),
+        torch.tensor([4.0, 6.0]),
+        torch.tensor([4.0, 6.0]),
+    )
+    for got, want in zip(sums, expected):
+        assert torch.equal(got, want)
 
 
 def test_sqnr_matches_hand_computed_ratio():

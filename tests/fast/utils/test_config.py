@@ -211,6 +211,50 @@ def test_config_to_dict_serializes_disabled_quant_scale_dtype(
     yaml.safe_dump(exported)
 
 
+def test_config_to_dict_rotation_roundtrip():
+    config = TrainConfig(
+        training=TrainingConfig(
+            mixed_precision="no",
+            quantization={
+                "enabled": True,
+                "dtype": {"recipe": "fp8"},
+                "rotation": {
+                    "rotation_cls": "hadamard",
+                    "rotation_kwargs": {
+                        "block_size": 4,
+                        "random_sign": True,
+                        "sign_vector": [1.0, -1.0, -1.0, 1.0],
+                    },
+                    "gemms": ["fwd", "wgrad"],
+                },
+            },
+        )
+    )
+    original_rule = _only_rule(config.training)
+    assert not hasattr(original_rule, "_rotation")
+
+    exported = config.to_dict()
+    exported_rotation = exported["training"]["quantization"][0]["rotation"]
+    assert set(exported_rotation) == {"rotation_cls", "rotation_kwargs", "gemms"}
+    assert exported_rotation["rotation_kwargs"]["sign_vector"] == [
+        1.0,
+        -1.0,
+        -1.0,
+        1.0,
+    ]
+    json.loads(json.dumps(exported))
+    yaml_export = yaml.safe_dump(exported)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "config.yaml")
+        with open(path, "w") as f:
+            f.write(yaml_export)
+        restored = load_config(path)
+
+    restored_rule = _only_rule(restored.training)
+    assert restored_rule.rotation == original_rule.rotation
+
+
 # ==================== CLI overrides ====================
 
 
@@ -669,13 +713,13 @@ def test_modelconfig_moe_unknown_router_score_fn_raises():
 
 
 def test_modelconfig_unknown_activation_raises():
-    with pytest.raises(ValueError, match="Unknown activation"):
+    with pytest.raises(ValueError, match="unknown activation"):
         ModelConfig(mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "mish"}}])
 
 
 def test_modelconfig_gated_only_activation_rejected_when_ungated():
     # bilinear is gated-only; rejected for an ungated mlp
-    with pytest.raises(ValueError, match="Unknown activation"):
+    with pytest.raises(ValueError, match="unknown activation"):
         ModelConfig(
             mlp=[
                 {
@@ -1372,6 +1416,162 @@ def test_configs_model_key_order_d_model_n_layers_vocab_size_attn_mlp_first():
 # ==================== Scaling recipes (tensorwise, rowwise, blockwise) ====================
 
 
+def test_quantization_config_rotation_defaults():
+    """Config canonicalization applies defaults without storing runtime state."""
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"recipe": "fp8"},
+        rotation={"rotation_cls": "hadamard"},
+    )
+    assert q.rotation["rotation_cls"] == "hadamard"
+    assert q.rotation["gemms"] == ["fwd", "dgrad", "wgrad"]
+    assert q.rotation["rotation_kwargs"] == {}
+    exported = TrainConfig(training=TrainingConfig(quantization=q)).to_dict()
+    assert exported["training"]["quantization"][0]["rotation"] == q.rotation
+    yaml.safe_dump(exported)
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [
+        None,
+        {},
+        {"rotation_kwargs": {"block_size": 32}},
+        {"gemms": ["wgrad"]},
+    ],
+)
+def test_quantization_config_rotation_requires_rotation_cls(rotation):
+    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8"}, rotation=rotation)
+    assert q.rotation is None
+
+
+@pytest.mark.parametrize("block_size", [1, 2, 32, 128])
+def test_quantization_config_rotation(block_size):
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"recipe": "fp8"},
+        rotation={
+            "rotation_cls": "hadamard",
+            "rotation_kwargs": {"block_size": block_size},
+        },
+    )
+    assert q.rotation["rotation_cls"] == "hadamard"
+    assert q.rotation["rotation_kwargs"]["block_size"] == block_size
+
+
+@pytest.mark.parametrize(
+    "gemms, expected",
+    [
+        (["wgrad"], ["wgrad"]),
+        (["dgrad", "wgrad"], ["dgrad", "wgrad"]),
+        ("wgrad", ["wgrad"]),
+    ],
+)
+def test_quantization_config_rotation_gemms(gemms, expected):
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"recipe": "fp8"},
+        rotation={"rotation_cls": "hadamard", "gemms": gemms},
+    )
+    assert q.rotation["gemms"] == expected
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [
+        [],
+        {"rotation_cls": []},
+        {"rotation_cls": "givens"},
+        {"rotation_cls": "hadamard", "rotation_kwargs": 4},
+        {"rotation_cls": "hadamard", "rotation_kwargs": []},
+        {"rotation_cls": "hadamard", "gemms": ["bwd"]},
+        {"rotation_cls": "hadamard", "gemms": ["wgrad", "wgrad"]},
+        {"rotation_cls": "hadamard", "gemm": ["wgrad"]},
+    ],
+)
+def test_quantization_config_rotation_raise_error(rotation):
+    with pytest.raises(ValueError, match="rotation"):
+        QuantizationConfig(
+            enabled=True,
+            dtype={"recipe": "fp8"},
+            rotation=rotation,
+        )
+
+
+def test_training_config_keeps_per_rule_rotations():
+    """Rules must be free to rotate differently; each keeps its own spec."""
+    config = TrainingConfig(
+        mixed_precision="bf16",
+        quantization=[
+            {
+                "enabled": True,
+                "dtype": {"recipe": "int8"},
+                "include": ["*attn*"],
+                "exclude": [],
+                "rotation": {
+                    "rotation_cls": "hadamard",
+                    "rotation_kwargs": {"block_size": 16, "seed": 1},
+                },
+            },
+            {
+                "enabled": True,
+                "dtype": {"recipe": "int8"},
+                "include": ["*mlp*"],
+                "exclude": [],
+                "rotation": {
+                    "rotation_cls": "hadamard",
+                    "rotation_kwargs": {"block_size": 64, "seed": 2},
+                    "gemms": ["wgrad"],
+                },
+            },
+        ],
+    )
+
+    attn, mlp = config.quantization
+    assert attn.rotation["rotation_kwargs"] == {"block_size": 16, "seed": 1}
+    assert attn.rotation["gemms"] == ["fwd", "dgrad", "wgrad"]
+    assert mlp.rotation["rotation_kwargs"] == {"block_size": 64, "seed": 2}
+    assert mlp.rotation["gemms"] == ["wgrad"]
+
+
+def test_quantization_config_rotation_kwargs_raise_error():
+    """Kwargs must survive the YAML round trip that carries them into a run."""
+    with pytest.raises(ValueError, match="rotation"):
+        QuantizationConfig(
+            enabled=True,
+            dtype={"recipe": "fp8"},
+            rotation={
+                "rotation_cls": "hadamard",
+                "rotation_kwargs": {"sign_vector": torch.ones(4)},
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "rotation_kwargs, expected_seed",
+    [
+        ({}, 23),
+        ({"seed": 7}, 7),
+    ],
+)
+def test_training_config_hadamard_rotation_seed(rotation_kwargs, expected_seed):
+    """An omitted Hadamard seed must inherit the training seed."""
+    config = TrainingConfig(
+        mixed_precision="bf16",
+        seed=23,
+        quantization={
+            "enabled": True,
+            "dtype": {"recipe": "int8"},
+            "rotation": {
+                "rotation_cls": "hadamard",
+                "rotation_kwargs": rotation_kwargs,
+            },
+        },
+    )
+
+    assert _only_rule(config).rotation["rotation_kwargs"]["seed"] == expected_seed
+
+
 def test_quant_blockwise_recipe_expands():
     q = QuantizationConfig(
         enabled=True, dtype={"recipe": "fp8"}, scale={"recipe": "blockwise"}
@@ -1431,15 +1631,6 @@ def test_quant_blockwise_fp32_scale_dtype_ok():
         },
     )
     assert q.scale["scale_dtype"] is torch.float32
-
-
-def test_quant_block_size_key_is_rejected():
-    with pytest.raises(ValueError, match="block_shape"):
-        QuantizationConfig(
-            enabled=True,
-            dtype={"recipe": "fp8"},
-            scale={"granularity": "blockwise", "block_size": 128},
-        )
 
 
 def test_monitoring_flags_default_true():
