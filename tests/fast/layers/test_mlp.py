@@ -86,6 +86,58 @@ def test_dense_bias_true_adds_biases(gated):
     assert blk.down_proj.bias is not None
 
 
+ACT_LIMIT_BLOCKS = [
+    (DenseMLPBlock, {}),
+    (
+        SparseMoEBlock,
+        {
+            "n_routed_experts": 4,
+            "n_routed_experts_per_token": 2,
+            "aux_loss": True,
+            "n_shared_experts": 1,
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("gated", [False, True])
+@pytest.mark.parametrize("block_cls,extra", ACT_LIMIT_BLOCKS)
+def test_activation_limit(block_cls, extra, gated):
+    """A limit above the data is a no-op; a tight one bounds the pre-activation."""
+    torch.manual_seed(0)
+    common = dict(d_model=64, intermediate_size=128, gated=gated, **extra)
+    # x is scaled so the projection output reliably exceeds the tight limit
+    x = torch.randn(2, 16, 64) * 8
+    unbounded = block_cls(**common)
+    loose = block_cls(**common, activation_limit=1e6)
+    tight = block_cls(**common, activation_limit=1.0)
+    loose.load_state_dict(unbounded.state_dict())
+    tight.load_state_dict(unbounded.state_dict())
+
+    base = unbounded(x)[0]
+    # a limit the data never reaches leaves the forward bit-identical
+    assert torch.equal(base, loose(x)[0])
+    out = tight(x)[0]
+    assert out.shape == base.shape
+    assert torch.isfinite(out).all()
+    assert not torch.allclose(base, out)
+
+
+@pytest.mark.parametrize("gated", [False, True])
+def test_dense_activation_limit_precision(gated):
+    """Clamping the projection output reproduces the block's forward exactly."""
+    torch.manual_seed(0)
+    blk = DenseMLPBlock(
+        d_model=64, intermediate_size=128, gated=gated, activation_limit=1.0
+    )
+    x = torch.randn(2, 16, 64) * 8
+    proj = blk.gate_up_proj if gated else blk.up_proj
+    h = proj(x).clamp(-1.0, 1.0)
+    ref = blk.down_proj(blk.act_fn(*h.chunk(2, dim=-1)) if gated else blk.act_fn(h))
+    # same ops in the same order, so the match is exact
+    assert torch.equal(blk(x)[0], ref)
+
+
 # ---------------------------------------------------------------------------
 # DenseMLPBlock — compute_flops
 # ---------------------------------------------------------------------------
