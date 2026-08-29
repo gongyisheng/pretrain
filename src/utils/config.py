@@ -176,10 +176,15 @@ class ModelConfig:
                 f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
             )
         # Bounds the projection output before the activation; absent = unbounded.
-        limit = kwargs.get("activation_limit")
-        if limit is not None and (not isinstance(limit, (int, float)) or limit <= 0):
+        activation_limit = kwargs.get("activation_limit")
+        if activation_limit is not None and (
+            isinstance(activation_limit, bool)
+            or not isinstance(activation_limit, (int, float))
+            or activation_limit <= 0
+        ):
             raise ValueError(
-                f"activation_limit must be a positive number or null; got {limit!r}"
+                "activation_limit must be a positive number or null; "
+                f"got {activation_limit!r}"
             )
         if mlp_cls == "moe":
             kwargs.setdefault("n_shared_experts", 0)

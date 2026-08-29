@@ -696,7 +696,7 @@ def test_modelconfig_gated_only_activation_rejected_when_ungated():
 
 
 @pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
-@pytest.mark.parametrize("limit", [0, -7.0, True, "7"])
+@pytest.mark.parametrize("limit", [0, -7.0, True, False, "7"])
 def test_modelconfig_activation_limit_raise_error(mlp_cls, limit):
     kwargs = {"activation_limit": limit}
     if mlp_cls == "moe":
