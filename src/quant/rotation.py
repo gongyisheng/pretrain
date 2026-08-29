@@ -1,20 +1,25 @@
 import hashlib
 import inspect
 import json
-import math
 from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
 
+from src.kernel.ops.hadamard import rotate
+
 
 class Rotation(nn.Module, ABC):
     @abstractmethod
-    def forward(self, x: torch.Tensor, contract_dim: int) -> torch.Tensor:
-        """Rotate along a GEMM contraction dimension."""
+    def forward(
+        self, x: torch.Tensor, contract_dim: int, out_dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        """Rotate along a GEMM contraction dimension, storing as `out_dtype`."""
 
     @abstractmethod
-    def inverse(self, x: torch.Tensor, contract_dim: int) -> torch.Tensor:
+    def inverse(
+        self, x: torch.Tensor, contract_dim: int, out_dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
         """Undo the rotation along a GEMM contraction dimension."""
 
     @property
@@ -46,6 +51,8 @@ class HadamardRotation(Rotation):
             )
         if type(random_sign) is not bool:
             raise ValueError(f"random_sign must be a bool, got {random_sign!r}")
+        if type(seed) is not int or seed < 0:
+            raise ValueError(f"seed must be a non-negative int, got {seed!r}")
         if sign_vector is not None:
             try:
                 signs = torch.as_tensor(sign_vector, dtype=torch.float32)
@@ -69,72 +76,46 @@ class HadamardRotation(Rotation):
         else:
             signs = None
 
-        # Sylvester construction, entries +-1. Kept unscaled so every product in the
-        # transform is an exact sign flip; the 1/sqrt(block) normalization is applied
-        # to the operand first, which also keeps fp16 sums inside fp32's range.
-        hadamard = torch.ones(1, 1)
-        while hadamard.shape[0] < block_size:
-            hadamard = torch.cat(
-                [
-                    torch.cat([hadamard, hadamard], 1),  # (N, 2N)
-                    torch.cat([hadamard, -hadamard], 1),  # (N, 2N)
-                ],
-                0,
-            )  # (2N, 2N)
-
         self.block_size = block_size
         self.random_sign = random_sign
         self.seed = seed
         self.register_buffer("sign_vector", signs)
-        # Derived from block_size, so it stays out of checkpoints.
-        self.register_buffer("hadamard", hadamard, persistent=False)
 
     @property
     def alignment(self) -> int:
         return self.block_size
 
-    def forward(self, x: torch.Tensor, contract_dim: int) -> torch.Tensor:
-        return self._transform(x, contract_dim, inverse=False)
+    def forward(
+        self, x: torch.Tensor, contract_dim: int, out_dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        return self._transform(x, contract_dim, False, out_dtype)
 
-    def inverse(self, x: torch.Tensor, contract_dim: int) -> torch.Tensor:
-        return self._transform(x, contract_dim, inverse=True)
+    def inverse(
+        self, x: torch.Tensor, contract_dim: int, out_dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        return self._transform(x, contract_dim, True, out_dtype)
 
     def _transform(
-        self, x: torch.Tensor, contract_dim: int, inverse: bool
+        self,
+        x: torch.Tensor,
+        contract_dim: int,
+        inverse: bool,
+        out_dtype: torch.dtype | None,
     ) -> torch.Tensor:
         if contract_dim not in (-2, -1):
             raise ValueError(f"contract_dim must be -2 or -1, got {contract_dim}")
         if self.block_size == 1:
-            return x
-        length = x.shape[contract_dim]
-        if length % self.block_size:
-            raise ValueError(
-                f"block {self.block_size} must divide the rotated extent {length}"
-            )
-
-        hadamard = self.hadamard.to(device=x.device, dtype=torch.float32)
-        signs = self.sign_vector
-        if signs is not None:
-            signs = signs.to(device=x.device, dtype=torch.float32)
-        scale = 1 / math.sqrt(self.block_size)
+            return x if out_dtype is None else x.to(out_dtype)
         if contract_dim == -1:
-            blocks = x.float().reshape(*x.shape[:-1], -1, self.block_size) * scale
-            if signs is not None and not inverse:
-                blocks = blocks * signs
-            blocks = blocks @ hadamard
-            if signs is not None and inverse:
-                blocks = blocks * signs
-        else:
-            blocks = (
-                x.float().reshape(*x.shape[:-2], -1, self.block_size, x.shape[-1])
-                * scale
-            )
-            if signs is not None and not inverse:
-                blocks = blocks * signs[:, None]
-            blocks = hadamard @ blocks
-            if signs is not None and inverse:
-                blocks = blocks * signs[:, None]
-        return blocks.reshape(x.shape).to(x.dtype)
+            return rotate(x, self.block_size, self._signs(x), inverse, out_dtype)
+        return rotate(
+            x.transpose(-2, -1), self.block_size, self._signs(x), inverse, out_dtype
+        ).transpose(-2, -1)
+
+    def _signs(self, x: torch.Tensor) -> torch.Tensor | None:
+        if self.sign_vector is None:
+            return None
+        return self.sign_vector.to(device=x.device, dtype=torch.float32)
 
 
 ROTATION_REGISTRY: dict[str, type[Rotation]] = {"hadamard": HadamardRotation}

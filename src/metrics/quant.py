@@ -138,7 +138,10 @@ def record_operand(
     # Detach first: `codes`/`scale` are live graph nodes, so folding them in would
     # make the accumulator buffers require grad and retain the step's graph.
     source, codes, scale = source.detach(), codes.detach(), scale.detach()
-    rotated_source = None if rotation is None else rotation(source, contract_dim)
+    # Must match `quantize_operand`'s rotation exactly, or the error metrics skew.
+    rotated_source = (
+        None if rotation is None else rotation(source, contract_dim, torch.float32)
+    )
     dequantized = dequantize_operand(
         codes,
         scale,

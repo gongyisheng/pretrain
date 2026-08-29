@@ -385,11 +385,12 @@ def quantize_operand(
     _check_dims(x, contract_dim, ragged_dim, offs)
     if rotation is not None:
         _check_rotation_dims(contract_dim, ragged_dim, offs, rotation)
-        x = rotation(x, contract_dim)
+    # The rotation kernel transforms in float32 and stores float32 directly,
+    # so the operand is never rounded back to its own dtype in between.
+    xf = x.float() if rotation is None else rotation(x, contract_dim, torch.float32)
     granularity = scale_cfg["granularity"]
     block_outer, block_size = scale_cfg["block_shape"]
     scale_dtype = scale_cfg["scale_dtype"]
-    xf = x.float()
     if granularity == "tensorwise":
         codes, scale = _quantize_tensorwise(
             xf, contract_dim, fmt, scale_dtype, offs, ragged_dim, stochastic_rounding

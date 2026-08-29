@@ -26,3 +26,12 @@ def to_swizzle_32_4_4(scale: torch.Tensor) -> torch.Tensor:
         .contiguous()
         .flatten()
     )
+
+
+def to_hadamard_scales(hadamard_block: int) -> tuple[float, float]:
+    """
+    Split 1/sqrt(block) into an exact pre-transform factor and a residual
+    """
+    log_block = hadamard_block.bit_length() - 1
+    pre = 2.0 ** -((log_block + 1) // 2)
+    return pre, 2.0**0.5 if log_block % 2 else 1.0
