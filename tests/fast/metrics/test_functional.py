@@ -5,6 +5,7 @@ tests assert directly on returned values with no logger or tracker involved.
 """
 
 import math
+import statistics
 
 import pytest
 import torch
@@ -288,6 +289,18 @@ def test_grad_norms_plain_model(arch_id, impl, device):
         assert v >= 0 and math.isfinite(v), f"{k}={v}"
 
 
+def test_grad_norms_3d_is_median_over_experts():
+    """Stacked expert grads report the median per-expert norm, not the stack norm."""
+    model = torch.nn.Module()
+    model.expert_gate_up = torch.nn.Parameter(torch.zeros(5, 6, 3))
+    model.expert_gate_up.grad = torch.randn(5, 6, 3)
+    g = model.expert_gate_up.grad
+    expected = statistics.median(g[i].norm().item() for i in range(g.shape[0]))
+    result = metric_utils.compute_grad_norms(model)
+    assert result["expert_gate_up"] == pytest.approx(expected)
+    assert result["expert_gate_up"] != pytest.approx(g.norm().item())
+
+
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_grad_norms_compiled_model(arch_id, impl, device):
@@ -334,13 +347,15 @@ def test_weight_norms_match_l2():
     assert result["bias"] == pytest.approx(model.bias.norm().item())
 
 
-def test_weight_norms_3d_is_global_over_experts():
-    """Stacked expert weights report one norm over all experts, not a per-expert stat."""
+def test_weight_norms_3d_is_median_over_experts():
+    """Stacked expert weights report the median per-expert norm, not the stack norm."""
     model = torch.nn.Module()
-    model.expert_gate_up = torch.nn.Parameter(torch.randn(4, 6, 3))
+    model.expert_gate_up = torch.nn.Parameter(torch.randn(5, 6, 3))
     w = model.expert_gate_up.detach()
+    expected = statistics.median(w[i].norm().item() for i in range(w.shape[0]))
     result = metric_utils.compute_weight_norms(model)
-    assert result["expert_gate_up"] == pytest.approx(w.norm().item())
+    assert result["expert_gate_up"] == pytest.approx(expected)
+    assert result["expert_gate_up"] != pytest.approx(w.norm().item())
 
 
 def test_weight_norms_compiled_model_strips_prefix():
@@ -390,20 +405,22 @@ def test_svd_metrics_zero_matrix():
     assert metric_utils._svd_metrics(torch.zeros(4, 4)) == {"srank": 0.0, "pr": 0.0}
 
 
-def test_svd_metrics_3d_averages_over_experts():
-    """Stacked (E, out, in) tensor: metrics equal the mean of per-expert 2D."""
+def test_svd_metrics_3d_medians_over_experts():
+    """Stacked (E, out, in) tensor: metrics equal the median of per-expert 2D."""
     torch.manual_seed(0)
     w = torch.randn(5, 16, 12)  # (E, out, in)
     batched = metric_utils._svd_metrics(w)
     per_expert = [metric_utils._svd_metrics(w[e]) for e in range(w.size(0))]
-    mean_srank = sum(d["srank"] for d in per_expert) / w.size(0)
-    mean_pr = sum(d["pr"] for d in per_expert) / w.size(0)
-    assert batched["srank"] == pytest.approx(mean_srank, rel=1e-5)
-    assert batched["pr"] == pytest.approx(mean_pr, rel=1e-5)
+    assert batched["srank"] == pytest.approx(
+        statistics.median(d["srank"] for d in per_expert), rel=1e-5
+    )
+    assert batched["pr"] == pytest.approx(
+        statistics.median(d["pr"] for d in per_expert), rel=1e-5
+    )
 
 
 def test_svd_metrics_3d_rank_one_experts():
-    """Every expert rank-1 → averaged srank≈pr≈1."""
+    """Every expert rank-1 → median srank≈pr≈1."""
     expert = torch.outer(torch.arange(1.0, 6.0), torch.arange(1.0, 4.0))
     w = expert.unsqueeze(0).expand(4, -1, -1).contiguous()  # (4, 5, 3)
     m = metric_utils._svd_metrics(w)
@@ -463,7 +480,7 @@ def test_grad_svd_metrics_skips_params_without_grad():
 
 
 def test_grad_svd_metrics_includes_moe_experts():
-    """3D stacked expert grads are covered, averaged over experts."""
+    """3D stacked expert grads are covered, median over experts."""
     model_cfg = _qwen3_moe_cfg("sdpa")
     model = build_model(_FakeTrainConfig(model_cfg))
     _populate_grads(model, model_cfg.vocab_size, "sdpa")

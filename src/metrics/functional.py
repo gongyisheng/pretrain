@@ -17,14 +17,18 @@ from src.utils.config import TrainConfig
 
 
 def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-    """Return L2 gradient norms keyed by parameter name."""
+    """Return L2 gradient norms keyed by parameter name (3D: median per expert)."""
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if param.grad is None:
             continue
         # torch.compile wraps model in OptimizedModule, prepending "_orig_mod."
         name = name.removeprefix("_orig_mod.")
-        norms[name] = param.grad.data.norm(2.0).item()
+        grad = param.grad.data
+        if grad.ndim == 3:
+            norms[name] = grad.flatten(1).norm(2.0, dim=1).median().item()
+        else:
+            norms[name] = grad.norm(2.0).item()
     return norms
 
 
@@ -44,13 +48,17 @@ def compute_activation_norm(model: torch.nn.Module) -> dict[str, float]:
 
 
 def compute_weight_norms(model: torch.nn.Module) -> dict[str, float]:
-    """Return L2 weight norms keyed by parameter name."""
+    """Return L2 weight norms keyed by parameter name"""
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if not param.is_floating_point():
             continue
         name = name.removeprefix("_orig_mod.")
-        norms[name] = param.detach().norm(2.0).item()
+        weight = param.detach()
+        if weight.ndim == 3:
+            norms[name] = weight.flatten(1).norm(2.0, dim=1).median().item()
+        else:
+            norms[name] = weight.norm(2.0).item()
     return norms
 
 
@@ -101,14 +109,14 @@ def _gram_energy(weight: torch.Tensor) -> torch.Tensor:
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """Return stable rank and participation ratio, averaged for 3D weights."""
+    """Return stable rank and participation ratio, median over experts for 3D."""
     energy = _gram_energy(weight)  # (..., k) descending σ²
     total = energy.sum(-1)
     if (total == 0).any():
         return {"srank": 0.0, "pr": 0.0}
     srank = total / energy[..., 0]  # stable rank ‖W‖_F²/σ_max² (rank-1 collapse canary)
     pr = total.pow(2) / energy.pow(2).sum(-1)  # participation ratio (Σσ²)²/Σσ⁴
-    return {"srank": srank.mean().item(), "pr": pr.mean().item()}
+    return {"srank": srank.median().item(), "pr": pr.median().item()}
 
 
 def compute_weight_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:
