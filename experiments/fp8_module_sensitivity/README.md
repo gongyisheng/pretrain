@@ -33,14 +33,29 @@ All runs share the model, data, schedule, and optimizer; the only independent va
 - All runs: seq_len=1024, batch=16, grad_accum=16 (eff. batch=256, ~262K tok/step), 50K steps (~13B tokens), bf16 mixed precision, lr=5e-4, cosine with 1500 warmup, min_lr=5e-5, seed=42, OpenWebText.
 - `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`.
 
+### 455M scale (`qwen3_455m_*`)
+
+The same add-one-in ablation at the 404M-scale architecture (`configs/qwen3_404m.yaml`) with untied embeddings, for a cross-scale check. Untying adds `vocab × d_model` = 50257 × 1024 ≈ 51.5M, so the model is **~455M** (455,406,080 params) vs the tied ~404M (403,894,784).
+
+| Config | FP8 module | `quant.include` | Quantized Linears |
+|---|---|---|---|
+| qwen3_455m_bf16 | none (baseline) | — (quant off) | 0 |
+| qwen3_455m_fp8_attn | attention | `[blocks.*.attn.*]` | 112 (4×28) |
+| qwen3_455m_fp8_mlp | MLP | `[blocks.*.mlp.*]` | 56 (2×28) |
+| qwen3_455m_fp8_lm_head | output head | `[lm_head]` | 1 |
+
+- Model: d_model=1024, 28 layers, gqa 16/8, qk_norm, intermediate_size=3072, rope θ=10000, `tie_word_embeddings: false` (~455M).
+- All runs: seq_len=1024, batch=32, grad_accum=8 (eff. batch=256), lr=2e-4, min_lr=2e-5 (lr/min_lr match `configs/qwen3_404m.yaml`; the 32×8 split uses the larger per-step batch an H200 (144GiB) affords). Everything else matches the 77M runs.
+
 Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 6000, SM 12.0) the FP8 GEMMs use Blackwell's cuBLASLt path.
 
 ## Run
 
-Runs the bf16 baseline, then each module in FP8.
+Each script runs the bf16 baseline, then each module in FP8, at its scale. `run_77m.sh` runs the untied-51M-base variant (`qwen3_77m_*`); `run_455m.sh` runs the 404M-scale variant (`qwen3_455m_*`) on an H200 (144GiB).
 
 ```bash
-nohup bash experiments/fp8_module_sensitivity/run.sh > logs/fp8_module_sensitivity.log 2>&1 &
+nohup bash experiments/fp8_module_sensitivity/run_77m.sh  > logs/fp8_module_sensitivity_77m.log  2>&1 &
+nohup bash experiments/fp8_module_sensitivity/run_455m.sh > logs/fp8_module_sensitivity_455m.log 2>&1 &
 ```
 
 ## Results

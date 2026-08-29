@@ -1,6 +1,6 @@
 #!/bin/bash
 # FP8 module-sensitivity add-one-in ablation at Qwen3-77M (untied), Muon optimizer.
-# Usage: nohup bash experiments/fp8_module_sensitivity/run.sh > logs/fp8_module_sensitivity.log 2>&1 &
+# Usage: nohup bash experiments/fp8_module_sensitivity/run_77m.sh > logs/fp8_module_sensitivity_77m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
