@@ -16,7 +16,6 @@ model:
     mlp_kwargs:
       intermediate_size: 3072
       dropout: 0.0
-      activation_limit: 127.0
   tie_word_embeddings: false
   norm_cls: rmsnorm
   pos_emb_cls: rope
@@ -41,7 +40,7 @@ training:
     enabled: true
     dtype:
       weight: int8
-      act: int8
+      act: bf16
       grad_out: bf16
     scale:
       granularity: tensorwise
