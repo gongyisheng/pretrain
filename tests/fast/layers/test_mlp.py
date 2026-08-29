@@ -643,15 +643,16 @@ def test_sparse_moe_block_expert_bias_updates_in_train_only():
     )  # imbalanced load moves bias at the step boundary
 
 
-def test_sparse_moe_block_post_step_accumulates_across_microbatches():
+@pytest.mark.parametrize("expert_bias", [True, False])
+def test_sparse_moe_block_post_step_accumulates_across_microbatches(expert_bias):
     torch.manual_seed(0)
     block = SparseMoEBlock(
         d_model=64,
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        aux_loss=False,
-        expert_bias=True,
+        aux_loss=not expert_bias,
+        expert_bias=expert_bias,
     )
     block.train()
     x = torch.randn(4, 16, 64)  # 64 tokens, k=2 -> 128 routings per micro-batch
@@ -661,7 +662,8 @@ def test_sparse_moe_block_post_step_accumulates_across_microbatches():
     assert block.expert_load.train_load.sum().item() == 2 * 64 * 2
 
     block.post_step()
-    # post_step consumes the accumulated load (bias update) and resets it.
+    # post_step resets the load in both balancing modes, so the load metrics read
+    # one step's routing whether or not the bias controller consumed it.
     assert block.expert_load.train_load.sum().item() == 0
     assert "expert_load.train_load" not in block.state_dict()  # non-persistent
 
@@ -887,7 +889,9 @@ def test_moe_router_matches_ref_under_saturation(dtype, atol):
     "gated,activation",
     [
         (True, "silu"),
+        (True, "silu_openai"),
         (False, "gelu"),
+        (False, "silu_openai"),
         (False, "relu"),
     ],
 )
@@ -983,7 +987,10 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
 
 # counts cover an empty group in interior, leading, and trailing positions.
 @pytest.mark.parametrize("counts", [[5, 0, 7, 4], [0, 5, 7, 4], [5, 7, 4, 0]])
-@pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
+@pytest.mark.parametrize(
+    "gated,activation",
+    [(True, "silu"), (True, "silu_openai"), (False, "gelu"), (False, "silu_openai")],
+)
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
 def test_grouped_mlp_matches_per_group_loop(
@@ -1177,7 +1184,10 @@ def test_sparse_moe_latent_output_shape():
 
 
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
+@pytest.mark.parametrize(
+    "gated,activation",
+    [(True, "silu"), (True, "silu_openai"), (False, "gelu"), (False, "silu_openai")],
+)
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
 def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
     torch.manual_seed(0)

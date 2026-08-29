@@ -464,7 +464,7 @@ class SparseMoEBlock(nn.Module):
     def post_step(self):
         if self.expert_bias:
             self.router.update_expert_bias(self.expert_load.train_load)
-            self.expert_load.reset_train_load()
+        self.expert_load.reset_train_load()
 
     def forward_meta(self) -> dict:
         """Routing metadata from the last forward. `expert_load` is the accumulated
