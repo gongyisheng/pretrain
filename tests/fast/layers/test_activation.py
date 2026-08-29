@@ -19,7 +19,15 @@ SIMPLE_UNGATED = ["relu", "gelu", "silu", "leaky_relu"]
 SQUARED_UNGATED = ["relu2", "gelu2", "silu2", "leaky_relu2"]
 # Ungated names whose output saturates to ~0 for large negative x.
 # leaky variants are excluded — they preserve a small slope on the negative side.
-SATURATING_UNGATED = ["relu", "gelu", "silu", "relu2", "gelu2", "silu2"]
+SATURATING_UNGATED = [
+    "relu",
+    "gelu",
+    "silu",
+    "silu_openai",
+    "relu2",
+    "gelu2",
+    "silu2",
+]
 SIMPLE_GATED = ["relu", "gelu", "silu", "leaky_relu", "bilinear", "powlu"]
 SQUARED_GATED = ["relu2", "gelu2", "silu2", "leaky_relu2", "bilinear2"]
 
@@ -60,6 +68,16 @@ def test_ungated_large_positive_no_overflow_simple(name, dtype):
     """Large positive x: simple unary acts pass through ~unchanged; output must be finite."""
     act = UNGATED_ACTIVATIONS[name]
     ref = UNGATED_ACTIVATIONS_REFS[name]
+    x = torch.full((2, 16, 64), 1000.0, dtype=dtype)
+    out = act(x)
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out, ref(x), atol=1.0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_ungated_silu_openai_large_positive_clamps(dtype):
+    act = UNGATED_ACTIVATIONS["silu_openai"]
+    ref = UNGATED_ACTIVATIONS_REFS["silu_openai"]
     x = torch.full((2, 16, 64), 1000.0, dtype=dtype)
     out = act(x)
     assert torch.isfinite(out).all()
@@ -145,6 +163,18 @@ def test_gated_large_input_no_overflow_simple(name, dtype):
     rtol = 1e-2 if dtype == torch.bfloat16 else 2e-3
     assert torch.allclose(
         out, GATED_ACTIVATIONS_REFS[name](gate, up), atol=10.0, rtol=rtol
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_gated_silu_openai_large_input_clamps(dtype):
+    act = GATED_ACTIVATIONS["silu_openai"]
+    gate = torch.full((2, 16, 64), 100.0, dtype=dtype)
+    up = torch.full((2, 16, 64), 100.0, dtype=dtype)
+    out = act(gate, up)
+    assert torch.isfinite(out).all()
+    assert torch.allclose(
+        out, GATED_ACTIVATIONS_REFS["silu_openai"](gate, up), atol=1.0, rtol=0.0
     )
 
 

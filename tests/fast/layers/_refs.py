@@ -75,6 +75,15 @@ def silu_ref(x: torch.Tensor) -> torch.Tensor:
     return (xf * torch.sigmoid(xf)).to(x.dtype)
 
 
+def silu_openai_ref(x: torch.Tensor) -> torch.Tensor:
+    """OpenAI SiLU: clamp only the positive side before x * sigmoid(alpha * x)."""
+    alpha = 1.702
+    limit = 7.0
+    xf = x.float()
+    gated = xf.clamp(max=limit)
+    return (gated * torch.sigmoid(alpha * gated)).to(x.dtype)
+
+
 def leaky_relu_ref(x: torch.Tensor) -> torch.Tensor:
     """leaky_relu(x, 0.01) = x if x > 0 else 0.01 * x."""
     xf = x.float()
@@ -110,6 +119,14 @@ def gelu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 def silu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (silu_ref(gate.float()) * up.float()).to(gate.dtype)
+
+
+def silu_openai_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    alpha = 1.702
+    limit = 7.0
+    gated = gate.float().clamp(max=limit)
+    shifted_up = up.float().clamp(min=-limit, max=limit) + 1.0
+    return (gated * torch.sigmoid(alpha * gated) * shifted_up).to(gate.dtype)
 
 
 def leaky_relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -163,6 +180,7 @@ UNGATED_ACTIVATIONS_REFS = {
     "relu": relu_ref,
     "gelu": gelu_ref,
     "silu": silu_ref,
+    "silu_openai": silu_openai_ref,
     "leaky_relu": leaky_relu_ref,
     "relu2": relu2_ref,
     "gelu2": gelu2_ref,
@@ -173,6 +191,7 @@ GATED_ACTIVATIONS_REFS = {
     "relu": relu_glu_ref,
     "gelu": gelu_glu_ref,
     "silu": silu_glu_ref,
+    "silu_openai": silu_openai_glu_ref,
     "leaky_relu": leaky_relu_glu_ref,
     "relu2": relu2_glu_ref,
     "gelu2": gelu2_glu_ref,
