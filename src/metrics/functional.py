@@ -17,7 +17,7 @@ from src.utils.config import TrainConfig
 
 
 def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-    """Return L2 gradient norms keyed by parameter name (3D: median per expert)."""
+    """Return L2 gradient norms; use the median over nonzero 3D experts."""
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if param.grad is None:
@@ -26,7 +26,9 @@ def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
         name = name.removeprefix("_orig_mod.")
         grad = param.grad.data
         if grad.ndim == 3:
-            norms[name] = grad.flatten(1).norm(2.0, dim=1).median().item()
+            per_expert = grad.flatten(1).norm(2.0, dim=1)
+            live = per_expert[per_expert > 0]
+            norms[name] = live.median().item() if live.numel() else 0.0
         else:
             norms[name] = grad.norm(2.0).item()
     return norms
@@ -76,6 +78,11 @@ def compute_maxvio(expert_counts: torch.Tensor) -> float:
     return ((counts.max() - mean) / mean).item()
 
 
+def compute_moe_unrouted_expert_count(load_per_layer: list[torch.Tensor]) -> list[int]:
+    """Per-layer count of experts that received no token, in list order."""
+    return [int((counts == 0).sum()) for counts in load_per_layer]
+
+
 def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
     """Per-layer MaxVio from accumulated expert load counts, in list order."""
     return [compute_maxvio(c) for c in load_per_layer]
@@ -109,14 +116,25 @@ def _gram_energy(weight: torch.Tensor) -> torch.Tensor:
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """Return stable rank and participation ratio, median over experts for 3D."""
+    """Return median stable rank and participation ratio over nonzero-energy slices.
+
+    For 3D inputs the median runs over the experts the router actually touched:
+    an unrouted expert has an all-zero gradient and no spectrum, so including it
+    would drag srank/pr to zero for the whole stack. Their number is reported by
+    `compute_moe_unrouted_expert_count`.
+    """
     energy = _gram_energy(weight)  # (..., k) descending σ²
+    energy = energy.reshape(-1, energy.shape[-1])  # (E, k); E == 1 for 2D
     total = energy.sum(-1)
-    if (total == 0).any():
-        return {"srank": 0.0, "pr": 0.0}
-    srank = total / energy[..., 0]  # stable rank ‖W‖_F²/σ_max² (rank-1 collapse canary)
-    pr = total.pow(2) / energy.pow(2).sum(-1)  # participation ratio (Σσ²)²/Σσ⁴
-    return {"srank": srank.median().item(), "pr": pr.median().item()}
+    live = total > 0
+
+    metrics = {"srank": 0.0, "pr": 0.0}
+    if bool(live.any()):
+        energy, total = energy[live], total[live]
+        srank = total / energy[:, 0]  # stable rank ‖W‖_F²/σ_max² (collapse canary)
+        pr = total.pow(2) / energy.pow(2).sum(-1)  # participation ratio (Σσ²)²/Σσ⁴
+        metrics = {"srank": srank.median().item(), "pr": pr.median().item()}
+    return metrics
 
 
 def compute_weight_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:

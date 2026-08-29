@@ -241,6 +241,11 @@ class MetricsCollector:
                 d[f"train-moe/maxvio_batch/layer_{idx}"] = v
             d["train-moe/maxvio_batch/mean"] = statistics.mean(maxvio)
             d["train-moe/maxvio_batch/max"] = max(maxvio)
+            unrouted = metric_utils.compute_moe_unrouted_expert_count(
+                self._moe_expert_load
+            )
+            for idx, v in zip(self._moe_layer_indices, unrouted):
+                d[f"train-moe/unrouted/layer_{idx}"] = v
 
         if self.config.task == "pretrain":
             d["train/perplexity"] = metric_utils.compute_perplexity(loss)

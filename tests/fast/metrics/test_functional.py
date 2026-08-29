@@ -301,6 +301,30 @@ def test_grad_norms_3d_is_median_over_experts():
     assert result["expert_gate_up"] != pytest.approx(g.norm().item())
 
 
+def test_grad_norms_3d_excludes_unrouted_experts():
+    """Zero-grad (unrouted) experts must not enter the median."""
+    torch.manual_seed(0)
+    g = torch.randn(6, 6, 3)  # 5 live experts once one is zeroed (odd -> exact median)
+    model = torch.nn.Module()
+    model.expert_gate_up = torch.nn.Parameter(torch.zeros(6, 6, 3))
+    model.expert_gate_up.grad = g.clone()
+    model.expert_gate_up.grad[2] = 0.0
+    expected = statistics.median(
+        g[i].norm().item() for i in range(g.shape[0]) if i != 2
+    )
+    assert metric_utils.compute_grad_norms(model)["expert_gate_up"] == pytest.approx(
+        expected
+    )
+
+
+def test_grad_norms_3d_all_unrouted():
+    """No live expert → 0, not NaN from an empty median."""
+    model = torch.nn.Module()
+    model.expert_gate_up = torch.nn.Parameter(torch.zeros(4, 6, 3))
+    model.expert_gate_up.grad = torch.zeros(4, 6, 3)
+    assert metric_utils.compute_grad_norms(model)["expert_gate_up"] == 0.0
+
+
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_grad_norms_compiled_model(arch_id, impl, device):
@@ -400,11 +424,6 @@ def test_svd_metrics_rank_one_is_minimal():
     assert m["pr"] == pytest.approx(1.0, abs=1e-4)
 
 
-def test_svd_metrics_zero_matrix():
-    """All-zero weight (no positive σ) → every metric 0."""
-    assert metric_utils._svd_metrics(torch.zeros(4, 4)) == {"srank": 0.0, "pr": 0.0}
-
-
 def test_svd_metrics_3d_medians_over_experts():
     """Stacked (E, out, in) tensor: metrics equal the median of per-expert 2D."""
     torch.manual_seed(0)
@@ -428,9 +447,22 @@ def test_svd_metrics_3d_rank_one_experts():
     assert m["pr"] == pytest.approx(1.0, abs=1e-4)
 
 
-def test_svd_metrics_3d_zero_tensor():
-    """Any all-zero expert (no positive σ) → every metric 0."""
-    assert metric_utils._svd_metrics(torch.zeros(3, 4, 4)) == {"srank": 0.0, "pr": 0.0}
+@pytest.mark.parametrize("shape", [(4, 4), (3, 4, 4)])
+def test_svd_metrics_all_zero(shape):
+    """No slice carries energy → every metric 0."""
+    assert metric_utils._svd_metrics(torch.zeros(shape)) == {"srank": 0.0, "pr": 0.0}
+
+
+def test_svd_metrics_3d_unrouted_experts_excluded_from_median():
+    """An unrouted (all-zero) expert is counted, not propagated to srank/pr."""
+    torch.manual_seed(0)
+    w = torch.randn(5, 16, 12)  # (E, out, in)
+    holed = w.clone()
+    holed[2] = 0.0
+    expected = metric_utils._svd_metrics(torch.cat([w[:2], w[3:]]))  # 4 live experts
+    got = metric_utils._svd_metrics(holed)
+    assert got["srank"] == pytest.approx(expected["srank"], rel=1e-6)
+    assert got["pr"] == pytest.approx(expected["pr"], rel=1e-6)
 
 
 def test_svd_metrics_includes_moe_experts():
@@ -859,3 +891,9 @@ def test_compute_moe_maxvio_per_layer_list():
     load = [torch.tensor([10, 0, 5, 5]), torch.tensor([5, 5, 5, 5])]  # maxvio 1.0, 0.0
     out = metric_utils.compute_moe_maxvio(load)
     assert out == [pytest.approx(1.0), pytest.approx(0.0)]
+
+
+def test_compute_moe_unrouted_expert_count_per_layer_list():
+    """Per-layer count of zero-load experts, in load order."""
+    load = [torch.tensor([10, 0, 5, 0]), torch.tensor([5, 5, 5, 5]), torch.zeros(4)]
+    assert metric_utils.compute_moe_unrouted_expert_count(load) == [2, 0, 4]
