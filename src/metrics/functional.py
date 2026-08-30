@@ -106,13 +106,20 @@ def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def _gram_energy(weight: torch.Tensor) -> torch.Tensor:
-    """Return descending squared singular values without a full SVD."""
-    w = weight.float()
-    m, k = w.shape[-2], w.shape[-1]
-    gram = w @ w.transpose(-2, -1) if m <= k else w.transpose(-2, -1) @ w
-    eig = torch.linalg.eigvalsh(gram)  # ascending, (..., min(m, k))
-    return eig.clamp_min(0).flip(-1)  # descending σ²
+def _spectral_energy(weight: torch.Tensor) -> torch.Tensor:
+    """Return descending squared singular values, (..., min(m, k)).
+
+    Taken from the singular values of `weight` itself rather than the eigenvalues
+    of its Gram matrix. Forming W Wᵀ squares the condition number, and a barely
+    routed MoE expert is already extreme before that: its gradient carries σ from
+    ~1e-8 down to ~1e-19, so cond(W) ~1e11 becomes cond(gram) ~1e21, far past what
+    float32 resolves. The squared tail collapses into subnormals the fp32
+    eigensolver cannot separate, and `eigvalsh` then intermittently aborts with
+    "failed to converge ... ill-conditioned or too many repeated eigenvalues",
+    killing the run from the metrics path. `svdvals` never squares the
+    conditioning, and returns σ already sorted descending and non-negative.
+    """
+    return torch.linalg.svdvals(weight.float()).pow(2)  # descending σ²
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
@@ -123,7 +130,7 @@ def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
     would drag srank/pr to zero for the whole stack. Their number is reported by
     `compute_moe_unrouted_expert_count`.
     """
-    energy = _gram_energy(weight)  # (..., k) descending σ²
+    energy = _spectral_energy(weight)  # (..., k) descending σ²
     energy = energy.reshape(-1, energy.shape[-1])  # (E, k); E == 1 for 2D
     total = energy.sum(-1)
     live = total > 0
