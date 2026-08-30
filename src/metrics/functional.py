@@ -107,16 +107,7 @@ def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 
 
 def _unit_frobenius(weight: torch.Tensor) -> torch.Tensor:
-    """Scale each slice to unit Frobenius norm in float32; all-zero slices stay zero.
-
-    The peak divide comes first so the Frobenius norm cannot itself under- or
-    overflow: summing squares of ~1e-23 entries flushes to zero (the clamp then
-    inflates the slice by ~1e16 until sigma^4 overflows to NaN in `pr`), and
-    squaring ~1e20 entries saturates to inf (the slice collapses to zero and
-    reads as a rank collapse). Dividing by the peak magnitude first is exact --
-    it cannot over- or underflow, being an element already present -- and leaves
-    every entry in [-1, 1], so the norm that follows lands in [1, sqrt(m * k)].
-    """
+    """Scale each slice to unit Frobenius norm in float32; all-zero slices stay zero."""
     w = weight.float()
     tiny = torch.finfo(w.dtype).tiny
     if w.ndim == 3:
@@ -141,13 +132,7 @@ def _spectral_energy(weight: torch.Tensor) -> torch.Tensor:
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """Return median stable rank and participation ratio over nonzero-energy slices.
-
-    For 3D inputs the median runs over the experts the router actually touched:
-    an unrouted expert has an all-zero gradient and no spectrum, so including it
-    would drag srank/pr to zero for the whole stack. Their number is reported by
-    `compute_moe_unrouted_expert_count`.
-    """
+    """Return median stable rank and participation ratio over nonzero-energy slices."""
     energy = _spectral_energy(weight)  # (..., k) descending σ²
     energy = energy.reshape(-1, energy.shape[-1])  # (E, k); E == 1 for 2D
     total = energy.sum(-1)
