@@ -75,4 +75,4 @@ Fused operations must support float32, float16, and bfloat16. Preserve the calle
 
 ### Experiments
 
-Each `experiments/` folder is self-contained and must include a `README.md` covering the hypothesis, setup table (configs, key parameters, approximate parameter count), run command, results table, and notes. Experiment YAML must explicitly set `batch_size: 16`, `gradient_accumulation_steps: 16`, `checkpoint_every: 5000`, `eval_every: 100`, and `eval_steps: 25` unless intentionally changed. Build sweep config lists in `run.sh` with nested loops over swept axes.
+Each `experiments/` folder is self-contained and must include a `README.md` covering the hypothesis, setup table (configs, key parameters, approximate parameter count), run command, results table, and notes. Experiment YAML must explicitly set `batch_size: 16`, `gradient_accumulation_steps: 16`, `checkpoint_every: 5000`, `eval_every: 100`, and `eval_steps: 100` unless intentionally changed. Build sweep config lists in `run.sh` with nested loops over swept axes.

@@ -10,7 +10,7 @@ The limit also costs loss in full precision on its own. [`activation_limit`](../
 
 ## Setup
 
-5 runs: bf16 baseline, unbounded int8 W8A8, and three int8 W8A8 limits. Limits halve each step so the range shrinks geometrically.
+8 runs: bf16 baseline, unbounded int8 W8A8, and six int8 W8A8 limits. Limits halve each step so the range shrinks geometrically.
 
 | Config | Weight | Activation | grad_out | `activation_limit` |
 |---|---|---|---|---|
@@ -19,6 +19,9 @@ The limit also costs loss in full precision on its own. [`activation_limit`](../
 | qwen3_51m_int8_w8a8_act_limit127 | int8 | int8 | bf16 | 127 |
 | qwen3_51m_int8_w8a8_act_limit63 | int8 | int8 | bf16 | 63 |
 | qwen3_51m_int8_w8a8_act_limit31 | int8 | int8 | bf16 | 31 |
+| qwen3_51m_int8_w8a8_act_limit15 | int8 | int8 | bf16 | 15 |
+| qwen3_51m_int8_w8a8_act_limit7 | int8 | int8 | bf16 | 7 |
+| qwen3_51m_int8_w8a8_act_limit3 | int8 | int8 | bf16 | 3 |
 
 All runs: Qwen3 51M (d_model=512, 8 layers, GQA 8/4 with qk_norm, dense SwiGLU MLP intermediate_size=1536, ~50.9M params), seq_len=1024, batch_size=16, grad_accum=16 (effective batch=256), 50K steps, Muon (`match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup steps and min_lr=5e-5, bf16 mixed precision, OpenWebText, seed 42, `eval_every=100`, `eval_steps=25`. Int8 runs use tensorwise scaling with `lm_head` excluded; `grad_out` stays bf16.
 
@@ -39,6 +42,9 @@ W&B project: `pretrain-int8-activation-limit`.
 | qwen3_51m_int8_w8a8_act_limit127 | int8 W8A8 | 127 | | | |
 | qwen3_51m_int8_w8a8_act_limit63 | int8 W8A8 | 63 | | | |
 | qwen3_51m_int8_w8a8_act_limit31 | int8 W8A8 | 31 | | | |
+| qwen3_51m_int8_w8a8_act_limit15 | int8 W8A8 | 15 | | | |
+| qwen3_51m_int8_w8a8_act_limit7 | int8 W8A8 | 7 | | | |
+| qwen3_51m_int8_w8a8_act_limit3 | int8 W8A8 | 3 | | | |
 
 ## Notes
 
