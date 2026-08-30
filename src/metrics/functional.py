@@ -106,30 +106,20 @@ def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def _spectral_energy(weight: torch.Tensor) -> torch.Tensor:
-    """Return descending squared singular values, up to one positive scale per slice.
-
-    Only ratios of the returned spectrum are meaningful, which is all
-    `_svd_metrics` reads: srank and pr are both scale-invariant.
-
-    Each slice is normalized before the Gram matrix is formed. Forming W Wt
-    squares the spectrum, and a barely-routed MoE expert is extreme to begin
-    with -- its gradient carries sigma from ~1e-8 down to ~1e-19, so the squared
-    tail lands among float32 subnormals (< 1.2e-38) where the fp32 eigensolver
-    can no longer separate eigenvalues. `eigvalsh` then intermittently aborts
-    with "failed to converge ... ill-conditioned or too many repeated
-    eigenvalues" and takes the whole run down from the metrics path. Normalizing
-    first pins sigma_max at 1 and lifts that same tail to ~1e-22, comfortably
-    normal. `svdvals` avoids the Gram entirely but has no batched CUDA kernel
-    (~170x slower here), so it only backs up a slice that still fails.
-    """
+def _unit_frobenius(weight: torch.Tensor) -> torch.Tensor:
+    """Scale each slice to unit Frobenius norm in float32; all-zero slices stay zero."""
     w = weight.float()
     tiny = torch.finfo(w.dtype).tiny
     if w.ndim == 3:
         scale = w.flatten(1).norm(dim=1).clamp_min(tiny)[:, None, None]
     else:
         scale = w.norm().clamp_min(tiny)
-    w = w / scale
+    return w / scale
+
+
+def _spectral_energy(weight: torch.Tensor) -> torch.Tensor:
+    """Return descending squared singular values, up to one positive scale per slice."""
+    w = _unit_frobenius(weight)
     m, k = w.shape[-2], w.shape[-1]
     gram = w @ w.transpose(-2, -1) if m <= k else w.transpose(-2, -1) @ w
     try:
