@@ -135,9 +135,9 @@ def _spectral_energy(weight: torch.Tensor) -> torch.Tensor:
     gram = w @ w.transpose(-2, -1) if m <= k else w.transpose(-2, -1) @ w
     try:
         eig = torch.linalg.eigvalsh(gram)  # ascending, (..., min(m, k))
+        return eig.clamp_min(0).flip(-1)  # descending sigma^2
     except RuntimeError:
         return torch.linalg.svdvals(w).pow(2)  # descending sigma^2
-    return eig.clamp_min(0).flip(-1)  # descending sigma^2
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
