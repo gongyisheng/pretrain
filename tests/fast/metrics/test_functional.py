@@ -540,6 +540,132 @@ def test_svd_metrics_compiled_model_strips_prefix():
 
 
 # ---------------------------------------------------------------------------
+# Spectral metric conditioning (normalize -> gram -> eigvalsh, svdvals fallback)
+# ---------------------------------------------------------------------------
+
+# 2D, 3D with m <= k (gram = W Wt), and 3D with m > k (gram = Wt W).
+SVD_SHAPES = [(24, 32), (5, 24, 32), (5, 32, 24)]
+# Scales srank/pr must survive. Below ~1e-22 an un-normalized gram underflows to
+# zero, which used to be read as a rank collapse -- exactly the barely-routed
+# MoE expert the metric is supposed to watch.
+SVD_SCALES = [1e-38, 1e-30, 1e-22, 1e-15, 1.0, 1e15, 1e22, 1e37]
+# The peak pre-scale holds unit norm across the whole float32 range, so these
+# span it: a plain Frobenius divide gives NaN at 1e-22 and zero at 1e22.
+SVD_UNIT_SCALES = [1e-38, 1e-22, 1.0, 1e22, 1e37]
+# (sigma_max, sigma_min); the last mirrors the spread measured on a real
+# barely-routed expert gradient, whose squared tail lands in float32 subnormals.
+SVD_SPECTRA = [(1e0, 1e-3), (1e-4, 1e-12), (1e-8, 1e-19)]
+
+# Worst error observed over the full grid (1.8e-7, 6.0e-7, 5.9e-7, 6.0e-7),
+# each given a ~4-6x margin.
+SVD_UNIT_ATOL = 8.5e-7
+SVD_SCALE_ATOL = 2.8e-6
+SVD_PRECISION_ATOL = 2.6e-6
+SVD_FALLBACK_ATOL = 3.7e-6
+
+
+def _matrix_with_spectrum(shape, hi, lo, seed=0):
+    """Float32 matrix (or stack) whose singular values are log-spaced hi..lo."""
+    torch.manual_seed(seed)
+    *lead, m, k = shape
+    n = min(m, k)
+    sigma = torch.logspace(math.log10(hi), math.log10(lo), n, dtype=torch.float64)
+    mats = []
+    for _ in range(math.prod(lead) if lead else 1):
+        u, _ = torch.linalg.qr(torch.randn(m, m, dtype=torch.float64))
+        v, _ = torch.linalg.qr(torch.randn(k, k, dtype=torch.float64))
+        s = torch.zeros(m, k, dtype=torch.float64)
+        s[torch.arange(n), torch.arange(n)] = sigma
+        mats.append(u @ s @ v.mT)
+    w = torch.stack(mats) if lead else mats[0]
+    return w.reshape(shape).float()
+
+
+def _svd_oracle(weight):
+    """srank/pr from a float64 SVD of the stored float32 matrix."""
+    energy = torch.linalg.svdvals(weight.double()).pow(2)
+    energy = energy.reshape(-1, energy.shape[-1])
+    total = energy.sum(-1)
+    live = total > 0
+    energy, total = energy[live], total[live]
+    return {
+        "srank": (total / energy[:, 0]).median().item(),
+        "pr": (total.pow(2) / energy.pow(2).sum(-1)).median().item(),
+    }
+
+
+@pytest.mark.parametrize("shape", SVD_SHAPES)
+@pytest.mark.parametrize("scale", SVD_UNIT_SCALES)
+def test_unit_frobenius(shape, scale):
+    """Live slices come back at unit Frobenius norm in float32; zero slices stay zero."""
+    w = _matrix_with_spectrum(shape, 1e0, 1e-6) * scale
+    if w.ndim == 3:
+        w[0] = 0.0  # an unrouted expert: 0/0 must not become NaN
+
+    out = metric_utils._unit_frobenius(w)
+
+    assert out.dtype == torch.float32
+    assert torch.isfinite(out).all()
+    if w.ndim == 3:
+        assert (out[0] == 0.0).all()
+        norms = out[1:].flatten(1).norm(dim=1)
+    else:
+        norms = out.norm().reshape(1)
+    assert (norms - 1.0).abs().max().item() == pytest.approx(
+        0.0, abs=SVD_UNIT_ATOL, rel=0
+    )
+
+
+@pytest.mark.parametrize("shape", SVD_SHAPES)
+@pytest.mark.parametrize("scale", SVD_SCALES)
+def test_svd_metrics_scale_invariant(shape, scale):
+    """srank and pr are ratios of sigma^2, so rescaling W must not move them."""
+    w = _matrix_with_spectrum(shape, 1e0, 1e-6)
+    expected = metric_utils._svd_metrics(w)
+
+    got = metric_utils._svd_metrics(w * scale)
+
+    assert got["srank"] > 0.0  # a rescale alone is not a rank collapse
+    assert got["srank"] == pytest.approx(expected["srank"], abs=SVD_SCALE_ATOL, rel=0)
+    assert got["pr"] == pytest.approx(expected["pr"], abs=SVD_SCALE_ATOL, rel=0)
+
+
+@pytest.mark.parametrize("shape", SVD_SHAPES)
+@pytest.mark.parametrize("spectrum", SVD_SPECTRA)
+def test_svd_metrics_precision(shape, spectrum):
+    """Match a float64 SVD oracle, including spectra whose square underflows fp32."""
+    w = _matrix_with_spectrum(shape, *spectrum, seed=1)
+    expected = _svd_oracle(w)
+
+    got = metric_utils._svd_metrics(w)
+
+    assert got["srank"] == pytest.approx(
+        expected["srank"], abs=SVD_PRECISION_ATOL, rel=0
+    )
+    assert got["pr"] == pytest.approx(expected["pr"], abs=SVD_PRECISION_ATOL, rel=0)
+
+
+@pytest.mark.parametrize("shape", SVD_SHAPES)
+def test_svd_metrics_eigvalsh_fallback(shape, monkeypatch):
+    """An eigvalsh convergence abort falls back to svdvals with the same answer."""
+    w = _matrix_with_spectrum(shape, 1e-4, 1e-12, seed=2)
+    expected = metric_utils._svd_metrics(w)
+
+    def _abort(*args, **kwargs):
+        raise RuntimeError(
+            "linalg.eigh: (Batch element 0): The algorithm failed to converge"
+        )
+
+    monkeypatch.setattr(torch.linalg, "eigvalsh", _abort)
+    got = metric_utils._svd_metrics(w)
+
+    assert got["srank"] == pytest.approx(
+        expected["srank"], abs=SVD_FALLBACK_ATOL, rel=0
+    )
+    assert got["pr"] == pytest.approx(expected["pr"], abs=SVD_FALLBACK_ATOL, rel=0)
+
+
+# ---------------------------------------------------------------------------
 # Parameter counts
 # ---------------------------------------------------------------------------
 

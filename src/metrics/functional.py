@@ -107,12 +107,23 @@ def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 
 
 def _unit_frobenius(weight: torch.Tensor) -> torch.Tensor:
-    """Scale each slice to unit Frobenius norm in float32; all-zero slices stay zero."""
+    """Scale each slice to unit Frobenius norm in float32; all-zero slices stay zero.
+
+    The peak divide comes first so the Frobenius norm cannot itself under- or
+    overflow: summing squares of ~1e-23 entries flushes to zero (the clamp then
+    inflates the slice by ~1e16 until sigma^4 overflows to NaN in `pr`), and
+    squaring ~1e20 entries saturates to inf (the slice collapses to zero and
+    reads as a rank collapse). Dividing by the peak magnitude first is exact --
+    it cannot over- or underflow, being an element already present -- and leaves
+    every entry in [-1, 1], so the norm that follows lands in [1, sqrt(m * k)].
+    """
     w = weight.float()
     tiny = torch.finfo(w.dtype).tiny
     if w.ndim == 3:
+        w = w / w.abs().amax(dim=(1, 2))[:, None, None].clamp_min(tiny)
         scale = w.flatten(1).norm(dim=1).clamp_min(tiny)[:, None, None]
     else:
+        w = w / w.abs().max().clamp_min(tiny)
         scale = w.norm().clamp_min(tiny)
     return w / scale
 
