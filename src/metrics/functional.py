@@ -107,19 +107,36 @@ def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 
 
 def _spectral_energy(weight: torch.Tensor) -> torch.Tensor:
-    """Return descending squared singular values, (..., min(m, k)).
+    """Return descending squared singular values, up to one positive scale per slice.
 
-    Taken from the singular values of `weight` itself rather than the eigenvalues
-    of its Gram matrix. Forming W Wᵀ squares the condition number, and a barely
-    routed MoE expert is already extreme before that: its gradient carries σ from
-    ~1e-8 down to ~1e-19, so cond(W) ~1e11 becomes cond(gram) ~1e21, far past what
-    float32 resolves. The squared tail collapses into subnormals the fp32
-    eigensolver cannot separate, and `eigvalsh` then intermittently aborts with
-    "failed to converge ... ill-conditioned or too many repeated eigenvalues",
-    killing the run from the metrics path. `svdvals` never squares the
-    conditioning, and returns σ already sorted descending and non-negative.
+    Only ratios of the returned spectrum are meaningful, which is all
+    `_svd_metrics` reads: srank and pr are both scale-invariant.
+
+    Each slice is normalized before the Gram matrix is formed. Forming W Wt
+    squares the spectrum, and a barely-routed MoE expert is extreme to begin
+    with -- its gradient carries sigma from ~1e-8 down to ~1e-19, so the squared
+    tail lands among float32 subnormals (< 1.2e-38) where the fp32 eigensolver
+    can no longer separate eigenvalues. `eigvalsh` then intermittently aborts
+    with "failed to converge ... ill-conditioned or too many repeated
+    eigenvalues" and takes the whole run down from the metrics path. Normalizing
+    first pins sigma_max at 1 and lifts that same tail to ~1e-22, comfortably
+    normal. `svdvals` avoids the Gram entirely but has no batched CUDA kernel
+    (~170x slower here), so it only backs up a slice that still fails.
     """
-    return torch.linalg.svdvals(weight.float()).pow(2)  # descending σ²
+    w = weight.float()
+    tiny = torch.finfo(w.dtype).tiny
+    if w.ndim == 3:
+        scale = w.flatten(1).norm(dim=1).clamp_min(tiny)[:, None, None]
+    else:
+        scale = w.norm().clamp_min(tiny)
+    w = w / scale
+    m, k = w.shape[-2], w.shape[-1]
+    gram = w @ w.transpose(-2, -1) if m <= k else w.transpose(-2, -1) @ w
+    try:
+        eig = torch.linalg.eigvalsh(gram)  # ascending, (..., min(m, k))
+    except RuntimeError:
+        return torch.linalg.svdvals(w).pow(2)  # descending sigma^2
+    return eig.clamp_min(0).flip(-1)  # descending sigma^2
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
