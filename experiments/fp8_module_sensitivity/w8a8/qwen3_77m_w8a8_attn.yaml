@@ -41,13 +41,12 @@ training:
     dtype:
       weight: fp8_e4m3
       act: fp8_e4m3
-      grad_out: fp8_e5m2
     scale:
       granularity: tensorwise
-    include: [lm_head]
+    include: [blocks.*.attn.*]
     exclude: []
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_module_sensitivity/qwen3_77m_fp8_lm_head/
+  checkpoint_dir: checkpoints/fp8_module_sensitivity/w8a8/qwen3_77m_attn/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -70,5 +69,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-fp8-module-sensitivity
-  wandb_run_name: qwen3-77m-fp8-lm-head
+  wandb_run_name: qwen3-77m-w8a8-attn
   log_every: 10
