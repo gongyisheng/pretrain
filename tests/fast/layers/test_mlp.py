@@ -86,6 +86,58 @@ def test_dense_bias_true_adds_biases(gated):
     assert blk.down_proj.bias is not None
 
 
+ACT_LIMIT_BLOCKS = [
+    (DenseMLPBlock, {}),
+    (
+        SparseMoEBlock,
+        {
+            "n_routed_experts": 4,
+            "n_routed_experts_per_token": 2,
+            "aux_loss": True,
+            "n_shared_experts": 1,
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("gated", [False, True])
+@pytest.mark.parametrize("block_cls,extra", ACT_LIMIT_BLOCKS)
+def test_activation_limit(block_cls, extra, gated):
+    """A limit above the data is a no-op; a tight one bounds the pre-activation."""
+    torch.manual_seed(0)
+    common = dict(d_model=64, intermediate_size=128, gated=gated, **extra)
+    # x is scaled so the projection output reliably exceeds the tight limit
+    x = torch.randn(2, 16, 64) * 8
+    unbounded = block_cls(**common)
+    loose = block_cls(**common, activation_limit=1e6)
+    tight = block_cls(**common, activation_limit=1.0)
+    loose.load_state_dict(unbounded.state_dict())
+    tight.load_state_dict(unbounded.state_dict())
+
+    base = unbounded(x)[0]
+    # a limit the data never reaches leaves the forward bit-identical
+    assert torch.equal(base, loose(x)[0])
+    out = tight(x)[0]
+    assert out.shape == base.shape
+    assert torch.isfinite(out).all()
+    assert not torch.allclose(base, out)
+
+
+@pytest.mark.parametrize("gated", [False, True])
+def test_dense_activation_limit_precision(gated):
+    """Clamping the projection output reproduces the block's forward exactly."""
+    torch.manual_seed(0)
+    blk = DenseMLPBlock(
+        d_model=64, intermediate_size=128, gated=gated, activation_limit=1.0
+    )
+    x = torch.randn(2, 16, 64) * 8
+    proj = blk.gate_up_proj if gated else blk.up_proj
+    h = proj(x).clamp(-1.0, 1.0)
+    ref = blk.down_proj(blk.act_fn(*h.chunk(2, dim=-1)) if gated else blk.act_fn(h))
+    # same ops in the same order, so the match is exact
+    assert torch.equal(blk(x)[0], ref)
+
+
 # ---------------------------------------------------------------------------
 # DenseMLPBlock — compute_flops
 # ---------------------------------------------------------------------------
@@ -591,15 +643,16 @@ def test_sparse_moe_block_expert_bias_updates_in_train_only():
     )  # imbalanced load moves bias at the step boundary
 
 
-def test_sparse_moe_block_post_step_accumulates_across_microbatches():
+@pytest.mark.parametrize("expert_bias", [True, False])
+def test_sparse_moe_block_post_step_accumulates_across_microbatches(expert_bias):
     torch.manual_seed(0)
     block = SparseMoEBlock(
         d_model=64,
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        aux_loss=False,
-        expert_bias=True,
+        aux_loss=not expert_bias,
+        expert_bias=expert_bias,
     )
     block.train()
     x = torch.randn(4, 16, 64)  # 64 tokens, k=2 -> 128 routings per micro-batch
@@ -609,7 +662,8 @@ def test_sparse_moe_block_post_step_accumulates_across_microbatches():
     assert block.expert_load.train_load.sum().item() == 2 * 64 * 2
 
     block.post_step()
-    # post_step consumes the accumulated load (bias update) and resets it.
+    # post_step resets the load in both balancing modes, so the load metrics read
+    # one step's routing whether or not the bias controller consumed it.
     assert block.expert_load.train_load.sum().item() == 0
     assert "expert_load.train_load" not in block.state_dict()  # non-persistent
 
@@ -835,7 +889,9 @@ def test_moe_router_matches_ref_under_saturation(dtype, atol):
     "gated,activation",
     [
         (True, "silu"),
+        (True, "silu_openai"),
         (False, "gelu"),
+        (False, "silu_openai"),
         (False, "relu"),
     ],
 )
@@ -931,7 +987,10 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
 
 # counts cover an empty group in interior, leading, and trailing positions.
 @pytest.mark.parametrize("counts", [[5, 0, 7, 4], [0, 5, 7, 4], [5, 7, 4, 0]])
-@pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
+@pytest.mark.parametrize(
+    "gated,activation",
+    [(True, "silu"), (True, "silu_openai"), (False, "gelu"), (False, "silu_openai")],
+)
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
 def test_grouped_mlp_matches_per_group_loop(
@@ -1125,7 +1184,10 @@ def test_sparse_moe_latent_output_shape():
 
 
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
+@pytest.mark.parametrize(
+    "gated,activation",
+    [(True, "silu"), (True, "silu_openai"), (False, "gelu"), (False, "silu_openai")],
+)
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
 def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
     torch.manual_seed(0)

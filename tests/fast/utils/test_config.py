@@ -739,6 +739,27 @@ def test_modelconfig_gated_only_activation_rejected_when_ungated():
     )
 
 
+@pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
+@pytest.mark.parametrize("limit", [0, -7.0, True, False, "7"])
+def test_modelconfig_activation_limit_raise_error(mlp_cls, limit):
+    kwargs = {"activation_limit": limit}
+    if mlp_cls == "moe":
+        kwargs |= {"n_routed_experts": 4, "aux_loss": True}
+    with pytest.raises(ValueError, match="activation_limit must be a positive number"):
+        ModelConfig(d_model=64, mlp=[{"mlp_cls": mlp_cls, "mlp_kwargs": kwargs}])
+
+
+@pytest.mark.parametrize("limit", [None, 7, 7.0])
+def test_modelconfig_activation_limit(limit):
+    cfg = ModelConfig(
+        d_model=64,
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_limit": limit}}],
+    )
+    assert cfg.resolve_mlp(0)[1]["activation_limit"] == limit
+    # left absent when unset, so the block's own default (unbounded) applies
+    assert "activation_limit" not in ModelConfig(d_model=64).resolve_mlp(0)[1]
+
+
 def test_modelconfig_validates_attn_dims():
     with pytest.raises(ValueError, match="divisible by n_heads"):
         ModelConfig(

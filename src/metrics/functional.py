@@ -17,14 +17,20 @@ from src.utils.config import TrainConfig
 
 
 def compute_grad_norms(model: torch.nn.Module) -> dict[str, float]:
-    """Return L2 gradient norms keyed by parameter name."""
+    """Return L2 gradient norms; use the median over nonzero 3D experts."""
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if param.grad is None:
             continue
         # torch.compile wraps model in OptimizedModule, prepending "_orig_mod."
         name = name.removeprefix("_orig_mod.")
-        norms[name] = param.grad.data.norm(2.0).item()
+        grad = param.grad.data
+        if grad.ndim == 3:
+            per_expert = grad.flatten(1).norm(2.0, dim=1)
+            live = per_expert[per_expert > 0]
+            norms[name] = live.median().item() if live.numel() else 0.0
+        else:
+            norms[name] = grad.norm(2.0).item()
     return norms
 
 
@@ -44,13 +50,17 @@ def compute_activation_norm(model: torch.nn.Module) -> dict[str, float]:
 
 
 def compute_weight_norms(model: torch.nn.Module) -> dict[str, float]:
-    """Return L2 weight norms keyed by parameter name."""
+    """Return L2 weight norms keyed by parameter name"""
     norms: dict[str, float] = {}
     for name, param in model.named_parameters():
         if not param.is_floating_point():
             continue
         name = name.removeprefix("_orig_mod.")
-        norms[name] = param.detach().norm(2.0).item()
+        weight = param.detach()
+        if weight.ndim == 3:
+            norms[name] = weight.flatten(1).norm(2.0, dim=1).median().item()
+        else:
+            norms[name] = weight.norm(2.0).item()
     return norms
 
 
@@ -66,6 +76,11 @@ def compute_maxvio(expert_counts: torch.Tensor) -> float:
     if mean == 0:
         return 0.0
     return ((counts.max() - mean) / mean).item()
+
+
+def compute_moe_unrouted_expert_count(load_per_layer: list[torch.Tensor]) -> list[int]:
+    """Per-layer count of experts that received no token, in list order."""
+    return [int((counts == 0).sum()) for counts in load_per_layer]
 
 
 def compute_moe_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
@@ -91,24 +106,45 @@ def compute_moe_batch_maxvio(load_per_layer: list[torch.Tensor]) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def _gram_energy(weight: torch.Tensor) -> torch.Tensor:
-    """Return descending squared singular values without a full SVD."""
+def _unit_frobenius(weight: torch.Tensor) -> torch.Tensor:
+    """Scale each slice to unit Frobenius norm in float32; all-zero slices stay zero."""
     w = weight.float()
+    tiny = torch.finfo(w.dtype).tiny
+    if w.ndim == 3:
+        w = w / w.abs().amax(dim=(1, 2))[:, None, None].clamp_min(tiny)
+        scale = w.flatten(1).norm(dim=1).clamp_min(tiny)[:, None, None]
+    else:
+        w = w / w.abs().max().clamp_min(tiny)
+        scale = w.norm().clamp_min(tiny)
+    return w / scale
+
+
+def _spectral_energy(weight: torch.Tensor) -> torch.Tensor:
+    """Return descending squared singular values, up to one positive scale per slice."""
+    w = _unit_frobenius(weight)
     m, k = w.shape[-2], w.shape[-1]
     gram = w @ w.transpose(-2, -1) if m <= k else w.transpose(-2, -1) @ w
-    eig = torch.linalg.eigvalsh(gram)  # ascending, (..., min(m, k))
-    return eig.clamp_min(0).flip(-1)  # descending σ²
+    try:
+        eig = torch.linalg.eigvalsh(gram)  # ascending, (..., min(m, k))
+        return eig.clamp_min(0).flip(-1)  # descending sigma^2
+    except RuntimeError:
+        return torch.linalg.svdvals(w).pow(2)  # descending sigma^2
 
 
 def _svd_metrics(weight: torch.Tensor) -> dict[str, float]:
-    """Return stable rank and participation ratio, averaged for 3D weights."""
-    energy = _gram_energy(weight)  # (..., k) descending σ²
+    """Return median stable rank and participation ratio over nonzero-energy slices."""
+    energy = _spectral_energy(weight)  # (..., k) descending σ²
+    energy = energy.reshape(-1, energy.shape[-1])  # (E, k); E == 1 for 2D
     total = energy.sum(-1)
-    if (total == 0).any():
-        return {"srank": 0.0, "pr": 0.0}
-    srank = total / energy[..., 0]  # stable rank ‖W‖_F²/σ_max² (rank-1 collapse canary)
-    pr = total.pow(2) / energy.pow(2).sum(-1)  # participation ratio (Σσ²)²/Σσ⁴
-    return {"srank": srank.mean().item(), "pr": pr.mean().item()}
+    live = total > 0
+
+    metrics = {"srank": 0.0, "pr": 0.0}
+    if bool(live.any()):
+        energy, total = energy[live], total[live]
+        srank = total / energy[:, 0]  # stable rank ‖W‖_F²/σ_max² (collapse canary)
+        pr = total.pow(2) / energy.pow(2).sum(-1)  # participation ratio (Σσ²)²/Σσ⁴
+        metrics = {"srank": srank.median().item(), "pr": pr.median().item()}
+    return metrics
 
 
 def compute_weight_svd_metrics(model: torch.nn.Module) -> dict[str, dict[str, float]]:

@@ -500,6 +500,25 @@ def test_train_moe_maxvio_logged_per_layer():
     assert all(d[k] >= 0.0 for k in d if k.startswith("train-moe/maxvio_batch/"))
 
 
+def test_train_moe_unrouted_logged_per_layer():
+    """Zero-load experts counted per layer from the same latest-step load."""
+    cfg = _moe_cfg()
+    cfg.logging.log_every = 1
+    tracker = MetricsCollector(cfg, device="cpu", logger=FakeLogger())
+    model = build_model(cfg)
+    opt = torch.optim.SGD(model.parameters(), lr=1e-3)
+
+    tracker.train_begin()
+    blocks = _moe_blocks(model)
+    blocks[0].expert_load.train_load.copy_(torch.tensor([10, 0, 5, 0]))
+    blocks[1].expert_load.train_load.copy_(torch.tensor([4, 4, 4, 4]))
+    _moe_on_step(tracker, model, opt, step=0)
+    d = tracker.log_train(step=1, model=model, optimizer=opt)
+
+    assert d["train-moe/unrouted/layer_0"] == 2
+    assert d["train-moe/unrouted/layer_1"] == 0
+
+
 def test_train_moe_maxvio_uses_latest_step():
     # Train MaxVio reflects only the latest step's routing load (cached each
     # on_train_step, overwriting the prior). Step 0 stamps a balanced load and
@@ -623,10 +642,11 @@ def test_moe_maxvio_labels_skip_dense_layer():
     tracker.train_begin()
     _moe_on_step(tracker, built, opt, step=0)
     dt = tracker.log_train(step=1, model=built, optimizer=opt)
-    train_keys = {k for k in dt if k.startswith("train-moe/maxvio_batch/")}
-    assert "train-moe/maxvio_batch/layer_0" not in train_keys
-    for i in (1, 2, 3):
-        assert f"train-moe/maxvio_batch/layer_{i}" in train_keys
+    for prefix in ("train-moe/maxvio_batch/", "train-moe/unrouted/"):
+        train_keys = {k for k in dt if k.startswith(prefix)}
+        assert f"{prefix}layer_0" not in train_keys
+        for i in (1, 2, 3):
+            assert f"{prefix}layer_{i}" in train_keys
 
     # --- eval ---
     built.eval()

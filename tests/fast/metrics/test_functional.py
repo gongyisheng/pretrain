@@ -5,6 +5,7 @@ tests assert directly on returned values with no logger or tracker involved.
 """
 
 import math
+import statistics
 
 import pytest
 import torch
@@ -288,6 +289,42 @@ def test_grad_norms_plain_model(arch_id, impl, device):
         assert v >= 0 and math.isfinite(v), f"{k}={v}"
 
 
+def test_grad_norms_3d_is_median_over_experts():
+    """Stacked expert grads report the median per-expert norm, not the stack norm."""
+    model = torch.nn.Module()
+    model.expert_gate_up = torch.nn.Parameter(torch.zeros(5, 6, 3))
+    model.expert_gate_up.grad = torch.randn(5, 6, 3)
+    g = model.expert_gate_up.grad
+    expected = statistics.median(g[i].norm().item() for i in range(g.shape[0]))
+    result = metric_utils.compute_grad_norms(model)
+    assert result["expert_gate_up"] == pytest.approx(expected)
+    assert result["expert_gate_up"] != pytest.approx(g.norm().item())
+
+
+def test_grad_norms_3d_excludes_unrouted_experts():
+    """Zero-grad (unrouted) experts must not enter the median."""
+    torch.manual_seed(0)
+    g = torch.randn(6, 6, 3)  # 5 live experts once one is zeroed (odd -> exact median)
+    model = torch.nn.Module()
+    model.expert_gate_up = torch.nn.Parameter(torch.zeros(6, 6, 3))
+    model.expert_gate_up.grad = g.clone()
+    model.expert_gate_up.grad[2] = 0.0
+    expected = statistics.median(
+        g[i].norm().item() for i in range(g.shape[0]) if i != 2
+    )
+    assert metric_utils.compute_grad_norms(model)["expert_gate_up"] == pytest.approx(
+        expected
+    )
+
+
+def test_grad_norms_3d_all_unrouted():
+    """No live expert → 0, not NaN from an empty median."""
+    model = torch.nn.Module()
+    model.expert_gate_up = torch.nn.Parameter(torch.zeros(4, 6, 3))
+    model.expert_gate_up.grad = torch.zeros(4, 6, 3)
+    assert metric_utils.compute_grad_norms(model)["expert_gate_up"] == 0.0
+
+
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 def test_grad_norms_compiled_model(arch_id, impl, device):
@@ -334,13 +371,15 @@ def test_weight_norms_match_l2():
     assert result["bias"] == pytest.approx(model.bias.norm().item())
 
 
-def test_weight_norms_3d_is_global_over_experts():
-    """Stacked expert weights report one norm over all experts, not a per-expert stat."""
+def test_weight_norms_3d_is_median_over_experts():
+    """Stacked expert weights report the median per-expert norm, not the stack norm."""
     model = torch.nn.Module()
-    model.expert_gate_up = torch.nn.Parameter(torch.randn(4, 6, 3))
+    model.expert_gate_up = torch.nn.Parameter(torch.randn(5, 6, 3))
     w = model.expert_gate_up.detach()
+    expected = statistics.median(w[i].norm().item() for i in range(w.shape[0]))
     result = metric_utils.compute_weight_norms(model)
-    assert result["expert_gate_up"] == pytest.approx(w.norm().item())
+    assert result["expert_gate_up"] == pytest.approx(expected)
+    assert result["expert_gate_up"] != pytest.approx(w.norm().item())
 
 
 def test_weight_norms_compiled_model_strips_prefix():
@@ -385,25 +424,22 @@ def test_svd_metrics_rank_one_is_minimal():
     assert m["pr"] == pytest.approx(1.0, abs=1e-4)
 
 
-def test_svd_metrics_zero_matrix():
-    """All-zero weight (no positive σ) → every metric 0."""
-    assert metric_utils._svd_metrics(torch.zeros(4, 4)) == {"srank": 0.0, "pr": 0.0}
-
-
-def test_svd_metrics_3d_averages_over_experts():
-    """Stacked (E, out, in) tensor: metrics equal the mean of per-expert 2D."""
+def test_svd_metrics_3d_medians_over_experts():
+    """Stacked (E, out, in) tensor: metrics equal the median of per-expert 2D."""
     torch.manual_seed(0)
     w = torch.randn(5, 16, 12)  # (E, out, in)
     batched = metric_utils._svd_metrics(w)
     per_expert = [metric_utils._svd_metrics(w[e]) for e in range(w.size(0))]
-    mean_srank = sum(d["srank"] for d in per_expert) / w.size(0)
-    mean_pr = sum(d["pr"] for d in per_expert) / w.size(0)
-    assert batched["srank"] == pytest.approx(mean_srank, rel=1e-5)
-    assert batched["pr"] == pytest.approx(mean_pr, rel=1e-5)
+    assert batched["srank"] == pytest.approx(
+        statistics.median(d["srank"] for d in per_expert), rel=1e-5
+    )
+    assert batched["pr"] == pytest.approx(
+        statistics.median(d["pr"] for d in per_expert), rel=1e-5
+    )
 
 
 def test_svd_metrics_3d_rank_one_experts():
-    """Every expert rank-1 → averaged srank≈pr≈1."""
+    """Every expert rank-1 → median srank≈pr≈1."""
     expert = torch.outer(torch.arange(1.0, 6.0), torch.arange(1.0, 4.0))
     w = expert.unsqueeze(0).expand(4, -1, -1).contiguous()  # (4, 5, 3)
     m = metric_utils._svd_metrics(w)
@@ -411,9 +447,22 @@ def test_svd_metrics_3d_rank_one_experts():
     assert m["pr"] == pytest.approx(1.0, abs=1e-4)
 
 
-def test_svd_metrics_3d_zero_tensor():
-    """Any all-zero expert (no positive σ) → every metric 0."""
-    assert metric_utils._svd_metrics(torch.zeros(3, 4, 4)) == {"srank": 0.0, "pr": 0.0}
+@pytest.mark.parametrize("shape", [(4, 4), (3, 4, 4)])
+def test_svd_metrics_all_zero(shape):
+    """No slice carries energy → every metric 0."""
+    assert metric_utils._svd_metrics(torch.zeros(shape)) == {"srank": 0.0, "pr": 0.0}
+
+
+def test_svd_metrics_3d_unrouted_experts_excluded_from_median():
+    """An unrouted (all-zero) expert is counted, not propagated to srank/pr."""
+    torch.manual_seed(0)
+    w = torch.randn(5, 16, 12)  # (E, out, in)
+    holed = w.clone()
+    holed[2] = 0.0
+    expected = metric_utils._svd_metrics(torch.cat([w[:2], w[3:]]))  # 4 live experts
+    got = metric_utils._svd_metrics(holed)
+    assert got["srank"] == pytest.approx(expected["srank"], rel=1e-6)
+    assert got["pr"] == pytest.approx(expected["pr"], rel=1e-6)
 
 
 def test_svd_metrics_includes_moe_experts():
@@ -463,7 +512,7 @@ def test_grad_svd_metrics_skips_params_without_grad():
 
 
 def test_grad_svd_metrics_includes_moe_experts():
-    """3D stacked expert grads are covered, averaged over experts."""
+    """3D stacked expert grads are covered, median over experts."""
     model_cfg = _qwen3_moe_cfg("sdpa")
     model = build_model(_FakeTrainConfig(model_cfg))
     _populate_grads(model, model_cfg.vocab_size, "sdpa")
@@ -488,6 +537,132 @@ def test_svd_metrics_compiled_model_strips_prefix():
     result = metric_utils.compute_weight_svd_metrics(compiled)
     assert set(result) == _expected_svd_keys(compiled)
     assert all(not k.startswith("_orig_mod.") for k in result)
+
+
+# ---------------------------------------------------------------------------
+# Spectral metric conditioning (normalize -> gram -> eigvalsh, svdvals fallback)
+# ---------------------------------------------------------------------------
+
+# 2D, 3D with m <= k (gram = W Wt), and 3D with m > k (gram = Wt W).
+SVD_SHAPES = [(24, 32), (5, 24, 32), (5, 32, 24)]
+# Scales srank/pr must survive. Below ~1e-22 an un-normalized gram underflows to
+# zero, which used to be read as a rank collapse -- exactly the barely-routed
+# MoE expert the metric is supposed to watch.
+SVD_SCALES = [1e-38, 1e-30, 1e-22, 1e-15, 1.0, 1e15, 1e22, 1e37]
+# The peak pre-scale holds unit norm across the whole float32 range, so these
+# span it: a plain Frobenius divide gives NaN at 1e-22 and zero at 1e22.
+SVD_UNIT_SCALES = [1e-38, 1e-22, 1.0, 1e22, 1e37]
+# (sigma_max, sigma_min); the last mirrors the spread measured on a real
+# barely-routed expert gradient, whose squared tail lands in float32 subnormals.
+SVD_SPECTRA = [(1e0, 1e-3), (1e-4, 1e-12), (1e-8, 1e-19)]
+
+# Worst error observed over the full grid (1.8e-7, 6.0e-7, 5.9e-7, 6.0e-7),
+# each given a ~4-6x margin.
+SVD_UNIT_ATOL = 8.5e-7
+SVD_SCALE_ATOL = 2.8e-6
+SVD_PRECISION_ATOL = 2.6e-6
+SVD_FALLBACK_ATOL = 3.7e-6
+
+
+def _matrix_with_spectrum(shape, hi, lo, seed=0):
+    """Float32 matrix (or stack) whose singular values are log-spaced hi..lo."""
+    torch.manual_seed(seed)
+    *lead, m, k = shape
+    n = min(m, k)
+    sigma = torch.logspace(math.log10(hi), math.log10(lo), n, dtype=torch.float64)
+    mats = []
+    for _ in range(math.prod(lead) if lead else 1):
+        u, _ = torch.linalg.qr(torch.randn(m, m, dtype=torch.float64))
+        v, _ = torch.linalg.qr(torch.randn(k, k, dtype=torch.float64))
+        s = torch.zeros(m, k, dtype=torch.float64)
+        s[torch.arange(n), torch.arange(n)] = sigma
+        mats.append(u @ s @ v.mT)
+    w = torch.stack(mats) if lead else mats[0]
+    return w.reshape(shape).float()
+
+
+def _svd_oracle(weight):
+    """srank/pr from a float64 SVD of the stored float32 matrix."""
+    energy = torch.linalg.svdvals(weight.double()).pow(2)
+    energy = energy.reshape(-1, energy.shape[-1])
+    total = energy.sum(-1)
+    live = total > 0
+    energy, total = energy[live], total[live]
+    return {
+        "srank": (total / energy[:, 0]).median().item(),
+        "pr": (total.pow(2) / energy.pow(2).sum(-1)).median().item(),
+    }
+
+
+@pytest.mark.parametrize("shape", SVD_SHAPES)
+@pytest.mark.parametrize("scale", SVD_UNIT_SCALES)
+def test_unit_frobenius(shape, scale):
+    """Live slices come back at unit Frobenius norm in float32; zero slices stay zero."""
+    w = _matrix_with_spectrum(shape, 1e0, 1e-6) * scale
+    if w.ndim == 3:
+        w[0] = 0.0  # an unrouted expert: 0/0 must not become NaN
+
+    out = metric_utils._unit_frobenius(w)
+
+    assert out.dtype == torch.float32
+    assert torch.isfinite(out).all()
+    if w.ndim == 3:
+        assert (out[0] == 0.0).all()
+        norms = out[1:].flatten(1).norm(dim=1)
+    else:
+        norms = out.norm().reshape(1)
+    assert (norms - 1.0).abs().max().item() == pytest.approx(
+        0.0, abs=SVD_UNIT_ATOL, rel=0
+    )
+
+
+@pytest.mark.parametrize("shape", SVD_SHAPES)
+@pytest.mark.parametrize("scale", SVD_SCALES)
+def test_svd_metrics_scale_invariant(shape, scale):
+    """srank and pr are ratios of sigma^2, so rescaling W must not move them."""
+    w = _matrix_with_spectrum(shape, 1e0, 1e-6)
+    expected = metric_utils._svd_metrics(w)
+
+    got = metric_utils._svd_metrics(w * scale)
+
+    assert got["srank"] > 0.0  # a rescale alone is not a rank collapse
+    assert got["srank"] == pytest.approx(expected["srank"], abs=SVD_SCALE_ATOL, rel=0)
+    assert got["pr"] == pytest.approx(expected["pr"], abs=SVD_SCALE_ATOL, rel=0)
+
+
+@pytest.mark.parametrize("shape", SVD_SHAPES)
+@pytest.mark.parametrize("spectrum", SVD_SPECTRA)
+def test_svd_metrics_precision(shape, spectrum):
+    """Match a float64 SVD oracle, including spectra whose square underflows fp32."""
+    w = _matrix_with_spectrum(shape, *spectrum, seed=1)
+    expected = _svd_oracle(w)
+
+    got = metric_utils._svd_metrics(w)
+
+    assert got["srank"] == pytest.approx(
+        expected["srank"], abs=SVD_PRECISION_ATOL, rel=0
+    )
+    assert got["pr"] == pytest.approx(expected["pr"], abs=SVD_PRECISION_ATOL, rel=0)
+
+
+@pytest.mark.parametrize("shape", SVD_SHAPES)
+def test_svd_metrics_eigvalsh_fallback(shape, monkeypatch):
+    """An eigvalsh convergence abort falls back to svdvals with the same answer."""
+    w = _matrix_with_spectrum(shape, 1e-4, 1e-12, seed=2)
+    expected = metric_utils._svd_metrics(w)
+
+    def _abort(*args, **kwargs):
+        raise RuntimeError(
+            "linalg.eigh: (Batch element 0): The algorithm failed to converge"
+        )
+
+    monkeypatch.setattr(torch.linalg, "eigvalsh", _abort)
+    got = metric_utils._svd_metrics(w)
+
+    assert got["srank"] == pytest.approx(
+        expected["srank"], abs=SVD_FALLBACK_ATOL, rel=0
+    )
+    assert got["pr"] == pytest.approx(expected["pr"], abs=SVD_FALLBACK_ATOL, rel=0)
 
 
 # ---------------------------------------------------------------------------
@@ -842,3 +1017,9 @@ def test_compute_moe_maxvio_per_layer_list():
     load = [torch.tensor([10, 0, 5, 5]), torch.tensor([5, 5, 5, 5])]  # maxvio 1.0, 0.0
     out = metric_utils.compute_moe_maxvio(load)
     assert out == [pytest.approx(1.0), pytest.approx(0.0)]
+
+
+def test_compute_moe_unrouted_expert_count_per_layer_list():
+    """Per-layer count of zero-load experts, in load order."""
+    load = [torch.tensor([10, 0, 5, 0]), torch.tensor([5, 5, 5, 5]), torch.zeros(4)]
+    assert metric_utils.compute_moe_unrouted_expert_count(load) == [2, 0, 4]

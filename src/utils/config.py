@@ -183,6 +183,17 @@ class ModelConfig:
         activation = kwargs.get("activation", "silu")
         valid_activation = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
         _check_one_of("activation", activation, valid_activation)
+        # Bounds the projection output before the activation; absent = unbounded.
+        activation_limit = kwargs.get("activation_limit")
+        if activation_limit is not None and (
+            isinstance(activation_limit, bool)
+            or not isinstance(activation_limit, (int, float))
+            or activation_limit <= 0
+        ):
+            raise ValueError(
+                "activation_limit must be a positive number or null; "
+                f"got {activation_limit!r}"
+            )
         if mlp_cls == "moe":
             kwargs.setdefault("n_shared_experts", 0)
             kwargs.setdefault("bias", False)

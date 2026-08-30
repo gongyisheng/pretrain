@@ -50,6 +50,7 @@ def grouped_mlp(
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
     expert_mm=grouped_mm_fn,
+    act_limit: float | None = None,
 ) -> torch.Tensor:
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
@@ -63,6 +64,8 @@ def grouped_mlp(
             b_down = b_down.to(dt)
     # the per-expert bias is (E, out) and rides in the GEMM epilogue
     h = expert_mm(x, w_in.mT, offs, bias=b_in, projection="gate_up")
+    if act_limit is not None:
+        h = h.clamp(-act_limit, act_limit)
     if gated:
         gate, up = h.chunk(2, dim=-1)
         h = act_fn(gate, up)
@@ -79,6 +82,7 @@ class DenseMLPBlock(nn.Module):
         d_model: int,
         intermediate_size: int,
         activation: str = "silu",
+        activation_limit: float | None = None,
         gated: bool = True,
         bias: bool = False,
         dropout: float = 0.0,
@@ -88,6 +92,7 @@ class DenseMLPBlock(nn.Module):
         registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
         self.gated = gated
         self.act_fn = registry[activation]
+        self.act_limit = activation_limit
         if gated:
             self.gate_up_proj = nn.Linear(d_model, 2 * intermediate_size, bias=bias)
         else:
@@ -96,11 +101,19 @@ class DenseMLPBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> tuple:
+        # act_limit bounds the projection output before the activation,
+        # as in gpt-oss's swiglu_limit and DeepSeek V4.
         if self.gated:
-            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+            h = self.gate_up_proj(x)
+            if self.act_limit is not None:
+                h = h.clamp(-self.act_limit, self.act_limit)
+            gate, up = h.chunk(2, dim=-1)
             hidden = self.act_fn(gate, up)
         else:
-            hidden = self.act_fn(self.up_proj(x))
+            h = self.up_proj(x)
+            if self.act_limit is not None:
+                h = h.clamp(-self.act_limit, self.act_limit)
+            hidden = self.act_fn(h)
         return self.dropout(self.down_proj(hidden)), None
 
     @classmethod
@@ -277,6 +290,7 @@ class SparseMoEBlock(nn.Module):
         expert_bias_update_rate: float = 0.001,
         router_score_fn: str = "sigmoid",
         activation: str = "silu",
+        activation_limit: float | None = None,
         gated: bool = True,
         bias: bool = False,
         dropout: float = 0.0,
@@ -299,6 +313,7 @@ class SparseMoEBlock(nn.Module):
         self.expert_bias_update_rate = expert_bias_update_rate
         self.gated = gated
         self.act_fn = registry[activation]
+        self.act_limit = activation_limit
         self.latent_moe = latent_moe
         self.latent_dim = latent_dim
         expert_dim = latent_dim if latent_moe else d_model
@@ -319,6 +334,7 @@ class SparseMoEBlock(nn.Module):
                 d_model,
                 intermediate_size=n_shared_experts * intermediate_size,
                 activation=activation,
+                activation_limit=activation_limit,
                 gated=gated,
                 bias=bias,
                 dropout=dropout,
@@ -416,6 +432,7 @@ class SparseMoEBlock(nn.Module):
             b_in=b_in,
             b_down=self.expert_down_bias,
             expert_mm=self.expert_mm,
+            act_limit=self.act_limit,
         )
         expert_out = expert_out * weights_sorted
         expert_out = self.expert_dropout(expert_out)
@@ -447,7 +464,7 @@ class SparseMoEBlock(nn.Module):
     def post_step(self):
         if self.expert_bias:
             self.router.update_expert_bias(self.expert_load.train_load)
-            self.expert_load.reset_train_load()
+        self.expert_load.reset_train_load()
 
     def forward_meta(self) -> dict:
         """Routing metadata from the last forward. `expert_load` is the accumulated

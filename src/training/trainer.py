@@ -348,7 +348,9 @@ class Trainer:
 
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), cfg.grad_clip
+                self.model.parameters(),
+                cfg.grad_clip,
+                error_if_nonfinite=not self.scaler.is_enabled(),
             )
             grad_norm_val = (
                 grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm

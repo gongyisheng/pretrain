@@ -17,6 +17,13 @@ def silu(x: torch.Tensor) -> torch.Tensor:
     return F.silu(x)
 
 
+def silu_openai(x: torch.Tensor) -> torch.Tensor:
+    alpha = 1.702
+    limit = 7.0
+    gated = x.clamp(max=limit)
+    return gated * torch.sigmoid(alpha * gated)
+
+
 def leaky_relu(x: torch.Tensor) -> torch.Tensor:
     return F.leaky_relu(x, 0.01)
 
@@ -50,6 +57,14 @@ def gelu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 def silu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.silu(gate) * up
+
+
+def silu_openai_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    alpha = 1.702
+    limit = 7.0
+    gated = gate.clamp(max=limit)
+    shifted_up = up.clamp(min=-limit, max=limit) + 1.0
+    return gated * torch.sigmoid(alpha * gated) * shifted_up
 
 
 def leaky_relu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -117,6 +132,7 @@ UNGATED_ACTIVATIONS = {
     "relu": relu,
     "gelu": gelu,
     "silu": silu,
+    "silu_openai": silu_openai,
     "leaky_relu": leaky_relu,
     "relu2": relu2,
     "gelu2": gelu2,
@@ -127,6 +143,7 @@ GATED_ACTIVATIONS = {
     "relu": relu_glu,
     "gelu": gelu_glu,
     "silu": silu_glu,
+    "silu_openai": silu_openai_glu,
     "leaky_relu": leaky_relu_glu,
     "relu2": relu2_glu,
     "gelu2": gelu2_glu,

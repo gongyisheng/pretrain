@@ -19,7 +19,8 @@ All FP8 configs use `scale: {granularity: tensorwise}`. Quantization applies to 
 ## Run
 
 ```bash
-nohup bash experiments/fp8_tensor_dtype/run.sh > logs/fp8_tensor_dtype.log 2>&1 &
+nohup bash experiments/fp8_tensor_dtype/run_51m.sh > logs/fp8_tensor_dtype_51m.log 2>&1 &
+nohup bash experiments/fp8_tensor_dtype/run_404m.sh > logs/fp8_tensor_dtype_404m.log 2>&1 &
 ```
 
 ## Results
@@ -39,6 +40,19 @@ W&B project: `pretrain-fp8-tensor-dtype`. Report mean validation loss over the f
 | `qwen3_51m_fp8_e5m2_w8a8` | e5m2 | e5m2 | bf16 | | | | | — |
 | `qwen3_51m_fp8_e5m2_w8a8g8` | e5m2 | e5m2 | e5m2 | | | | | |
 | `qwen3_51m_fp8_e5m2_w8a8_e4m3_g8` | e5m2 | e5m2 | e4m3 | | | | | |
+
+### 404M scale
+
+Scale-up of the e4m3 forward recipes to Qwen3 404M. The reason is that at 51M the loss variance is large enough that the recipes fall within each other's error range, and only e4m3 forward is swept since e5m2 is clearly worse.
+
+| Config | weight | act | grad_out | Val loss | σ (last 10) | Δ vs bf16 | Val BPB | Tokens/sec |
+|---|---|---|---|---|---|---|---|---|
+| `qwen3_404m_bf16` | — | — | — | | | 0 | | |
+| `qwen3_404m_fp8_e4m3_w8a16` | e4m3 | bf16 | bf16 | | | | | — |
+| `qwen3_404m_fp8_e4m3_w16a8` | bf16 | e4m3 | bf16 | | | | | — |
+| `qwen3_404m_fp8_e4m3_w8a8` | e4m3 | e4m3 | bf16 | | | | | — |
+| `qwen3_404m_fp8_e4m3_w8a8g8` | e4m3 | e4m3 | e4m3 | | | | | |
+| `qwen3_404m_fp8_e4m3_w8a8_e5m2_g8` | e4m3 | e4m3 | e5m2 | | | | | |
 
 ## Notes
 
