@@ -40,12 +40,13 @@ training:
     enabled: true
     dtype:
       weight: fp8_e4m3
+      act: fp8_e4m3
     scale:
       granularity: tensorwise
     include: [lm_head]
     exclude: []
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_module_sensitivity/w8a16/qwen3_455m_lm_head/
+  checkpoint_dir: checkpoints/fp8_module_sensitivity/fp8_w8a8/qwen3_455m_lm_head/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -68,5 +69,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-fp8-module-sensitivity
-  wandb_run_name: qwen3-455m-w8a16-lm-head
+  wandb_run_name: qwen3-455m-fp8-w8a8-lm-head
   log_every: 10

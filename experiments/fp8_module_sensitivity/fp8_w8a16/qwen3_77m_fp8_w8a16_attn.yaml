@@ -45,7 +45,7 @@ training:
     include: [blocks.*.attn.*]
     exclude: []
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_module_sensitivity/w8a16/qwen3_77m_attn/
+  checkpoint_dir: checkpoints/fp8_module_sensitivity/fp8_w8a16/qwen3_77m_attn/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -68,5 +68,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-fp8-module-sensitivity
-  wandb_run_name: qwen3-77m-w8a16-attn
+  wandb_run_name: qwen3-77m-fp8-w8a16-attn
   log_every: 10

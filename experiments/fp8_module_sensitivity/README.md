@@ -10,7 +10,7 @@ FP8 GEMM injects rounding noise into whichever GEMM operands are quantized. Diff
 - **MLP** (`gate_up_proj`, `down_proj`) is the widest hidden GEMM and carries most of the FLOPs; its output re-enters the residual stream directly.
 - **`lm_head`** is `(d_model, vocab=50257)`, the single largest GEMM, and its output feeds straight into cross-entropy where small logit errors move the loss. Expected most sensitive under `tensorwise` (one coarse scale over a 50K-wide output).
 
-Widening the recipe (w8a16 → w8a8 → w8a8g8) adds more FP8 operands per quantized linear, so absolute Δ should grow with each recipe; the open question is whether the *module ranking* stays the same.
+Widening the recipe (fp8_w8a16 → fp8_w8a8 → fp8_w8a8g8) adds more FP8 operands per quantized linear, so absolute Δ should grow with each recipe; the open question is whether the *module ranking* stays the same.
 
 ## Recipes
 
@@ -18,11 +18,11 @@ Three FP8 recipes form the second axis. Each lives in its own subfolder and diff
 
 | Recipe | `quant.dtype` | FP8 operands | GEMM path |
 |---|---|---|---|
-| `w8a16/` | `weight: fp8_e4m3` | weight only | weight quant→dequant, matmul in bf16 (weight-only) |
-| `w8a8/` | `weight, act: fp8_e4m3` | weight + act (forward) | fwd uses fp8 scaled-mm; dgrad/wgrad in bf16 (grad_out unquantized) |
-| `w8a8g8/` | `weight, act: fp8_e4m3`, `grad_out: fp8_e5m2` | weight + act + grad | fwd + both backward GEMMs in fp8 (full) |
+| `fp8_w8a16/` | `weight: fp8_e4m3` | weight only | weight quant→dequant, matmul in bf16 (weight-only) |
+| `fp8_w8a8/` | `weight, act: fp8_e4m3` | weight + act (forward) | fwd uses fp8 scaled-mm; dgrad/wgrad in bf16 (grad_out unquantized) |
+| `fp8_w8a8g8/` | `weight, act: fp8_e4m3`, `grad_out: fp8_e5m2` | weight + act + grad | fwd + both backward GEMMs in fp8 (full) |
 
-`w8a8g8` is the fully-quantized recipe (E4M3 forward operands, E5M2 grad); `w8a8` isolates forward-only error; `w8a16` isolates the weight-rounding error alone.
+`fp8_w8a8g8` is the fully-quantized recipe (E4M3 forward operands, E5M2 grad); `fp8_w8a8` isolates forward-only error; `fp8_w8a16` isolates the weight-rounding error alone.
 
 ## Untied embeddings — why 77M
 
@@ -39,9 +39,9 @@ All runs share the model, data, schedule, and optimizer; the independent variabl
 ```
 fp8_module_sensitivity/
   qwen3_77m_bf16.yaml           qwen3_455m_bf16.yaml         # shared baselines
-  w8a16/   qwen3_{77m,455m}_w8a16_{attn,mlp,lm_head}.yaml    # weight-only
-  w8a8/    qwen3_{77m,455m}_w8a8_{attn,mlp,lm_head}.yaml     # forward fp8
-  w8a8g8/  qwen3_{77m,455m}_w8a8g8_{attn,mlp,lm_head}.yaml   # full fp8
+  fp8_w8a16/   qwen3_{77m,455m}_fp8_w8a16_{attn,mlp,lm_head}.yaml    # weight-only
+  fp8_w8a8/    qwen3_{77m,455m}_fp8_w8a8_{attn,mlp,lm_head}.yaml     # forward fp8
+  fp8_w8a8g8/  qwen3_{77m,455m}_fp8_w8a8g8_{attn,mlp,lm_head}.yaml   # full fp8
   run_77m.sh   run_455m.sh
 ```
 
@@ -74,7 +74,7 @@ The same module × recipe ablation at the 404M-scale architecture (`configs/qwen
 - Model: d_model=1024, 28 layers, gqa 16/8, qk_norm, intermediate_size=3072, rope θ=10000, `tie_word_embeddings: false` (~455M).
 - All runs: seq_len=1024, batch=32, grad_accum=8 (eff. batch=256), lr=2e-4, min_lr=2e-5 (lr/min_lr match `configs/qwen3_404m.yaml`; the 32×8 split uses the larger per-step batch an H200 (144GiB) affords). Everything else matches the 77M runs.
 
-Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 6000, SM 12.0) the FP8 GEMMs use Blackwell's cuBLASLt path. `w8a16` needs no fp8 scaled-mm (weight-only dequant path), so it runs anywhere.
+Hardware requirement: SM 8.9+ (Ada/Hopper/Blackwell). On the dev box (RTX PRO 6000, SM 12.0) the FP8 GEMMs use Blackwell's cuBLASLt path. `fp8_w8a16` needs no fp8 scaled-mm (weight-only dequant path), so it runs anywhere.
 
 ## Run
 
@@ -89,7 +89,7 @@ nohup bash experiments/fp8_module_sensitivity/run_455m.sh > logs/fp8_module_sens
 
 Δ Loss is vs the shared bf16 baseline; larger Δ = more FP8-sensitive. One block per recipe.
 
-### w8a16 (weight-only)
+### fp8_w8a16 (weight-only)
 
 | FP8 module | Quantized Linears | Final Val Loss | Val BPB | Δ Loss vs bf16 | Tokens/sec |
 |---|---|---|---|---|---|
@@ -98,7 +98,7 @@ nohup bash experiments/fp8_module_sensitivity/run_455m.sh > logs/fp8_module_sens
 | MLP | 16 | TBD | TBD | TBD | TBD |
 | lm_head | 1 | TBD | TBD | TBD | TBD |
 
-### w8a8 (forward fp8)
+### fp8_w8a8 (forward fp8)
 
 | FP8 module | Quantized Linears | Final Val Loss | Val BPB | Δ Loss vs bf16 | Tokens/sec |
 |---|---|---|---|---|---|
@@ -106,7 +106,7 @@ nohup bash experiments/fp8_module_sensitivity/run_455m.sh > logs/fp8_module_sens
 | MLP | 16 | TBD | TBD | TBD | TBD |
 | lm_head | 1 | TBD | TBD | TBD | TBD |
 
-### w8a8g8 (full fp8)
+### fp8_w8a8g8 (full fp8)
 
 | FP8 module | Quantized Linears | Final Val Loss | Val BPB | Δ Loss vs bf16 | Tokens/sec |
 |---|---|---|---|---|---|
@@ -119,7 +119,7 @@ Sensitivity ranking = modules sorted by Δ Loss (descending), read per recipe an
 ## Notes
 
 - tensorwise is deliberately the noisiest scaling recipe to amplify per-module differences. If one module dominates, rerun just that module under rowwise or blockwise scaling (see `experiments/fp8_granularity/`) to see whether tighter scaling recovers it.
-- The recipe axis separates *where* the FP8 error enters: `w8a16` is weight-rounding only, `w8a8` adds forward-activation error, `w8a8g8` adds backward (grad) error. Comparing Δ across recipes for the same module attributes the damage to a stage.
-- `lm_head` quantizes a single but very large GEMM; watch tokens/sec there — one module can still be a meaningful throughput share. `w8a16` does no fp8 matmul, so its throughput ≈ bf16.
+- The recipe axis separates *where* the FP8 error enters: `fp8_w8a16` is weight-rounding only, `fp8_w8a8` adds forward-activation error, `fp8_w8a8g8` adds backward (grad) error. Comparing Δ across recipes for the same module attributes the damage to a stage.
+- `lm_head` quantizes a single but very large GEMM; watch tokens/sec there — one module can still be a meaningful throughput share. `fp8_w8a16` does no fp8 matmul, so its throughput ≈ bf16.
 - Untying changes param count and absolute loss vs the tied 51M configs, so compare Δ's *within this experiment*, not against `fp8_granularity/`.
 - `optim/momentum_norm` / `optim/variance_norm` in W&B reflect only the AdamW-routed params (Muon's `momentum_buffer` is not aggregated).
