@@ -27,9 +27,9 @@ All runs share the model, data, schedule, and optimizer; the only independent va
 | Config | int8 module | `quant.include` | Quantized Linears |
 |---|---|---|---|
 | qwen3_455m_bf16 | none (baseline) | — (quant off) | 0 |
-| qwen3_455m_int8_attn | attention | `[blocks.*.attn.*]` | 112 (4×28) |
-| qwen3_455m_int8_mlp | MLP | `[blocks.*.mlp.*]` | 56 (2×28) |
-| qwen3_455m_int8_lm_head | output head | `[lm_head]` | 1 |
+| qwen3_455m_w8a16_attn | attention | `[blocks.*.attn.*]` | 112 (4×28) |
+| qwen3_455m_w8a16_mlp | MLP | `[blocks.*.mlp.*]` | 56 (2×28) |
+| qwen3_455m_w8a16_lm_head | output head | `[lm_head]` | 1 |
 
 - Model: d_model=1024, 28 layers, gqa 16/8, qk_norm, intermediate_size=3072, rope θ=10000, `tie_word_embeddings: false` (~455M).
 - int8: `dtype: {weight: int8, act: bf16, grad_out: bf16}` (**W8A16, weight-only**), `scale.granularity: tensorwise`, `exclude: []`. Only the weight operand is quantized on the fly; activations and gradients stay bf16, and hp master weights are preserved. The forward GEMM dequantizes the int8 weight against a bf16 activation.

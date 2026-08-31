@@ -1,20 +1,20 @@
 max_seq_len: 1024
 
 model:
-  d_model: 1024
-  n_layers: 28
+  d_model: 512
+  n_layers: 8
   vocab_size: 50257
   attn:
   - attn_cls: gqa
     attn_kwargs:
-      n_heads: 16
-      n_kv_heads: 8
+      n_heads: 8
+      n_kv_heads: 4
       qk_norm: true
       dropout: 0.0
   mlp:
   - mlp_cls: dense
     mlp_kwargs:
-      intermediate_size: 3072
+      intermediate_size: 1536
       dropout: 0.0
   tie_word_embeddings: false
   norm_cls: rmsnorm
@@ -31,8 +31,8 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 32
-  gradient_accumulation_steps: 8
+  batch_size: 16
+  gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
   seed: 42
@@ -44,17 +44,17 @@ training:
       grad_out: bf16
     scale:
       granularity: tensorwise
-    include: [lm_head]
+    include: [blocks.*.mlp.*]
     exclude: []
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int8_module_sensitivity/qwen3_455m_int8_lm_head/
+  checkpoint_dir: checkpoints/int8_module_sensitivity/qwen3_77m_w8a16_mlp/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
 
 optimizer:
   name: muon
-  lr: 2e-4
+  lr: 5e-4
   weight_decay: 0.1
   betas:
   - 0.9
@@ -66,9 +66,9 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 1500
-  min_lr: 2e-5
+  min_lr: 5e-5
 
 logging:
   wandb_project: pretrain-int8-module-sensitivity
-  wandb_run_name: qwen3-455m-int8-lm-head
+  wandb_run_name: qwen3-77m-w8a16-mlp
   log_every: 10
