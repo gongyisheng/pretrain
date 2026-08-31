@@ -44,7 +44,7 @@ training:
   checkpoint_dir: checkpoints/int8_activation_limit/qwen3_51m_int8_w8a16/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
 optimizer:
   name: muon
   lr: 5e-4

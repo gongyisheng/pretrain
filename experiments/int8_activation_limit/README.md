@@ -24,7 +24,7 @@ The limit also costs loss in full precision on its own. [`activation_limit`](../
 | qwen3_51m_int8_w8a8_act_limit7 | int8 | int8 | bf16 | 7 |
 | qwen3_51m_int8_w8a8_act_limit3 | int8 | int8 | bf16 | 3 |
 
-All runs: Qwen3 51M (d_model=512, 8 layers, GQA 8/4 with qk_norm, dense SwiGLU MLP intermediate_size=1536, ~50.9M params), seq_len=1024, batch_size=16, grad_accum=16 (effective batch=256), 50K steps, Muon (`match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup steps and min_lr=5e-5, bf16 mixed precision, OpenWebText, seed 42, `eval_every=100`, `eval_steps=25`. Int8 runs use tensorwise scaling with `lm_head` excluded; `grad_out` stays bf16. The W8A16 run quantizes weights only, so it isolates the weight-quantization share of the W8A8 gap and is unaffected by the limit.
+All runs: Qwen3 51M (d_model=512, 8 layers, GQA 8/4 with qk_norm, dense SwiGLU MLP intermediate_size=1536, ~50.9M params), seq_len=1024, batch_size=16, grad_accum=16 (effective batch=256), 50K steps, Muon (`match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup steps and min_lr=5e-5, bf16 mixed precision, OpenWebText, seed 42, `eval_every=100`, `eval_steps=100`. Int8 runs use tensorwise scaling with `lm_head` excluded; `grad_out` stays bf16. The W8A16 run quantizes weights only, so it isolates the weight-quantization share of the W8A8 gap and is unaffected by the limit.
 
 ## Run
 
