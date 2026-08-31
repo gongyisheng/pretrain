@@ -42,7 +42,7 @@ training:
       block_shape: [64, 64]
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int8_granularity/qwen3_51m_int8_blockwise2d_64/
+  checkpoint_dir: checkpoints/int8_granularity/qwen3_51m_int8_w8a16_blockwise2d_64/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -62,5 +62,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-int8-granularity
-  wandb_run_name: qwen3-51m-int8-blockwise2d-64
+  wandb_run_name: qwen3-51m-int8-w8a16-blockwise2d-64
   log_every: 10

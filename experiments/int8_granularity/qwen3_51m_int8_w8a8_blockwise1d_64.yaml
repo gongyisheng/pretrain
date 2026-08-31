@@ -35,14 +35,14 @@ training:
     enabled: true
     dtype:
       weight: int8
-      act: bf16
+      act: int8
       grad_out: bf16
     scale:
       granularity: blockwise
       block_shape: [1, 64]
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int8_granularity/qwen3_51m_int8_w8a16_blockwise1d_64/
+  checkpoint_dir: checkpoints/int8_granularity/qwen3_51m_int8_w8a8_blockwise1d_64/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -62,5 +62,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-int8-granularity
-  wandb_run_name: qwen3-51m-int8-w8a16-blockwise1d-64
+  wandb_run_name: qwen3-51m-int8-w8a8-blockwise1d-64
   log_every: 10
