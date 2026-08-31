@@ -497,6 +497,7 @@ class TrainingConfig:
     eval_steps: int = 25
     eval_batch_size: int = 16
     eval_train: bool = False  # for SFT
+    eval_generate: bool = False
     intra_doc_masking: bool = True
     quantization: Union[QuantizationConfig, dict, list] = field(
         default_factory=QuantizationConfig

@@ -480,7 +480,7 @@ class Trainer:
             step=self.step, model=self.model, train_avg_acc=train_avg_acc
         )
 
-        if self.config.task == "pretrain":
+        if self.config.task == "pretrain" and self.config.training.eval_generate:
             self._generate_sample()
 
     @torch.no_grad()
