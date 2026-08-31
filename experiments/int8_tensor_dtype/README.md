@@ -1,6 +1,6 @@
 # Integer Tensor-Dtype Sensitivity
 
-Compare Qwen3-51M pretraining in bf16 with integer quantization from int8 through int4, under two scale granularities: `rowwise/` and `tensorwise/`. W8A16 quantizes weights only; W8A8 quantizes weights and activations. `grad_out` remains bf16.
+Compare Qwen3-51M pretraining in bf16 with integer quantization from int8 through int4, under two scale granularities: rowwise and tensorwise. W8A16 quantizes weights only; W8A8 quantizes weights and activations. `grad_out` remains bf16.
 
 ## Hypothesis
 
@@ -8,7 +8,7 @@ W8A16 should stay close to bf16 at int8 and degrade progressively at lower width
 
 ## Setup
 
-All quantized runs exclude `lm_head`; `grad_out` remains bf16. Each cell below exists twice — once in `rowwise/` (suffix `_rowwise`) and once in `tensorwise/` (suffix `_tensorwise`). `qwen3_51m_bf16` sits at the experiment root and is the shared baseline for both granularities.
+All quantized runs exclude `lm_head`; `grad_out` remains bf16. Each cell below exists twice, with suffix `_rowwise` and `_tensorwise`. `qwen3_51m_bf16` is the shared baseline for both granularities.
 
 | Config | Weight | Activation | grad_out |
 |---|---|---|---|
@@ -29,9 +29,7 @@ All runs share: Qwen3 51M, seq_len=1024, batch_size=16, grad_accum=16 (effective
 ## Run
 
 ```bash
-nohup bash experiments/int8_tensor_dtype/run_baseline.sh > logs/int8_tensor_dtype_baseline.log 2>&1 &
-nohup bash experiments/int8_tensor_dtype/run_rowwise.sh > logs/int8_tensor_dtype_rowwise.log 2>&1 &
-nohup bash experiments/int8_tensor_dtype/run_tensorwise.sh > logs/int8_tensor_dtype_tensorwise.log 2>&1 &
+nohup bash experiments/int8_tensor_dtype/run.sh > logs/int8_tensor_dtype.log 2>&1 &
 ```
 
 ## Results
@@ -66,4 +64,4 @@ W&B project: `pretrain-int8-tensor-dtype`.
 
 - `int4`–`int7` set a lower-bit code range but use an int8 tensor container; W8A16 and W8A8 describe which tensors are quantized.
 - This measures training-loss sensitivity, not packed low-bit memory or throughput. Everything outside eligible linear layers remains bf16/fp32, and `lm_head` is excluded.
-- The bf16 baseline is granularity-independent, so it lives at the experiment root and runs once via `run_baseline.sh`; both sweeps compare against it.
+- The bf16 baseline is granularity-independent, so it runs once at the head of `run.sh`; both granularities compare against it.
