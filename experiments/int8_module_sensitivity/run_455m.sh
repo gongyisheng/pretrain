@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-variants=(bf16 w8a16_attn w8a16_mlp w8a16_lm_head)
+variants=(bf16 int8_w8a16_attn int8_w8a16_mlp int8_w8a16_lm_head)
 configs=()
 for v in "${variants[@]}"; do
     configs+=("qwen3_455m_${v}")

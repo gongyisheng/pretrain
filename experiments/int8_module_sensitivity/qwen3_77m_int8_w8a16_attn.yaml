@@ -44,10 +44,10 @@ training:
       grad_out: bf16
     scale:
       granularity: tensorwise
-    include: [lm_head]
+    include: [blocks.*.attn.*]
     exclude: []
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int8_module_sensitivity/qwen3_77m_w8a16_lm_head/
+  checkpoint_dir: checkpoints/int8_module_sensitivity/qwen3_77m_int8_w8a16_attn/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -70,5 +70,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-int8-module-sensitivity
-  wandb_run_name: qwen3-77m-w8a16-lm-head
+  wandb_run_name: qwen3-77m-int8-w8a16-attn
   log_every: 10
