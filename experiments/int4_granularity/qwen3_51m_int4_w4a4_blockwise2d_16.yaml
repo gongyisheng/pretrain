@@ -39,10 +39,10 @@ training:
       grad_out: bf16
     scale:
       granularity: blockwise
-      block_shape: [64, 64]
+      block_shape: [16, 16]
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int4_granularity/qwen3_51m_int4_w8a8_blockwise2d_64/
+  checkpoint_dir: checkpoints/int4_granularity/qwen3_51m_int4_w4a4_blockwise2d_16/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -62,5 +62,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-int4-granularity
-  wandb_run_name: qwen3-51m-int4-w8a8-blockwise2d-64
+  wandb_run_name: qwen3-51m-int4-w4a4-blockwise2d-16
   log_every: 10
