@@ -8,7 +8,7 @@ The limit is a capacity constraint in full precision: it removes the tail of the
 
 ## Setup
 
-7 runs. Limits halve each step so the range shrinks geometrically.
+9 runs. Limits halve each step down to 3, then step to 2 and 1, so the range shrinks geometrically and the tail probes the tight regime.
 
 | Config | `activation_limit` |
 |---|---|
@@ -19,6 +19,8 @@ The limit is a capacity constraint in full precision: it removes the tail of the
 | qwen3_51m_act_limit15 | 15 |
 | qwen3_51m_act_limit7 | 7 |
 | qwen3_51m_act_limit3 | 3 |
+| qwen3_51m_act_limit2 | 2 |
+| qwen3_51m_act_limit1 | 1 |
 
 All runs: Qwen3 51M (d_model=512, 8 layers, GQA 8/4 with qk_norm, dense SwiGLU MLP intermediate_size=1536, ~50.9M params), seq_len=1024, batch_size=16, grad_accum=16 (effective batch=256), 50K steps, Muon (`match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup steps and min_lr=5e-5, bf16 mixed precision, OpenWebText, seed 42, `eval_every=100`, `eval_steps=25`.
 
@@ -41,6 +43,8 @@ W&B project: `pretrain-activation-limit`.
 | qwen3_51m_act_limit15 | 15 | | |
 | qwen3_51m_act_limit7 | 7 | | |
 | qwen3_51m_act_limit3 | 3 | | |
+| qwen3_51m_act_limit2 | 2 | | |
+| qwen3_51m_act_limit1 | 1 | | |
 
 ## Notes
 

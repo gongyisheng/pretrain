@@ -1,12 +1,12 @@
 #!/bin/bash
-# Run the bf16 activation-limit sweep (unbounded, 127, 63, 31, 15, 7, 3) at 51M on Qwen3.
+# Run the bf16 activation-limit sweep (unbounded, 127, 63, 31, 15, 7, 3, 2, 1) at 51M on Qwen3.
 # Usage: nohup bash experiments/activation_limit/run.sh > logs/activation_limit.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
 
 configs=(qwen3_51m_bf16)
-for limit in 127 63 31 15 7 3; do
+for limit in 127 63 31 15 7 3 2 1; do
     configs+=("qwen3_51m_act_limit${limit}")
 done
 
