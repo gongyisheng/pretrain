@@ -175,17 +175,25 @@ class ModelConfig:
             raise ValueError(
                 f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
             )
-        # Bounds the projection output before the activation; absent = unbounded.
-        activation_limit = kwargs.get("activation_limit")
-        if activation_limit is not None and (
-            isinstance(activation_limit, bool)
-            or not isinstance(activation_limit, (int, float))
-            or activation_limit <= 0
-        ):
-            raise ValueError(
-                "activation_limit must be a positive number or null; "
-                f"got {activation_limit!r}"
-            )
+        act_limit = kwargs.get("activation_limit")
+        if act_limit is not None and not isinstance(act_limit, dict):
+            del kwargs["activation_limit"]
+            act_limit = None
+        if act_limit is not None:
+            for side in ("gate", "up"):
+                bounds = act_limit.get(side)
+                if not isinstance(bounds, dict):
+                    continue
+                lo, hi = bounds.get("min"), bounds.get("max")
+                if not isinstance(lo, (int, float)):
+                    lo = None
+                if not isinstance(hi, (int, float)):
+                    hi = None
+                if lo is not None and hi is not None and lo >= hi:
+                    raise ValueError(
+                        f"activation_limit['{side}'] requires min < max; "
+                        f"got min={lo!r}, max={hi!r}"
+                    )
         if mlp_cls == "moe":
             kwargs.setdefault("n_shared_experts", 0)
             kwargs.setdefault("bias", False)

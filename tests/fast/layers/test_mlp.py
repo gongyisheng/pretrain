@@ -108,9 +108,11 @@ def test_activation_limit(block_cls, extra, gated):
     common = dict(d_model=64, intermediate_size=128, gated=gated, **extra)
     # x is scaled so the projection output reliably exceeds the tight limit
     x = torch.randn(2, 16, 64) * 8
+    loose_lim = {"gate": {"max": 1e6}, "up": {"min": -1e6, "max": 1e6}}
+    tight_lim = {"gate": {"max": 1.0}, "up": {"min": -1.0, "max": 1.0}}
     unbounded = block_cls(**common)
-    loose = block_cls(**common, activation_limit=1e6)
-    tight = block_cls(**common, activation_limit=1.0)
+    loose = block_cls(**common, activation_limit=loose_lim)
+    tight = block_cls(**common, activation_limit=tight_lim)
     loose.load_state_dict(unbounded.state_dict())
     tight.load_state_dict(unbounded.state_dict())
 
@@ -127,13 +129,19 @@ def test_activation_limit(block_cls, extra, gated):
 def test_dense_activation_limit_precision(gated):
     """Clamping the projection output reproduces the block's forward exactly."""
     torch.manual_seed(0)
+    limit = {"gate": {"max": 1.0}, "up": {"min": -1.0, "max": 1.0}}
     blk = DenseMLPBlock(
-        d_model=64, intermediate_size=128, gated=gated, activation_limit=1.0
+        d_model=64, intermediate_size=128, gated=gated, activation_limit=limit
     )
     x = torch.randn(2, 16, 64) * 8
-    proj = blk.gate_up_proj if gated else blk.up_proj
-    h = proj(x).clamp(-1.0, 1.0)
-    ref = blk.down_proj(blk.act_fn(*h.chunk(2, dim=-1)) if gated else blk.act_fn(h))
+    if gated:
+        gate, up = blk.gate_up_proj(x).chunk(2, dim=-1)
+        # gate clamped above only, up clamped symmetrically (DeepSeek-V4)
+        hidden = blk.act_fn(gate.clamp(max=1.0), up.clamp(-1.0, 1.0))
+    else:
+        # ungated: single tensor clamped with the "up" bounds
+        hidden = blk.act_fn(blk.up_proj(x).clamp(-1.0, 1.0))
+    ref = blk.down_proj(hidden)
     # same ops in the same order, so the match is exact
     assert torch.equal(blk(x)[0], ref)
 

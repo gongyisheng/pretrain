@@ -695,25 +695,55 @@ def test_modelconfig_gated_only_activation_rejected_when_ungated():
     )
 
 
+ACT_LIMIT_ERRORS = [
+    # only an inverted numeric range is rejected; other shapes just skip
+    ({"up": {"min": 7, "max": 1}}, r"\['up'\] requires min < max"),
+    (
+        {"up": {"min": 0, "max": -1}},
+        r"\['up'\] requires min < max",
+    ),  # 0 is a real bound
+]
+
+
 @pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
-@pytest.mark.parametrize("limit", [0, -7.0, True, False, "7"])
-def test_modelconfig_activation_limit_raise_error(mlp_cls, limit):
+@pytest.mark.parametrize("limit,match", ACT_LIMIT_ERRORS)
+def test_modelconfig_activation_limit_raise_error(mlp_cls, limit, match):
     kwargs = {"activation_limit": limit}
     if mlp_cls == "moe":
         kwargs |= {"n_routed_experts": 4, "aux_loss": True}
-    with pytest.raises(ValueError, match="activation_limit must be a positive number"):
+    with pytest.raises(ValueError, match=match):
         ModelConfig(d_model=64, mlp=[{"mlp_cls": mlp_cls, "mlp_kwargs": kwargs}])
 
 
-@pytest.mark.parametrize("limit", [None, 7, 7.0])
+@pytest.mark.parametrize(
+    "limit",
+    [
+        None,
+        {"gate": {"max": 7}},  # partial: only the gate's upper tail
+        {"gate": {"min": None, "max": 7}, "up": {"min": -7, "max": 7}},  # deepseek
+        {"gate": {"max": 7}, "note": "kept"},  # unrelated keys pass through unused
+        {"gate": 7, "up": {"max": 7}},  # non-mapping side skipped, stored verbatim
+    ],
+)
 def test_modelconfig_activation_limit(limit):
     cfg = ModelConfig(
         d_model=64,
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_limit": limit}}],
     )
+    # stored verbatim; the block reads missing sides/bounds as unbounded
     assert cfg.resolve_mlp(0)[1]["activation_limit"] == limit
     # left absent when unset, so the block's own default (unbounded) applies
     assert "activation_limit" not in ModelConfig(d_model=64).resolve_mlp(0)[1]
+
+
+@pytest.mark.parametrize("limit", [7.0, "off", True])
+def test_modelconfig_activation_limit_non_mapping_disabled(limit):
+    # a non-mapping value is dropped rather than rejected: the limit is disabled
+    cfg = ModelConfig(
+        d_model=64,
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_limit": limit}}],
+    )
+    assert "activation_limit" not in cfg.resolve_mlp(0)[1]
 
 
 def test_modelconfig_validates_attn_dims():

@@ -5,6 +5,20 @@ from src.kernel.ops.gemm import grouped_mm
 from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
 
 
+def _apply_act_limit(t: torch.Tensor, act_limit: dict, side: str) -> torch.Tensor:
+    """Clamp a tensor by the min/max bounds for one side of activation_limit.
+
+    `side` is "gate" or "up"; a missing side or bound is unbounded there. Gated
+    blocks clamp gate and up separately (DeepSeek-V4: SiLU is already bounded
+    below, so gate typically sets only max); ungated blocks pass their single
+    tensor with side="up".
+    """
+    bounds = act_limit.get(side)
+    if not isinstance(bounds, dict):
+        return t
+    return t.clamp(bounds.get("min"), bounds.get("max"))
+
+
 class GroupedGemmFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b, bias, offs, backend: str | None = None):
@@ -50,7 +64,7 @@ def grouped_mlp(
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
     expert_mm=grouped_mm_fn,
-    act_limit: float | None = None,
+    act_limit: dict | None = None,
 ) -> torch.Tensor:
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
@@ -64,12 +78,15 @@ def grouped_mlp(
             b_down = b_down.to(dt)
     # the per-expert bias is (E, out) and rides in the GEMM epilogue
     h = expert_mm(x, w_in.mT, offs, bias=b_in, projection="gate_up")
-    if act_limit is not None:
-        h = h.clamp(-act_limit, act_limit)
     if gated:
         gate, up = h.chunk(2, dim=-1)
+        if act_limit is not None:
+            gate = _apply_act_limit(gate, act_limit, "gate")
+            up = _apply_act_limit(up, act_limit, "up")
         h = act_fn(gate, up)
     else:
+        if act_limit is not None:
+            h = _apply_act_limit(h, act_limit, "up")
         h = act_fn(h)
     return expert_mm(h, w_down.mT, offs, bias=b_down, projection="down")
 
@@ -82,7 +99,7 @@ class DenseMLPBlock(nn.Module):
         d_model: int,
         intermediate_size: int,
         activation: str = "silu",
-        activation_limit: float | None = None,
+        activation_limit: dict | None = None,
         gated: bool = True,
         bias: bool = False,
         dropout: float = 0.0,
@@ -101,18 +118,17 @@ class DenseMLPBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> tuple:
-        # act_limit bounds the projection output before the activation,
-        # as in gpt-oss's swiglu_limit and DeepSeek V4.
+        # gpt-oss/deepseek-v4 style swiglu clamping: gate and up bounded per side
         if self.gated:
-            h = self.gate_up_proj(x)
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
             if self.act_limit is not None:
-                h = h.clamp(-self.act_limit, self.act_limit)
-            gate, up = h.chunk(2, dim=-1)
+                gate = _apply_act_limit(gate, self.act_limit, "gate")
+                up = _apply_act_limit(up, self.act_limit, "up")
             hidden = self.act_fn(gate, up)
         else:
             h = self.up_proj(x)
             if self.act_limit is not None:
-                h = h.clamp(-self.act_limit, self.act_limit)
+                h = _apply_act_limit(h, self.act_limit, "up")
             hidden = self.act_fn(h)
         return self.dropout(self.down_proj(hidden)), None
 
@@ -290,7 +306,7 @@ class SparseMoEBlock(nn.Module):
         expert_bias_update_rate: float = 0.001,
         router_score_fn: str = "sigmoid",
         activation: str = "silu",
-        activation_limit: float | None = None,
+        activation_limit: dict | None = None,
         gated: bool = True,
         bias: bool = False,
         dropout: float = 0.0,
