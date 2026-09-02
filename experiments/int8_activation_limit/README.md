@@ -54,5 +54,5 @@ W&B project: `pretrain-int8-activation-limit`.
 
 - Compare runs using the mean validation loss over the final 10 evaluations.
 - The limit only touches the dense MLP's pre-activation. Attention projections and `lm_head` are unaffected, so it bounds the `down_proj` input but not every quantized activation.
-- Limits are absolute pre-activation magnitudes, not int8 codes; 127/63/31 are a geometric ladder, not a bit-width mapping.
+- Limits are absolute pre-activation magnitudes, not int8 codes; 31/15/7 are a geometric ladder, not a bit-width mapping.
 - A limit helps quantization only if its int8 gain exceeds the matching bf16 loss from `activation_limit`.
