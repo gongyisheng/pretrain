@@ -1,6 +1,8 @@
 # MLP Activation Limit
 
-Sweep the MLP activation limit (`mlp_kwargs.activation_limit`) at Qwen3-51M in bf16. `activation_limit` bounds the `gate_up_proj` output to `[-L, L]` before SwiGLU, as in gpt-oss's `swiglu_limit` and DeepSeek V4.
+Sweep the MLP activation limit (`mlp_kwargs.activation_limit`) at Qwen3-51M in bf16. `activation_limit` bounds the `gate_up_proj` output before SwiGLU, as in gpt-oss's `swiglu_limit` and DeepSeek V4. It is a per-side mapping — `{gate: {min, max}, up: {min, max}}`, every key optional (missing = unbounded on that side). Each `limit L` row below uses the DeepSeek asymmetric form: `gate: {max: L}` (SiLU is already bounded below, so the gate needs no lower bound) and `up: {min: -L, max: L}`.
+
+> Semantics note: earlier runs of this sweep clamped `gate_up_proj` symmetrically to `[-L, L]` *before* the chunk (both gate and up). The current schema clamps gate and up separately, so results at tight limits (1–3) are not directly comparable to any pre-migration numbers; rerun those rows if mixing.
 
 ## Hypothesis
 
@@ -8,13 +10,11 @@ The limit is a capacity constraint in full precision: it removes the tail of the
 
 ## Setup
 
-9 runs. Limits halve each step down to 3, then step to 2 and 1, so the range shrinks geometrically and the tail probes the tight regime.
+7 runs. Limits halve each step down to 3, then step to 2 and 1, so the range shrinks geometrically and the tail probes the tight regime.
 
 | Config | `activation_limit` |
 |---|---|
 | qwen3_51m_bf16 | — |
-| qwen3_51m_act_limit127 | 127 |
-| qwen3_51m_act_limit63 | 63 |
 | qwen3_51m_act_limit31 | 31 |
 | qwen3_51m_act_limit15 | 15 |
 | qwen3_51m_act_limit7 | 7 |
@@ -37,8 +37,6 @@ W&B project: `pretrain-activation-limit`.
 | Config | `activation_limit` | Final Val Loss | Δ vs unbounded |
 |---|---|---|---|
 | qwen3_51m_bf16 | — | | 0 |
-| qwen3_51m_act_limit127 | 127 | | |
-| qwen3_51m_act_limit63 | 63 | | |
 | qwen3_51m_act_limit31 | 31 | | |
 | qwen3_51m_act_limit15 | 15 | | |
 | qwen3_51m_act_limit7 | 7 | | |

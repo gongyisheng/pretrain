@@ -1,6 +1,8 @@
 # Activation Limit under Int8 W8A8
 
-Sweep the MLP activation limit (`mlp_kwargs.activation_limit`) at Qwen3-51M under int8 W8A8 tensorwise quantization, against a bf16 baseline. `activation_limit` bounds the `gate_up_proj` output to `[-L, L]` before SwiGLU, as in gpt-oss's `swiglu_limit` and DeepSeek V4.
+Sweep the MLP activation limit (`mlp_kwargs.activation_limit`) at Qwen3-51M under int8 W8A8 tensorwise quantization, against a bf16 baseline. `activation_limit` bounds the `gate_up_proj` output before SwiGLU, as in gpt-oss's `swiglu_limit` and DeepSeek V4. It is a per-side mapping — `{gate: {min, max}, up: {min, max}}`, every key optional (missing = unbounded on that side). Each `limit L` row uses the DeepSeek asymmetric form: `gate: {max: L}` (SiLU is already bounded below) and `up: {min: -L, max: L}`.
+
+> Semantics note: earlier runs clamped `gate_up_proj` symmetrically to `[-L, L]` *before* the chunk (both gate and up). The current schema clamps gate and up separately, so tight-limit results are not directly comparable to any pre-migration numbers.
 
 ## Hypothesis
 
@@ -10,15 +12,13 @@ The limit also costs loss in full precision on its own. [`activation_limit`](../
 
 ## Setup
 
-11 runs: bf16 baseline, int8 W8A16 (weight-only) reference, unbounded int8 W8A8, and eight int8 W8A8 limits. Limits halve each step down to 3, then step to 2 and 1, so the range shrinks geometrically and the tail probes the tight regime.
+9 runs: bf16 baseline, int8 W8A16 (weight-only) reference, unbounded int8 W8A8, and six int8 W8A8 limits. Limits halve each step down to 3, then step to 2 and 1, so the range shrinks geometrically and the tail probes the tight regime.
 
 | Config | Weight | Activation | grad_out | `activation_limit` |
 |---|---|---|---|---|
 | qwen3_51m_bf16 | bf16 | bf16 | bf16 | — |
 | qwen3_51m_int8_w8a16 | int8 | bf16 | bf16 | — |
 | qwen3_51m_int8_w8a8 | int8 | int8 | bf16 | — |
-| qwen3_51m_int8_w8a8_act_limit127 | int8 | int8 | bf16 | 127 |
-| qwen3_51m_int8_w8a8_act_limit63 | int8 | int8 | bf16 | 63 |
 | qwen3_51m_int8_w8a8_act_limit31 | int8 | int8 | bf16 | 31 |
 | qwen3_51m_int8_w8a8_act_limit15 | int8 | int8 | bf16 | 15 |
 | qwen3_51m_int8_w8a8_act_limit7 | int8 | int8 | bf16 | 7 |
@@ -43,8 +43,6 @@ W&B project: `pretrain-int8-activation-limit`.
 | qwen3_51m_bf16 | bf16 | — | | 0 | |
 | qwen3_51m_int8_w8a16 | int8 W8A16 | — | | | |
 | qwen3_51m_int8_w8a8 | int8 W8A8 | — | | | 0 |
-| qwen3_51m_int8_w8a8_act_limit127 | int8 W8A8 | 127 | | | |
-| qwen3_51m_int8_w8a8_act_limit63 | int8 W8A8 | 63 | | | |
 | qwen3_51m_int8_w8a8_act_limit31 | int8 W8A8 | 31 | | | |
 | qwen3_51m_int8_w8a8_act_limit15 | int8 W8A8 | 15 | | | |
 | qwen3_51m_int8_w8a8_act_limit7 | int8 W8A8 | 7 | | | |
