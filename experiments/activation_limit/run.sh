@@ -6,7 +6,7 @@ set -e
 cd "$(dirname "$0")/../.."
 
 configs=(qwen3_51m_bf16)
-for limit in 2 1; do
+for limit in 31 15 7 3 2 1; do
     configs+=("qwen3_51m_act_limit${limit}")
 done
 
