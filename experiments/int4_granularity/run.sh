@@ -1,12 +1,12 @@
 #!/bin/bash
-# Run the int4 scale-granularity sweep (6 blockwise granularities x W4A16/W4A4) vs bf16 at 51M on Qwen3.
+# Run the int4 scale-granularity sweep (6 blockwise granularities x W4A16/W4A4/W4A4G4) vs bf16 at 51M on Qwen3.
 # Usage: nohup bash experiments/int4_granularity/run.sh > logs/int4_granularity.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
 
 configs=(qwen3_51m_bf16)
-for arm in w4a16 w4a4; do
+for arm in w4a16 w4a4 w4a4g4; do
     for layout in blockwise1d blockwise2d; do
         for extent in 16 32 64; do
             configs+=("qwen3_51m_int4_${arm}_${layout}_${extent}")
