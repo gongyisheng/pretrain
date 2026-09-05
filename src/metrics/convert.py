@@ -55,11 +55,12 @@ def apply_quantization_monitoring(model) -> None:
         elif isinstance(module, QuantizedSparseMoEBlock):
             # Each expert has its own scale, so stats must expose experts separately.
             device = next(module.parameters()).device
+            projections = ("gate", "up", "down") if module.gated else ("up", "down")
             module.quant_stats = {
                 projection: _tensor_stats(
                     f"{name}.expert_{projection}", cfg, module.n_routed_experts, device
                 )
-                for projection in ("gate_up", "down")
+                for projection in projections
             }
             _register(
                 module,

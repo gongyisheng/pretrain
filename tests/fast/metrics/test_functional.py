@@ -292,13 +292,13 @@ def test_grad_norms_plain_model(arch_id, impl, device):
 def test_grad_norms_3d_is_median_over_experts():
     """Stacked expert grads report the median per-expert norm, not the stack norm."""
     model = torch.nn.Module()
-    model.expert_gate_up = torch.nn.Parameter(torch.zeros(5, 6, 3))
-    model.expert_gate_up.grad = torch.randn(5, 6, 3)
-    g = model.expert_gate_up.grad
+    model.expert_gate = torch.nn.Parameter(torch.zeros(5, 6, 3))
+    model.expert_gate.grad = torch.randn(5, 6, 3)
+    g = model.expert_gate.grad
     expected = statistics.median(g[i].norm().item() for i in range(g.shape[0]))
     result = metric_utils.compute_grad_norms(model)
-    assert result["expert_gate_up"] == pytest.approx(expected)
-    assert result["expert_gate_up"] != pytest.approx(g.norm().item())
+    assert result["expert_gate"] == pytest.approx(expected)
+    assert result["expert_gate"] != pytest.approx(g.norm().item())
 
 
 def test_grad_norms_3d_excludes_unrouted_experts():
@@ -306,13 +306,13 @@ def test_grad_norms_3d_excludes_unrouted_experts():
     torch.manual_seed(0)
     g = torch.randn(6, 6, 3)  # 5 live experts once one is zeroed (odd -> exact median)
     model = torch.nn.Module()
-    model.expert_gate_up = torch.nn.Parameter(torch.zeros(6, 6, 3))
-    model.expert_gate_up.grad = g.clone()
-    model.expert_gate_up.grad[2] = 0.0
+    model.expert_gate = torch.nn.Parameter(torch.zeros(6, 6, 3))
+    model.expert_gate.grad = g.clone()
+    model.expert_gate.grad[2] = 0.0
     expected = statistics.median(
         g[i].norm().item() for i in range(g.shape[0]) if i != 2
     )
-    assert metric_utils.compute_grad_norms(model)["expert_gate_up"] == pytest.approx(
+    assert metric_utils.compute_grad_norms(model)["expert_gate"] == pytest.approx(
         expected
     )
 
@@ -320,9 +320,9 @@ def test_grad_norms_3d_excludes_unrouted_experts():
 def test_grad_norms_3d_all_unrouted():
     """No live expert → 0, not NaN from an empty median."""
     model = torch.nn.Module()
-    model.expert_gate_up = torch.nn.Parameter(torch.zeros(4, 6, 3))
-    model.expert_gate_up.grad = torch.zeros(4, 6, 3)
-    assert metric_utils.compute_grad_norms(model)["expert_gate_up"] == 0.0
+    model.expert_gate = torch.nn.Parameter(torch.zeros(4, 6, 3))
+    model.expert_gate.grad = torch.zeros(4, 6, 3)
+    assert metric_utils.compute_grad_norms(model)["expert_gate"] == 0.0
 
 
 @pytest.mark.parametrize("arch_id", list(_CFG_FACTORIES))
@@ -374,12 +374,12 @@ def test_weight_norms_match_l2():
 def test_weight_norms_3d_is_median_over_experts():
     """Stacked expert weights report the median per-expert norm, not the stack norm."""
     model = torch.nn.Module()
-    model.expert_gate_up = torch.nn.Parameter(torch.randn(5, 6, 3))
-    w = model.expert_gate_up.detach()
+    model.expert_gate = torch.nn.Parameter(torch.randn(5, 6, 3))
+    w = model.expert_gate.detach()
     expected = statistics.median(w[i].norm().item() for i in range(w.shape[0]))
     result = metric_utils.compute_weight_norms(model)
-    assert result["expert_gate_up"] == pytest.approx(expected)
-    assert result["expert_gate_up"] != pytest.approx(w.norm().item())
+    assert result["expert_gate"] == pytest.approx(expected)
+    assert result["expert_gate"] != pytest.approx(w.norm().item())
 
 
 def test_weight_norms_compiled_model_strips_prefix():
@@ -471,7 +471,8 @@ def test_svd_metrics_includes_moe_experts():
     result = metric_utils.compute_weight_svd_metrics(model)
     expert_keys = [k for k in result if "expert_" in k]
     assert expert_keys, "expected MoE expert weights in SVD metrics"
-    assert any(k.endswith("expert_gate_up") for k in expert_keys)
+    assert any(k.endswith("expert_gate") for k in expert_keys)
+    assert any(k.endswith("expert_up") for k in expert_keys)
     assert any(k.endswith("expert_down") for k in expert_keys)
 
 
@@ -517,7 +518,8 @@ def test_grad_svd_metrics_includes_moe_experts():
     model = build_model(_FakeTrainConfig(model_cfg))
     _populate_grads(model, model_cfg.vocab_size, "sdpa")
     result = metric_utils.compute_grad_svd_metrics(model)
-    assert any(k.endswith("expert_gate_up") for k in result)
+    assert any(k.endswith("expert_gate") for k in result)
+    assert any(k.endswith("expert_up") for k in result)
     assert any(k.endswith("expert_down") for k in result)
 
 
