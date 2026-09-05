@@ -8,7 +8,7 @@ Muon orthogonalizes each 2D weight's momentum via Newton–Schulz, equalizing th
 
 ## Setup
 
-`torch.optim.Muon` is 2D-only, so the `muon` runs use the hybrid `MuonAdamWOptimizer`: 2D hidden weights → Muon, everything else (token/pos embeddings, `lm_head`, RMSNorm scales) → AdamW. Each `(adamw, muon)` pair is identical except `optimizer.name`.
+`torch.optim.Muon` is 2D-only, so the `muon` runs use the hybrid `MuonAdamWOptimizer`: 2D hidden weights → Muon, everything else (token/pos embeddings, `lm_head`, RMSNorm scales) → AdamW. Each `(adamw, muon)` pair is identical except `optimizer.optimizer_cls`.
 
 | Config | Optimizer | Params | Muon-routed | LR | min_lr | WD | Eff. batch |
 |---|---|---|---|---|---|---|---|

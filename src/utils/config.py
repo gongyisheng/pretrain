@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Union
 import torch
@@ -549,27 +550,21 @@ class TrainingConfig:
 
 @dataclass
 class OptimizerConfig:
-    name: str = "adamw"  # "adamw" | "lion" | "muon"
-    lr: float = 6e-4
+    optimizer_cls: str = "adamw"  # "adamw" | "lion" | "muon"
+    lr: float = 5e-4
     lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
-    betas: List[float] = field(default_factory=lambda: [0.9, 0.95])
-    eps: float = 1e-8
-    muon_momentum: float = 0.95
-    muon_nesterov: bool = True
-    muon_ns_coefficients: List[float] = field(
-        default_factory=lambda: [3.4445, -4.775, 2.0315]
-    )
-    muon_ns_max_batch_elems: int = 8_000_000  # tuned on 5090/6000 pro blackwell
-    muon_ns_steps: int = 5
-    muon_adjust_lr_fn: str = "match_rms_adamw"
+    optimizer_kwargs: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.name not in OPTIMIZER_REGISTRY:
+        if self.optimizer_cls not in OPTIMIZER_REGISTRY:
             raise ValueError(
-                f"unknown optimizer: {self.name!r}; "
+                f"unknown optimizer_cls: {self.optimizer_cls!r}; "
                 f"expected one of {sorted(OPTIMIZER_REGISTRY)}"
             )
+        self.optimizer_kwargs.setdefault(
+            "foreach" if self.optimizer_cls == "lion" else "fused", True
+        )
 
 
 @dataclass
@@ -675,8 +670,6 @@ def _coerce_types(dc_class, raw_dict: dict) -> dict:
     PyYAML safe_load treats scientific notation (e.g. 6e-4) as strings.
     This converts them to the correct type based on the dataclass annotation.
     """
-    import dataclasses
-
     field_types = {f.name: f.type for f in dataclasses.fields(dc_class)}
     coerced = {}
     for k, v in raw_dict.items():
@@ -734,6 +727,7 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         config.model.pos_emb_kwargs,
         config.model.residual_kwargs,
         config.tokenizer_training.method_kwargs,
+        config.optimizer.optimizer_kwargs,
     ):
         _coerce_kwargs(kw)
     for item in config.model.attn:

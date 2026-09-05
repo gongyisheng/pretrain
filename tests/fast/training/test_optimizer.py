@@ -30,7 +30,11 @@ from src.training.optimizer import (
 # --------------------------------------------------------------------------- #
 
 
-def _make_cfg(tie: bool = False, lr_mult: dict | None = None) -> TrainConfig:
+def _make_cfg(
+    tie: bool = False,
+    lr_mult: dict | None = None,
+    optimizer_cls: str = "adamw",
+) -> TrainConfig:
     cfg = TrainConfig()
     cfg.max_seq_len = 128
     cfg.model = ModelConfig(
@@ -46,6 +50,7 @@ def _make_cfg(tie: bool = False, lr_mult: dict | None = None) -> TrainConfig:
         tie_word_embeddings=tie,
     )
     cfg.optimizer = OptimizerConfig(
+        optimizer_cls,
         lr=1e-3,
         lr_mult=lr_mult if lr_mult is not None else {"lm_head": 1.0},
         weight_decay=0.1,
@@ -332,8 +337,7 @@ def test_all_params_covered_exactly_once():
 
 
 def test_build_optimizer_dispatches_to_lion():
-    cfg = _make_cfg(tie=False)
-    cfg.optimizer.name = "lion"
+    cfg = _make_cfg(tie=False, optimizer_cls="lion")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
     assert isinstance(opt, LionOptimizer)
@@ -346,11 +350,13 @@ def test_build_optimizer_dispatches_to_lion():
 
 
 def test_build_optimizer_dispatches_to_muon():
-    cfg = _make_cfg(tie=False)
-    cfg.optimizer.name = "muon"
+    cfg = _make_cfg(tie=False, optimizer_cls="muon")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
     assert isinstance(opt, MuonAdamWOptimizer)
+    # Kwargs absent from the config fall back to MuonAdamWOptimizer's own defaults.
+    assert opt.muon.param_groups[0]["ns_steps"] == 5
+    assert opt.muon.param_groups[0]["ns_coefficients"] == (3.4445, -4.7750, 2.0315)
     # Every trainable param appears exactly once across the two subsystems.
     seen = [id(p) for pg in opt.param_groups for p in pg["params"]]
     trainable = [id(p) for p in model.parameters() if p.requires_grad]
@@ -360,8 +366,7 @@ def test_build_optimizer_dispatches_to_muon():
 
 def test_muon_routes_only_2d_hidden_weights():
     """2D weights -> Muon; embeddings, lm_head, and 1D params -> AdamW."""
-    cfg = _make_cfg(tie=False)
-    cfg.optimizer.name = "muon"
+    cfg = _make_cfg(tie=False, optimizer_cls="muon")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
 
@@ -383,8 +388,7 @@ def test_muon_routes_only_2d_hidden_weights():
 
 
 def _make_moe_cfg() -> TrainConfig:
-    cfg = _make_cfg(tie=False)
-    cfg.optimizer.name = "muon"
+    cfg = _make_cfg(tie=False, optimizer_cls="muon")
     cfg.model = ModelConfig(
         d_model=cfg.model.d_model,
         n_layers=cfg.model.n_layers,
@@ -572,8 +576,7 @@ def test_muon_rejects_1d_param():
 def test_muon_step_updates_params(device):
     if device != "cuda":
         pytest.skip("Muon hybrid uses fused AdamW (CUDA-only)")
-    cfg = _make_cfg(tie=False)
-    cfg.optimizer.name = "muon"
+    cfg = _make_cfg(tie=False, optimizer_cls="muon")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
     for p in model.parameters():
@@ -587,8 +590,7 @@ def test_muon_step_updates_params(device):
 def test_muon_state_dict_roundtrip(device):
     if device != "cuda":
         pytest.skip("Muon hybrid uses fused AdamW (CUDA-only)")
-    cfg = _make_cfg(tie=False)
-    cfg.optimizer.name = "muon"
+    cfg = _make_cfg(tie=False, optimizer_cls="muon")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
     for p in model.parameters():
@@ -602,14 +604,6 @@ def test_muon_state_dict_roundtrip(device):
     opt2.load_state_dict(state)  # must not raise
     # Muon momentum buffers were restored.
     assert any("momentum_buffer" in s for s in opt2.muon.state.values())
-
-
-def test_build_optimizer_unknown_name_raises():
-    cfg = _make_cfg(tie=False)
-    cfg.optimizer.name = "shampoo"
-    model = build_model(cfg)
-    with pytest.raises(ValueError, match="unknown optimizer"):
-        build_optimizer(model, cfg)
 
 
 # --------------------------------------------------------------------------- #

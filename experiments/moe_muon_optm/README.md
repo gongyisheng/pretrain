@@ -1,6 +1,6 @@
 # MoE: Muon vs AdamW
 
-Compare Muon ([Jordan et al.](https://kellerjordan.github.io/posts/muon/), [Moonshot scaling](https://arxiv.org/pdf/2502.16982)) against AdamW on the 183M/a51M MoE, holding everything except `optimizer.name` fixed.
+Compare Muon ([Jordan et al.](https://kellerjordan.github.io/posts/muon/), [Moonshot scaling](https://arxiv.org/pdf/2502.16982)) against AdamW on the 183M/a51M MoE, holding everything except `optimizer.optimizer_cls` fixed.
 
 Unlike [`muon_optm`](../muon_optm/) (dense, 2D weights only), this experiment exercises Muon on the **MoE expert layers**: the experts are stored as stacked 3D tensors `(E, out, in)`, which `MuonOptimizer` orthogonalizes per-expert via batched Newton–Schulz. Experts are 82% of all params (96% of the Muon-routed params), so this run is mostly a test of whether Muon helps where it previously could not reach.
 
@@ -10,7 +10,7 @@ Muon orthogonalizes each weight's momentum so every singular direction gets a co
 
 ## Setup
 
-The `muon` run uses the hybrid `MuonAdamWOptimizer`: matrix hidden weights (attention/MLP projections **and** the 3D experts) → Muon; embeddings, `lm_head`, the **router gate**, and 1D params (RMSNorm scales) → AdamW. The two configs are identical except `optimizer.name`.
+The `muon` run uses the hybrid `MuonAdamWOptimizer`: matrix hidden weights (attention/MLP projections **and** the 3D experts) → Muon; embeddings, `lm_head`, the **router gate**, and 1D params (RMSNorm scales) → AdamW. The two configs are identical except `optimizer.optimizer_cls`.
 
 | Config | Optimizer | Total params | Active | Muon-routed | of which experts | LR | min_lr | WD | Eff. batch |
 |---|---|---|---|---|---|---|---|---|---|
