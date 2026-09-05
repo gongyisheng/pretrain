@@ -1,4 +1,5 @@
 import dataclasses
+import json
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Union
 import torch
@@ -13,11 +14,13 @@ from src.quant.constants import (
     QUANT_GRANULARITY,
     QUANT_DTYPE_RECIPES,
     QUANT_PASSTHROUGH,
+    GEMM_OPS_BY_TENSOR,
+    GEMM_TENSORS,
     QUANT_ROUNDING,
     QUANT_SCALE_RECIPES,
-    QUANT_TENSOR_GEMMS,
-    QUANT_TENSORS,
+    GEMM_OPS,
 )
+from src.quant.rotation import ROTATION_REGISTRY
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
 
@@ -27,6 +30,18 @@ _SCALE_DTYPES = {
     "fp32": torch.float32,
     "fp8_e8m0": torch.float8_e8m0fnu,
 }
+
+
+def _check_one_of(label: str, value, options) -> None:
+    """Raise unless value names one of options."""
+    try:
+        known = value in options
+    except TypeError:  # unhashable values never name a choice
+        known = False
+    if not known:
+        raise ValueError(
+            f"unknown {label}: {value!r}; expected one of {sorted(options)}"
+        )
 
 
 @dataclass
@@ -84,11 +99,7 @@ class ModelConfig:
         for item in self.attn:
             if "attn_cls" not in item:
                 raise ValueError("each model.attn item requires 'attn_cls'")
-            if item["attn_cls"] not in ATTN_REGISTRY:
-                raise ValueError(
-                    f"unknown attn_cls: {item['attn_cls']!r}; "
-                    f"expected one of {sorted(ATTN_REGISTRY)}"
-                )
+            _check_one_of("attn_cls", item["attn_cls"], ATTN_REGISTRY)
             item.setdefault("attn_kwargs", {})
             self._set_default_attn_kwargs(item["attn_cls"], item["attn_kwargs"])
 
@@ -170,11 +181,7 @@ class ModelConfig:
         """Fill defaults/validation for one MLP item's kwargs, keyed on mlp_cls."""
         kwargs.setdefault("intermediate_size", 4 * self.d_model)
         activation_cls = kwargs.setdefault("activation_cls", "swiglu")
-        if activation_cls not in ACT_REGISTRY:
-            raise ValueError(
-                f"Unknown activation: {activation_cls!r}; "
-                f"expected one of {sorted(ACT_REGISTRY)}"
-            )
+        _check_one_of("activation_cls", activation_cls, ACT_REGISTRY)
         activation_kwargs = kwargs.setdefault("activation_kwargs", {})
         if not isinstance(activation_kwargs, dict):
             del kwargs["activation_kwargs"]
@@ -202,11 +209,9 @@ class ModelConfig:
             kwargs.setdefault("n_shared_experts", 0)
             kwargs.setdefault("bias", False)
             kwargs.setdefault("router_score_fn", "sigmoid")
-            if kwargs["router_score_fn"] not in MOE_ROUTER_SCORE_FNS:
-                raise ValueError(
-                    f"router_score_fn must be one of {sorted(MOE_ROUTER_SCORE_FNS)}; "
-                    f"got {kwargs['router_score_fn']!r}"
-                )
+            _check_one_of(
+                "router_score_fn", kwargs["router_score_fn"], MOE_ROUTER_SCORE_FNS
+            )
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
             # exclusive balancing strategies; exactly one must be enabled.
             kwargs.setdefault("expert_bias", False)
@@ -242,11 +247,7 @@ class ModelConfig:
         for item in self.mlp:
             if "mlp_cls" not in item:
                 raise ValueError("each model.mlp item requires 'mlp_cls'")
-            if item["mlp_cls"] not in MLP_REGISTRY:
-                raise ValueError(
-                    f"unknown mlp_cls: {item['mlp_cls']!r}; "
-                    f"expected one of {sorted(MLP_REGISTRY)}"
-                )
+            _check_one_of("mlp_cls", item["mlp_cls"], MLP_REGISTRY)
             item.setdefault("mlp_kwargs", {})
             self._set_default_mlp_kwargs(item["mlp_cls"], item["mlp_kwargs"])
 
@@ -326,40 +327,6 @@ class TokenizerTrainingConfig:
             self.method_kwargs.setdefault("max_superword_words", 4)
 
 
-def _resolve_quant_dtype(dtype: dict) -> dict:
-    """Expand `{tensor: fmt | {gemm: fmt}}` to `{tensor: {gemm: fmt}}`, validating.
-
-    A scalar means "that format in every GEMM consuming the tensor"; a dict scopes it,
-    and may name only some of them -- the rest are filled by the recipe, or by
-    `TrainingConfig` with the compute dtype. Idempotent, so a resolved dict survives
-    the to_dict/load round trip.
-    """
-    resolved = {}
-    for tensor, value in dtype.items():
-        if tensor not in QUANT_TENSOR_GEMMS:
-            raise ValueError(
-                f"unknown quant dtype key: {tensor!r}; "
-                f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
-            )
-        gemms = QUANT_TENSOR_GEMMS[tensor]
-        per_gemm = (
-            dict(value) if isinstance(value, dict) else dict.fromkeys(gemms, value)
-        )
-        for gemm, fmt in per_gemm.items():
-            if gemm not in gemms:
-                raise ValueError(
-                    f"quant dtype {tensor!r} cannot be scoped to {gemm!r}: "
-                    f"only {list(gemms)} consume it"
-                )
-            if fmt not in QUANT_FORMATS:
-                raise ValueError(
-                    f"unknown quant fmt for {tensor}.{gemm}: {fmt!r}; "
-                    f"expected one of {sorted(QUANT_FORMATS)}"
-                )
-        resolved[tensor] = per_gemm
-    return resolved
-
-
 @dataclass
 class QuantizationConfig:
     enabled: bool = False
@@ -367,80 +334,67 @@ class QuantizationConfig:
     dtype: dict = field(default_factory=dict)
     scale: dict = field(default_factory=dict)  # {granularity, block_shape}
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
+    rotation: Optional[dict] = None
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
     def __post_init__(self):
         if not self.enabled:
             return
+        self._post_init_dtype()
+        self._post_init_scale()
+        self._post_init_rounding()
+        self._post_init_rotation()
 
-        for tensor, mode in self.rounding.items():
-            if tensor not in QUANT_TENSOR_GEMMS:
-                raise ValueError(
-                    f"unknown quant rounding key: {tensor!r}; "
-                    f"expected one of {sorted(QUANT_TENSOR_GEMMS)}"
-                )
-            if mode not in QUANT_ROUNDING:
-                raise ValueError(
-                    f"unknown quant rounding for {tensor}: {mode!r}; "
-                    f"expected one of {sorted(QUANT_ROUNDING)}"
-                )
-        self.rounding = {t: self.rounding.get(t, "RNE") for t in QUANT_TENSORS}
-
-        dtype_recipe = self.dtype.pop("recipe", None)
-        self.dtype = _resolve_quant_dtype(self.dtype)
+    def _post_init_dtype(self):
+        """Expand {tensor: fmt} to {tensor: {gemm: fmt}}, then apply the recipe."""
+        recipe = self.dtype.pop("recipe", None)
+        for tensor, value in self.dtype.items():
+            _check_one_of("quant dtype key", tensor, GEMM_OPS_BY_TENSOR)
+            gemms = GEMM_OPS_BY_TENSOR[tensor]
+            per_gemm = (
+                dict(value) if isinstance(value, dict) else dict.fromkeys(gemms, value)
+            )
+            for gemm, fmt in per_gemm.items():
+                if gemm not in gemms:
+                    raise ValueError(
+                        f"quant dtype {tensor!r} cannot be scoped to {gemm!r}: "
+                        f"only {list(gemms)} consume it"
+                    )
+                _check_one_of(f"quant fmt for {tensor}.{gemm}", fmt, QUANT_FORMATS)
+            self.dtype[tensor] = per_gemm
 
         # A dtype recipe fills the slots left open, the way a scale recipe fills
         # scale. It is applied after the expansion so that a tensor scoped to one
         # GEMM still takes the recipe's format in the other.
-        if dtype_recipe is not None:
-            if dtype_recipe not in QUANT_DTYPE_RECIPES:
-                raise ValueError(
-                    f"unknown quant dtype recipe: {dtype_recipe!r}; "
-                    f"expected one of {sorted(QUANT_DTYPE_RECIPES)}"
-                )
-            for tensor, fmt in QUANT_DTYPE_RECIPES[dtype_recipe].items():
-                for gemm in QUANT_TENSOR_GEMMS[tensor]:
-                    self.dtype.setdefault(tensor, {}).setdefault(gemm, fmt)
+        if recipe is None:
+            return
+        _check_one_of("quant dtype recipe", recipe, QUANT_DTYPE_RECIPES)
+        for tensor, fmt in QUANT_DTYPE_RECIPES[recipe].items():
+            for gemm in GEMM_OPS_BY_TENSOR[tensor]:
+                self.dtype.setdefault(tensor, {}).setdefault(gemm, fmt)
+        if recipe == "mxfp8":
             # mxfp8 is an fp8 element paired with the "mxfp8" scale scheme; seed it.
-            if dtype_recipe == "mxfp8":
-                self.scale.setdefault("recipe", "mxfp8")
+            self.scale.setdefault("recipe", "mxfp8")
 
-        # A scale recipe fills the scale dict the same way (recipe key popped from scale).
+    def _post_init_scale(self):
+        """Apply the scale recipe, then resolve granularity, block_shape and dtype."""
         recipe = self.scale.pop("recipe", None)
         if recipe is not None:
-            if recipe not in QUANT_SCALE_RECIPES:
-                raise ValueError(
-                    f"unknown quant scale recipe: {recipe!r}; "
-                    f"expected one of {sorted(QUANT_SCALE_RECIPES)}"
-                )
+            _check_one_of("quant scale recipe", recipe, QUANT_SCALE_RECIPES)
             for key, val in QUANT_SCALE_RECIPES[recipe].items():
                 self.scale.setdefault(key, val)  # explicit scale keys win
 
-        self.scale.setdefault("granularity", "tensorwise")
-        granularity = self.scale["granularity"]
-        if granularity not in QUANT_GRANULARITY:
-            raise ValueError(
-                f"unknown quant granularity: {granularity!r}; "
-                f"expected one of {sorted(QUANT_GRANULARITY)}"
-            )
+        granularity = self.scale.setdefault("granularity", "tensorwise")
+        _check_one_of("quant granularity", granularity, QUANT_GRANULARITY)
 
         if self.scale.get("scale_dtype") is None:
             self.scale["scale_dtype"] = "fp32"
         scale_dtype = self.scale["scale_dtype"]
-        if scale_dtype not in ("fp32", "fp8_e8m0"):
-            raise ValueError(
-                f"unknown quant scale_dtype: {scale_dtype!r}; "
-                "expected 'fp32' or 'fp8_e8m0'"
-            )
+        _check_one_of("quant scale_dtype", scale_dtype, _SCALE_DTYPES)
         if scale_dtype == "fp8_e8m0" and granularity != "blockwise":
             raise ValueError(
                 "quant scale_dtype 'fp8_e8m0' requires granularity 'blockwise'"
-            )
-        if "block_size" in self.scale:
-            raise ValueError(
-                "quant scale key 'block_size' was replaced by 'block_shape', a "
-                "(outer, contract) pair; use block_shape: [1, N] for the old behaviour"
             )
         if granularity == "blockwise":
             block_shape = self.scale.get("block_shape")
@@ -476,7 +430,9 @@ class QuantizationConfig:
             # nothing downstream has to re-check the granularity to know that.
             self.scale["block_shape"] = (0, 0)
 
-        # mxfp8 (blockwise + fp8_e8m0) is defined only over fp8 elements.
+        # The e8m0 shared exponent only has fp8 kernels, so mxfp8 + int8 (or any
+        # other non-fp8 element) is rejected here. Pass-through formats are exempt:
+        # they are unquantized and carry no scale.
         if granularity == "blockwise" and scale_dtype == "fp8_e8m0":
             for tensor, per_gemm in self.dtype.items():
                 for gemm, fmt in per_gemm.items():
@@ -487,6 +443,68 @@ class QuantizationConfig:
                         )
 
         self.scale["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
+
+    def _post_init_rounding(self):
+        """Validate the named rounding modes and default the rest to RNE."""
+        for tensor, mode in self.rounding.items():
+            _check_one_of("quant rounding key", tensor, GEMM_OPS_BY_TENSOR)
+            _check_one_of(f"quant rounding for {tensor}", mode, QUANT_ROUNDING)
+        self.rounding = {t: self.rounding.get(t, "RNE") for t in GEMM_TENSORS}
+
+    def _post_init_rotation(self):
+        """Canonicalize rotation to {rotation_cls, rotation_kwargs, gemms}."""
+        if self.rotation is None:
+            return
+        if not isinstance(self.rotation, dict):
+            raise ValueError(
+                "quant 'rotation' must be {rotation_cls, rotation_kwargs, gemms}, "
+                f"got {self.rotation!r}"
+            )
+        if "rotation_cls" not in self.rotation:
+            self.rotation = None
+            return
+        unknown = set(self.rotation) - {"rotation_cls", "rotation_kwargs", "gemms"}
+        if unknown:
+            raise ValueError(f"unknown quant rotation keys: {sorted(unknown)}")
+
+        rotation_cls = self.rotation["rotation_cls"]
+        _check_one_of("rotation_cls", rotation_cls, ROTATION_REGISTRY)
+
+        rotation_kwargs = self.rotation.get("rotation_kwargs", {})
+        if not isinstance(rotation_kwargs, dict):
+            raise ValueError(
+                f"quant rotation 'rotation_kwargs' must be a dict, "
+                f"got {rotation_kwargs!r}"
+            )
+        rotation_kwargs = dict(rotation_kwargs)
+        # build_rotation_key serializes these to derive a stable identity, and the
+        # config itself must survive the YAML round trip.
+        try:
+            json.dumps(rotation_kwargs, sort_keys=True)
+        except TypeError as error:
+            raise ValueError(
+                f"quant rotation 'rotation_kwargs' must hold only YAML/JSON "
+                f"values, got {rotation_kwargs!r}"
+            ) from error
+
+        gemms = self.rotation.get("gemms", list(GEMM_OPS))
+        if isinstance(gemms, str):
+            gemms = [gemms]
+        if not isinstance(gemms, list) or not gemms:
+            raise ValueError(
+                f"quant rotation 'gemms' must be a non-empty list of "
+                f"{list(GEMM_OPS)}, got {gemms!r}"
+            )
+        for gemm in gemms:
+            _check_one_of("rotation gemm", gemm, GEMM_OPS)
+        if len(set(gemms)) != len(gemms):
+            raise ValueError(f"quant rotation 'gemms' has duplicates: {gemms!r}")
+
+        self.rotation = {
+            "rotation_cls": rotation_cls,
+            "rotation_kwargs": rotation_kwargs,
+            "gemms": gemms,
+        }
 
 
 @dataclass
@@ -516,20 +534,9 @@ class TrainingConfig:
     )
 
     def __post_init__(self):
-        if self.device not in _DEVICES:
-            raise ValueError(
-                f"unknown device: {self.device!r}; expected one of {sorted(_DEVICES)}"
-            )
-        if self.mixed_precision not in _MIXED_PRECISION:
-            raise ValueError(
-                f"unknown mixed_precision: {self.mixed_precision!r}; "
-                f"expected one of {sorted(_MIXED_PRECISION)}"
-            )
-        if self.loss_fn not in LOSS_REGISTRY:
-            raise ValueError(
-                f"unknown loss_fn: {self.loss_fn!r}; "
-                f"expected one of {sorted(LOSS_REGISTRY)}"
-            )
+        _check_one_of("device", self.device, _DEVICES)
+        _check_one_of("mixed_precision", self.mixed_precision, _MIXED_PRECISION)
+        _check_one_of("loss_fn", self.loss_fn, LOSS_REGISTRY)
         rules = (
             self.quantization
             if isinstance(self.quantization, list)
@@ -541,9 +548,11 @@ class TrainingConfig:
             if isinstance(rule, dict):
                 rule = QuantizationConfig(**rule)
             if rule.enabled:
-                for tensor, gemms in QUANT_TENSOR_GEMMS.items():
+                for tensor, gemms in GEMM_OPS_BY_TENSOR.items():
                     for gemm in gemms:
                         rule.dtype.setdefault(tensor, {}).setdefault(gemm, amp_dtype)
+                if rule.rotation and rule.rotation["rotation_cls"] == "hadamard":
+                    rule.rotation["rotation_kwargs"].setdefault("seed", self.seed)
             normalized.append(rule)
         self.quantization = normalized
 
@@ -557,28 +566,34 @@ class OptimizerConfig:
     optimizer_kwargs: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.optimizer_cls not in OPTIMIZER_REGISTRY:
-            raise ValueError(
-                f"unknown optimizer_cls: {self.optimizer_cls!r}; "
-                f"expected one of {sorted(OPTIMIZER_REGISTRY)}"
-            )
-        self.optimizer_kwargs.setdefault(
-            "foreach" if self.optimizer_cls == "lion" else "fused", True
-        )
+        _check_one_of("optimizer_cls", self.optimizer_cls, OPTIMIZER_REGISTRY)
+        kwargs = self.optimizer_kwargs
+        if self.optimizer_cls == "adamw":
+            # beta2=0.95 (not torch's 0.999) is the GPT-3/LLaMA setting.
+            kwargs.setdefault("betas", (0.9, 0.95))
+            kwargs.setdefault("eps", 1e-8)
+            kwargs.setdefault("fused", True)
+        elif self.optimizer_cls == "lion":
+            kwargs.setdefault("betas", (0.9, 0.99))  # Chen et al. 2023 default
+            kwargs.setdefault("foreach", True)
+        elif self.optimizer_cls == "muon":
+            kwargs.setdefault("momentum", 0.95)
+            kwargs.setdefault("nesterov", True)
+            # Rescale Muon's update RMS to AdamW's so both halves share one lr.
+            kwargs.setdefault("adjust_lr_fn", "match_rms_adamw")
+            kwargs.setdefault("betas", (0.9, 0.95))  # AdamW half
+            kwargs.setdefault("eps", 1e-8)
+            kwargs.setdefault("fused", True)
 
 
 @dataclass
 class SchedulerConfig:
     name: str = "cosine"
     warmup_steps: int = 100
-    min_lr: float = 6e-5
+    min_lr: float = 5e-5
 
     def __post_init__(self):
-        if self.name not in SCHEDULER_REGISTRY:
-            raise ValueError(
-                f"unknown scheduler: {self.name!r}; "
-                f"expected one of {sorted(SCHEDULER_REGISTRY)}"
-            )
+        _check_one_of("scheduler", self.name, SCHEDULER_REGISTRY)
 
 
 @dataclass

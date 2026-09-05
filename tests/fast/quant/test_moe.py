@@ -11,6 +11,8 @@ from src.quant.moe import (
     ScaledGroupedGemmFn,
     quantized_grouped_mm,
 )
+from src.quant.constants import GEMM_OPS
+from src.quant.rotation import build_rotation
 from src.utils.config import (
     ModelConfig,
     QuantizationConfig,
@@ -24,6 +26,8 @@ from tests.fast.quant.helper import (
     INT4_W8A16_DTYPES,
     FP8_E4M3_W8A8_E5M2_G8_DTYPES,
     ALL_SCALES,
+    BLOCKWISE1D_16,
+    BLOCKWISE1D_32_E8M0,
     ROWWISE,
     SCALE_DTYPE_NAMES,
     fp8_only,
@@ -54,9 +58,9 @@ def _cfg(scale_cfg=ROWWISE, dtype=None):
     )
 
 
-def _expert_mm(cfg, a, b, offs, bias=None):
+def _expert_mm(cfg, a, b, offs, bias=None, rotation=None):
     """Run the quantized expert GEMM without block metadata or statistics."""
-    return ScaledGroupedGemmFn.apply(a, b, bias, offs, cfg, {})
+    return ScaledGroupedGemmFn.apply(a, b, bias, offs, cfg, {}, rotation)
 
 
 def _make(counts, K, N, seed=0):
@@ -149,16 +153,23 @@ GROUPED_STATS_CASES = [
     ("int8", "bf16", True, True, False),
     ("int8", "int8", True, True, True),
 ]
+GROUPED_STATS_LAYOUTS = ["ragged_m", "ragged_k"]
 
 
 @fp8_only
 @pytest.mark.parametrize(
     "a_fmt,b_fmt,with_stats,a_folded,b_folded", GROUPED_STATS_CASES
 )
+@pytest.mark.parametrize("layout", GROUPED_STATS_LAYOUTS)
 def test_quantized_grouped_mm_records_stats(
-    a_fmt, b_fmt, with_stats, a_folded, b_folded
+    a_fmt, b_fmt, with_stats, a_folded, b_folded, layout
 ):
     a, b, offs = _make(COUNTS, K=64, N=48)
+    if layout == "ragged_m":
+        src_a, src_b = a, b
+    else:
+        src_a = a.mT
+        src_b = torch.randn(a.shape[0], b.shape[-1], device=a.device, dtype=a.dtype)
     # Allocate one stats slot per expert to catch cold experts.
     experts = len(COUNTS)
     a_stats = QuantizationStats("act/x", experts, a.device) if with_stats else None
@@ -166,8 +177,8 @@ def test_quantized_grouped_mm_records_stats(
     set_quantization_monitoring_status(True)
     try:
         out = quantized_grouped_mm(
-            a,
-            b,
+            src_a,
+            src_b,
             offs,
             a_fmt,
             b_fmt,
@@ -181,21 +192,89 @@ def test_quantized_grouped_mm_records_stats(
     assert torch.isfinite(out).all()
     if with_stats:
         assert a_stats.numel.shape == (experts,)
-        assert a_stats.numel.sum().item() == (a.numel() if a_folded else 0)
-        assert b_stats.numel.sum().item() == (b.numel() if b_folded else 0)
+        assert a_stats.numel.sum().item() == (src_a.numel() if a_folded else 0)
+        assert b_stats.numel.sum().item() == (src_b.numel() if b_folded else 0)
+
+
+# 168 rows over four experts: one empty, one shorter than a rotation block, and one
+# that is not a block multiple -- the cases segment padding has to align.
+ROTATION_COUNTS = [128, 0, 7, 33]
+ROTATION_CONFIGS = [
+    {"rotation_cls": "hadamard", "rotation_kwargs": {"block_size": 16, "seed": 0}},
+    {"rotation_cls": "hadamard", "rotation_kwargs": {"block_size": 32, "seed": 0}},
+]
+ROTATION_FORMATS = ["fp8_e4m3", "int8"]
+ROTATION_SCALES = [ROWWISE, BLOCKWISE1D_16, BLOCKWISE1D_32_E8M0]
+# Worst over 30 valid cases is 0.0544553, so this gives a 3.3x margin. An
+# expert-boundary cancellation failure remains O(1).
+ROTATION_PRECISION_BOUND = 0.18
+
+
+@fp8_only
+@pytest.mark.parametrize("fmt", ROTATION_FORMATS)
+@pytest.mark.parametrize("scale_cfg", ROTATION_SCALES)
+@pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
+@pytest.mark.parametrize("rotation_cfg", ROTATION_CONFIGS)
+def test_quantized_grouped_mm_rotation_precision(fmt, scale_cfg, layout, rotation_cfg):
+    """Rotated and unrotated quantized GEMMs must agree for every ragged layout."""
+    skip_unsupported_fmt_scale(fmt, scale_cfg)
+    if layout == "ragged_k":
+        skip_unsupported_ragged_k_scale(scale_cfg)
+    a, b, offs = _make(ROTATION_COUNTS, K=64, N=48)
+    rotation = build_rotation(rotation_cfg)
+
+    if layout == "ragged_m":
+        # Ragged-M: (R,K) x (E,K,N) -> (R,N)
+        out = quantized_grouped_mm(
+            a, b, offs, fmt, fmt, a.dtype, scale_cfg, rotation=rotation
+        )
+        ref = quantized_grouped_mm(
+            a, b, offs, fmt, fmt, a.dtype, scale_cfg, rotation=None
+        )
+    elif layout == "ragged_n":
+        # Ragged-N: (E,M,K) x (K,R) -> (M,R)
+        slabs = torch.randn(offs.shape[0], 32, 64, device="cuda", dtype=torch.bfloat16)
+        cols = torch.randn(64, a.shape[0], device="cuda", dtype=torch.bfloat16) * 0.1
+        out = quantized_grouped_mm(
+            slabs, cols, offs, fmt, fmt, slabs.dtype, scale_cfg, rotation=rotation
+        )
+        ref = quantized_grouped_mm(
+            slabs, cols, offs, fmt, fmt, slabs.dtype, scale_cfg, rotation=None
+        )
+    else:
+        # Ragged-K: (K,R) x (R,N) -> (E,K,N)
+        gy = torch.randn(a.shape[0], 48, device="cuda", dtype=torch.bfloat16)
+        out = quantized_grouped_mm(
+            a.mT, gy, offs, fmt, fmt, a.dtype, scale_cfg, rotation=rotation
+        )
+        ref = quantized_grouped_mm(
+            a.mT, gy, offs, fmt, fmt, a.dtype, scale_cfg, rotation=None
+        )
+
+    assert rel(out, ref) < ROTATION_PRECISION_BOUND, rel(out, ref)
 
 
 # --- ScaledGroupedGemmFn ---
 
 
 @fp8_only
-def test_scaled_grouped_gemm_fn_compiles_fullgraph():
-    # Fullgraph covers forward; autograd backward remains eager.
+@pytest.mark.parametrize("rotation_gemms", [None, list(GEMM_OPS)])
+def test_scaled_grouped_gemm_fn_compiles_fullgraph(rotation_gemms):
+    """Fullgraph covers forward; autograd backward remains eager."""
     a, b, offs = _make(COUNTS, K=64, N=48)
     cfg = _cfg(ROWWISE)
+    rotation = None
+    if rotation_gemms is not None:
+        rotation_cfg = {
+            "rotation_cls": "hadamard",
+            "rotation_kwargs": {"block_size": 16, "seed": 0},
+            "gemms": rotation_gemms,
+        }
+        cfg.rotation = rotation_cfg
+        rotation = build_rotation(rotation_cfg).cuda()
 
     def fwd(a, b):
-        return _expert_mm(cfg, a, b, offs)
+        return _expert_mm(cfg, a, b, offs, rotation=rotation)
 
     def run(fn):
         a_, b_ = a.clone().requires_grad_(True), b.clone().requires_grad_(True)
@@ -206,7 +285,7 @@ def test_scaled_grouped_gemm_fn_compiles_fullgraph():
     eager = run(fwd)
     compiled = run(torch.compile(fwd, fullgraph=True))
     for got, ref in zip(compiled, eager):
-        torch.testing.assert_close(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(got, ref, atol=0, rtol=0)
 
 
 @fp8_only
@@ -340,9 +419,23 @@ def test_quantized_sparse_moe_block_autocast():
     assert torch.isfinite(x.grad).all()
 
 
+# Block 16 divides both expert contractions below (64 and 48); wgrad reaches the
+# ragged contraction, so it is the case segment padding has to carry.
+E2E_ROTATIONS = [
+    None,
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 16},
+        "gemms": ["wgrad"],
+    },
+    {"rotation_cls": "hadamard", "rotation_kwargs": {"block_size": 16}},
+]
+
+
 @fp8_only
 @pytest.mark.parametrize("bias", [False, True])
-def test_quantized_sparse_moe_block_trains_a_full_model(bias):
+@pytest.mark.parametrize("rotation", E2E_ROTATIONS)
+def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation):
     """Check one converted FP8 MoE step and fused per-expert bias gradients."""
     config = TrainConfig(
         max_seq_len=64,
@@ -374,13 +467,19 @@ def test_quantized_sparse_moe_block_trains_a_full_model(bias):
                 "enabled": True,
                 "dtype": {"recipe": "fp8"},
                 "scale": {"recipe": "rowwise"},
+                "rotation": rotation,
             },
         ),
     )
-    model = build_model(config).cuda().to(torch.bfloat16)
+    model = build_model(config)
     apply_quantization(model, config)
+    model.cuda().to(torch.bfloat16)
     blocks = [m for m in model.modules() if isinstance(m, QuantizedSparseMoEBlock)]
     assert blocks  # Conversion installed the quantized seam.
+    # Pin the rotation to the block: a config that silently resolves to None would
+    # leave every assertion below passing without a rotation ever running.
+    for block in blocks:
+        assert (block.rotation is not None) == (rotation is not None)
 
     ids = torch.randint(0, 128, (2, 64), device="cuda")
     position_ids = torch.arange(64, device="cuda").unsqueeze(0).expand(2, 64)

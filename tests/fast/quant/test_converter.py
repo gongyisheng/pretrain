@@ -10,6 +10,7 @@ from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
+from src.quant.rotation import build_rotation_key
 from src.utils.config import (
     ModelConfig,
     QuantizationConfig,
@@ -144,3 +145,87 @@ def test_apply_quantization_accepts_a_bare_config_namespace():
     config = SimpleNamespace(training=SimpleNamespace(quantization=[rule]))
     apply_quantization(model, config)
     assert isinstance(model[0], QuantizedLinear)
+
+
+def test_apply_quantization_owns_rotation_once_at_model_root():
+    """Catch a rotation being registered per quantized module instead of once."""
+    model = _Dense()
+    config = _cfg(
+        _spec(
+            "int8",
+            rotation={
+                "rotation_cls": "hadamard",
+                "rotation_kwargs": {"block_size": 16, "random_sign": True},
+                "gemms": ["fwd"],
+            },
+        )
+    )
+    cfg = config.training.quantization[0]
+    key = build_rotation_key(cfg.rotation, cfg.include, cfg.exclude)
+
+    apply_quantization(model, config)
+    model.to("meta")
+
+    root_rotation = model.quant_rotations[key]
+    assert root_rotation.sign_vector.device.type == "meta"
+    assert model.attn["q_proj"].rotation is root_rotation
+    assert model.mlp["down_proj"].rotation is root_rotation
+    rotation_state = [k for k in model.state_dict() if "sign_vector" in k]
+    assert rotation_state == [f"quant_rotations.{key}.sign_vector"]
+
+
+def test_apply_quantization_gives_each_rule_its_own_rotation():
+    """Catch one rule's rotation leaking into the modules claimed by another."""
+    model = _Dense()
+    config = _cfg(
+        [
+            _spec(
+                "int8",
+                include=["*attn*"],
+                exclude=[],
+                rotation={
+                    "rotation_cls": "hadamard",
+                    "rotation_kwargs": {"block_size": 16, "seed": 1},
+                    "gemms": ["fwd"],
+                },
+            ),
+            _spec(
+                "int8",
+                include=["*mlp*"],
+                exclude=[],
+                rotation={
+                    "rotation_cls": "hadamard",
+                    "rotation_kwargs": {"block_size": 32, "seed": 2},
+                    "gemms": ["wgrad"],
+                },
+            ),
+        ]
+    )
+    attn_cfg, mlp_cfg = config.training.quantization
+    attn_key = build_rotation_key(attn_cfg.rotation, attn_cfg.include, attn_cfg.exclude)
+    mlp_key = build_rotation_key(mlp_cfg.rotation, mlp_cfg.include, mlp_cfg.exclude)
+
+    apply_quantization(model, config)
+
+    assert attn_key != mlp_key
+    assert sorted(model.quant_rotations) == sorted([attn_key, mlp_key])
+    assert model.attn["q_proj"].rotation is model.quant_rotations[attn_key]
+    assert model.mlp["down_proj"].rotation is model.quant_rotations[mlp_key]
+    assert model.attn["q_proj"].rotation.block_size == 16
+    assert model.mlp["down_proj"].rotation.block_size == 32
+    assert sorted(k for k in model.state_dict() if "sign_vector" in k) == sorted(
+        [
+            f"quant_rotations.{attn_key}.sign_vector",
+            f"quant_rotations.{mlp_key}.sign_vector",
+        ]
+    )
+
+
+def test_apply_quantization_without_rotation_leaves_state_dict_clean():
+    """A non-rotating run must not gain a rotation registry."""
+    model = _Dense()
+
+    apply_quantization(model, _cfg(_spec("int8")))
+
+    assert not hasattr(model, "quant_rotations")
+    assert not any("sign_vector" in k for k in model.state_dict())

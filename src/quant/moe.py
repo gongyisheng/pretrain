@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import copy
 
 import torch
@@ -8,6 +6,7 @@ from src.kernel.ops.gemm import SCALED_MM_OPS, grouped_mm
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import QuantizationStats, record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
+from src.quant.rotation import Rotation
 from src.quant.utils import is_quantized, scaled_grouped_mm_op
 from src.utils.config import QuantizationConfig
 
@@ -25,6 +24,7 @@ def quantized_grouped_mm(
     b_stochastic_rounding: bool = False,
     a_stats: QuantizationStats | None = None,
     b_stats: QuantizationStats | None = None,
+    rotation: Rotation | None = None,
 ) -> torch.Tensor:
     """Quantized grouped GEMM for ragged M, K, or N layouts.
 
@@ -46,9 +46,36 @@ def quantized_grouped_mm(
         src_a, contract_a, a_offs, a_ragged_dim = a, -1, None, None
         b_offs, b_ragged_dim = offs, -1
     elif ragged_k:
-        # Ragged K: map both operands and transpose A for quantization.
-        src_a, contract_a, a_offs, a_ragged_dim = a.mT, -2, offs, -2
-        b_offs, b_ragged_dim = offs, -2
+        # Ragged K: both operands share their contraction axis.
+        src_a, contract_a, a_ragged_dim = a, -1, -1
+        b_ragged_dim = -2
+        if rotation is not None:
+            alignment = rotation.alignment
+            if alignment > 1:
+                n_rows, n_groups = src_a.shape[-1], offs.shape[0]
+                starts = torch.cat([offs.new_zeros(1), offs[:-1]])
+                counts = offs - starts
+                ceil_inputs = counts + alignment - 1
+                padded_blocks = torch.div(ceil_inputs, alignment, rounding_mode="floor")
+                padded_counts = padded_blocks * alignment
+                padded_offs = padded_counts.cumsum(0).to(offs.dtype)
+                padded_starts = torch.cat([padded_offs.new_zeros(1), padded_offs[:-1]])
+                rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
+                group = torch.searchsorted(offs, rows, right=True)
+                group.clamp_(max=n_groups - 1)
+                index = (padded_starts[group] + rows - starts[group]).long()
+                max_padded_rows = n_rows + n_groups * alignment
+                n_padded = -(-max_padded_rows // alignment) * alignment
+                src_a_shape = (src_a.shape[-2], n_padded)
+                padded_src_a = src_a.new_zeros(src_a_shape, dtype=torch.float32)
+                padded_src_a.index_copy_(1, index, src_a.float())
+                src_a = padded_src_a
+                b_shape = (n_padded, b.shape[-1])
+                padded_b = b.new_zeros(b_shape, dtype=torch.float32)
+                padded_b.index_copy_(0, index, b.float())
+                b = padded_b
+                offs = padded_offs
+        a_offs, b_offs = offs, offs
     else:
         # Ragged M: only A is mapped.
         src_a, contract_a, a_offs, a_ragged_dim = a, -1, offs, -2
@@ -64,6 +91,7 @@ def quantized_grouped_mm(
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             stochastic_rounding=a_stochastic_rounding,
+            rotation=rotation,
         )
         record_operand(
             a_stats,
@@ -74,6 +102,7 @@ def quantized_grouped_mm(
             scale_cfg,
             offs=a_offs,
             ragged_dim=a_ragged_dim,
+            rotation=rotation,
         )
     if is_quantized(b_fmt):
         bq, sb = quantize_operand(
@@ -84,6 +113,7 @@ def quantized_grouped_mm(
             offs=b_offs,
             ragged_dim=b_ragged_dim,
             stochastic_rounding=b_stochastic_rounding,
+            rotation=rotation,
         )
         # Keep `offs` for per-expert B metrics, even when B is not ragged.
         record_operand(
@@ -95,13 +125,14 @@ def quantized_grouped_mm(
             scale_cfg,
             offs=offs,
             ragged_dim=b_ragged_dim,
+            rotation=rotation,
         )
 
     if op is not None:
         return SCALED_MM_OPS[op](
-            aq.mT if ragged_k else aq,
+            aq,
             bq,
-            sa.mT if ragged_k else sa,
+            sa,
             sb,
             offs,
             out_dtype,
@@ -111,14 +142,26 @@ def quantized_grouped_mm(
 
     if aq is not None:
         src_a = dequantize_operand(
-            aq, sa, contract_a, scale_cfg, offs=a_offs, ragged_dim=a_ragged_dim
+            aq,
+            sa,
+            contract_a,
+            scale_cfg,
+            offs=a_offs,
+            ragged_dim=a_ragged_dim,
+            rotation=rotation,
         ).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(
-            bq, sb, -2, scale_cfg, offs=b_offs, ragged_dim=b_ragged_dim
+            bq,
+            sb,
+            -2,
+            scale_cfg,
+            offs=b_offs,
+            ragged_dim=b_ragged_dim,
+            rotation=rotation,
         ).to(b.dtype)
     y = grouped_mm(
-        (src_a.mT if ragged_k else src_a).to(out_dtype),
+        src_a.to(out_dtype),
         b.to(out_dtype),
         offs,
         bias=None if bias is None else bias.to(out_dtype),
@@ -128,7 +171,7 @@ def quantized_grouped_mm(
 
 class ScaledGroupedGemmFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, bias, offs, cfg: QuantizationConfig, stats):
+    def forward(ctx, a, b, bias, offs, cfg: QuantizationConfig, stats, rotation):
         out_dtype = a.dtype
         y = quantized_grouped_mm(
             a,
@@ -143,10 +186,16 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("act"),
             b_stats=stats.get("weight"),
+            rotation=(
+                rotation
+                if cfg.rotation is not None and "fwd" in cfg.rotation["gemms"]
+                else None
+            ),
         )
         ctx.save_for_backward(a, b, offs)
         ctx.cfg = cfg
         ctx.stats = stats
+        ctx.rotation = rotation
         ctx.bias_needs_grad = ctx.needs_input_grad[2]
         return y
 
@@ -169,6 +218,11 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("grad_out"),
             b_stats=stats.get("weight"),
+            rotation=(
+                ctx.rotation
+                if cfg.rotation is not None and "dgrad" in cfg.rotation["gemms"]
+                else None
+            ),
         )
         # Wgrad uses the ragged-K layout.
         grad_b = quantized_grouped_mm(
@@ -183,6 +237,11 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             b_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             a_stats=stats.get("act"),
             b_stats=stats.get("grad_out"),
+            rotation=(
+                ctx.rotation
+                if cfg.rotation is not None and "wgrad" in cfg.rotation["gemms"]
+                else None
+            ),
         )
         grad_bias = None
         if ctx.bias_needs_grad:
@@ -192,17 +251,21 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             acc = grad_y.new_zeros(offs.shape[0], grad_y.shape[1], dtype=torch.float32)
             acc.index_add_(0, group_of_row, grad_y.float())
             grad_bias = acc.to(grad_y.dtype)
-        return grad_a, grad_b, grad_bias, None, None, None
+        return grad_a, grad_b, grad_bias, None, None, None, None
 
 
 class QuantizedSparseMoEBlock(SparseMoEBlock):
     @classmethod
     def from_module(
-        cls, module: SparseMoEBlock, quantization_config: QuantizationConfig
+        cls,
+        module: SparseMoEBlock,
+        quantization_config: QuantizationConfig,
+        rotation: Rotation | None = None,
     ) -> "QuantizedSparseMoEBlock":
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
+        object.__setattr__(q, "rotation", rotation)
         # Monitoring populates this; empty disables statistics.
         q.quant_stats = {}
         return q
@@ -218,4 +281,5 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
             offs,
             self.quantization_config,
             self.quant_stats.get(projection, {}),
+            self.rotation,
         )

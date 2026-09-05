@@ -202,12 +202,12 @@ SCALES_COARSE_TO_FINE = [
 SCALE_DTYPE_NAMES = {torch.float32: "fp32", torch.float8_e8m0fnu: "fp8_e8m0"}
 
 
-def roundtrip(x, contract_dim, fmt, scale_cfg):
+def roundtrip(x, contract_dim, fmt, scale_cfg, rotation=None):
     """Return a quantized operand after dequantization."""
     if not is_quantized(fmt):
         return x
-    xq, scale = quantize_operand(x, contract_dim, fmt, scale_cfg)
-    return dequantize_operand(xq, scale, contract_dim, scale_cfg)
+    xq, scale = quantize_operand(x, contract_dim, fmt, scale_cfg, rotation=rotation)
+    return dequantize_operand(xq, scale, contract_dim, scale_cfg, rotation=rotation)
 
 
 def fused_op_exists(a_fmt, b_fmt):
@@ -215,7 +215,7 @@ def fused_op_exists(a_fmt, b_fmt):
     return (is_fp8(a_fmt) and is_fp8(b_fmt)) or (is_int8s(a_fmt) and is_int8s(b_fmt))
 
 
-def mm_ref(a, a_fmt, b, b_fmt, scale_cfg):
+def mm_ref(a, a_fmt, b, b_fmt, scale_cfg, rotation=None):
     """Reference GEMM with fused and fallback precision behavior.
 
     Fused GEMMs accumulate in fp32. The fallback first restores operand dtype, then
@@ -223,8 +223,8 @@ def mm_ref(a, a_fmt, b, b_fmt, scale_cfg):
     """
     dtype = torch.float32 if fused_op_exists(a_fmt, b_fmt) else a.dtype
     return (
-        roundtrip(a, -1, a_fmt, scale_cfg).to(dtype).float()
-        @ roundtrip(b, -2, b_fmt, scale_cfg).to(dtype).float()
+        roundtrip(a, -1, a_fmt, scale_cfg, rotation=rotation).to(dtype).float()
+        @ roundtrip(b, -2, b_fmt, scale_cfg, rotation=rotation).to(dtype).float()
     )
 
 
@@ -264,7 +264,7 @@ def rel(got, ref):
     return (got.float() - ref.float()).norm() / ref.float().norm()
 
 
-def rule(dtype, scale_cfg=None, rounding=None):
+def rule(dtype, scale_cfg=None, rounding=None, rotation=None):
     """Build a resolved rule through TrainingConfig.
 
     Rename `scale_dtype` for config syntax without resolving it again.
@@ -277,4 +277,6 @@ def rule(dtype, scale_cfg=None, rounding=None):
         }
     if rounding is not None:
         spec["rounding"] = dict(rounding)
+    if rotation is not None:
+        spec["rotation"] = dict(rotation)
     return TrainingConfig(mixed_precision="no", quantization=spec).quantization[0]

@@ -1,12 +1,10 @@
-from functools import lru_cache
-
 import torch
 
 import src.kernel.backends.cublaslt  # noqa: F401
 import src.kernel.backends.eager  # noqa: F401
 import src.kernel.backends.triton  # noqa: F401
 from src.kernel.registry import KERNEL_REGISTRY
-from src.kernel.selector import _platform_for, dispatch
+from src.kernel.selector import _platform_for, compile_safe_cache, dispatch
 
 try:  # Absent when the extension is unbuilt.
     from src.kernel.backends.cublaslt import gemm as _cublaslt
@@ -97,7 +95,7 @@ __all__ = [
 ]
 
 
-@lru_cache(maxsize=None)
+@compile_safe_cache
 def _is_kernel_available(op: str, backend: str, device: torch.device) -> bool:
     """Return whether a registered backend supports the device."""
     platform = _platform_for(device.type, device.index)
