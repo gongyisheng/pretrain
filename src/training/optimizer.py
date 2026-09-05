@@ -275,26 +275,40 @@ class MuonAdamWOptimizer:
     AdamW-tuned base lr so both subsystems run off one lr the scheduler drives.
     """
 
-    def __init__(self, muon_groups, adamw_groups, config: "TrainConfig"):
-        opt = config.optimizer
+    def __init__(
+        self,
+        muon_groups,
+        adamw_groups,
+        lr: float,
+        weight_decay: float = 0.1,
+        betas=(0.9, 0.95),
+        eps: float = 1e-8,
+        fused: bool = True,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_coefficients=(3.4445, -4.7750, 2.0315),
+        ns_max_batch_elems: int = 8_000_000,
+        ns_steps: int = 5,
+        adjust_lr_fn: str | None = "match_rms_adamw",
+    ):
         self.muon = MuonOptimizer(
             muon_groups,
-            lr=opt.lr,
-            weight_decay=opt.weight_decay,
-            momentum=opt.muon_momentum,
-            nesterov=opt.muon_nesterov,
-            ns_coefficients=tuple(opt.muon_ns_coefficients),
-            ns_max_batch_elems=opt.muon_ns_max_batch_elems,
-            eps=opt.eps,
-            ns_steps=opt.muon_ns_steps,
-            adjust_lr_fn=opt.muon_adjust_lr_fn,
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_coefficients=tuple(ns_coefficients),
+            ns_max_batch_elems=ns_max_batch_elems,
+            eps=eps,
+            ns_steps=ns_steps,
+            adjust_lr_fn=adjust_lr_fn,
         )
         self.adamw = AdamWOptimizer(
             adamw_groups,
-            lr=opt.lr,
-            betas=tuple(opt.betas),
-            eps=opt.eps,
-            fused=True,
+            lr=lr,
+            betas=tuple(betas),
+            eps=eps,
+            fused=fused,
         )
         self._optimizers = [self.muon, self.adamw]
 
@@ -347,7 +361,7 @@ def build_optimizer(
     with `lr_mult=1.0`. Within every group, weight decay still follows the
     standard rule (`ndim >= 2` and no `"ln"`/`"bias"` in the name → decay).
 
-    For `name == "muon"`, params are additionally split on `use_muon` (2D hidden
+    For `optimizer_cls == "muon"`, params are additionally split on `use_muon` (2D hidden
     weights → Muon; everything else → AdamW), so the two subsystems get disjoint
     param groups.
 
@@ -355,8 +369,8 @@ def build_optimizer(
     only under `token_emb.weight` — an `lm_head` pattern in `lr_mult` is a
     silent no-op.
     """
-    name = config.optimizer.name
-    split_muon = name == "muon"
+    optimizer_cls = config.optimizer.optimizer_cls
+    split_muon = optimizer_cls == "muon"
     patterns = [(re.compile(k), k) for k in config.optimizer.lr_mult.keys()]
     wd = config.optimizer.weight_decay
     groups: dict = {}  # (matched_pattern_key_or_None, is_no_decay, use_muon) -> [params]
@@ -385,27 +399,19 @@ def build_optimizer(
             }
         )
 
-    if name == "adamw":
-        return AdamWOptimizer(
-            param_groups,
+    kwargs = dict(config.optimizer.optimizer_kwargs)
+    if "betas" in kwargs:
+        kwargs["betas"] = tuple(kwargs["betas"])
+    if split_muon:
+        return MuonAdamWOptimizer(
+            [g for g in param_groups if g["use_muon"]],
+            [g for g in param_groups if not g["use_muon"]],
             lr=config.optimizer.lr,
-            betas=tuple(config.optimizer.betas),
-            eps=config.optimizer.eps,
-            fused=True,
+            weight_decay=wd,
+            **kwargs,
         )
-    if name == "lion":
-        # Lion has no `eps`; the shared field is ignored.
-        return LionOptimizer(
-            param_groups,
-            lr=config.optimizer.lr,
-            betas=tuple(config.optimizer.betas),
-        )
-    if name == "muon":
-        muon_groups = [g for g in param_groups if g["use_muon"]]
-        adamw_groups = [g for g in param_groups if not g["use_muon"]]
-        return MuonAdamWOptimizer(muon_groups, adamw_groups, config)
-    raise ValueError(
-        f"unknown optimizer: {name!r}; expected one of {sorted(OPTIMIZER_REGISTRY)}"
+    return OPTIMIZER_REGISTRY[optimizer_cls](
+        param_groups, lr=config.optimizer.lr, **kwargs
     )
 
 

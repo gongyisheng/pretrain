@@ -18,7 +18,7 @@ Muon orthogonalizes each 2D weight's momentum via Newton–Schulz, equalizing th
 
 ## Setup
 
-All four configs are identical except `optimizer.name` (+ Muon-only hyperparams) and the grad `dtype` (`e4m3_w8a8_e5m2_g8` vs `e4m3_w8a8g8`). Muon uses the hybrid `MuonAdamWOptimizer`: 2D hidden weights → Muon, everything else (embeddings, `lm_head`, RMSNorm scales) → AdamW. `adjust_lr_fn=match_rms_adamw` matches Muon's update RMS to AdamW so it reuses the AdamW-tuned `lr`/`wd` directly.
+All four configs are identical except `optimizer.optimizer_cls` (+ Muon-only hyperparams) and the grad `dtype` (`e4m3_w8a8_e5m2_g8` vs `e4m3_w8a8g8`). Muon uses the hybrid `MuonAdamWOptimizer`: 2D hidden weights → Muon, everything else (embeddings, `lm_head`, RMSNorm scales) → AdamW. `adjust_lr_fn=match_rms_adamw` matches Muon's update RMS to AdamW so it reuses the AdamW-tuned `lr`/`wd` directly.
 
 | Config | Optimizer | Precision | Grad fmt | LR | min_lr | WD | Eff. batch | Approx params |
 |---|---|---|---|---|---|---|---|---|

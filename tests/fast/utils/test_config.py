@@ -1,3 +1,4 @@
+import copy
 import os
 import glob
 import json
@@ -69,10 +70,10 @@ MINIMAL_CONFIG = {
         "eval_steps": 2,
     },
     "optimizer": {
-        "name": "adamw",
+        "optimizer_cls": "adamw",
         "lr": 1e-3,
         "weight_decay": 0.1,
-        "betas": [0.9, 0.95],
+        "optimizer_kwargs": {"betas": [0.9, 0.95], "eps": 1e-8},
     },
     "scheduler": {"name": "cosine", "warmup_steps": 2, "min_lr": 1e-4},
     "logging": {"wandb_project": "test", "wandb_run_name": "test", "log_every": 1},
@@ -259,6 +260,21 @@ def test_config_to_dict_rotation_roundtrip():
 
 
 # ==================== CLI overrides ====================
+
+
+def test_load_config_optimizer_section():
+    with tempfile.TemporaryDirectory() as tmp:
+        # The section is optional (tokenizer-training configs have none) and
+        # falls back to the dataclass defaults.
+        raw = copy.deepcopy(MINIMAL_CONFIG)
+        del raw["optimizer"]
+        cfg = load_config(_write_yaml(tmp, raw)).optimizer
+        assert (cfg.optimizer_cls, cfg.lr) == ("adamw", 5e-4)
+        assert cfg.optimizer_kwargs == {
+            "betas": (0.9, 0.95),
+            "eps": 1e-8,
+            "fused": True,
+        }
 
 
 def test_config_cli_overrides():
@@ -911,13 +927,40 @@ def test_scheduler_unknown_name_raises():
     SchedulerConfig(name="constant")
 
 
-def test_optimizer_unknown_name_raises():
+@pytest.mark.parametrize(
+    "optimizer_cls, expected",
+    [
+        ("adamw", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
+        ("lion", {"betas": (0.9, 0.99), "foreach": True}),
+        (
+            "muon",
+            {
+                "betas": (0.9, 0.95),
+                "eps": 1e-8,
+                "momentum": 0.95,
+                "nesterov": True,
+                "adjust_lr_fn": "match_rms_adamw",
+                "fused": True,
+            },
+        ),
+    ],
+)
+def test_optimizer_config_defaults(optimizer_cls, expected):
     from src.utils.config import OptimizerConfig
 
-    with pytest.raises(ValueError, match="unknown optimizer"):
-        OptimizerConfig(name="sgd")
-    OptimizerConfig(name="adamw")
-    OptimizerConfig(name="lion")
+    # Unset kwargs get the pretraining-tuned defaults for the selected optimizer.
+    assert OptimizerConfig(optimizer_cls, lr=1e-3).optimizer_kwargs == expected
+    # An explicit value wins; the remaining keys are still filled in.
+    for key in expected:
+        cfg = OptimizerConfig(optimizer_cls, lr=1e-3, optimizer_kwargs={key: "set"})
+        assert cfg.optimizer_kwargs == {**expected, key: "set"}
+
+
+def test_optimizer_config_raise_error():
+    from src.utils.config import OptimizerConfig
+
+    with pytest.raises(ValueError, match="unknown optimizer_cls"):
+        OptimizerConfig("sgd", lr=1e-3)
 
 
 def test_training_unknown_mixed_precision_raises():
