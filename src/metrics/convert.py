@@ -64,11 +64,12 @@ def apply_quantization_monitoring(model) -> None:
             # every expert is quantized against its own amax, so the accumulators are
             # per expert: one cold, badly scaled expert has to show up
             device = next(module.parameters()).device
+            projections = ("gate", "up", "down") if module.gated else ("up", "down")
             module.quant_stats = {
                 projection: _tensor_stats(
                     f"{name}.expert_{projection}", cfg, module.n_routed_experts, device
                 )
-                for projection in ("gate_up", "down")
+                for projection in projections
             }
             _register(
                 module,

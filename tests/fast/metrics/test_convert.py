@@ -242,11 +242,15 @@ def test_moe_monitoring_installs_per_projection_stats():
     assert moe.quant_stats == {}
     apply_quantization_monitoring(model)
 
-    assert set(moe.quant_stats) == {"gate_up", "down"}
+    assert set(moe.quant_stats) == {"gate", "up", "down"}
     assert {
         site.key for sites in moe.quant_stats.values() for site in sites.values()
-    } == {"weight/moe.expert_gate_up", "weight/moe.expert_down"}
+    } == {
+        "weight/moe.expert_gate",
+        "weight/moe.expert_up",
+        "weight/moe.expert_down",
+    }
     # children, so reset_quantization_stats and the metric read reach them
-    assert len(moe._quant_stats) == 2
+    assert len(moe._quant_stats) == 3
     # per expert: one cold, badly scaled expert has to be visible on its own
-    assert moe.quant_stats["gate_up"]["weight"].numel.shape == (2,)
+    assert moe.quant_stats["gate"]["weight"].numel.shape == (2,)

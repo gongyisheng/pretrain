@@ -302,12 +302,12 @@ def test_quantized_sparse_moe_block_only_quantizes_during_training():
     )
     block = QuantizedSparseMoEBlock.from_module(source, rule(INT4_W8A16_DTYPES))
     args = (torch.randn(4, 4), torch.randn(2, 4, 8), torch.tensor([2, 4]))
-    plain = SparseMoEBlock.expert_mm(block, *args, projection="gate_up")
+    plain = SparseMoEBlock.expert_mm(block, *args, projection="gate")
 
     block.train()
-    assert not torch.equal(block.expert_mm(*args, projection="gate_up"), plain)
+    assert not torch.equal(block.expert_mm(*args, projection="gate"), plain)
     block.eval()
-    assert torch.equal(block.expert_mm(*args, projection="gate_up"), plain)
+    assert torch.equal(block.expert_mm(*args, projection="gate"), plain)
 
 
 @fp8_only
@@ -323,7 +323,8 @@ def test_quantized_sparse_moe_block_autocast():
         aux_loss_coef=1e-3,
     ).cuda()  # Keep the master weights in fp32.
     with torch.no_grad():  # Initialize the expert weights for a nonzero signal.
-        nn.init.normal_(source.expert_gate_up, std=0.02)
+        nn.init.normal_(source.expert_gate, std=0.02)
+        nn.init.normal_(source.expert_up, std=0.02)
         nn.init.normal_(source.expert_down, std=0.02)
     block = QuantizedSparseMoEBlock.from_module(
         source, rule(FP8_E4M3_W8A8_E5M2_G8_DTYPES, ROWWISE)
@@ -334,8 +335,9 @@ def test_quantized_sparse_moe_block_autocast():
         out, _ = block(x)
     assert out.dtype == torch.float32  # The block preserves the caller's dtype.
     out.square().mean().backward()
-    assert block.expert_gate_up.grad.dtype == torch.float32  # Matches the fp32 master.
-    assert torch.isfinite(block.expert_gate_up.grad).all()
+    assert block.expert_gate.grad.dtype == torch.float32  # Matches the fp32 master.
+    assert torch.isfinite(block.expert_gate.grad).all()
+    assert torch.isfinite(block.expert_up.grad).all()
     assert torch.isfinite(block.expert_down.grad).all()
     assert torch.isfinite(x.grad).all()
 

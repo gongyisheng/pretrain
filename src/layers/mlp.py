@@ -44,31 +44,35 @@ def grouped_mm_fn(a, b, offs, bias=None, projection=None, backend: str | None = 
 
 def grouped_mlp(
     x: torch.Tensor,
-    w_in: torch.Tensor,
+    w_up: torch.Tensor,
     w_down: torch.Tensor,
     act_fn,
     offs: torch.Tensor,
-    gated: bool,
-    b_in: torch.Tensor = None,
+    w_gate: torch.Tensor = None,
+    b_up: torch.Tensor = None,
+    b_gate: torch.Tensor = None,
     b_down: torch.Tensor = None,
     expert_mm=grouped_mm_fn,
 ) -> torch.Tensor:
+    """Grouped expert FFN. `w_gate` given selects the GLU path, mirroring the
+    activation's arity; each projection is its own GEMM."""
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
         dt = torch.get_autocast_dtype(dev)
-        x = x.to(dt)
-        w_in = w_in.to(dt)
-        w_down = w_down.to(dt)
-        if b_in is not None:
-            b_in = b_in.to(dt)
-        if b_down is not None:
-            b_down = b_down.to(dt)
+
+        def cast(t):
+            return None if t is None else t.to(dt)
+
+        x, w_up, w_gate, w_down = cast(x), cast(w_up), cast(w_gate), cast(w_down)
+        b_up, b_gate, b_down = cast(b_up), cast(b_gate), cast(b_down)
     # the per-expert bias is (E, out) and rides in the GEMM epilogue
-    h = expert_mm(x, w_in.mT, offs, bias=b_in, projection="gate_up")
-    if gated:
-        h = act_fn(*h.chunk(2, dim=-1))
+    if w_gate is not None:
+        h = act_fn(
+            expert_mm(x, w_gate.mT, offs, bias=b_gate, projection="gate"),
+            expert_mm(x, w_up.mT, offs, bias=b_up, projection="up"),
+        )
     else:
-        h = act_fn(h)
+        h = act_fn(expert_mm(x, w_up.mT, offs, bias=b_up, projection="up"))
     return expert_mm(h, w_down.mT, offs, bias=b_down, projection="down")
 
 
@@ -91,15 +95,14 @@ class DenseMLPBlock(nn.Module):
         self.gated = activation.gated
         self.act_fn = partial(activation.fn, **(activation_kwargs or {}))
         if self.gated:
-            self.gate_up_proj = nn.Linear(d_model, 2 * intermediate_size, bias=bias)
-        else:
-            self.up_proj = nn.Linear(d_model, intermediate_size, bias=bias)
+            self.gate_proj = nn.Linear(d_model, intermediate_size, bias=bias)
+        self.up_proj = nn.Linear(d_model, intermediate_size, bias=bias)
         self.down_proj = nn.Linear(intermediate_size, d_model, bias=bias)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> tuple:
         if self.gated:
-            hidden = self.act_fn(*self.gate_up_proj(x).chunk(2, dim=-1))
+            hidden = self.act_fn(self.gate_proj(x), self.up_proj(x))
         else:
             hidden = self.act_fn(self.up_proj(x))
         return self.dropout(self.down_proj(hidden)), None
@@ -136,7 +139,7 @@ class DenseMLPBlock(nn.Module):
         d_ff = intermediate_size
         gated = ACT_REGISTRY[activation_cls].gated
         if gated:
-            weights = 3 * d_ff * d_model  # gate_up (2*d_ff x d) + down (d x d_ff)
+            weights = 3 * d_ff * d_model  # gate + up (d_ff x d each) + down (d x d_ff)
             b = (2 * d_ff + d_model) if bias else 0
         else:
             weights = 2 * d_ff * d_model  # up (d_ff x d) + down (d x d_ff)
@@ -347,25 +350,28 @@ class SparseMoEBlock(nn.Module):
             self.shared_expert = None
 
         # Stacked expert weights: (E, out, in) following nn.Linear convention.
-        # Gated path fuses gate and up into one tensor (one bmm vs two).
+        # Gate and up are separate tensors, so quantization and the optimizer
+        # treat them as independent operands.
         if self.gated:
-            self.expert_gate_up = nn.Parameter(
-                torch.empty(n_routed_experts, 2 * intermediate_size, expert_dim)
-            )
-            self.expert_gate_up_bias = (
-                nn.Parameter(torch.zeros(n_routed_experts, 2 * intermediate_size))
-                if bias
-                else None
-            )
-        else:
-            self.expert_up = nn.Parameter(
+            self.expert_gate = nn.Parameter(
                 torch.empty(n_routed_experts, intermediate_size, expert_dim)
             )
-            self.expert_up_bias = (
+            self.expert_gate_bias = (
                 nn.Parameter(torch.zeros(n_routed_experts, intermediate_size))
                 if bias
                 else None
             )
+        else:
+            self.expert_gate = None
+            self.expert_gate_bias = None
+        self.expert_up = nn.Parameter(
+            torch.empty(n_routed_experts, intermediate_size, expert_dim)
+        )
+        self.expert_up_bias = (
+            nn.Parameter(torch.zeros(n_routed_experts, intermediate_size))
+            if bias
+            else None
+        )
         self.expert_down = nn.Parameter(
             torch.empty(n_routed_experts, expert_dim, intermediate_size)
         )
@@ -406,9 +412,6 @@ class SparseMoEBlock(nn.Module):
 
         tokens = self.latent_down_proj(x_flat) if self.latent_moe else x_flat
 
-        w_in = self.expert_gate_up if self.gated else self.expert_up
-        b_in = self.expert_gate_up_bias if self.gated else self.expert_up_bias
-
         # flatten
         expert_ids = top_indices.reshape(-1)
         token_ids = torch.arange(BS, device=x.device).repeat_interleave(k)
@@ -428,12 +431,13 @@ class SparseMoEBlock(nn.Module):
         # grouped mm
         expert_out = grouped_mlp(
             x_sorted,
-            w_in,
+            self.expert_up,
             self.expert_down,
             self.act_fn,
             offs,
-            self.gated,
-            b_in=b_in,
+            w_gate=self.expert_gate,
+            b_up=self.expert_up_bias,
+            b_gate=self.expert_gate_bias,
             b_down=self.expert_down_bias,
             expert_mm=self.expert_mm,
         )
