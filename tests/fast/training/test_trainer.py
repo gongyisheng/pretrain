@@ -86,9 +86,7 @@ def _tiny_config(tmp_dir):
             eval_every=3,
             eval_steps=2,
         ),
-        optimizer=OptimizerConfig(
-            name="adamw", lr=1e-3, weight_decay=0.0, betas=[0.9, 0.95]
-        ),
+        optimizer=OptimizerConfig("adamw", lr=1e-3, weight_decay=0.0),
         scheduler=SchedulerConfig(name="cosine", warmup_steps=1, min_lr=1e-4),
         logging=LoggingConfig(wandb_project="test", wandb_run_name="test", log_every=1),
     )
@@ -135,9 +133,7 @@ def _tiny_moe_config(tmp_dir):
             eval_every=3,
             eval_steps=2,
         ),
-        optimizer=OptimizerConfig(
-            name="adamw", lr=1e-3, weight_decay=0.0, betas=[0.9, 0.95]
-        ),
+        optimizer=OptimizerConfig("adamw", lr=1e-3, weight_decay=0.0),
         scheduler=SchedulerConfig(name="cosine", warmup_steps=1, min_lr=1e-4),
         logging=LoggingConfig(wandb_project="test", wandb_run_name="test", log_every=1),
     )

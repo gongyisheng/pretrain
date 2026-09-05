@@ -33,12 +33,14 @@ training:
   eval_every: 1000
   eval_steps: 200
 optimizer:
-  name: adamw
+  optimizer_cls: adamw
   lr: 5e-5
   weight_decay: 0.1
-  betas:
-  - 0.9
-  - 0.95
+  optimizer_kwargs:
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1e-8
 scheduler:
   name: cosine
   warmup_steps: 1000

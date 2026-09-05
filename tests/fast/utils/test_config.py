@@ -1,3 +1,4 @@
+import copy
 import os
 import glob
 import json
@@ -69,10 +70,10 @@ MINIMAL_CONFIG = {
         "eval_steps": 2,
     },
     "optimizer": {
-        "name": "adamw",
+        "optimizer_cls": "adamw",
         "lr": 1e-3,
         "weight_decay": 0.1,
-        "betas": [0.9, 0.95],
+        "optimizer_kwargs": {"betas": [0.9, 0.95], "eps": 1e-8},
     },
     "scheduler": {"name": "cosine", "warmup_steps": 2, "min_lr": 1e-4},
     "logging": {"wandb_project": "test", "wandb_run_name": "test", "log_every": 1},
@@ -215,6 +216,17 @@ def test_config_to_dict_serializes_disabled_quant_scale_dtype(
 
 
 # ==================== CLI overrides ====================
+
+
+def test_load_config_optimizer_section():
+    with tempfile.TemporaryDirectory() as tmp:
+        # The section is optional (tokenizer-training configs have none) and
+        # falls back to the dataclass defaults.
+        raw = copy.deepcopy(MINIMAL_CONFIG)
+        del raw["optimizer"]
+        cfg = load_config(_write_yaml(tmp, raw)).optimizer
+        assert (cfg.optimizer_cls, cfg.lr) == ("adamw", 5e-4)
+        assert cfg.optimizer_kwargs == {"fused": True}
 
 
 def test_config_cli_overrides():
@@ -867,13 +879,24 @@ def test_scheduler_unknown_name_raises():
     SchedulerConfig(name="constant")
 
 
-def test_optimizer_unknown_name_raises():
+def test_optimizer_config_defaults():
     from src.utils.config import OptimizerConfig
 
-    with pytest.raises(ValueError, match="unknown optimizer"):
-        OptimizerConfig(name="sgd")
-    OptimizerConfig(name="adamw")
-    OptimizerConfig(name="lion")
+    # Only the batched-kernel flag is defaulted; every other kwarg comes from YAML.
+    for cls, flag in (("adamw", "fused"), ("muon", "fused"), ("lion", "foreach")):
+        assert OptimizerConfig(cls, lr=1e-3).optimizer_kwargs == {flag: True}
+    # An explicit opt-out is preserved, and other kwargs pass through untouched.
+    cfg = OptimizerConfig(
+        "muon", lr=1e-3, optimizer_kwargs={"fused": False, "eps": 0.1}
+    )
+    assert cfg.optimizer_kwargs == {"fused": False, "eps": 0.1}
+
+
+def test_optimizer_config_raise_error():
+    from src.utils.config import OptimizerConfig
+
+    with pytest.raises(ValueError, match="unknown optimizer_cls"):
+        OptimizerConfig("sgd", lr=1e-3)
 
 
 def test_training_unknown_mixed_precision_raises():

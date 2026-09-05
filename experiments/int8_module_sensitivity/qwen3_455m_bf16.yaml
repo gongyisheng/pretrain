@@ -43,16 +43,17 @@ training:
   eval_steps: 100
 
 optimizer:
-  name: muon
+  optimizer_cls: muon
   lr: 2e-4
   weight_decay: 0.1
-  betas:
-  - 0.9
-  - 0.95
-  muon_momentum: 0.95
-  muon_nesterov: true
-  muon_adjust_lr_fn: match_rms_adamw
-
+  optimizer_kwargs:
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1e-8
+    momentum: 0.95
+    nesterov: true
+    adjust_lr_fn: match_rms_adamw
 scheduler:
   name: cosine
   warmup_steps: 1500

@@ -20,7 +20,7 @@ fixed active budget. This experiment pushes the same axis into the **ultra-spars
 ## Setup
 
 Common backbone — identical to `moe_sparsity`, so those runs serve as the low-`E` end of this
-curve. Only `n_routed_experts` and `optimizer.name` vary.
+curve. Only `n_routed_experts` and `optimizer.optimizer_cls` vary.
 
 | Param | Value |
 |-------|-------|
