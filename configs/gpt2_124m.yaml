@@ -12,8 +12,7 @@ model:
   mlp:
   - mlp_cls: dense
     mlp_kwargs:
-      activation: gelu
-      gated: false
+      activation_cls: gelu
       bias: true
       dropout: 0.0
   norm_cls: layernorm

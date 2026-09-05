@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from src.kernel.ops.gemm import grouped_mm
-from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.layers.activation import ACT_REGISTRY
 from src.layers.mlp import (
     DenseMLPBlock,
     ExpertBias,
@@ -29,8 +29,10 @@ def grouped_mm_eager(a, b, offs, bias=None):
     return grouped_mm(a, b, offs, bias=bias, backend="eager")
 
 
-ACT_NAMES = list(UNGATED_ACTIVATIONS.keys())
-GATED_ACT_NAMES = list(GATED_ACTIVATIONS.keys())
+ACT_NAMES = [n for n, e in ACT_REGISTRY.items() if not e.gated]
+GATED_ACT_NAMES = [n for n, e in ACT_REGISTRY.items() if e.gated]
+# One unary / one gated name, for tests that only need to cross the arity split.
+ARITY_PAIR = ["silu", "swiglu"]
 
 
 # ---------------------------------------------------------------------------
@@ -48,10 +50,13 @@ def test_mlp_registry():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("gated", [False, True])
-def test_dense_output_shape(gated):
+@pytest.mark.parametrize("activation_cls", ARITY_PAIR)
+def test_dense_output_shape(activation_cls):
     blk = DenseMLPBlock(
-        d_model=64, intermediate_size=128, activation="silu", gated=gated, dropout=0.0
+        d_model=64,
+        intermediate_size=128,
+        activation_cls=activation_cls,
+        dropout=0.0,
     )
     x = torch.randn(2, 16, 64)
     out, aux = blk(x)
@@ -59,29 +64,27 @@ def test_dense_output_shape(gated):
 
 
 def test_dense_returns_none_aux():
-    blk = DenseMLPBlock(
-        d_model=64, intermediate_size=128, activation="silu", gated=True
-    )
+    blk = DenseMLPBlock(d_model=64, intermediate_size=128, activation_cls="swiglu")
     out, aux = blk(torch.randn(2, 8, 64))
     assert out.shape == (2, 8, 64) and aux is None
 
 
-@pytest.mark.parametrize("gated", [False, True])
-def test_dense_default_bias_is_false(gated):
+@pytest.mark.parametrize("activation_cls", ARITY_PAIR)
+def test_dense_default_bias_is_false(activation_cls):
     blk = DenseMLPBlock(
-        d_model=64, intermediate_size=128, activation="silu", gated=gated
+        d_model=64, intermediate_size=128, activation_cls=activation_cls
     )
-    w1 = blk.gate_up_proj if gated else blk.up_proj
+    w1 = blk.gate_up_proj if blk.gated else blk.up_proj
     assert w1.bias is None
     assert blk.down_proj.bias is None
 
 
-@pytest.mark.parametrize("gated", [False, True])
-def test_dense_bias_true_adds_biases(gated):
+@pytest.mark.parametrize("activation_cls", ARITY_PAIR)
+def test_dense_bias_true_adds_biases(activation_cls):
     blk = DenseMLPBlock(
-        d_model=64, intermediate_size=128, activation="silu", gated=gated, bias=True
+        d_model=64, intermediate_size=128, activation_cls=activation_cls, bias=True
     )
-    w1 = blk.gate_up_proj if gated else blk.up_proj
+    w1 = blk.gate_up_proj if blk.gated else blk.up_proj
     assert w1.bias is not None
     assert blk.down_proj.bias is not None
 
@@ -100,17 +103,31 @@ ACT_LIMIT_BLOCKS = [
 ]
 
 
-@pytest.mark.parametrize("gated", [False, True])
+# Loose bounds no side of the data ever reaches; tight ones it always does.
+LOOSE_LIMITS = {
+    True: {"gate": {"max": 1e6}, "up": {"min": -1e6, "max": 1e6}},
+    False: {"up": {"min": -1e6, "max": 1e6}},
+}
+TIGHT_LIMITS = {
+    True: {"gate": {"max": 1.0}, "up": {"min": -1.0, "max": 1.0}},
+    False: {"up": {"min": -1.0, "max": 1.0}},
+}
+
+
+@pytest.mark.parametrize("activation_cls", ARITY_PAIR)
 @pytest.mark.parametrize("block_cls,extra", ACT_LIMIT_BLOCKS)
-def test_activation_limit(block_cls, extra, gated):
+def test_act_limit(block_cls, extra, activation_cls):
     """A limit above the data is a no-op; a tight one bounds the pre-activation."""
     torch.manual_seed(0)
-    common = dict(d_model=64, intermediate_size=128, gated=gated, **extra)
+    gated = ACT_REGISTRY[activation_cls].gated
+    common = dict(
+        d_model=64, intermediate_size=128, activation_cls=activation_cls, **extra
+    )
     # x is scaled so the projection output reliably exceeds the tight limit
     x = torch.randn(2, 16, 64) * 8
     unbounded = block_cls(**common)
-    loose = block_cls(**common, activation_limit=1e6)
-    tight = block_cls(**common, activation_limit=1.0)
+    loose = block_cls(**common, activation_kwargs={"act_limit": LOOSE_LIMITS[gated]})
+    tight = block_cls(**common, activation_kwargs={"act_limit": TIGHT_LIMITS[gated]})
     loose.load_state_dict(unbounded.state_dict())
     tight.load_state_dict(unbounded.state_dict())
 
@@ -123,17 +140,33 @@ def test_activation_limit(block_cls, extra, gated):
     assert not torch.allclose(base, out)
 
 
-@pytest.mark.parametrize("gated", [False, True])
-def test_dense_activation_limit_precision(gated):
-    """Clamping the projection output reproduces the block's forward exactly."""
+@pytest.mark.parametrize("activation_cls", ARITY_PAIR)
+def test_dense_activation_kwargs_precision(activation_cls):
+    """The block's forward equals the raw activation applied to clamped, shifted
+    projections -- i.e. activation_kwargs reach the activation intact."""
     torch.manual_seed(0)
+    gated = ACT_REGISTRY[activation_cls].gated
+    act_kwargs = {"alpha": 1.702, "act_limit": TIGHT_LIMITS[gated]}
+    if gated:
+        act_kwargs["up_shift"] = 1.0
     blk = DenseMLPBlock(
-        d_model=64, intermediate_size=128, gated=gated, activation_limit=1.0
+        d_model=64,
+        intermediate_size=128,
+        activation_cls=activation_cls,
+        activation_kwargs=act_kwargs,
     )
     x = torch.randn(2, 16, 64) * 8
-    proj = blk.gate_up_proj if gated else blk.up_proj
-    h = proj(x).clamp(-1.0, 1.0)
-    ref = blk.down_proj(blk.act_fn(*h.chunk(2, dim=-1)) if gated else blk.act_fn(h))
+    # the unbound registry entry, so the reference clamps and shifts explicitly
+    if gated:
+        act = ACT_REGISTRY["swiglu"].fn
+        gate, up = blk.gate_up_proj(x).chunk(2, dim=-1)
+        # gate clamped above only, up clamped symmetrically (DeepSeek-V4)
+        gate, up = gate.clamp(max=1.0), up.clamp(-1.0, 1.0) + 1.0
+        hidden = act(gate, up, alpha=1.702)
+    else:
+        act = ACT_REGISTRY["silu"].fn
+        hidden = act(blk.up_proj(x).clamp(-1.0, 1.0), alpha=1.702)
+    ref = blk.down_proj(hidden)
     # same ops in the same order, so the match is exact
     assert torch.equal(blk(x)[0], ref)
 
@@ -144,17 +177,23 @@ def test_dense_activation_limit_precision(gated):
 
 
 def test_dense_compute_flops_gated():
-    f = DenseMLPBlock.compute_flops(64, intermediate_size=128, gated=True, bias=False)
+    f = DenseMLPBlock.compute_flops(
+        64, intermediate_size=128, activation_cls="swiglu", bias=False
+    )
     assert f == 6 * 64 * 128
 
 
 def test_dense_compute_flops_ungated():
-    f = DenseMLPBlock.compute_flops(64, intermediate_size=128, gated=False, bias=False)
+    f = DenseMLPBlock.compute_flops(
+        64, intermediate_size=128, activation_cls="silu", bias=False
+    )
     assert f == 4 * 64 * 128
 
 
 def test_dense_compute_flops_gated_bias():
-    f = DenseMLPBlock.compute_flops(64, intermediate_size=128, gated=True, bias=True)
+    f = DenseMLPBlock.compute_flops(
+        64, intermediate_size=128, activation_cls="swiglu", bias=True
+    )
     assert f == 6 * 64 * 128 + 2 * 128 + 64
 
 
@@ -163,43 +202,41 @@ def test_dense_compute_flops_gated_bias():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("activation", ACT_NAMES)
+@pytest.mark.parametrize("activation_cls", ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
-def test_dense_ungated_matches_ref(activation, dtype, atol):
+def test_dense_ungated_matches_ref(activation_cls, dtype, atol):
     torch.manual_seed(0)
     blk = DenseMLPBlock(
         d_model=64,
         intermediate_size=256,
-        activation=activation,
-        gated=False,
+        activation_cls=activation_cls,
         dropout=0.0,
     ).to(dtype)
     blk.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)
     out, _ = blk(x)
     out_ref = dense_mlp_ref(
-        x, blk.down_proj, activation=activation, up_proj=blk.up_proj
+        x, blk.down_proj, activation_cls=activation_cls, up_proj=blk.up_proj
     )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
 
-@pytest.mark.parametrize("activation", GATED_ACT_NAMES)
+@pytest.mark.parametrize("activation_cls", GATED_ACT_NAMES)
 @pytest.mark.parametrize("dtype,atol", SIMPLE_DTYPES)
-def test_dense_gated_matches_ref(activation, dtype, atol):
+def test_dense_gated_matches_ref(activation_cls, dtype, atol):
     torch.manual_seed(0)
     blk = DenseMLPBlock(
         d_model=64,
         intermediate_size=128,
-        activation=activation,
-        gated=True,
+        activation_cls=activation_cls,
         dropout=0.0,
     ).to(dtype)
     blk.eval()
     x = torch.randn(2, 16, 64, dtype=dtype)
     out, _ = blk(x)
     out_ref = dense_mlp_ref(
-        x, blk.down_proj, activation=activation, gate_up_proj=blk.gate_up_proj
+        x, blk.down_proj, activation_cls=activation_cls, gate_up_proj=blk.gate_up_proj
     )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
@@ -684,8 +721,8 @@ def test_sparse_moe_no_shared_experts_by_default():
 
 
 @pytest.mark.parametrize("n_shared_experts", [1, 2])
-@pytest.mark.parametrize("gated", [True, False])
-def test_sparse_moe_shared_expert_width_and_shape(n_shared_experts, gated):
+@pytest.mark.parametrize("activation_cls", ARITY_PAIR)
+def test_sparse_moe_shared_expert_width_and_shape(n_shared_experts, activation_cls):
     inter = 128
     block = SparseMoEBlock(
         d_model=64,
@@ -693,8 +730,9 @@ def test_sparse_moe_shared_expert_width_and_shape(n_shared_experts, gated):
         n_routed_experts=4,
         n_routed_experts_per_token=2,
         n_shared_experts=n_shared_experts,
-        gated=gated,
+        activation_cls=activation_cls,
     )
+    gated = ACT_REGISTRY[activation_cls].gated
     assert block.shared_expert is not None
     w1 = block.shared_expert.gate_up_proj if gated else block.shared_expert.up_proj
     expected = (2 if gated else 1) * n_shared_experts * inter
@@ -729,11 +767,13 @@ def test_sparse_moe_shared_expert_in_param_count():
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        gated=True,
+        activation_cls="swiglu",
     )
     base = SparseMoEBlock.compute_parameters(64, **kwargs)
     with_shared = SparseMoEBlock.compute_parameters(64, n_shared_experts=2, **kwargs)
-    dense = DenseMLPBlock.compute_parameters(64, intermediate_size=2 * 128, gated=True)
+    dense = DenseMLPBlock.compute_parameters(
+        64, intermediate_size=2 * 128, activation_cls="swiglu"
+    )
     assert with_shared - base == dense
     # Shared experts count in active params too (always run).
     base_active = SparseMoEBlock.compute_parameters(64, active=True, **kwargs)
@@ -748,11 +788,13 @@ def test_sparse_moe_shared_expert_in_flops():
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        gated=True,
+        activation_cls="swiglu",
     )
     base = SparseMoEBlock.compute_flops(64, **kwargs)
     with_shared = SparseMoEBlock.compute_flops(64, n_shared_experts=2, **kwargs)
-    dense = DenseMLPBlock.compute_flops(64, intermediate_size=2 * 128, gated=True)
+    dense = DenseMLPBlock.compute_flops(
+        64, intermediate_size=2 * 128, activation_cls="swiglu"
+    )
     assert with_shared - base == dense
 
 
@@ -767,7 +809,7 @@ def test_sparse_moe_compute_flops_gated():
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        gated=True,
+        activation_cls="swiglu",
         bias=False,
     )
     router = 2 * 64 * 4
@@ -781,7 +823,7 @@ def test_sparse_moe_compute_flops_ungated():
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        gated=False,
+        activation_cls="silu",
         bias=False,
     )
     router = 2 * 64 * 4
@@ -794,7 +836,7 @@ def test_sparse_moe_compute_flops_expert_bias():
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        gated=True,
+        activation_cls="swiglu",
     )
     base = SparseMoEBlock.compute_flops(64, **kwargs)
     with_bias = SparseMoEBlock.compute_flops(64, expert_bias=True, **kwargs)
@@ -806,7 +848,7 @@ def test_sparse_moe_compute_parameters_expert_bias():
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        gated=True,
+        activation_cls="swiglu",
     )
     base = SparseMoEBlock.compute_parameters(64, **kwargs)
     with_bias = SparseMoEBlock.compute_parameters(64, expert_bias=True, **kwargs)
@@ -828,7 +870,7 @@ def test_sparse_moe_compute_parameters_expert_bias_matches_live_module():
         intermediate_size=128,
         n_routed_experts=4,
         n_routed_experts_per_token=2,
-        gated=True,
+        activation_cls="swiglu",
         expert_bias=True,
         aux_loss=False,
     )
@@ -886,18 +928,13 @@ def test_moe_router_matches_ref_under_saturation(dtype, atol):
 
 
 @pytest.mark.parametrize(
-    "gated,activation",
-    [
-        (True, "silu"),
-        (True, "silu_openai"),
-        (False, "gelu"),
-        (False, "silu_openai"),
-        (False, "relu"),
-    ],
+    "activation_cls",
+    ["swiglu", "swiglu2", "gelu", "silu2", "relu"],
 )
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
-def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
+def test_sparse_moe_block_matches_ref(activation_cls, dtype, atol):
     torch.manual_seed(0)
+    gated = ACT_REGISTRY[activation_cls].gated
     d_model, inter, n_routed_experts, k = 64, 32, 4, 2
     block = SparseMoEBlock(
         d_model=d_model,
@@ -905,8 +942,7 @@ def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
         n_routed_experts=n_routed_experts,
         n_routed_experts_per_token=k,
         dropout=0.0,
-        gated=gated,
-        activation=activation,
+        activation_cls=activation_cls,
         router_score_fn="softmax",
         aux_loss_coef=1.0,  # ref returns unscaled aux; coef=1.0 keeps parity
     )
@@ -924,7 +960,7 @@ def test_sparse_moe_block_matches_ref(gated, activation, dtype, atol):
         block.router.gate.weight,
         block.expert_down,
         n_routed_experts_per_token=k,
-        activation=activation,
+        activation_cls=activation_cls,
         normalize=True,
         expert_gate_up=block.expert_gate_up if gated else None,
         expert_up=None if gated else block.expert_up,
@@ -988,18 +1024,18 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
 # counts cover an empty group in interior, leading, and trailing positions.
 @pytest.mark.parametrize("counts", [[5, 0, 7, 4], [0, 5, 7, 4], [5, 7, 4, 0]])
 @pytest.mark.parametrize(
-    "gated,activation",
-    [(True, "silu"), (True, "silu_openai"), (False, "gelu"), (False, "silu_openai")],
+    "activation_cls",
+    ["swiglu", "swiglu2", "gelu", "silu2"],
 )
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
 def test_grouped_mlp_matches_per_group_loop(
-    gated, activation, use_bias, dtype, atol, counts
+    activation_cls, use_bias, dtype, atol, counts
 ):
     torch.manual_seed(0)
     E, D, inter = 4, 16, 32
     R = sum(counts)
-    act = (GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS)[activation]
+    act, gated = ACT_REGISTRY[activation_cls]
 
     x = torch.randn(R, D, dtype=dtype)
     out_dim = 2 * inter if gated else inter
@@ -1046,13 +1082,13 @@ def test_grouped_mlp_matches_per_group_loop(
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="grouped_mm compile is CUDA+bf16 only"
 )
-@pytest.mark.parametrize("gated,activation", [(True, "silu"), (False, "gelu")])
-def test_grouped_mlp_compiled_matches_eager_cuda_bf16(gated, activation):
+@pytest.mark.parametrize("activation_cls", ["swiglu", "gelu"])
+def test_grouped_mlp_compiled_matches_eager_cuda_bf16(activation_cls):
     torch.manual_seed(0)
     E, D, inter = 4, 16, 32
     counts = [5, 0, 7, 4]  # includes an empty group
     R = sum(counts)
-    act = (GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS)[activation]
+    act, gated = ACT_REGISTRY[activation_cls]
     x = torch.randn(R, D, device="cuda", dtype=torch.bfloat16)
     out_dim = 2 * inter if gated else inter
     w_in = torch.randn(E, out_dim, D, device="cuda", dtype=torch.bfloat16) * 0.1
@@ -1064,17 +1100,17 @@ def test_grouped_mlp_compiled_matches_eager_cuda_bf16(gated, activation):
     assert torch.allclose(compiled, eager, atol=1e-2)
 
 
-@pytest.mark.parametrize("gated", [True, False])
-def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
+@pytest.mark.parametrize("activation_cls", ["swiglu", "gelu"])
+def test_sparse_moe_dropless_handles_empty_expert_and_bias(activation_cls):
     torch.manual_seed(0)
+    gated = ACT_REGISTRY[activation_cls].gated
     d_model, inter, E, k = 32, 16, 4, 2
     block = SparseMoEBlock(
         d_model=d_model,
         intermediate_size=inter,
         n_routed_experts=E,
         n_routed_experts_per_token=k,
-        gated=gated,
-        activation="silu" if gated else "gelu",
+        activation_cls=activation_cls,
         bias=True,
         router_score_fn="softmax",
         aux_loss_coef=1.0,  # ref returns unscaled aux; coef=1.0 keeps parity
@@ -1101,7 +1137,7 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(gated):
         block.router.gate.weight,
         block.expert_down,
         n_routed_experts_per_token=k,
-        activation="silu" if gated else "gelu",
+        activation_cls=activation_cls,
         normalize=True,
         expert_gate_up=block.expert_gate_up if gated else None,
         expert_up=None if gated else block.expert_up,
@@ -1120,7 +1156,7 @@ def test_grouped_mlp_casts_to_autocast_dtype():
     E, D, inter = 4, 16, 32
     counts = [5, 0, 7, 4]
     R = sum(counts)
-    act = GATED_ACTIVATIONS["silu"]
+    act = ACT_REGISTRY["swiglu"].fn
     x = torch.randn(R, D, device="cpu")  # fp32 on CPU
     w_in = torch.randn(E, 2 * inter, D, device="cpu") * 0.1  # fp32 on CPU
     w_down = torch.randn(E, D, inter, device="cpu") * 0.1  # fp32 on CPU
@@ -1185,12 +1221,13 @@ def test_sparse_moe_latent_output_shape():
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize(
-    "gated,activation",
-    [(True, "silu"), (True, "silu_openai"), (False, "gelu"), (False, "silu_openai")],
+    "activation_cls",
+    ["swiglu", "swiglu2", "gelu", "silu2"],
 )
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
-def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
+def test_sparse_moe_latent_matches_ref(activation_cls, dtype, atol, bias):
     torch.manual_seed(0)
+    gated = ACT_REGISTRY[activation_cls].gated
     d_model, inter, E, k, ell = 64, 32, 4, 2, 16
     aux_loss_coef = 0.05
     block = SparseMoEBlock(
@@ -1199,8 +1236,7 @@ def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
         n_routed_experts=E,
         n_routed_experts_per_token=k,
         dropout=0.0,
-        gated=gated,
-        activation=activation,
+        activation_cls=activation_cls,
         router_score_fn="softmax",
         aux_loss_coef=aux_loss_coef,
         bias=bias,
@@ -1227,7 +1263,7 @@ def test_sparse_moe_latent_matches_ref(gated, activation, dtype, atol, bias):
         block.router.gate.weight,
         block.expert_down,
         n_routed_experts_per_token=k,
-        activation=activation,
+        activation_cls=activation_cls,
         normalize=True,
         expert_gate_up=block.expert_gate_up if gated else None,
         expert_up=None if gated else block.expert_up,
@@ -1258,8 +1294,7 @@ def test_sparse_moe_latent_with_shared_experts_matches_ref_plus_shared():
         n_routed_experts_per_token=k,
         n_shared_experts=1,
         dropout=0.0,
-        gated=True,
-        activation="silu",
+        activation_cls="swiglu",
         router_score_fn="softmax",
         aux_loss_coef=aux_loss_coef,
         latent_moe=True,
@@ -1280,7 +1315,7 @@ def test_sparse_moe_latent_with_shared_experts_matches_ref_plus_shared():
         block.router.gate.weight,
         block.expert_down,
         n_routed_experts_per_token=k,
-        activation="silu",
+        activation_cls="swiglu",
         normalize=True,
         expert_gate_up=block.expert_gate_up,
         latent_down_weight=block.latent_down_proj.weight,
@@ -1351,9 +1386,9 @@ def test_sparse_moe_latent_flops_less_than_dense_moe():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="grouped GEMM is CUDA only")
-@pytest.mark.parametrize("gated", [True, False])
+@pytest.mark.parametrize("activation_cls", ["swiglu", "gelu"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
-def test_sparse_moe_block_compiles_fullgraph(gated, dtype):
+def test_sparse_moe_block_compiles_fullgraph(activation_cls, dtype):
     torch.manual_seed(0)
     blk = (
         SparseMoEBlock(
@@ -1361,8 +1396,7 @@ def test_sparse_moe_block_compiles_fullgraph(gated, dtype):
             intermediate_size=32,
             n_routed_experts=4,
             n_routed_experts_per_token=2,
-            gated=gated,
-            activation="silu" if gated else "gelu",
+            activation_cls=activation_cls,
             router_score_fn="softmax",
             aux_loss=False,
             expert_bias=True,

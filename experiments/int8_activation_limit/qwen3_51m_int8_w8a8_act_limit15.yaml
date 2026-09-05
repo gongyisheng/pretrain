@@ -15,7 +15,13 @@ model:
     mlp_kwargs:
       intermediate_size: 1536
       dropout: 0.0
-      activation_limit: 15.0
+      activation_kwargs:
+        act_limit:
+          gate:
+            max: 15.0
+          up:
+            min: -15.0
+            max: 15.0
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -45,7 +51,7 @@ training:
   checkpoint_dir: checkpoints/int8_activation_limit/qwen3_51m_int8_w8a8_act_limit15/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 25
+  eval_steps: 100
 optimizer:
   name: muon
   lr: 5e-4

@@ -454,8 +454,7 @@ def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation):
                         "bias": bias,
                         "aux_loss": True,
                         "aux_loss_coef": 1e-3,
-                        "activation": "silu",
-                        "gated": True,
+                        "activation_cls": "swiglu",
                     },
                 }
             ],

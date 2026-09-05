@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import yaml
 
-from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.layers.activation import ACT_REGISTRY
 from src.layers.attention import ATTN_REGISTRY
 from src.layers.mlp import MLP_REGISTRY, MOE_ROUTER_SCORE_FNS
 from src.layers.pos_emb import POS_EMB_REGISTRY
@@ -179,30 +179,38 @@ class ModelConfig:
     def _set_default_mlp_kwargs(self, mlp_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one MLP item's kwargs, keyed on mlp_cls."""
         kwargs.setdefault("intermediate_size", 4 * self.d_model)
-        gated = kwargs.get("gated", True)
-        activation = kwargs.get("activation", "silu")
-        valid_activation = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
-        _check_one_of("activation", activation, valid_activation)
-        # Bounds the projection output before the activation; absent = unbounded.
-        activation_limit = kwargs.get("activation_limit")
-        if activation_limit is not None and (
-            isinstance(activation_limit, bool)
-            or not isinstance(activation_limit, (int, float))
-            or activation_limit <= 0
-        ):
-            raise ValueError(
-                "activation_limit must be a positive number or null; "
-                f"got {activation_limit!r}"
-            )
+        activation_cls = kwargs.setdefault("activation_cls", "swiglu")
+        _check_one_of("activation_cls", activation_cls, ACT_REGISTRY)
+        activation_kwargs = kwargs.setdefault("activation_kwargs", {})
+        if not isinstance(activation_kwargs, dict):
+            del kwargs["activation_kwargs"]
+            activation_kwargs = {}
+        act_limit = activation_kwargs.get("act_limit")
+        if act_limit is not None and not isinstance(act_limit, dict):
+            del activation_kwargs["act_limit"]
+            act_limit = None
+        if act_limit is not None:
+            for side in ("gate", "up"):
+                bounds = act_limit.get(side)
+                if not isinstance(bounds, dict):
+                    continue
+                lo, hi = bounds.get("min"), bounds.get("max")
+                if not isinstance(lo, (int, float)):
+                    lo = None
+                if not isinstance(hi, (int, float)):
+                    hi = None
+                if lo is not None and hi is not None and lo >= hi:
+                    raise ValueError(
+                        f"act_limit['{side}'] requires min < max; "
+                        f"got min={lo!r}, max={hi!r}"
+                    )
         if mlp_cls == "moe":
             kwargs.setdefault("n_shared_experts", 0)
             kwargs.setdefault("bias", False)
             kwargs.setdefault("router_score_fn", "sigmoid")
-            if kwargs["router_score_fn"] not in MOE_ROUTER_SCORE_FNS:
-                raise ValueError(
-                    f"router_score_fn must be one of {sorted(MOE_ROUTER_SCORE_FNS)}; "
-                    f"got {kwargs['router_score_fn']!r}"
-                )
+            _check_one_of(
+                "router_score_fn", kwargs["router_score_fn"], MOE_ROUTER_SCORE_FNS
+            )
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
             # exclusive balancing strategies; exactly one must be enabled.
             kwargs.setdefault("expert_bias", False)
@@ -518,6 +526,7 @@ class TrainingConfig:
     eval_steps: int = 25
     eval_batch_size: int = 16
     eval_train: bool = False  # for SFT
+    eval_generate: bool = False
     intra_doc_masking: bool = True
     quantization: Union[QuantizationConfig, dict, list] = field(
         default_factory=QuantizationConfig

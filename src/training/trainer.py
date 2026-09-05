@@ -479,7 +479,7 @@ class Trainer:
             step=self.step, model=self.model, train_avg_acc=train_avg_acc
         )
 
-        if self.config.task == "pretrain":
+        if self.config.task == "pretrain" and self.config.training.eval_generate:
             self._generate_sample()
 
     @torch.no_grad()
@@ -512,6 +512,10 @@ class Trainer:
         B, S = 1, max_new_tokens + 1
         idx = torch.zeros((B, S), dtype=torch.long, device=self.device)
         idx[0, 0] = self.eot_token_id
+        # Own generator: sampling must not advance the global RNG stream that
+        # feeds training, and a fixed seed makes samples comparable across evals.
+        gen = torch.Generator(device=self.device)
+        gen.manual_seed(self.config.training.seed)
         pos_ids = torch.arange(S, device=self.device).unsqueeze(0)
         attn_mask = build_causal_attention_mask(
             B,
@@ -527,7 +531,7 @@ class Trainer:
                     idx, position_ids=pos_ids, attn_mask=attn_mask
                 )
             probs = F.softmax(logits[:, pos, :], dim=-1)
-            idx[0, pos + 1] = torch.multinomial(probs, num_samples=1)
+            idx[0, pos + 1] = torch.multinomial(probs, num_samples=1, generator=gen)
         token_ids = idx[0].tolist()
         generated_text = self.tokenizer.decode(token_ids)
         self.logger.log_text("val-sample/generations", generated_text, step=self.step)

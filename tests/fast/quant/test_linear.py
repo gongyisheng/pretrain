@@ -375,7 +375,9 @@ def test_quantized_linear_trains_a_full_model():
             mlp=[
                 {
                     "mlp_cls": "dense",
-                    "mlp_kwargs": {"activation": "silu", "gated": True},
+                    "mlp_kwargs": {
+                        "activation_cls": "swiglu",
+                    },
                 }
             ],
             norm_cls="rmsnorm",
