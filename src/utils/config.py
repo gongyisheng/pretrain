@@ -568,7 +568,12 @@ class OptimizerConfig:
     def __post_init__(self):
         _check_one_of("optimizer_cls", self.optimizer_cls, OPTIMIZER_REGISTRY)
         kwargs = self.optimizer_kwargs
-        if self.optimizer_cls == "lion":
+        if self.optimizer_cls == "adamw":
+            # beta2=0.95 (not torch's 0.999) is the GPT-3/LLaMA setting.
+            kwargs.setdefault("betas", (0.9, 0.95))
+            kwargs.setdefault("eps", 1e-8)
+            kwargs.setdefault("fused", True)
+        elif self.optimizer_cls == "lion":
             kwargs.setdefault("betas", (0.9, 0.99))  # Chen et al. 2023 default
             kwargs.setdefault("foreach", True)
         elif self.optimizer_cls == "muon":
@@ -579,17 +584,13 @@ class OptimizerConfig:
             kwargs.setdefault("betas", (0.9, 0.95))  # AdamW half
             kwargs.setdefault("eps", 1e-8)
             kwargs.setdefault("fused", True)
-        else:  # adamw; beta2=0.95 (not torch's 0.999) is the GPT-3/LLaMA setting
-            kwargs.setdefault("betas", (0.9, 0.95))
-            kwargs.setdefault("eps", 1e-8)
-            kwargs.setdefault("fused", True)
 
 
 @dataclass
 class SchedulerConfig:
     name: str = "cosine"
     warmup_steps: int = 100
-    min_lr: float = 6e-5
+    min_lr: float = 5e-5
 
     def __post_init__(self):
         _check_one_of("scheduler", self.name, SCHEDULER_REGISTRY)
