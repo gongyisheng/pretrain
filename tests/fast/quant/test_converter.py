@@ -124,7 +124,8 @@ MOE_CASES = [
 def test_apply_quantization_moe(quantization, seam_owner, gate_swapped):
     model = _MoE()
     apply_quantization(model, _cfg(quantization))
-    assert isinstance(model.mlp.expert_gate_up, torch.nn.Parameter)
+    assert isinstance(model.mlp.expert_gate, torch.nn.Parameter)
+    assert isinstance(model.mlp.expert_up, torch.nn.Parameter)
     assert model.mlp.expert_mm.__func__ is seam_owner.expert_mm
     assert isinstance(model.mlp.router.gate, QuantizedLinear) is gate_swapped
 

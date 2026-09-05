@@ -74,8 +74,8 @@ def test_dense_default_bias_is_false(activation_cls):
     blk = DenseMLPBlock(
         d_model=64, intermediate_size=128, activation_cls=activation_cls
     )
-    w1 = blk.gate_up_proj if blk.gated else blk.up_proj
-    assert w1.bias is None
+    assert blk.up_proj.bias is None
+    assert not blk.gated or blk.gate_proj.bias is None
     assert blk.down_proj.bias is None
 
 
@@ -84,8 +84,8 @@ def test_dense_bias_true_adds_biases(activation_cls):
     blk = DenseMLPBlock(
         d_model=64, intermediate_size=128, activation_cls=activation_cls, bias=True
     )
-    w1 = blk.gate_up_proj if blk.gated else blk.up_proj
-    assert w1.bias is not None
+    assert blk.up_proj.bias is not None
+    assert not blk.gated or blk.gate_proj.bias is not None
     assert blk.down_proj.bias is not None
 
 
@@ -159,7 +159,7 @@ def test_dense_activation_kwargs_precision(activation_cls):
     # the unbound registry entry, so the reference clamps and shifts explicitly
     if gated:
         act = ACT_REGISTRY["swiglu"].fn
-        gate, up = blk.gate_up_proj(x).chunk(2, dim=-1)
+        gate, up = blk.gate_proj(x), blk.up_proj(x)
         # gate clamped above only, up clamped symmetrically (DeepSeek-V4)
         gate, up = gate.clamp(max=1.0), up.clamp(-1.0, 1.0) + 1.0
         hidden = act(gate, up, alpha=1.702)
@@ -236,7 +236,11 @@ def test_dense_gated_matches_ref(activation_cls, dtype, atol):
     x = torch.randn(2, 16, 64, dtype=dtype)
     out, _ = blk(x)
     out_ref = dense_mlp_ref(
-        x, blk.down_proj, activation_cls=activation_cls, gate_up_proj=blk.gate_up_proj
+        x,
+        blk.down_proj,
+        activation_cls=activation_cls,
+        up_proj=blk.up_proj,
+        gate_proj=blk.gate_proj,
     )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
@@ -734,9 +738,10 @@ def test_sparse_moe_shared_expert_width_and_shape(n_shared_experts, activation_c
     )
     gated = ACT_REGISTRY[activation_cls].gated
     assert block.shared_expert is not None
-    w1 = block.shared_expert.gate_up_proj if gated else block.shared_expert.up_proj
-    expected = (2 if gated else 1) * n_shared_experts * inter
-    assert w1.weight.shape[0] == expected
+    expected = n_shared_experts * inter
+    assert block.shared_expert.up_proj.weight.shape[0] == expected
+    if gated:
+        assert block.shared_expert.gate_proj.weight.shape[0] == expected
     out, aux = block(torch.randn(2, 8, 64))
     assert out.shape == (2, 8, 64)
     assert aux.ndim == 0
@@ -947,8 +952,9 @@ def test_sparse_moe_block_matches_ref(activation_cls, dtype, atol):
         aux_loss_coef=1.0,  # ref returns unscaled aux; coef=1.0 keeps parity
     )
     with torch.no_grad():
-        w1 = block.expert_gate_up if gated else block.expert_up
-        torch.nn.init.normal_(w1, std=0.02)
+        torch.nn.init.normal_(block.expert_up, std=0.02)
+        if gated:
+            torch.nn.init.normal_(block.expert_gate, std=0.02)
         torch.nn.init.normal_(block.expert_down, std=0.02)
     block.to(dtype)
     block.eval()
@@ -962,8 +968,8 @@ def test_sparse_moe_block_matches_ref(activation_cls, dtype, atol):
         n_routed_experts_per_token=k,
         activation_cls=activation_cls,
         normalize=True,
-        expert_gate_up=block.expert_gate_up if gated else None,
-        expert_up=None if gated else block.expert_up,
+        expert_up=block.expert_up,
+        expert_gate=block.expert_gate if gated else None,
     )
 
     assert out.dtype == dtype
@@ -990,7 +996,8 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
         router_score_fn="softmax",
     )
     with torch.no_grad():
-        torch.nn.init.normal_(ours.expert_gate_up, std=0.02)
+        torch.nn.init.normal_(ours.expert_gate, std=0.02)
+        torch.nn.init.normal_(ours.expert_up, std=0.02)
         torch.nn.init.normal_(ours.expert_down, std=0.02)
     ours.eval()
 
@@ -1006,7 +1013,10 @@ def test_sparse_moe_block_matches_hf_qwen3_moe():
 
     with torch.no_grad():
         hf.gate.weight.copy_(ours.router.gate.weight)
-        hf.experts.gate_up_proj.copy_(ours.expert_gate_up)
+        # HF fuses the experts' gate and up; ours are separate tensors.
+        hf.experts.gate_up_proj.copy_(
+            torch.cat([ours.expert_gate, ours.expert_up], dim=-2)
+        )
         hf.experts.down_proj.copy_(ours.expert_down)
 
     x = torch.randn(2, 8, d_model)
@@ -1038,22 +1048,24 @@ def test_grouped_mlp_matches_per_group_loop(
     act, gated = ACT_REGISTRY[activation_cls]
 
     x = torch.randn(R, D, dtype=dtype)
-    out_dim = 2 * inter if gated else inter
-    w_in = torch.randn(E, out_dim, D, dtype=dtype) * 0.1
+    w_up = torch.randn(E, inter, D, dtype=dtype) * 0.1
+    w_gate = torch.randn(E, inter, D, dtype=dtype) * 0.1 if gated else None
     w_down = torch.randn(E, D, inter, dtype=dtype) * 0.1
-    b_in = torch.randn(E, out_dim, dtype=dtype) * 0.1 if use_bias else None
+    b_up = torch.randn(E, inter, dtype=dtype) * 0.1 if use_bias else None
+    b_gate = torch.randn(E, inter, dtype=dtype) * 0.1 if use_bias and gated else None
     b_down = torch.randn(E, D, dtype=dtype) * 0.1 if use_bias else None
 
     offs = torch.tensor(counts).cumsum(0).to(torch.int32)
 
     got = grouped_mlp(
         x,
-        w_in,
+        w_up,
         w_down,
         act,
         offs,
-        gated,
-        b_in=b_in,
+        w_gate=w_gate,
+        b_up=b_up,
+        b_gate=b_gate,
         b_down=b_down,
     )
 
@@ -1064,12 +1076,16 @@ def test_grouped_mlp_matches_per_group_loop(
         if c == 0:
             continue
         xs = x[start : start + c]
-        h = torch.addmm(b_in[e], xs, w_in[e].mT) if use_bias else xs @ w_in[e].mT
+        up = torch.addmm(b_up[e], xs, w_up[e].mT) if use_bias else xs @ w_up[e].mT
         if gated:
-            gate, up = h.chunk(2, dim=-1)
+            gate = (
+                torch.addmm(b_gate[e], xs, w_gate[e].mT)
+                if use_bias
+                else xs @ w_gate[e].mT
+            )
             h = act(gate, up)
         else:
-            h = act(h)
+            h = act(up)
         out = torch.addmm(b_down[e], h, w_down[e].mT) if use_bias else h @ w_down[e].mT
         ref[start : start + c] = out
         start += c
@@ -1090,12 +1106,16 @@ def test_grouped_mlp_compiled_matches_eager_cuda_bf16(activation_cls):
     R = sum(counts)
     act, gated = ACT_REGISTRY[activation_cls]
     x = torch.randn(R, D, device="cuda", dtype=torch.bfloat16)
-    out_dim = 2 * inter if gated else inter
-    w_in = torch.randn(E, out_dim, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    w_up = torch.randn(E, inter, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    w_gate = (
+        torch.randn(E, inter, D, device="cuda", dtype=torch.bfloat16) * 0.1
+        if gated
+        else None
+    )
     w_down = torch.randn(E, D, inter, device="cuda", dtype=torch.bfloat16) * 0.1
     offs = torch.tensor(counts, device="cuda").cumsum(0).to(torch.int32)
-    eager = grouped_mlp(x, w_in, w_down, act, offs, gated)
-    compiled = torch.compile(grouped_mlp)(x, w_in, w_down, act, offs, gated)
+    eager = grouped_mlp(x, w_up, w_down, act, offs, w_gate=w_gate)
+    compiled = torch.compile(grouped_mlp)(x, w_up, w_down, act, offs, w_gate=w_gate)
     assert compiled.dtype == torch.bfloat16
     assert torch.allclose(compiled, eager, atol=1e-2)
 
@@ -1116,12 +1136,12 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(activation_cls):
         aux_loss_coef=1.0,  # ref returns unscaled aux; coef=1.0 keeps parity
     )
     with torch.no_grad():
-        w1 = block.expert_gate_up if gated else block.expert_up
-        torch.nn.init.normal_(w1, std=0.02)
+        torch.nn.init.normal_(block.expert_up, std=0.02)
+        torch.nn.init.normal_(block.expert_up_bias, std=0.02)
+        if gated:
+            torch.nn.init.normal_(block.expert_gate, std=0.02)
+            torch.nn.init.normal_(block.expert_gate_bias, std=0.02)
         torch.nn.init.normal_(block.expert_down, std=0.02)
-        torch.nn.init.normal_(
-            block.expert_gate_up_bias if gated else block.expert_up_bias, std=0.02
-        )
         torch.nn.init.normal_(block.expert_down_bias, std=0.02)
         # expert 3 gets logit = gate_weight[3] · x. Using all-negative weight row and
         # all-positive x (abs) ensures logit_3 << 0 reliably → expert 3 never in top-k.
@@ -1139,10 +1159,10 @@ def test_sparse_moe_dropless_handles_empty_expert_and_bias(activation_cls):
         n_routed_experts_per_token=k,
         activation_cls=activation_cls,
         normalize=True,
-        expert_gate_up=block.expert_gate_up if gated else None,
-        expert_up=None if gated else block.expert_up,
-        expert_gate_up_bias=block.expert_gate_up_bias if gated else None,
-        expert_up_bias=None if gated else block.expert_up_bias,
+        expert_up=block.expert_up,
+        expert_gate=block.expert_gate if gated else None,
+        expert_up_bias=block.expert_up_bias,
+        expert_gate_bias=block.expert_gate_bias if gated else None,
         expert_down_bias=block.expert_down_bias,
     )
     assert torch.allclose(out, out_ref, atol=1e-4)
@@ -1158,14 +1178,15 @@ def test_grouped_mlp_casts_to_autocast_dtype():
     R = sum(counts)
     act = ACT_REGISTRY["swiglu"].fn
     x = torch.randn(R, D, device="cpu")  # fp32 on CPU
-    w_in = torch.randn(E, 2 * inter, D, device="cpu") * 0.1  # fp32 on CPU
+    w_up = torch.randn(E, inter, D, device="cpu") * 0.1  # fp32 on CPU
+    w_gate = torch.randn(E, inter, D, device="cpu") * 0.1  # fp32 on CPU
     w_down = torch.randn(E, D, inter, device="cpu") * 0.1  # fp32 on CPU
     offs = torch.tensor(counts, device="cpu").cumsum(0).to(torch.int32)
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        out = grouped_mlp(x, w_in, w_down, act, offs, True)
+        out = grouped_mlp(x, w_up, w_down, act, offs, w_gate=w_gate)
     assert out.dtype == torch.bfloat16
     # eager (no autocast) preserves fp32
-    out_eager = grouped_mlp(x, w_in, w_down, act, offs, True)
+    out_eager = grouped_mlp(x, w_up, w_down, act, offs, w_gate=w_gate)
     assert out_eager.dtype == torch.float32
 
 
@@ -1181,7 +1202,8 @@ def test_sparse_moe_latent_off_by_default():
     assert block.latent_up_proj is None
     # expert I/O axis is d_model when latent is off
     assert block.expert_down.shape == (4, 64, 32)
-    assert block.expert_gate_up.shape == (4, 2 * 32, 64)
+    assert block.expert_gate.shape == (4, 32, 64)
+    assert block.expert_up.shape == (4, 32, 64)
 
 
 def test_sparse_moe_latent_weight_shapes():
@@ -1196,7 +1218,8 @@ def test_sparse_moe_latent_weight_shapes():
     )
     assert block.latent_down_proj.weight.shape == (ell, d_model)
     assert block.latent_up_proj.weight.shape == (d_model, ell)
-    assert block.expert_gate_up.shape == (E, 2 * inter, ell)
+    assert block.expert_gate.shape == (E, inter, ell)
+    assert block.expert_up.shape == (E, inter, ell)
     assert block.expert_down.shape == (E, ell, inter)
     # router still scores at d_model
     assert block.router.gate.weight.shape == (E, d_model)
@@ -1244,14 +1267,16 @@ def test_sparse_moe_latent_matches_ref(activation_cls, dtype, atol, bias):
         latent_dim=ell,
     )
     with torch.no_grad():
-        w1 = block.expert_gate_up if gated else block.expert_up
-        torch.nn.init.normal_(w1, std=0.02)
+        torch.nn.init.normal_(block.expert_up, std=0.02)
+        if gated:
+            torch.nn.init.normal_(block.expert_gate, std=0.02)
         torch.nn.init.normal_(block.expert_down, std=0.02)
         torch.nn.init.normal_(block.latent_down_proj.weight, std=0.02)
         torch.nn.init.normal_(block.latent_up_proj.weight, std=0.02)
         if bias:
-            b1 = block.expert_gate_up_bias if gated else block.expert_up_bias
-            torch.nn.init.normal_(b1, std=0.02)
+            torch.nn.init.normal_(block.expert_up_bias, std=0.02)
+            if gated:
+                torch.nn.init.normal_(block.expert_gate_bias, std=0.02)
             torch.nn.init.normal_(block.expert_down_bias, std=0.02)
     block.to(dtype)
     block.eval()
@@ -1265,10 +1290,10 @@ def test_sparse_moe_latent_matches_ref(activation_cls, dtype, atol, bias):
         n_routed_experts_per_token=k,
         activation_cls=activation_cls,
         normalize=True,
-        expert_gate_up=block.expert_gate_up if gated else None,
-        expert_up=None if gated else block.expert_up,
-        expert_gate_up_bias=(block.expert_gate_up_bias if gated and bias else None),
-        expert_up_bias=(block.expert_up_bias if not gated and bias else None),
+        expert_up=block.expert_up,
+        expert_gate=block.expert_gate if gated else None,
+        expert_up_bias=block.expert_up_bias if bias else None,
+        expert_gate_bias=block.expert_gate_bias if gated and bias else None,
         expert_down_bias=block.expert_down_bias if bias else None,
         latent_down_weight=block.latent_down_proj.weight,
         latent_up_weight=block.latent_up_proj.weight,
@@ -1301,7 +1326,8 @@ def test_sparse_moe_latent_with_shared_experts_matches_ref_plus_shared():
         latent_dim=ell,
     )
     with torch.no_grad():
-        torch.nn.init.normal_(block.expert_gate_up, std=0.02)
+        torch.nn.init.normal_(block.expert_gate, std=0.02)
+        torch.nn.init.normal_(block.expert_up, std=0.02)
         torch.nn.init.normal_(block.expert_down, std=0.02)
         torch.nn.init.normal_(block.latent_down_proj.weight, std=0.02)
         torch.nn.init.normal_(block.latent_up_proj.weight, std=0.02)
@@ -1317,7 +1343,8 @@ def test_sparse_moe_latent_with_shared_experts_matches_ref_plus_shared():
         n_routed_experts_per_token=k,
         activation_cls="swiglu",
         normalize=True,
-        expert_gate_up=block.expert_gate_up,
+        expert_up=block.expert_up,
+        expert_gate=block.expert_gate,
         latent_down_weight=block.latent_down_proj.weight,
         latent_up_weight=block.latent_up_proj.weight,
         aux_loss_coef=aux_loss_coef,
@@ -1444,7 +1471,7 @@ def test_moe_expert_mm_seam_is_pluggable():
     assert out.shape == x.shape
     # one seam, called once per projection, each tagged so a swapped-in
     # implementation can tell the block input from the post-activation hidden state
-    assert seen == ["gate_up", "down"]
+    assert seen == ["gate", "up", "down"]
 
 
 _GG_LAYOUTS = ("ragged_m", "ragged_k", "ragged_n")

@@ -395,22 +395,16 @@ def dense_mlp_ref(
     x: torch.Tensor,
     down_proj: nn.Linear,
     activation_cls: str,
-    up_proj: nn.Linear | None = None,
-    gate_up_proj: nn.Linear | None = None,
+    up_proj: nn.Linear,
+    gate_proj: nn.Linear | None = None,
 ) -> torch.Tensor:
     """Eager feed-forward:
-        ungated (up_proj given):     down_proj(act(up_proj(x)))
-        gated   (gate_up_proj given): down_proj(act(gate, up)) where (gate, up) =
-                                       chunk(gate_up_proj(x), 2, dim=-1)
+        ungated (gate_proj omitted): down_proj(act(up_proj(x)))
+        gated   (gate_proj given):   down_proj(act(gate_proj(x), up_proj(x)))
     `activation_cls` is a key in REFS ("relu"/"gelu"/"swiglu"/...).
     """
-    if (up_proj is None) == (gate_up_proj is None):
-        raise ValueError(
-            "Exactly one of up_proj (ungated) or gate_up_proj (gated) must be given"
-        )
-    if gate_up_proj is not None:
-        gate, up = gate_up_proj(x).chunk(2, dim=-1)
-        hidden = REFS[activation_cls](gate, up)
+    if gate_proj is not None:
+        hidden = REFS[activation_cls](gate_proj(x), up_proj(x))
     else:
         hidden = REFS[activation_cls](up_proj(x))
     return down_proj(hidden)
@@ -447,11 +441,11 @@ def sparse_moe_block_ref(
     expert_down: torch.Tensor,
     n_routed_experts_per_token: int,
     activation_cls: str = "swiglu",
-    expert_gate_up: torch.Tensor | None = None,
     expert_up: torch.Tensor | None = None,
+    expert_gate: torch.Tensor | None = None,
     normalize: bool = True,
-    expert_gate_up_bias: torch.Tensor | None = None,
     expert_up_bias: torch.Tensor | None = None,
+    expert_gate_bias: torch.Tensor | None = None,
     expert_down_bias: torch.Tensor | None = None,
     latent_down_weight: torch.Tensor | None = None,
     latent_up_weight: torch.Tensor | None = None,
@@ -460,8 +454,8 @@ def sparse_moe_block_ref(
     """Eager sparse MoE: naive per-(token, slot) expert dispatch.
 
     Mirrors MLP's gated/ungated split:
-      - gated   (expert_gate_up given): hidden = act(gate)*up
-      - ungated (expert_up given):      hidden = act(up)
+      - gated   (expert_gate given): hidden = act(gate, up)
+      - ungated (expert_gate omitted): hidden = act(up)
     both looked up by name in REFS.
     Optional bias tensors are applied per-expert when provided.
 
@@ -470,10 +464,6 @@ def sparse_moe_block_ref(
     input is x @ W↓ᵀ, expert outputs are accumulated in ℓ, then projected back via W↑.
     Returns (output (B,S,D), aux_loss scalar) — Switch Transformer load-balancing loss.
     """
-    if (expert_gate_up is None) == (expert_up is None):
-        raise ValueError(
-            "Exactly one of expert_gate_up (gated) or expert_up (ungated) must be given"
-        )
     B, S, D = x.shape
     T = B * S
     E = gate_weight.shape[0]
@@ -494,16 +484,15 @@ def sparse_moe_block_ref(
         for slot in range(n_routed_experts_per_token):
             e = top_indices[t, slot].item()
             w = top_weights[t, slot]
-            if expert_gate_up is not None:
-                gate_up = expert_in[t] @ expert_gate_up[e].T
-                if expert_gate_up_bias is not None:
-                    gate_up = gate_up + expert_gate_up_bias[e]
-                g, u = gate_up.chunk(2, dim=-1)
-                hidden = REFS[activation_cls](g, u)
+            up = expert_in[t] @ expert_up[e].T
+            if expert_up_bias is not None:
+                up = up + expert_up_bias[e]
+            if expert_gate is not None:
+                gate = expert_in[t] @ expert_gate[e].T
+                if expert_gate_bias is not None:
+                    gate = gate + expert_gate_bias[e]
+                hidden = REFS[activation_cls](gate, up)
             else:
-                up = expert_in[t] @ expert_up[e].T
-                if expert_up_bias is not None:
-                    up = up + expert_up_bias[e]
                 hidden = REFS[activation_cls](up)
             out_t = hidden @ expert_down[e].T
             if expert_down_bias is not None:
