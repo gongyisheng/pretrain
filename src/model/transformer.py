@@ -56,8 +56,9 @@ class TransformerLM(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
         elif isinstance(module, SparseMoEBlock):
-            w1 = module.expert_gate_up if module.gated else module.expert_up
-            nn.init.normal_(w1, mean=0.0, std=0.02)
+            nn.init.normal_(module.expert_up, mean=0.0, std=0.02)
+            if module.gated:
+                nn.init.normal_(module.expert_gate, mean=0.0, std=0.02)
             nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
 
     @staticmethod

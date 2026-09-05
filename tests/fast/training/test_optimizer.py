@@ -438,8 +438,9 @@ def test_muon_routes_experts_in_router_out():
     # Router gate (2D) stays on AdamW; shared-expert 2D weights go to Muon.
     router_gate = params["blocks.0.mlp.router.gate.weight"]
     assert id(router_gate) in adamw_ids
-    shared = params["blocks.0.mlp.shared_expert.gate_up_proj.weight"]
-    assert id(shared) in muon_ids
+    for proj in ("gate_proj", "up_proj"):
+        shared = params[f"blocks.0.mlp.shared_expert.{proj}.weight"]
+        assert id(shared) in muon_ids
 
     # Embeddings / head on AdamW; nothing routed to Muon has ndim<2 or is excluded.
     assert id(model.token_emb.weight) in adamw_ids

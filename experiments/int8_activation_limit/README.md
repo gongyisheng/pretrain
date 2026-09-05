@@ -1,8 +1,8 @@
 # Activation Limit under Int8 W8A8
 
-Sweep the MLP activation limit (`mlp_kwargs.activation_kwargs.act_limit`) at Qwen3-51M under int8 W8A8 tensorwise quantization, against a bf16 baseline. `act_limit` bounds the `gate_up_proj` output before SwiGLU, as in gpt-oss's `swiglu_limit` and DeepSeek V4. It is a per-side mapping — `{gate: {min, max}, up: {min, max}}`, every key optional (missing = unbounded on that side). Each `limit L` row uses the DeepSeek asymmetric form: `gate: {max: L}` (SiLU is already bounded below) and `up: {min: -L, max: L}`.
+Sweep the MLP activation limit (`mlp_kwargs.activation_kwargs.act_limit`) at Qwen3-51M under int8 W8A8 tensorwise quantization, against a bf16 baseline. `act_limit` bounds the `gate_proj` / `up_proj` outputs before SwiGLU, as in gpt-oss's `swiglu_limit` and DeepSeek V4. It is a per-side mapping — `{gate: {min, max}, up: {min, max}}`, every key optional (missing = unbounded on that side). Each `limit L` row uses the DeepSeek asymmetric form: `gate: {max: L}` (SiLU is already bounded below) and `up: {min: -L, max: L}`.
 
-> Semantics note: earlier runs clamped `gate_up_proj` symmetrically to `[-L, L]` *before* the chunk (both gate and up). The current schema clamps gate and up separately, so tight-limit results are not directly comparable to any pre-migration numbers.
+> Semantics note: earlier runs clamped both gate and up symmetrically to `[-L, L]`. The current schema clamps gate and up separately, so tight-limit results are not directly comparable to any pre-migration numbers.
 
 ## Hypothesis
 
