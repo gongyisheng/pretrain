@@ -1,7 +1,12 @@
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 
 from src.layers.norm import LayerNorm, RMSNorm
+
+if TYPE_CHECKING:
+    from src.utils.config import ModelConfig
 
 
 def _aggregate(V: torch.Tensor, K: torch.Tensor, w_proj: torch.Tensor) -> torch.Tensor:
@@ -28,12 +33,14 @@ class BaseResidual(nn.Module):
         raise NotImplementedError
 
     @classmethod
-    def compute_flops(cls, config, max_seq_len: int, layer_idx: int) -> int:
+    def compute_flops(
+        cls, config: "ModelConfig", max_seq_len: int, layer_idx: int
+    ) -> int:
         """Forward FLOPs per token for ONE residual slot; a plain add counts as 0."""
         return 0
 
     @classmethod
-    def compute_parameters(cls, config) -> int:
+    def compute_parameters(cls, config: "ModelConfig") -> int:
         """Trainable params for ONE residual slot. Default 0: a plain add has none."""
         return 0
 
@@ -75,13 +82,15 @@ class AttnResidual(BaseResidual):
         return x + r, ctx
 
     @classmethod
-    def compute_flops(cls, config, max_seq_len: int, layer_idx: int) -> int:
+    def compute_flops(
+        cls, config: "ModelConfig", max_seq_len: int, layer_idx: int
+    ) -> int:
         seal = config.residual_kwargs.get("seal_block_size", 1)
         n_ctx = layer_idx // seal + 1
         return 7 * n_ctx * config.d_model
 
     @classmethod
-    def compute_parameters(cls, config) -> int:
+    def compute_parameters(cls, config: "ModelConfig") -> int:
         """proj (d_model x 1, no bias) + norm, matching __init__."""
         d = config.d_model
         norm = config.residual_kwargs.get("norm", "rmsnorm")

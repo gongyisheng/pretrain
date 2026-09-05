@@ -13,8 +13,7 @@ model:
   - mlp_cls: dense
     mlp_kwargs:
       intermediate_size: 1536
-      activation: leaky_relu2
-      gated: true
+      activation_cls: leaky_reglu2
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:

@@ -75,15 +75,6 @@ def silu_ref(x: torch.Tensor) -> torch.Tensor:
     return (xf * torch.sigmoid(xf)).to(x.dtype)
 
 
-def silu_openai_ref(x: torch.Tensor) -> torch.Tensor:
-    """OpenAI SiLU: clamp only the positive side before x * sigmoid(alpha * x)."""
-    alpha = 1.702
-    limit = 7.0
-    xf = x.float()
-    gated = xf.clamp(max=limit)
-    return (gated * torch.sigmoid(alpha * gated)).to(x.dtype)
-
-
 def leaky_relu_ref(x: torch.Tensor) -> torch.Tensor:
     """leaky_relu(x, 0.01) = x if x > 0 else 0.01 * x."""
     xf = x.float()
@@ -109,58 +100,50 @@ def leaky_relu2_ref(x: torch.Tensor) -> torch.Tensor:
 # --- Gated (GLU family): (gate, up) → act(gate) * up ---
 
 
-def relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def reglu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (relu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
-def gelu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def geglu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (gelu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
-def silu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def swiglu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (silu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
-def silu_openai_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    alpha = 1.702
-    limit = 7.0
-    gated = gate.float().clamp(max=limit)
-    shifted_up = up.float().clamp(min=-limit, max=limit) + 1.0
-    return (gated * torch.sigmoid(alpha * gated) * shifted_up).to(gate.dtype)
-
-
-def leaky_relu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def leaky_reglu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (leaky_relu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
-def relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def reglu2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return ((relu_ref(gate.float()) ** 2) * up.float()).to(gate.dtype)
 
 
-def gelu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def geglu2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return ((gelu_ref(gate.float()) ** 2) * up.float()).to(gate.dtype)
 
 
-def silu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def swiglu2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return ((silu_ref(gate.float()) ** 2) * up.float()).to(gate.dtype)
 
 
-def leaky_relu2_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def leaky_reglu2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return ((leaky_relu_ref(gate.float()) ** 2) * up.float()).to(gate.dtype)
 
 
 def bilinear_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Bilinear GLU: gate * up (no unary activation). From Shazeer 2020."""
+    """Bilinear GLU: gate * up (no unary activation_cls). From Shazeer 2020."""
     return (gate.float() * up.float()).to(gate.dtype)
 
 
 def bilinear2_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Squared Bilinear GLU: gate² * up (squared identity activation on gate)."""
+    """Squared Bilinear GLU: gate² * up (squared identity activation_cls on gate)."""
     return ((gate.float() ** 2) * up.float()).to(gate.dtype)
 
 
 def powlu_ref(x: torch.Tensor) -> torch.Tensor:
-    """PowLU helper (unary part of the gated activation). arXiv:2605.25704, m=3.
+    """PowLU helper (unary part of the gated activation_cls). arXiv:2605.25704, m=3.
     Pos branch: x · x^(m/(sqrt(x)+1)) · sigmoid(x).
     Neg branch: x² · sigmoid(x)  (equals x · silu(x))."""
     m = 3.0
@@ -171,35 +154,44 @@ def powlu_ref(x: torch.Tensor) -> torch.Tensor:
     return torch.where(x > 0, pos, neg)
 
 
-def powlu_glu_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def powlu_gated_ref(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """PowLU GLU: powlu(gate) * up. The gated form from arXiv:2605.25704."""
     return (powlu_ref(gate.float()) * up.float()).to(gate.dtype)
 
 
-UNGATED_ACTIVATIONS_REFS = {
+REFS = {
     "relu": relu_ref,
     "gelu": gelu_ref,
     "silu": silu_ref,
-    "silu_openai": silu_openai_ref,
     "leaky_relu": leaky_relu_ref,
     "relu2": relu2_ref,
     "gelu2": gelu2_ref,
     "silu2": silu2_ref,
     "leaky_relu2": leaky_relu2_ref,
-}
-GATED_ACTIVATIONS_REFS = {
-    "relu": relu_glu_ref,
-    "gelu": gelu_glu_ref,
-    "silu": silu_glu_ref,
-    "silu_openai": silu_openai_glu_ref,
-    "leaky_relu": leaky_relu_glu_ref,
-    "relu2": relu2_glu_ref,
-    "gelu2": gelu2_glu_ref,
-    "silu2": silu2_glu_ref,
-    "leaky_relu2": leaky_relu2_glu_ref,
+    "reglu": reglu_ref,
+    "geglu": geglu_ref,
+    "swiglu": swiglu_ref,
+    "leaky_reglu": leaky_reglu_ref,
+    "reglu2": reglu2_ref,
+    "geglu2": geglu2_ref,
+    "swiglu2": swiglu2_ref,
+    "leaky_reglu2": leaky_reglu2_ref,
     "bilinear": bilinear_ref,
     "bilinear2": bilinear2_ref,
-    "powlu": powlu_glu_ref,
+    "powlu": powlu_gated_ref,
+}
+GATED_ACTIVATIONS_REFS = {
+    "relu": reglu_ref,
+    "gelu": geglu_ref,
+    "silu": swiglu_ref,
+    "leaky_relu": leaky_reglu_ref,
+    "relu2": reglu2_ref,
+    "gelu2": geglu2_ref,
+    "silu2": swiglu2_ref,
+    "leaky_relu2": leaky_reglu2_ref,
+    "bilinear": bilinear_ref,
+    "bilinear2": bilinear2_ref,
+    "powlu": powlu_gated_ref,
 }
 
 
@@ -402,7 +394,7 @@ def mla_ref(
 def dense_mlp_ref(
     x: torch.Tensor,
     down_proj: nn.Linear,
-    activation: str,
+    activation_cls: str,
     up_proj: nn.Linear | None = None,
     gate_up_proj: nn.Linear | None = None,
 ) -> torch.Tensor:
@@ -410,7 +402,7 @@ def dense_mlp_ref(
         ungated (up_proj given):     down_proj(act(up_proj(x)))
         gated   (gate_up_proj given): down_proj(act(gate, up)) where (gate, up) =
                                        chunk(gate_up_proj(x), 2, dim=-1)
-    `activation` is a key in {UN,}GATED_ACTIVATIONS_REFS ("relu"/"gelu"/"silu").
+    `activation_cls` is a key in REFS ("relu"/"gelu"/"swiglu"/...).
     """
     if (up_proj is None) == (gate_up_proj is None):
         raise ValueError(
@@ -418,9 +410,9 @@ def dense_mlp_ref(
         )
     if gate_up_proj is not None:
         gate, up = gate_up_proj(x).chunk(2, dim=-1)
-        hidden = GATED_ACTIVATIONS_REFS[activation](gate, up)
+        hidden = REFS[activation_cls](gate, up)
     else:
-        hidden = UNGATED_ACTIVATIONS_REFS[activation](up_proj(x))
+        hidden = REFS[activation_cls](up_proj(x))
     return down_proj(hidden)
 
 
@@ -454,7 +446,7 @@ def sparse_moe_block_ref(
     gate_weight: torch.Tensor,
     expert_down: torch.Tensor,
     n_routed_experts_per_token: int,
-    activation: str = "silu",
+    activation_cls: str = "swiglu",
     expert_gate_up: torch.Tensor | None = None,
     expert_up: torch.Tensor | None = None,
     normalize: bool = True,
@@ -468,8 +460,9 @@ def sparse_moe_block_ref(
     """Eager sparse MoE: naive per-(token, slot) expert dispatch.
 
     Mirrors MLP's gated/ungated split:
-      - gated   (expert_gate_up given): hidden = act(gate)*up via GATED_ACTIVATIONS_REFS
-      - ungated (expert_up given):      hidden = act(up)      via UNGATED_ACTIVATIONS_REFS
+      - gated   (expert_gate_up given): hidden = act(gate)*up
+      - ungated (expert_up given):      hidden = act(up)
+    both looked up by name in REFS.
     Optional bias tensors are applied per-expert when provided.
 
     LatentMoE (latent_down_weight (ℓ,d) and latent_up_weight (d,ℓ) given): experts run
@@ -506,12 +499,12 @@ def sparse_moe_block_ref(
                 if expert_gate_up_bias is not None:
                     gate_up = gate_up + expert_gate_up_bias[e]
                 g, u = gate_up.chunk(2, dim=-1)
-                hidden = GATED_ACTIVATIONS_REFS[activation](g, u)
+                hidden = REFS[activation_cls](g, u)
             else:
                 up = expert_in[t] @ expert_up[e].T
                 if expert_up_bias is not None:
                     up = up + expert_up_bias[e]
-                hidden = UNGATED_ACTIVATIONS_REFS[activation](up)
+                hidden = REFS[activation_cls](up)
             out_t = hidden @ expert_down[e].T
             if expert_down_bias is not None:
                 out_t = out_t + expert_down_bias[e]

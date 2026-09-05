@@ -1,22 +1,10 @@
+from functools import partial
+
 import torch
 import torch.nn as nn
 
 from src.kernel.ops.gemm import grouped_mm
-from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
-
-
-def _apply_act_limit(t: torch.Tensor, act_limit: dict, side: str) -> torch.Tensor:
-    """Clamp a tensor by the min/max bounds for one side of activation_limit.
-
-    `side` is "gate" or "up"; a missing side or bound is unbounded there. Gated
-    blocks clamp gate and up separately (DeepSeek-V4: SiLU is already bounded
-    below, so gate typically sets only max); ungated blocks pass their single
-    tensor with side="up".
-    """
-    bounds = act_limit.get(side)
-    if not isinstance(bounds, dict):
-        return t
-    return t.clamp(bounds.get("min"), bounds.get("max"))
+from src.layers.activation import ACT_REGISTRY
 
 
 class GroupedGemmFn(torch.autograd.Function):
@@ -64,7 +52,6 @@ def grouped_mlp(
     b_in: torch.Tensor = None,
     b_down: torch.Tensor = None,
     expert_mm=grouped_mm_fn,
-    act_limit: dict | None = None,
 ) -> torch.Tensor:
     dev = x.device.type
     if torch.is_autocast_enabled(dev):
@@ -79,38 +66,31 @@ def grouped_mlp(
     # the per-expert bias is (E, out) and rides in the GEMM epilogue
     h = expert_mm(x, w_in.mT, offs, bias=b_in, projection="gate_up")
     if gated:
-        gate, up = h.chunk(2, dim=-1)
-        if act_limit is not None:
-            gate = _apply_act_limit(gate, act_limit, "gate")
-            up = _apply_act_limit(up, act_limit, "up")
-        h = act_fn(gate, up)
+        h = act_fn(*h.chunk(2, dim=-1))
     else:
-        if act_limit is not None:
-            h = _apply_act_limit(h, act_limit, "up")
         h = act_fn(h)
     return expert_mm(h, w_down.mT, offs, bias=b_down, projection="down")
 
 
 class DenseMLPBlock(nn.Module):
-    """Dense feed-forward block, ungated or GLU-family (gated=True + silu = SwiGLU)."""
+    """Dense feed-forward block; the activation's name picks unary or GLU-family."""
 
     def __init__(
         self,
         d_model: int,
         intermediate_size: int,
-        activation: str = "silu",
-        activation_limit: dict | None = None,
-        gated: bool = True,
+        activation_cls: str = "swiglu",
+        activation_kwargs: dict | None = None,
         bias: bool = False,
         dropout: float = 0.0,
     ):
         super().__init__()
         # Defaults/validation (intermediate_size, activation) live in ModelConfig.
-        registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
-        self.gated = gated
-        self.act_fn = registry[activation]
-        self.act_limit = activation_limit
-        if gated:
+        # The activation's name carries the arity, so `gated` is derived, not passed.
+        activation = ACT_REGISTRY[activation_cls]
+        self.gated = activation.gated
+        self.act_fn = partial(activation.fn, **(activation_kwargs or {}))
+        if self.gated:
             self.gate_up_proj = nn.Linear(d_model, 2 * intermediate_size, bias=bias)
         else:
             self.up_proj = nn.Linear(d_model, intermediate_size, bias=bias)
@@ -118,23 +98,23 @@ class DenseMLPBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> tuple:
-        # gpt-oss/deepseek-v4 style swiglu clamping: gate and up bounded per side
         if self.gated:
-            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
-            if self.act_limit is not None:
-                gate = _apply_act_limit(gate, self.act_limit, "gate")
-                up = _apply_act_limit(up, self.act_limit, "up")
-            hidden = self.act_fn(gate, up)
+            hidden = self.act_fn(*self.gate_up_proj(x).chunk(2, dim=-1))
         else:
-            h = self.up_proj(x)
-            if self.act_limit is not None:
-                h = _apply_act_limit(h, self.act_limit, "up")
-            hidden = self.act_fn(h)
+            hidden = self.act_fn(self.up_proj(x))
         return self.dropout(self.down_proj(hidden)), None
 
     @classmethod
-    def compute_flops(cls, d_model, intermediate_size, gated=True, bias=False, **_):
+    def compute_flops(
+        cls,
+        d_model: int,
+        intermediate_size: int,
+        activation_cls: str = "swiglu",
+        bias: bool = False,
+        **_: object,
+    ) -> int:
         d_ff = intermediate_size
+        gated = ACT_REGISTRY[activation_cls].gated
         if gated:
             matmul = 6 * d_model * d_ff
             b = (2 * d_ff + d_model) if bias else 0
@@ -145,9 +125,16 @@ class DenseMLPBlock(nn.Module):
 
     @classmethod
     def compute_parameters(
-        cls, d_model, *, intermediate_size, gated=True, bias=False, active=False, **_
+        cls,
+        d_model: int,
+        intermediate_size: int,
+        activation_cls: str = "swiglu",
+        bias: bool = False,
+        active: bool = False,
+        **_: object,
     ) -> int:
         d_ff = intermediate_size
+        gated = ACT_REGISTRY[activation_cls].gated
         if gated:
             weights = 3 * d_ff * d_model  # gate_up (2*d_ff x d) + down (d x d_ff)
             b = (2 * d_ff + d_model) if bias else 0
@@ -276,14 +263,18 @@ class MoERouter(nn.Module):
             self.expert_bias.update(expert_counts)
 
     @classmethod
-    def compute_flops(cls, d_model: int, n_experts: int, expert_bias=False) -> int:
+    def compute_flops(
+        cls, d_model: int, n_experts: int, expert_bias: bool = False
+    ) -> int:
         flops = 2 * d_model * n_experts  # gate matmul (no bias)
         if expert_bias:
             flops += ExpertBias.compute_flops(n_experts)
         return flops
 
     @classmethod
-    def compute_parameters(cls, d_model: int, n_experts: int, expert_bias=False):
+    def compute_parameters(
+        cls, d_model: int, n_experts: int, expert_bias: bool = False
+    ) -> int:
         params = d_model * n_experts  # gate, no bias
         if expert_bias:
             params += ExpertBias.compute_parameters(n_experts)
@@ -305,9 +296,8 @@ class SparseMoEBlock(nn.Module):
         expert_bias: bool = False,
         expert_bias_update_rate: float = 0.001,
         router_score_fn: str = "sigmoid",
-        activation: str = "silu",
-        activation_limit: dict | None = None,
-        gated: bool = True,
+        activation_cls: str = "swiglu",
+        activation_kwargs: dict | None = None,
         bias: bool = False,
         dropout: float = 0.0,
         latent_moe: bool = False,
@@ -318,7 +308,8 @@ class SparseMoEBlock(nn.Module):
             raise ValueError(
                 "aux_loss and expert_bias are mutually exclusive MoE balancing strategies"
             )
-        registry = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
+        activation = ACT_REGISTRY[activation_cls]
+        self.gated = activation.gated
         self.n_routed_experts = n_routed_experts
         self.n_routed_experts_per_token = n_routed_experts_per_token
         self.n_shared_experts = n_shared_experts
@@ -327,9 +318,7 @@ class SparseMoEBlock(nn.Module):
         self.router_score_fn = router_score_fn
         self.expert_bias = expert_bias
         self.expert_bias_update_rate = expert_bias_update_rate
-        self.gated = gated
-        self.act_fn = registry[activation]
-        self.act_limit = activation_limit
+        self.act_fn = partial(activation.fn, **(activation_kwargs or {}))
         self.latent_moe = latent_moe
         self.latent_dim = latent_dim
         expert_dim = latent_dim if latent_moe else d_model
@@ -349,9 +338,8 @@ class SparseMoEBlock(nn.Module):
             self.shared_expert = DenseMLPBlock(
                 d_model,
                 intermediate_size=n_shared_experts * intermediate_size,
-                activation=activation,
-                activation_limit=activation_limit,
-                gated=gated,
+                activation_cls=activation_cls,
+                activation_kwargs=activation_kwargs,
                 bias=bias,
                 dropout=dropout,
             )
@@ -360,7 +348,7 @@ class SparseMoEBlock(nn.Module):
 
         # Stacked expert weights: (E, out, in) following nn.Linear convention.
         # Gated path fuses gate and up into one tensor (one bmm vs two).
-        if gated:
+        if self.gated:
             self.expert_gate_up = nn.Parameter(
                 torch.empty(n_routed_experts, 2 * intermediate_size, expert_dim)
             )
@@ -448,7 +436,6 @@ class SparseMoEBlock(nn.Module):
             b_in=b_in,
             b_down=self.expert_down_bias,
             expert_mm=self.expert_mm,
-            act_limit=self.act_limit,
         )
         expert_out = expert_out * weights_sorted
         expert_out = self.expert_dropout(expert_out)
@@ -493,19 +480,20 @@ class SparseMoEBlock(nn.Module):
     @classmethod
     def compute_flops(
         cls,
-        d_model,
-        intermediate_size,
-        n_routed_experts,
-        n_routed_experts_per_token=2,
-        n_shared_experts=0,
-        gated=True,
-        bias=False,
-        expert_bias=False,
-        latent_moe=False,
-        latent_dim=None,
-        **_,
-    ):
+        d_model: int,
+        intermediate_size: int,
+        n_routed_experts: int,
+        n_routed_experts_per_token: int = 2,
+        n_shared_experts: int = 0,
+        activation_cls: str = "swiglu",
+        bias: bool = False,
+        expert_bias: bool = False,
+        latent_moe: bool = False,
+        latent_dim: int | None = None,
+        **_: object,
+    ) -> int:
         d_ff = intermediate_size
+        gated = ACT_REGISTRY[activation_cls].gated
         edim = latent_dim if latent_moe else d_model
         router = MoERouter.compute_flops(
             d_model, n_routed_experts, expert_bias=expert_bias
@@ -521,7 +509,7 @@ class SparseMoEBlock(nn.Module):
             DenseMLPBlock.compute_flops(
                 d_model,
                 intermediate_size=n_shared_experts * d_ff,
-                gated=gated,
+                activation_cls=activation_cls,
                 bias=bias,
             )
             if n_shared_experts > 0
@@ -532,20 +520,21 @@ class SparseMoEBlock(nn.Module):
     @classmethod
     def compute_parameters(
         cls,
-        d_model,
-        intermediate_size,
-        n_routed_experts,
-        n_routed_experts_per_token=2,
-        n_shared_experts=0,
-        gated=True,
-        bias=False,
-        expert_bias=False,
-        latent_moe=False,
-        latent_dim=None,
-        active=False,
-        **_,
+        d_model: int,
+        intermediate_size: int,
+        n_routed_experts: int,
+        n_routed_experts_per_token: int = 2,
+        n_shared_experts: int = 0,
+        activation_cls: str = "swiglu",
+        bias: bool = False,
+        expert_bias: bool = False,
+        latent_moe: bool = False,
+        latent_dim: int | None = None,
+        active: bool = False,
+        **_: object,
     ) -> int:
         d_ff = intermediate_size
+        gated = ACT_REGISTRY[activation_cls].gated
         edim = latent_dim if latent_moe else d_model
         router = MoERouter.compute_parameters(
             d_model, n_routed_experts, expert_bias=expert_bias
@@ -565,7 +554,7 @@ class SparseMoEBlock(nn.Module):
             DenseMLPBlock.compute_parameters(
                 d_model,
                 intermediate_size=n_shared_experts * d_ff,
-                gated=gated,
+                activation_cls=activation_cls,
                 bias=bias,
             )
             if n_shared_experts > 0

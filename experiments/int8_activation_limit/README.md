@@ -1,6 +1,6 @@
 # Activation Limit under Int8 W8A8
 
-Sweep the MLP activation limit (`mlp_kwargs.activation_limit`) at Qwen3-51M under int8 W8A8 tensorwise quantization, against a bf16 baseline. `activation_limit` bounds the `gate_up_proj` output before SwiGLU, as in gpt-oss's `swiglu_limit` and DeepSeek V4. It is a per-side mapping — `{gate: {min, max}, up: {min, max}}`, every key optional (missing = unbounded on that side). Each `limit L` row uses the DeepSeek asymmetric form: `gate: {max: L}` (SiLU is already bounded below) and `up: {min: -L, max: L}`.
+Sweep the MLP activation limit (`mlp_kwargs.activation_kwargs.act_limit`) at Qwen3-51M under int8 W8A8 tensorwise quantization, against a bf16 baseline. `act_limit` bounds the `gate_up_proj` output before SwiGLU, as in gpt-oss's `swiglu_limit` and DeepSeek V4. It is a per-side mapping — `{gate: {min, max}, up: {min, max}}`, every key optional (missing = unbounded on that side). Each `limit L` row uses the DeepSeek asymmetric form: `gate: {max: L}` (SiLU is already bounded below) and `up: {min: -L, max: L}`.
 
 > Semantics note: earlier runs clamped `gate_up_proj` symmetrically to `[-L, L]` *before* the chunk (both gate and up). The current schema clamps gate and up separately, so tight-limit results are not directly comparable to any pre-migration numbers.
 
@@ -14,7 +14,7 @@ The limit also costs loss in full precision on its own. [`activation_limit`](../
 
 9 runs: bf16 baseline, int8 W8A16 (weight-only) reference, unbounded int8 W8A8, and six int8 W8A8 limits. Limits halve each step down to 3, then step to 2 and 1, so the range shrinks geometrically and the tail probes the tight regime.
 
-| Config | Weight | Activation | grad_out | `activation_limit` |
+| Config | Weight | Activation | grad_out | `act_limit` |
 |---|---|---|---|---|
 | qwen3_51m_bf16 | bf16 | bf16 | bf16 | — |
 | qwen3_51m_int8_w8a16 | int8 | bf16 | bf16 | — |
@@ -38,7 +38,7 @@ nohup bash experiments/int8_activation_limit/run.sh > logs/int8_activation_limit
 
 W&B project: `pretrain-int8-activation-limit`.
 
-| Config | Precision | `activation_limit` | Final Val Loss | Δ vs bf16 | Δ vs unbounded int8 |
+| Config | Precision | `act_limit` | Final Val Loss | Δ vs bf16 | Δ vs unbounded int8 |
 |---|---|---|---|---|---|
 | qwen3_51m_bf16 | bf16 | — | | 0 | |
 | qwen3_51m_int8_w8a16 | int8 W8A16 | — | | | |

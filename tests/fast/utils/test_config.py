@@ -42,8 +42,7 @@ MINIMAL_CONFIG = {
             {
                 "mlp_cls": "dense",
                 "mlp_kwargs": {
-                    "activation": "silu",
-                    "gated": True,
+                    "activation_cls": "swiglu",
                     "intermediate_size": 0,
                 },
             }
@@ -91,9 +90,13 @@ def test_model_config_defaults():
     assert cfg.pos_emb_cls == "rope"
     assert cfg.residual_cls == "standard"
     # __post_init__ fills component defaults: attn_implementation for attn,
-    # intermediate_size (4*d_model) for mlp.
+    # intermediate_size (4*d_model) and the activation pair for mlp.
     assert cfg.resolve_attn(0)[1] == {"attn_implementation": "flex_attention"}
-    assert cfg.resolve_mlp(0)[1] == {"intermediate_size": 4 * 768}
+    assert cfg.resolve_mlp(0)[1] == {
+        "intermediate_size": 4 * 768,
+        "activation_cls": "swiglu",
+        "activation_kwargs": {},
+    }
     assert cfg.norm_kwargs == {}
     assert cfg.pos_emb_kwargs == {}
     assert cfg.residual_kwargs == {}
@@ -116,7 +119,7 @@ def test_load_config_model_kwargs():
         path = _write_yaml(tmp, MINIMAL_CONFIG)
         cfg = load_config(path)
         assert cfg.model.resolve_attn(0)[1]["n_heads"] == 4
-        assert cfg.model.resolve_mlp(0)[1]["activation"] == "silu"
+        assert cfg.model.resolve_mlp(0)[1]["activation_cls"] == "swiglu"
         assert cfg.model.pos_emb_kwargs["rope_theta"] == 1e4
 
 
@@ -668,82 +671,164 @@ def test_modelconfig_moe_unknown_router_score_fn_raises():
         )
 
 
-def test_modelconfig_unknown_activation_raises():
-    with pytest.raises(ValueError, match="Unknown activation"):
-        ModelConfig(mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "mish"}}])
-
-
-def test_modelconfig_gated_only_activation_rejected_when_ungated():
-    # bilinear is gated-only; rejected for an ungated mlp
-    with pytest.raises(ValueError, match="Unknown activation"):
-        ModelConfig(
-            mlp=[
-                {
-                    "mlp_cls": "dense",
-                    "mlp_kwargs": {"activation": "bilinear", "gated": False},
-                }
-            ]
-        )
-    # accepted when gated
-    ModelConfig(
-        mlp=[
-            {
-                "mlp_cls": "dense",
-                "mlp_kwargs": {"activation": "bilinear", "gated": True},
-            }
-        ]
-    )
-
-
-ACT_LIMIT_ERRORS = [
-    # only an inverted numeric range is rejected; other shapes just skip
-    ({"up": {"min": 7, "max": 1}}, r"\['up'\] requires min < max"),
+ACT_KWARGS_ERRORS = [
+    # (activation_cls, activation_kwargs, expected message) -- an inverted bound is
+    # the only act_limit defect that raises; the rest are tolerated below
     (
-        {"up": {"min": 0, "max": -1}},
-        r"\['up'\] requires min < max",
-    ),  # 0 is a real bound
+        "swiglu",
+        {"act_limit": {"up": {"min": 7, "max": 1}}},
+        r"act_limit\['up'\] requires min < max",
+    ),
+    (
+        "swiglu",
+        {"act_limit": {"up": {"min": 0, "max": -1}}},  # 0 is a real bound
+        r"act_limit\['up'\] requires min < max",
+    ),
+    (
+        "silu",
+        {"act_limit": {"up": {"min": 7, "max": 1}}},
+        r"act_limit\['up'\] requires min < max",
+    ),
+]
+
+# (activation_cls, act_limit) shapes the check does not police -- kept verbatim and
+# left for the activation, which only reads its own 'gate'/'up' numeric bounds
+ACT_LIMITS_TOLERATED = [
+    ("swiglu", {"max": 7}),  # side keys that name no tensor
+    ("silu", {"gate": {"max": 7}}),  # gate limit on a unary activation
+    ("swiglu", {"gate": 7}),  # bounds that are not a dict
+    ("swiglu", {"gate": {}}),
+    ("swiglu", {"gate": {"lo": 1}}),  # bound keys that are not min/max
+    ("swiglu", {"up": {"min": "x"}}),  # non-numeric bound
+]
+
+ACT_LIMITS_OK = [
+    ({"gate": {"max": 7}}, "swiglu"),  # partial: only the gate's upper tail
+    ({"gate": {"max": 7}, "up": {"min": -7, "max": 7}}, "swiglu"),  # deepseek-v4
+    ({"up": {"min": -7}}, "swiglu"),
+    ({"up": {"max": 7}}, "silu"),  # unary clamps its single up tensor
+    ({"up": {"min": -7, "max": 7}}, "silu"),
 ]
 
 
+def test_modelconfig_activation_cls_raise_error():
+    with pytest.raises(ValueError, match="Unknown activation"):
+        ModelConfig(
+            mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_cls": "mish"}}]
+        )
+
+
+@pytest.mark.parametrize("activation_cls", ["swiglu", "silu", "bilinear", "powlu"])
+def test_modelconfig_activation_cls(activation_cls):
+    """The name alone resolves the activation; SwiGLU is the default."""
+    resolved = ModelConfig(d_model=64).resolve_mlp(0)[1]
+    assert resolved["activation_cls"] == "swiglu"
+    assert resolved["activation_kwargs"] == {}
+    cfg = ModelConfig(
+        d_model=64,
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_cls": activation_cls}}],
+    )
+    assert cfg.resolve_mlp(0)[1]["activation_cls"] == activation_cls
+
+
 @pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
-@pytest.mark.parametrize("limit,match", ACT_LIMIT_ERRORS)
-def test_modelconfig_activation_limit_raise_error(mlp_cls, limit, match):
-    kwargs = {"activation_limit": limit}
+@pytest.mark.parametrize("act_cls,act_kwargs,match", ACT_KWARGS_ERRORS)
+def test_modelconfig_activation_kwargs_raise_error(mlp_cls, act_cls, act_kwargs, match):
+    kwargs = {"activation_cls": act_cls, "activation_kwargs": act_kwargs}
     if mlp_cls == "moe":
         kwargs |= {"n_routed_experts": 4, "aux_loss": True}
     with pytest.raises(ValueError, match=match):
         ModelConfig(d_model=64, mlp=[{"mlp_cls": mlp_cls, "mlp_kwargs": kwargs}])
 
 
+@pytest.mark.parametrize("act_kwargs", [7.0, "off", None])
+def test_modelconfig_activation_kwargs_non_mapping_dropped(act_kwargs):
+    """A non-dict activation_kwargs is discarded, leaving the block's own default."""
+    cfg = ModelConfig(
+        d_model=64,
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_kwargs": act_kwargs}}],
+    )
+    assert "activation_kwargs" not in cfg.resolve_mlp(0)[1]
+
+
+@pytest.mark.parametrize("act_cls,act_limit", ACT_LIMITS_TOLERATED)
+def test_modelconfig_activation_kwargs_act_limit_tolerated(act_cls, act_limit):
+    """Malformed-but-dict limits are stored verbatim rather than rejected."""
+    cfg = ModelConfig(
+        d_model=64,
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "activation_cls": act_cls,
+                    "activation_kwargs": {"act_limit": act_limit},
+                },
+            }
+        ],
+    )
+    assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == {"act_limit": act_limit}
+
+
+@pytest.mark.parametrize("act_limit", [7.0, "off"])
+def test_modelconfig_activation_kwargs_act_limit_non_dict_dropped(act_limit):
+    """A limit that is not a dict is discarded, leaving the activation unclamped."""
+    cfg = ModelConfig(
+        d_model=64,
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {"activation_kwargs": {"act_limit": act_limit}},
+            }
+        ],
+    )
+    assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == {}
+
+
+@pytest.mark.parametrize("act_limit,activation_cls", ACT_LIMITS_OK)
+def test_modelconfig_activation_kwargs_act_limit(act_limit, activation_cls):
+    """Valid limits are stored verbatim; the shape follows the activation's arity."""
+    cfg = ModelConfig(
+        d_model=64,
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "activation_cls": activation_cls,
+                    "activation_kwargs": {"act_limit": act_limit},
+                },
+            }
+        ],
+    )
+    assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == {"act_limit": act_limit}
+
+
 @pytest.mark.parametrize(
-    "limit",
+    "act_kwargs",
     [
-        None,
-        {"gate": {"max": 7}},  # partial: only the gate's upper tail
-        {"gate": {"min": None, "max": 7}, "up": {"min": -7, "max": 7}},  # deepseek
-        {"gate": {"max": 7}, "note": "kept"},  # unrelated keys pass through unused
-        {"gate": 7, "up": {"max": 7}},  # non-mapping side skipped, stored verbatim
+        {"alpha": 1.702},
+        {"up_shift": 1.0},
+        # the gpt-oss SwiGLU, now expressible without a dedicated registry entry
+        {
+            "alpha": 1.702,
+            "up_shift": 1.0,
+            "act_limit": {"gate": {"max": 7.0}, "up": {"min": -7.0, "max": 7.0}},
+        },
     ],
 )
-def test_modelconfig_activation_limit(limit):
+def test_modelconfig_activation_kwargs(act_kwargs):
     cfg = ModelConfig(
         d_model=64,
-        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_limit": limit}}],
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "activation_cls": "swiglu",
+                    "activation_kwargs": act_kwargs,
+                },
+            }
+        ],
     )
-    # stored verbatim; the block reads missing sides/bounds as unbounded
-    assert cfg.resolve_mlp(0)[1]["activation_limit"] == limit
-    # left absent when unset, so the block's own default (unbounded) applies
-    assert "activation_limit" not in ModelConfig(d_model=64).resolve_mlp(0)[1]
-
-
-@pytest.mark.parametrize("limit", [7.0, "off", True])
-def test_modelconfig_activation_limit_non_mapping_disabled(limit):
-    # a non-mapping value is dropped rather than rejected: the limit is disabled
-    cfg = ModelConfig(
-        d_model=64,
-        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_limit": limit}}],
-    )
-    assert "activation_limit" not in cfg.resolve_mlp(0)[1]
+    assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == act_kwargs
 
 
 def test_modelconfig_validates_attn_dims():

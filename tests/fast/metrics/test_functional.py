@@ -37,7 +37,7 @@ def _gpt2_cfg(impl):
         mlp=[
             {
                 "mlp_cls": "dense",
-                "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+                "mlp_kwargs": {"bias": True, "activation_cls": "gelu"},
             }
         ],
     )
@@ -108,7 +108,7 @@ def _gpt2_attn_res_cfg(impl):
         mlp=[
             {
                 "mlp_cls": "dense",
-                "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+                "mlp_kwargs": {"bias": True, "activation_cls": "gelu"},
             }
         ],
         residual_cls="attn_res",
@@ -691,7 +691,7 @@ def _gpt2_layernorm_learned_cfg(impl):
         mlp=[
             {
                 "mlp_cls": "dense",
-                "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+                "mlp_kwargs": {"bias": True, "activation_cls": "gelu"},
             }
         ],
         norm_cls="layernorm",
@@ -799,8 +799,7 @@ def test_compute_flops_per_token_dense_gpt2_mha_ungated():
                 "mlp_cls": "dense",
                 "mlp_kwargs": {
                     "intermediate_size": 256,
-                    "activation": "gelu",
-                    "gated": False,
+                    "activation_cls": "gelu",
                     "bias": True,
                 },
             }
@@ -838,8 +837,7 @@ def test_compute_flops_per_token_gqa_gated_qwen3():
                 "mlp_cls": "dense",
                 "mlp_kwargs": {
                     "intermediate_size": 256,
-                    "activation": "silu",
-                    "gated": True,
+                    "activation_cls": "swiglu",
                     "bias": False,
                 },
             }
@@ -872,7 +870,7 @@ def test_compute_flops_per_token_moe_uses_k_active():
                     "aux_loss_coef": 1e-3,
                     "n_routed_experts_per_token": 2,
                     "intermediate_size": 128,
-                    "gated": True,
+                    "activation_cls": "swiglu",
                     "bias": False,
                 },
             }

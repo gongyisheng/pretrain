@@ -10,7 +10,7 @@ class RMSNorm(nn.RMSNorm):
         return super().forward(x.to(self.weight.dtype)).to(x.dtype)
 
     @classmethod
-    def compute_parameters(cls, d_model, **_) -> int:
+    def compute_parameters(cls, d_model: int, **_: object) -> int:
         return d_model  # weight only, no bias
 
 
@@ -19,7 +19,7 @@ class LayerNorm(nn.LayerNorm):
         super().__init__(d_model, eps=eps, elementwise_affine=True, bias=bias)
 
     @classmethod
-    def compute_parameters(cls, d_model, bias=True, **_) -> int:
+    def compute_parameters(cls, d_model: int, bias: bool = True, **_: object) -> int:
         return d_model * (2 if bias else 1)  # weight + optional bias
 
 

@@ -18,7 +18,7 @@ class LearnedPositionalEmbedding(nn.Module):
         return x + self.embedding(pos)
 
     @classmethod
-    def compute_parameters(cls, max_seq_len, d_model, **_) -> int:
+    def compute_parameters(cls, max_seq_len: int, d_model: int, **_: object) -> int:
         return max_seq_len * d_model
 
 
@@ -65,7 +65,7 @@ class RoPE(nn.Module):
         return _apply_rope(x, cos, sin)
 
     @classmethod
-    def compute_parameters(cls, max_seq_len, d_model, **_) -> int:
+    def compute_parameters(cls, max_seq_len: int, d_model: int, **_: object) -> int:
         return 0  # cos/sin are buffers, not trainable params
 
 

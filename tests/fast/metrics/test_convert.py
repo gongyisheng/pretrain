@@ -34,7 +34,14 @@ def _block_cfg(n_layers=1):
                 "attn_kwargs": {"n_heads": 4, "attn_implementation": "sdpa"},
             }
         ],
-        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "silu", "gated": True}}],
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "activation_cls": "swiglu",
+                },
+            }
+        ],
         norm_cls="rmsnorm",
         pos_emb_cls="rope",
         pos_emb_kwargs={},
@@ -69,8 +76,8 @@ def test_sites_are_exactly_the_linear_inputs():
 
 
 def test_embedding_is_not_a_site_but_tied_lm_head_is():
-    """torch.nn.Embedding consumes token ids, not an activation; the tied lm_head still
-    contracts a real activation against the same weight."""
+    """torch.nn.Embedding consumes token ids, not an activation_cls; the tied lm_head still
+    contracts a real activation_cls against the same weight."""
     model = torch.nn.Module()
     model.token_emb = torch.nn.Embedding(32, D_MODEL)
     model.lm_head = torch.nn.Linear(D_MODEL, 32, bias=False)

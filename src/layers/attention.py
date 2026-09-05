@@ -70,8 +70,14 @@ class MultiHeadAttention(nn.Module):
 
     @classmethod
     def compute_flops(
-        cls, d_model, max_seq_len, *, n_heads, bias=False, qk_norm=False, **_
-    ):
+        cls,
+        d_model: int,
+        max_seq_len: int,
+        n_heads: int,
+        bias: bool = False,
+        qk_norm: bool = False,
+        **_: object,
+    ) -> int:
         head_dim = d_model // n_heads
         n_kv = n_heads
         qkv = 2 * d_model * (n_heads + 2 * n_kv) * head_dim
@@ -84,7 +90,12 @@ class MultiHeadAttention(nn.Module):
 
     @classmethod
     def compute_parameters(
-        cls, d_model, *, n_heads, bias=False, qk_norm=False, **_
+        cls,
+        d_model: int,
+        n_heads: int,
+        bias: bool = False,
+        qk_norm: bool = False,
+        **_: object,
     ) -> int:
         head_dim = d_model // n_heads
         n_kv = n_heads
@@ -164,14 +175,14 @@ class GroupedQueryAttention(nn.Module):
     @classmethod
     def compute_flops(
         cls,
-        d_model,
-        max_seq_len,
-        n_heads,
-        n_kv_heads=None,
-        bias=False,
-        qk_norm=False,
-        **_,
-    ):
+        d_model: int,
+        max_seq_len: int,
+        n_heads: int,
+        n_kv_heads: int | None = None,
+        bias: bool = False,
+        qk_norm: bool = False,
+        **_: object,
+    ) -> int:
         n_kv = n_kv_heads or n_heads
         head_dim = d_model // n_heads
         qkv = 2 * d_model * (n_heads + 2 * n_kv) * head_dim
@@ -184,7 +195,13 @@ class GroupedQueryAttention(nn.Module):
 
     @classmethod
     def compute_parameters(
-        cls, d_model, *, n_heads, n_kv_heads=None, bias=False, qk_norm=False, **_
+        cls,
+        d_model: int,
+        n_heads: int,
+        n_kv_heads: int | None = None,
+        bias: bool = False,
+        qk_norm: bool = False,
+        **_: object,
     ) -> int:
         n_kv = n_kv_heads or n_heads
         head_dim = d_model // n_heads
@@ -293,17 +310,17 @@ class MultiHeadLatentAttention(nn.Module):
     @classmethod
     def compute_flops(
         cls,
-        d_model,
-        max_seq_len,
-        n_heads,
-        qk_nope_head_dim,
-        qk_rope_head_dim,
-        v_head_dim,
-        kv_lora_rank,
-        q_lora_rank=0,
-        bias=False,
-        **_,
-    ):
+        d_model: int,
+        max_seq_len: int,
+        n_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        q_lora_rank: int = 0,
+        bias: bool = False,
+        **_: object,
+    ) -> int:
         qk_head = qk_nope_head_dim + qk_rope_head_dim
         b = lambda out: out if bias else 0  # noqa: E731
         if q_lora_rank > 0:
@@ -333,15 +350,15 @@ class MultiHeadLatentAttention(nn.Module):
     @classmethod
     def compute_parameters(
         cls,
-        d_model,
-        n_heads,
-        qk_nope_head_dim,
-        qk_rope_head_dim,
-        v_head_dim,
-        kv_lora_rank,
-        q_lora_rank=0,
-        bias=False,
-        **_,
+        d_model: int,
+        n_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        q_lora_rank: int = 0,
+        bias: bool = False,
+        **_: object,
     ) -> int:
         qk_head = qk_nope_head_dim + qk_rope_head_dim
         b = lambda out: out if bias else 0  # noqa: E731
