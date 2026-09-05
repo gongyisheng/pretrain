@@ -24,7 +24,7 @@ def _block_cfg(impl):
         mlp=[
             {
                 "mlp_cls": "dense",
-                "mlp_kwargs": {"activation": "gelu", "gated": False, "bias": True},
+                "mlp_kwargs": {"activation_cls": "gelu", "bias": True},
             }
         ],
         norm_cls="layernorm",

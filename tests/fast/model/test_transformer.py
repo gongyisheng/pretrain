@@ -15,7 +15,14 @@ def _cfg(max_seq_len=32, **model_over):
         n_layers=2,
         vocab_size=256,
         attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}}],
-        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "silu", "gated": True}}],
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "activation_cls": "swiglu",
+                },
+            }
+        ],
         norm_cls="rmsnorm",
         pos_emb_cls="rope",
         pos_emb_kwargs={"rope_theta": 1e4},
@@ -54,7 +61,7 @@ def _gpt2_cfg(impl):
         mlp=[
             {
                 "mlp_cls": "dense",
-                "mlp_kwargs": {"activation": "gelu", "gated": False, "bias": True},
+                "mlp_kwargs": {"activation_cls": "gelu", "bias": True},
             }
         ],
         norm_cls="layernorm",
@@ -76,7 +83,14 @@ def _qwen3_cfg(impl):
                 },
             }
         ],
-        mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation": "silu", "gated": True}}],
+        mlp=[
+            {
+                "mlp_cls": "dense",
+                "mlp_kwargs": {
+                    "activation_cls": "swiglu",
+                },
+            }
+        ],
         norm_cls="rmsnorm",
         pos_emb_cls="rope",
         pos_emb_kwargs={"rope_theta": 1e4},
@@ -105,8 +119,7 @@ def _moe_cfg(impl):
                     "aux_loss": True,
                     "aux_loss_coef": 1e-3,
                     "n_routed_experts_per_token": 2,
-                    "activation": "silu",
-                    "gated": True,
+                    "activation_cls": "swiglu",
                 },
             }
         ],
@@ -242,8 +255,7 @@ def test_transformer_matches_hf_qwen3_with_copied_weights():
                 "mlp_cls": "dense",
                 "mlp_kwargs": {
                     "intermediate_size": intermediate_size,
-                    "activation": "silu",
-                    "gated": True,
+                    "activation_cls": "swiglu",
                 },
             }
         ],

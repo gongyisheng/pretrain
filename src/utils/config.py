@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import yaml
 
-from src.layers.activation import GATED_ACTIVATIONS, UNGATED_ACTIVATIONS
+from src.layers.activation import ACT_REGISTRY
 from src.layers.attention import ATTN_REGISTRY
 from src.layers.mlp import MLP_REGISTRY, MOE_ROUTER_SCORE_FNS
 from src.layers.pos_emb import POS_EMB_REGISTRY
@@ -168,16 +168,19 @@ class ModelConfig:
     def _set_default_mlp_kwargs(self, mlp_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one MLP item's kwargs, keyed on mlp_cls."""
         kwargs.setdefault("intermediate_size", 4 * self.d_model)
-        gated = kwargs.get("gated", True)
-        activation = kwargs.get("activation", "silu")
-        valid = GATED_ACTIVATIONS if gated else UNGATED_ACTIVATIONS
-        if activation not in valid:
+        activation_cls = kwargs.setdefault("activation_cls", "swiglu")
+        if activation_cls not in ACT_REGISTRY:
             raise ValueError(
-                f"Unknown activation: {activation!r}; expected one of {sorted(valid)}"
+                f"Unknown activation: {activation_cls!r}; "
+                f"expected one of {sorted(ACT_REGISTRY)}"
             )
-        act_limit = kwargs.get("activation_limit")
+        activation_kwargs = kwargs.setdefault("activation_kwargs", {})
+        if not isinstance(activation_kwargs, dict):
+            del kwargs["activation_kwargs"]
+            activation_kwargs = {}
+        act_limit = activation_kwargs.get("act_limit")
         if act_limit is not None and not isinstance(act_limit, dict):
-            del kwargs["activation_limit"]
+            del activation_kwargs["act_limit"]
             act_limit = None
         if act_limit is not None:
             for side in ("gate", "up"):
@@ -191,7 +194,7 @@ class ModelConfig:
                     hi = None
                 if lo is not None and hi is not None and lo >= hi:
                     raise ValueError(
-                        f"activation_limit['{side}'] requires min < max; "
+                        f"act_limit['{side}'] requires min < max; "
                         f"got min={lo!r}, max={hi!r}"
                     )
         if mlp_cls == "moe":

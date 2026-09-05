@@ -40,7 +40,7 @@ d_model, 8 layers, 64 routed experts + 2 always-on shared experts, top-6
 routed, no expert capacity limit, `expert_bias: true` / `aux_loss: false`,
 sigmoid router, muon lr 1e-3, warmup 1500. Active MoE FFN width
 `(k + s)·intermediate_size = (6+2)·192 = 1536`; `l0dense`'s layer-0 dense
-MLP uses `intermediate_size: 1536, activation: silu, gated: true` to match it
+MLP uses `intermediate_size: 1536, activation_cls: silu, gated: true` to match it
 (SwiGLU, compute-comparable to a routed+shared MoE layer).
 
 | Param | Value |

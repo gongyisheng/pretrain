@@ -15,12 +15,13 @@ model:
     mlp_kwargs:
       intermediate_size: 1536
       dropout: 0.0
-      activation_limit:
-        gate:
-          max: 3.0
-        up:
-          min: -3.0
-          max: 3.0
+      activation_kwargs:
+        act_limit:
+          gate:
+            max: 3.0
+          up:
+            min: -3.0
+            max: 3.0
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:

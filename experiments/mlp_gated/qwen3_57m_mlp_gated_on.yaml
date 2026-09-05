@@ -13,8 +13,7 @@ model:
   - mlp_cls: dense
     mlp_kwargs:
       intermediate_size: 2048
-      activation: silu
-      gated: true
+      activation_cls: swiglu
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:

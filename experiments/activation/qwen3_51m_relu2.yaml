@@ -13,8 +13,7 @@ model:
   - mlp_cls: dense
     mlp_kwargs:
       intermediate_size: 2304
-      activation: relu2
-      gated: false
+      activation_cls: relu2
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:

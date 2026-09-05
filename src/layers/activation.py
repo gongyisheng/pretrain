@@ -1,3 +1,5 @@
+from typing import Callable, NamedTuple
+
 import torch
 import torch.nn.functional as F
 
@@ -5,99 +7,252 @@ import torch.nn.functional as F
 # --- Unary activations: x → act(x) ---
 
 
-def relu(x: torch.Tensor) -> torch.Tensor:
+def relu(x: torch.Tensor, act_limit: dict | None = None) -> torch.Tensor:
+    if act_limit and "up" in act_limit:
+        x = x.clamp(**act_limit["up"])
     return F.relu(x)
 
 
-def gelu(x: torch.Tensor) -> torch.Tensor:
+def gelu(x: torch.Tensor, act_limit: dict | None = None) -> torch.Tensor:
+    if act_limit and "up" in act_limit:
+        x = x.clamp(**act_limit["up"])
     return F.gelu(x)
 
 
-def silu(x: torch.Tensor) -> torch.Tensor:
-    return F.silu(x)
+def silu(
+    x: torch.Tensor, alpha: float = 1.0, act_limit: dict | None = None
+) -> torch.Tensor:
+    """x * sigmoid(alpha * x). alpha scales only the sigmoid argument, so
+    alpha=1.0 is exactly F.silu (gpt-oss uses alpha=1.702)."""
+    if act_limit and "up" in act_limit:
+        x = x.clamp(**act_limit["up"])
+    if alpha == 1.0:
+        return F.silu(x)
+    return x * torch.sigmoid(alpha * x)
 
 
-def silu_openai(x: torch.Tensor) -> torch.Tensor:
-    alpha = 1.702
-    limit = 7.0
-    gated = x.clamp(max=limit)
-    return gated * torch.sigmoid(alpha * gated)
+def leaky_relu(
+    x: torch.Tensor, negative_slope: float = 0.01, act_limit: dict | None = None
+) -> torch.Tensor:
+    if act_limit and "up" in act_limit:
+        x = x.clamp(**act_limit["up"])
+    return F.leaky_relu(x, negative_slope)
 
 
-def leaky_relu(x: torch.Tensor) -> torch.Tensor:
-    return F.leaky_relu(x, 0.01)
-
-
-def relu2(x: torch.Tensor) -> torch.Tensor:
+def relu2(x: torch.Tensor, act_limit: dict | None = None) -> torch.Tensor:
+    if act_limit and "up" in act_limit:
+        x = x.clamp(**act_limit["up"])
     return F.relu(x) ** 2
 
 
-def gelu2(x: torch.Tensor) -> torch.Tensor:
+def gelu2(x: torch.Tensor, act_limit: dict | None = None) -> torch.Tensor:
+    if act_limit and "up" in act_limit:
+        x = x.clamp(**act_limit["up"])
     return F.gelu(x) ** 2
 
 
-def silu2(x: torch.Tensor) -> torch.Tensor:
-    return F.silu(x) ** 2
+def silu2(
+    x: torch.Tensor, alpha: float = 1.0, act_limit: dict | None = None
+) -> torch.Tensor:
+    if act_limit and "up" in act_limit:
+        x = x.clamp(**act_limit["up"])
+    if alpha == 1.0:
+        return F.silu(x) ** 2
+    return (x * torch.sigmoid(alpha * x)) ** 2
 
 
-def leaky_relu2(x: torch.Tensor) -> torch.Tensor:
-    return F.leaky_relu(x, 0.01) ** 2
+def leaky_relu2(
+    x: torch.Tensor, negative_slope: float = 0.01, act_limit: dict | None = None
+) -> torch.Tensor:
+    if act_limit and "up" in act_limit:
+        x = x.clamp(**act_limit["up"])
+    return F.leaky_relu(x, negative_slope) ** 2
 
 
-# --- Gated (GLU) activations: (gate, up) → act(gate) * up ---
+# --- Gated (GLU) activations: (gate, up) → act(gate) * (up + up_shift) ---
 
 
-def relu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def reglu(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
     return F.relu(gate) * up
 
 
-def gelu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def geglu(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
     return F.gelu(gate) * up
 
 
-def silu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return F.silu(gate) * up
+def swiglu(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    alpha: float = 1.0,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
+    """
+    SwiGLU: SiLU's gated form.
+    gpt-oss's variant is alpha=1.702, up_shift=1.0, act_limit=±7.
+    """
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
+    if alpha == 1.0:
+        return F.silu(gate) * up
+    return gate * torch.sigmoid(alpha * gate) * up
 
 
-def silu_openai_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    alpha = 1.702
-    limit = 7.0
-    gated = gate.clamp(max=limit)
-    shifted_up = up.clamp(min=-limit, max=limit) + 1.0
-    return gated * torch.sigmoid(alpha * gated) * shifted_up
+def leaky_reglu(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    negative_slope: float = 0.01,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
+    return F.leaky_relu(gate, negative_slope) * up
 
 
-def leaky_relu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return F.leaky_relu(gate, 0.01) * up
-
-
-def relu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def reglu2(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
     return (F.relu(gate) ** 2) * up
 
 
-def gelu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def geglu2(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
     return (F.gelu(gate) ** 2) * up
 
 
-def silu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return (F.silu(gate) ** 2) * up
+def swiglu2(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    alpha: float = 1.0,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
+    if alpha == 1.0:
+        return (F.silu(gate) ** 2) * up
+    return ((gate * torch.sigmoid(alpha * gate)) ** 2) * up
 
 
-def leaky_relu2_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return (F.leaky_relu(gate, 0.01) ** 2) * up
+def leaky_reglu2(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    negative_slope: float = 0.01,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
+    return (F.leaky_relu(gate, negative_slope) ** 2) * up
 
 
-def bilinear(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def bilinear(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
     """Bilinear GLU: gate * up. No unary activation. Shazeer 2020."""
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
     return gate * up
 
 
-def bilinear2(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def bilinear2(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
     """Squared Bilinear GLU: gate² * up."""
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
     return (gate**2) * up
 
 
-def powlu(x: torch.Tensor) -> torch.Tensor:
+def powlu(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    m: float = 3.0,
+    up_shift: float = 0.0,
+    act_limit: dict | None = None,
+) -> torch.Tensor:
     """PowLU helper: arXiv:2605.25704 (May 2026), m=3.0.
 
     Piecewise:
@@ -116,40 +271,47 @@ def powlu(x: torch.Tensor) -> torch.Tensor:
     The outer `torch.where(x > 0, pos, neg)` selects the correct branch;
     when x > 0, safe_x == x, so the forward value is unchanged.
     """
-    m = 3.0
-    safe_x = torch.where(x > 0, x, torch.ones_like(x))
-    exponent = m / (torch.sqrt(safe_x) + 1.0)
-    pos = x * (safe_x**exponent) * torch.sigmoid(x)
-    neg = x * x * torch.sigmoid(x)
-    return torch.where(x > 0, pos, neg)
+    if act_limit:
+        if "gate" in act_limit:
+            gate = gate.clamp(**act_limit["gate"])
+        if "up" in act_limit:
+            up = up.clamp(**act_limit["up"])
+    if up_shift != 0.0:
+        up = up + up_shift
+    safe_gate = torch.where(gate > 0, gate, torch.ones_like(gate))
+    exponent = m / (torch.sqrt(safe_gate) + 1.0)
+    pos = gate * (safe_gate**exponent) * torch.sigmoid(gate)
+    neg = gate * gate * torch.sigmoid(gate)
+    return torch.where(gate > 0, pos, neg) * up
 
 
-def powlu_glu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return powlu(gate) * up
+class Activation(NamedTuple):
+    """Registry entry: the function, plus the arity its name already implies."""
+
+    fn: Callable
+    gated: bool
 
 
-UNGATED_ACTIVATIONS = {
-    "relu": relu,
-    "gelu": gelu,
-    "silu": silu,
-    "silu_openai": silu_openai,
-    "leaky_relu": leaky_relu,
-    "relu2": relu2,
-    "gelu2": gelu2,
-    "silu2": silu2,
-    "leaky_relu2": leaky_relu2,
-}
-GATED_ACTIVATIONS = {
-    "relu": relu_glu,
-    "gelu": gelu_glu,
-    "silu": silu_glu,
-    "silu_openai": silu_openai_glu,
-    "leaky_relu": leaky_relu_glu,
-    "relu2": relu2_glu,
-    "gelu2": gelu2_glu,
-    "silu2": silu2_glu,
-    "leaky_relu2": leaky_relu2_glu,
-    "bilinear": bilinear,
-    "bilinear2": bilinear2,
-    "powlu": powlu_glu,
+# The name alone says gated or unary -- "swiglu" is SiLU's gated form, "silu" the
+# unary one -- so no separate `gated` config key is needed.
+ACT_REGISTRY = {
+    "relu": Activation(relu, False),
+    "gelu": Activation(gelu, False),
+    "silu": Activation(silu, False),
+    "leaky_relu": Activation(leaky_relu, False),
+    "relu2": Activation(relu2, False),
+    "gelu2": Activation(gelu2, False),
+    "silu2": Activation(silu2, False),
+    "leaky_relu2": Activation(leaky_relu2, False),
+    "reglu": Activation(reglu, True),
+    "geglu": Activation(geglu, True),
+    "swiglu": Activation(swiglu, True),
+    "leaky_reglu": Activation(leaky_reglu, True),
+    "reglu2": Activation(reglu2, True),
+    "geglu2": Activation(geglu2, True),
+    "swiglu2": Activation(swiglu2, True),
+    "leaky_reglu2": Activation(leaky_reglu2, True),
+    "bilinear": Activation(bilinear, True),
+    "bilinear2": Activation(bilinear2, True),
+    "powlu": Activation(powlu, True),
 }

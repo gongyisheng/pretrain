@@ -406,8 +406,7 @@ def _make_moe_cfg() -> TrainConfig:
                     "n_routed_experts_per_token": 2,
                     "n_shared_experts": 1,
                     "intermediate_size": 32,
-                    "activation": "silu",
-                    "gated": True,
+                    "activation_cls": "swiglu",
                 },
             }
         ],

@@ -46,7 +46,10 @@ def _cfg(task="pretrain", log_every=2, **logging):
             mlp=[
                 {
                     "mlp_cls": "dense",
-                    "mlp_kwargs": {"gated": False, "bias": True, "activation": "gelu"},
+                    "mlp_kwargs": {
+                        "bias": True,
+                        "activation_cls": "gelu",
+                    },
                 }
             ],
         )
@@ -830,7 +833,7 @@ def test_print_model_summary_moe(capsys):
 
 
 # ---------------------------------------------------------------------------
-# val-side activation / quantization windows
+# val-side activation_cls / quantization windows
 # ---------------------------------------------------------------------------
 
 
@@ -948,7 +951,7 @@ def test_log_eval_without_a_model_emits_no_window_keys():
 
 
 # ---------------------------------------------------------------------------
-# train-side activation window: train_step_begin arms it, log_train reads it
+# train-side activation_cls window: train_step_begin arms it, log_train reads it
 # ---------------------------------------------------------------------------
 
 
