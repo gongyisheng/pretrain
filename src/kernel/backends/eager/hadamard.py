@@ -4,17 +4,19 @@ from src.kernel.registry import register_kernel
 from src.kernel.utils import to_hadamard_scales
 
 
-def _butterfly(v: torch.Tensor, block: int) -> torch.Tensor:
+def _butterfly(v: torch.Tensor) -> torch.Tensor:
     """
-    whaHadamard-transform the last axis, in place of a matmul with the Sylvester matrix.
+    Hadamard-transform the last axis, in place of a matmul with the Sylvester matrix.
     """
-    lead = v.shape[:-1]
-    for stage in range(block.bit_length() - 1):
-        low = 1 << stage
-        pairs = v.reshape(*lead, block // (2 * low), 2, low)
-        even, odd = pairs[..., 0, :], pairs[..., 1, :]
-        v = torch.stack([even + odd, even - odd], dim=-2).reshape(*lead, block)
-    return v
+    shape = v.shape
+    block = shape[-1]
+    half = 1
+    while half < block:
+        pairs = v.reshape(-1, block // (2 * half), 2, half)
+        even, odd = pairs[:, :, 0], pairs[:, :, 1]
+        v = torch.stack([even + odd, even - odd], dim=2)
+        half *= 2
+    return v.reshape(shape)
 
 
 @register_kernel(
@@ -42,12 +44,15 @@ def rotate(
 
     v = x.float().reshape(*x.shape[:-1], -1, hadamard_block) * pre_scale
 
-    if signs is not None and not inverse:
-        v = v * signs
-    v = _butterfly(v, hadamard_block)
+    if inverse:
+        v = _butterfly(v)
+        if signs is not None:
+            v = v * signs
+    else:
+        if signs is not None:
+            v = v * signs
+        v = _butterfly(v)
     if post_scale != 1.0:
         v = v * post_scale
-    if signs is not None and inverse:
-        v = v * signs
 
     return v.reshape(x.shape).to(out_dtype)
