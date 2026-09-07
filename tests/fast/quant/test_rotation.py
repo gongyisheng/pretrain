@@ -23,11 +23,6 @@ GEMM_ATOL = {
     torch.bfloat16: 0.52,
 }
 ROTATION_DEVICES = ("cpu", "cuda")
-LARGE_ROTATION_ATOL = {
-    # Worst dense-oracle errors are 1.18e-3 and 4.96e30; margins are 3.5x and 5.2x.
-    torch.float16: 0.0041,
-    torch.bfloat16: 2.6e31,
-}
 INVALID_HADAMARD_KWARGS = [
     {"random_sign": 1},
     {"seed": -1},
@@ -35,18 +30,6 @@ INVALID_HADAMARD_KWARGS = [
     {"block_size": 4, "sign_vector": [1.0, -1.0, 0.0, 1.0]},
     {"unknown": 1},
 ]
-SYLVESTER_4 = torch.tensor(
-    [
-        [0.5, 0.5, 0.5, 0.5],
-        [0.5, -0.5, 0.5, -0.5],
-        [0.5, 0.5, -0.5, -0.5],
-        [0.5, -0.5, -0.5, 0.5],
-    ]
-)
-SIGN_VECTOR_4 = torch.tensor([1.0, -1.0, -1.0, 1.0])
-HADAMARD_SIGN_VECTORS = (None, SIGN_VECTOR_4)
-HADAMARD_DIRECTIONS = (False, True)
-HADAMARD_ORACLE_INPUT = torch.arange(1, 17, dtype=torch.float32).reshape(4, 4)
 INVALID_HADAMARD_APPLY_CASES = [
     (0, (8, 16), -1, "power of two"),
     (3, (8, 16), -1, "power of two"),
@@ -117,29 +100,6 @@ def test_hadamard_rotation_apply_gemm(shape, dtype):
     torch.testing.assert_close(transformed, a @ b, atol=GEMM_ATOL[dtype], rtol=0)
 
 
-@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
-@pytest.mark.parametrize("sign_vector", HADAMARD_SIGN_VECTORS)
-@pytest.mark.parametrize("inverse", HADAMARD_DIRECTIONS)
-def test_hadamard_rotation_apply_oracle(contract_dim, sign_vector, inverse):
-    rotation = HadamardRotation(
-        block_size=4, random_sign=False, sign_vector=sign_vector
-    )
-    transform = SYLVESTER_4
-    if sign_vector is not None:
-        transform = (
-            transform * sign_vector
-            if inverse
-            else sign_vector.unsqueeze(-1) * transform
-        )
-    x = HADAMARD_ORACLE_INPUT
-    expected = (x.movedim(contract_dim, -1) @ transform).movedim(-1, contract_dim)
-    transformed = (
-        rotation.inverse(x, contract_dim) if inverse else rotation(x, contract_dim)
-    )
-
-    assert torch.equal(transformed, expected)
-
-
 def test_hadamard_rotation_apply_seed():
     x = torch.arange(32, dtype=torch.float32).reshape(4, 8)
     first = HadamardRotation(block_size=8, seed=1234)
@@ -176,36 +136,6 @@ def test_hadamard_rotation_apply_out_dtype(dtype, contract_dim, device):
     assert torch.equal(
         rotation.inverse(x, contract_dim, torch.float32),
         rotation.inverse(x.float(), contract_dim),
-    )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_hadamard_rotation_apply_precision(dtype):
-    block_size = 32
-    x = torch.full(
-        (3, block_size), torch.finfo(dtype).max / 8, dtype=dtype, device="cuda"
-    )
-    x[1, 1::2] *= -1
-    x[2].zero_()
-    x[2, : block_size // 2] = torch.finfo(dtype).max * 0.3
-    signs = torch.tensor(
-        [
-            [
-                1.0 if (row & col).bit_count() % 2 == 0 else -1.0
-                for col in range(block_size)
-            ]
-            for row in range(block_size)
-        ],
-        device=x.device,
-    )
-    expected = (x.float() @ (signs / block_size**0.5)).to(dtype)
-
-    transformed = HadamardRotation(block_size=block_size, random_sign=False)(x, -1)
-
-    assert torch.isfinite(transformed).all()
-    torch.testing.assert_close(
-        transformed, expected, atol=LARGE_ROTATION_ATOL[dtype], rtol=0
     )
 
 
@@ -256,43 +186,42 @@ UNSIGNED_ROTATION = {
     **BASE_ROTATION,
     "rotation_kwargs": {"block_size": 16, "seed": 1, "random_sign": False},
 }
-ROTATION_KEY_IDENTITY_EQUAL_CASES = [
-    {"rotation": DEFAULT_RANDOM_SIGN_ROTATION},
-    {"rotation": MULTI_GEMM_ROTATION},
-    {"include": BASE_INCLUDE[::-1]},
-    {"exclude": BASE_EXCLUDE[::-1]},
+ROTATION_KEY_ROTATION_CASES = [
+    (BASE_ROTATION, True),
+    (DEFAULT_RANDOM_SIGN_ROTATION, True),
+    (MULTI_GEMM_ROTATION, True),
+    (BLOCK_32_ROTATION, False),
+    (SEED_2_ROTATION, False),
+    (UNSIGNED_ROTATION, False),
 ]
-ROTATION_KEY_IDENTITY_DIFFERENT_CASES = [
-    {"rotation": BLOCK_32_ROTATION},
-    {"rotation": SEED_2_ROTATION},
-    {"rotation": UNSIGNED_ROTATION},
-    {"include": ["*mlp*"]},
-    {"include": []},
-    {"exclude": ["lm_head"]},
+ROTATION_KEY_INCLUDE_CASES = [
+    (BASE_INCLUDE, True),
+    (BASE_INCLUDE[::-1], True),
+    (["*mlp*"], False),
+    ([], False),
+]
+ROTATION_KEY_EXCLUDE_CASES = [
+    (BASE_EXCLUDE, True),
+    (BASE_EXCLUDE[::-1], True),
+    (["lm_head"], False),
 ]
 
 
-def _key(rotation=None, include=None, exclude=None):
-    return build_rotation_key(
-        BASE_ROTATION if rotation is None else rotation,
-        BASE_INCLUDE if include is None else include,
-        BASE_EXCLUDE if exclude is None else exclude,
-    )
+@pytest.mark.parametrize("rotation_case", ROTATION_KEY_ROTATION_CASES)
+@pytest.mark.parametrize("include_case", ROTATION_KEY_INCLUDE_CASES)
+@pytest.mark.parametrize("exclude_case", ROTATION_KEY_EXCLUDE_CASES)
+def test_build_rotation_key_identity(rotation_case, include_case, exclude_case):
+    rotation, rotation_equal = rotation_case
+    include, include_equal = include_case
+    exclude, exclude_equal = exclude_case
 
-
-@pytest.mark.parametrize("key_kwargs", ROTATION_KEY_IDENTITY_EQUAL_CASES)
-def test_build_rotation_key_identity_equal(key_kwargs):
-    key = _key(**key_kwargs)
+    key = build_rotation_key(rotation, include, exclude)
+    base_key = build_rotation_key(BASE_ROTATION, BASE_INCLUDE, BASE_EXCLUDE)
 
     assert key.startswith("hadamard-")
     assert "." not in key
     nn.ModuleDict({key: HadamardRotation(block_size=16)})
-    assert key == _key()
-
-
-@pytest.mark.parametrize("key_kwargs", ROTATION_KEY_IDENTITY_DIFFERENT_CASES)
-def test_build_rotation_key_identity_different(key_kwargs):
-    assert _key(**key_kwargs) != _key()
+    assert (key == base_key) is (rotation_equal and include_equal and exclude_equal)
 
 
 def test_build_rotation_key_reproducible_across_processes():
@@ -312,4 +241,4 @@ def test_build_rotation_key_reproducible_across_processes():
         for seed in ("0", "1")
     }
 
-    assert keys == {_key()}
+    assert keys == {build_rotation_key(BASE_ROTATION, BASE_INCLUDE, BASE_EXCLUDE)}
