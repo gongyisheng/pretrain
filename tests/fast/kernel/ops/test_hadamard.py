@@ -4,13 +4,12 @@ import pytest
 import torch
 
 import src.kernel.ops.hadamard as hadamard
-
-CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+from tests.fast.helper import cuda_only
 
 EMPTY_SHAPES = ((0, 64), (8, 0), (2, 0, 64))
 
 
-@CUDA
+@cuda_only
 def test_rotate_materializes_cpu_signs_before_dispatch(monkeypatch):
     x = torch.randn(3, 64, 128, device="cuda")
     signs = torch.ones(16)
@@ -31,7 +30,7 @@ def test_rotate_materializes_cpu_signs_before_dispatch(monkeypatch):
     assert captured["device"] == x.device
 
 
-@CUDA
+@cuda_only
 @pytest.mark.parametrize("backend", (None, "eager", "triton"))
 def test_rotate_block_one_is_identity(backend):
     """The op handles block one before selecting a backend."""

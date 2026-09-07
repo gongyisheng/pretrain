@@ -24,11 +24,14 @@ from tests.fast.kernel.backends.helper import (
     make_scaled_grouped_mm_inputs,
     make_scaled_mm_inputs,
 )
-
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="Triton MM kernels are CUDA only"
+from tests.fast.helper import (
+    cuda_capability_at_least,
+    cuda_only,
+    cuda_sm100_or_newer,
 )
+
+
+pytestmark = cuda_only
 
 
 @pytest.mark.parametrize("case", GROUPED_MM_CASES, ids=lambda case: case.name)
@@ -77,10 +80,9 @@ def test_grouped_mm_raise_error(case, layout, with_bias):
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
 @pytest.mark.parametrize("out_dtype", OUT_DTYPE_CASES, ids=lambda case: case.name)
 def test_scaled_mm_precision(case, format, scale, with_bias, out_dtype):
-    capability = torch.cuda.get_device_capability()
-    if format.a_format == "int8" and capability < (8, 0):
+    if format.a_format == "int8" and not cuda_capability_at_least((8, 0)):
         pytest.skip("Triton INT8 scaled MM requires SM80+")
-    if format.a_format.startswith("fp8") and capability < (8, 9):
+    if format.a_format.startswith("fp8") and not cuda_capability_at_least((8, 9)):
         pytest.skip("Triton FP8 scaled MM requires SM89+")
 
     aq, bq, sa, sb, _, block_size, bias = make_scaled_mm_inputs(
@@ -110,15 +112,13 @@ def test_scaled_mm_raise_error(case, format, scale, with_bias):
         triton_mm.scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
+@cuda_sm100_or_newer
 @pytest.mark.parametrize("case", MXFP8_SCALED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("format", MXFP8_PLUS_FORMAT_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("scale", MXFP8_PLUS_SCALE_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
 @pytest.mark.parametrize("out_dtype", OUT_DTYPE_CASES, ids=lambda case: case.name)
 def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias, out_dtype):
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("mxfp8 scaled MM requires SM100+")
-
     aq, bq, sa, sb, _, block_size, bias = make_scaled_mm_inputs(
         case,
         format,
@@ -174,10 +174,9 @@ def test_mxfp8_scaled_mm_raise_error(case, format, scale, with_bias):
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
 @pytest.mark.parametrize("out_dtype", OUT_DTYPE_CASES, ids=lambda case: case.name)
 def test_scaled_grouped_mm_precision(case, scale, format, layout, with_bias, out_dtype):
-    capability = torch.cuda.get_device_capability()
-    if format.a_format == "int8" and capability < (8, 0):
+    if format.a_format == "int8" and not cuda_capability_at_least((8, 0)):
         pytest.skip("Triton INT8 scaled grouped MM requires SM80+")
-    if format.a_format.startswith("fp8") and capability < (8, 9):
+    if format.a_format.startswith("fp8") and not cuda_capability_at_least((8, 9)):
         pytest.skip("Triton FP8 scaled grouped MM requires SM89+")
     if layout == "ragged_n" and with_bias:
         pytest.skip("rejected, not supported -- see test_scaled_grouped_mm_raise_error")
@@ -239,6 +238,7 @@ def test_scaled_grouped_mm_raise_error_on_layout(
         triton_mm.scaled_grouped_mm(aq, bq, sa, sb, offs, out_dtype, kbs, bias=bias)
 
 
+@cuda_sm100_or_newer
 @pytest.mark.parametrize("case", SCALED_GROUPED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
 @pytest.mark.parametrize("format", MXFP8_PLUS_FORMAT_CASES, ids=lambda case: case.name)
@@ -249,8 +249,6 @@ def test_mxfp8_scaled_grouped_mm_precision(
     case, layout, format, scale, with_bias, out_dtype
 ):
     """The grouped analogue of test_mxfp8_scaled_mm_precision."""
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("mxfp8 scaled grouped MM requires SM100+")
     if layout == "ragged_n" and with_bias:
         pytest.skip("rejected, not supported -- see test_scaled_grouped_mm_raise_error")
     if layout in {"ragged_k", "ragged_n"} and all(

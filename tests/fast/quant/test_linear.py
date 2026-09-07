@@ -8,6 +8,7 @@ from src.quant.convert import apply_quantization
 from src.quant.linear import QuantizedLinear, quantized_mm
 from src.quant.rotation import build_rotation
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+from tests.fast.helper import cuda_sm89_or_newer
 from tests.fast.quant.helper import (
     ALL_FORMATS,
     FORWARD_DTYPES,
@@ -17,7 +18,6 @@ from tests.fast.quant.helper import (
     ALL_SCALES,
     TENSORWISE,
     BLOCKWISE1D_128,
-    fp8_only,
     mm_ref,
     operand_fmt,
     rel,
@@ -62,7 +62,7 @@ def test_quantized_mm_passthrough(fmt, dtype, out_dtype):
     )
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("rotation_cfg", [None, ROTATION_CFG])
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
@@ -149,7 +149,7 @@ def test_quantized_linear_from_module(bias, eval_mode):
         assert q.bias is None
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("rotation_cfg", [None, ROTATION_CFG])
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("dtype", FORWARD_DTYPES)
@@ -196,7 +196,7 @@ BACKWARD_ROTATION_GEMMS = [
 ]
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("rotation_gemms", BACKWARD_ROTATION_GEMMS)
 @pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
@@ -295,7 +295,7 @@ SR_CASES = [
 ]
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("enable_sr", [False, True])
 @pytest.mark.parametrize("tensor,gemms", SR_CASES)
 def test_quantized_linear_stochastic_rounding(tensor, gemms, enable_sr):
@@ -326,7 +326,7 @@ def test_quantized_linear_stochastic_rounding(tensor, gemms, enable_sr):
         assert torch.equal(got, second[gemm]) is (gemm not in stochastic)
 
 
-@fp8_only
+@cuda_sm89_or_newer
 def test_quantized_linear_autocast():
     torch.manual_seed(0)
     lin = nn.Linear(128, 96, bias=False).cuda().to(torch.float32)  # fp32 master
@@ -341,7 +341,7 @@ def test_quantized_linear_autocast():
     assert torch.isfinite(q.weight.grad).all()
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("rotation_cfg", [None, ROTATION_CFG])
 def test_quantized_linear_compiles_fullgraph(rotation_cfg):
     torch.manual_seed(0)
@@ -362,7 +362,7 @@ def test_quantized_linear_compiles_fullgraph(rotation_cfg):
     assert x.grad is not None and torch.isfinite(x.grad).all()
 
 
-@fp8_only
+@cuda_sm89_or_newer
 def test_quantized_linear_trains_a_full_model():
     """Run a training step through a quantized TransformerLM."""
     config = TrainConfig(

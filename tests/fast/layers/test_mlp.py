@@ -16,6 +16,7 @@ from src.layers.mlp import (
     SparseMoEBlock,
     grouped_mlp,
 )
+from tests.fast.helper import cuda_only
 from tests.fast.layers._refs import (
     COMPOUND_DTYPES,
     SIMPLE_DTYPES,
@@ -393,10 +394,9 @@ def test_moe_router_gate_weight_loaded_as_fp32(source_dtype):
     assert torch.equal(router.gate.weight, src_values.float())
 
 
+@cuda_only
 @pytest.mark.parametrize("amp_dtype", [torch.bfloat16, torch.float16])
 def test_moe_router_runs_in_fp32_under_autocast(amp_dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("autocast fp16/bf16 path is CUDA-only in this codebase")
     torch.manual_seed(0)
     d_model, n_routed_experts, k = 512, 64, 4
     router = MoERouter(d_model, n_routed_experts, k).cuda()
@@ -1095,9 +1095,7 @@ def test_grouped_mlp_matches_per_group_loop(
     assert torch.allclose(got, ref, atol=atol)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped_mm compile is CUDA+bf16 only"
-)
+@cuda_only
 @pytest.mark.parametrize("activation_cls", ["swiglu", "gelu"])
 def test_grouped_mlp_compiled_matches_eager_cuda_bf16(activation_cls):
     torch.manual_seed(0)
@@ -1412,7 +1410,7 @@ def test_sparse_moe_latent_flops_less_than_dense_moe():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="grouped GEMM is CUDA only")
+@cuda_only
 @pytest.mark.parametrize("activation_cls", ["swiglu", "gelu"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
 def test_sparse_moe_block_compiles_fullgraph(activation_cls, dtype):
@@ -1441,9 +1439,7 @@ def test_sparse_moe_block_compiles_fullgraph(activation_cls, dtype):
     assert out.shape == x.shape and x.grad is not None
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
-)
+@cuda_only
 def test_moe_expert_mm_seam_is_pluggable():
     torch.manual_seed(0)
     blk = (
@@ -1505,9 +1501,7 @@ def _run_grouped_mm_apply(a0, b0, offs, grad, backend, include_backend):
     return out, a.grad, b.grad
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
-)
+@cuda_only
 @pytest.mark.parametrize(
     ("backend", "include_backend"),
     [(None, False), ("triton", True)],
@@ -1526,9 +1520,7 @@ def test_grouped_mm_fn_apply_backward_arity(backend, include_backend):
     assert torch.isfinite(grad_b).all()
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
-)
+@cuda_only
 def test_grouped_mm_fn_explicit_none_backend_matches_omitted_backend():
     a0, b0, offs = _make_grouped_layout("ragged_m")
     grad = torch.randn(a0.shape[0], b0.shape[-1], device="cuda", dtype=torch.bfloat16)
@@ -1540,9 +1532,7 @@ def test_grouped_mm_fn_explicit_none_backend_matches_omitted_backend():
         torch.testing.assert_close(got, expected)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
-)
+@cuda_only
 @pytest.mark.parametrize("layout", _GG_LAYOUTS)
 def test_grouped_mm_fn_grads_match_torch(layout):
     """Each layout's dgrad/wgrad lands in another layout of the same set, so
@@ -1562,9 +1552,7 @@ def test_grouped_mm_fn_grads_match_torch(layout):
         torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
-)
+@cuda_only
 @pytest.mark.parametrize("layout", ("ragged_m", "ragged_k"))
 def test_grouped_mm_fn_bias_grads_match_eager(layout):
     a0, b0, offs = _make_grouped_layout(layout)
@@ -1588,9 +1576,7 @@ def test_grouped_mm_fn_bias_grads_match_eager(layout):
             torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped GEMM is CUDA+bf16 only"
-)
+@cuda_only
 def test_grouped_mm_fn_compiles_fullgraph_and_matches_eager():
     # Forward compiles with no graph break; the Function's backward runs eager
     # (Dynamo cannot trace the autograd engine under fullgraph), so we compile

@@ -5,6 +5,7 @@ from src.quant.constants import EPS
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.rotation import build_rotation
 from src.quant.utils import is_int8s, str_to_dtype, str_to_qmax
+from tests.fast.helper import cuda_sm89_or_newer
 from tests.fast.quant.helper import (
     ALL_QUANT_FORMATS,
     ALL_SCALES,
@@ -12,7 +13,6 @@ from tests.fast.quant.helper import (
     ROWWISE,
     SCALES_COARSE_TO_FINE,
     TENSORWISE,
-    fp8_only,
     skip_unsupported_fmt_scale,
     roundtrip,
     scale_of,
@@ -674,7 +674,7 @@ def test_quantize_operand_rotation_rejects_indivisible_block():
         quantize_operand(x, -1, "int8", TENSORWISE, rotation=rotation)
 
 
-@fp8_only
+@cuda_sm89_or_newer
 def test_quantize_operand_compiles_fullgraph():
     """Rotated FP8 quantization must have identical eager and compiled bits."""
     torch.manual_seed(0)

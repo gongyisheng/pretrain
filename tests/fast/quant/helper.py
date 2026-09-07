@@ -8,13 +8,6 @@ from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.utils import is_fp8, is_int8s, is_quantized
 from src.utils.config import TrainingConfig
 
-
-def fp8_capable():
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
-
-
-fp8_only = pytest.mark.skipif(not fp8_capable(), reason="fp8 needs SM >= 8.9")
-
 E4M3 = "fp8_e4m3"
 FP8_FORMATS = sorted(_FP8_FORMATS)
 INT_FORMATS = sorted(_INT8_FORMATS)

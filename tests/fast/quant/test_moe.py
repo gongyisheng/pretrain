@@ -19,6 +19,7 @@ from src.utils.config import (
     TrainConfig,
     TrainingConfig,
 )
+from tests.fast.helper import cuda_sm89_or_newer
 from tests.fast.quant.helper import (
     ALL_FORMATS,
     FORWARD_DTYPES,
@@ -30,7 +31,6 @@ from tests.fast.quant.helper import (
     BLOCKWISE1D_32_E8M0,
     ROWWISE,
     SCALE_DTYPE_NAMES,
-    fp8_only,
     mm_ref,
     operand_fmt,
     rel,
@@ -79,7 +79,7 @@ def _make(counts, K, N, seed=0):
 GROUPED_LAYOUTS = ["ragged_m", "ragged_k", "ragged_n"]
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("a_fmt", ALL_FORMATS)
 @pytest.mark.parametrize("b_fmt", ALL_FORMATS)
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
@@ -156,7 +156,7 @@ GROUPED_STATS_CASES = [
 GROUPED_STATS_LAYOUTS = ["ragged_m", "ragged_k"]
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize(
     "a_fmt,b_fmt,with_stats,a_folded,b_folded", GROUPED_STATS_CASES
 )
@@ -210,7 +210,7 @@ ROTATION_SCALES = [ROWWISE, BLOCKWISE1D_16, BLOCKWISE1D_32_E8M0]
 ROTATION_PRECISION_BOUND = 0.18
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("fmt", ROTATION_FORMATS)
 @pytest.mark.parametrize("scale_cfg", ROTATION_SCALES)
 @pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
@@ -257,7 +257,7 @@ def test_quantized_grouped_mm_rotation_precision(fmt, scale_cfg, layout, rotatio
 # --- ScaledGroupedGemmFn ---
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("rotation_gemms", [None, list(GEMM_OPS)])
 def test_scaled_grouped_gemm_fn_compiles_fullgraph(rotation_gemms):
     """Fullgraph covers forward; autograd backward remains eager."""
@@ -288,7 +288,7 @@ def test_scaled_grouped_gemm_fn_compiles_fullgraph(rotation_gemms):
         torch.testing.assert_close(got, ref, atol=0, rtol=0)
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("dtype", FORWARD_DTYPES)
@@ -319,7 +319,7 @@ def test_scaled_grouped_gemm_fn_forward_precision(dtype, scale_cfg, bias):
     assert rel(y, y_ref) < PRECISION_BOUND
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
@@ -389,7 +389,7 @@ def test_quantized_sparse_moe_block_only_quantizes_during_training():
     assert torch.equal(block.expert_mm(*args, projection="gate"), plain)
 
 
-@fp8_only
+@cuda_sm89_or_newer
 def test_quantized_sparse_moe_block_autocast():
     """Check autocast GEMMs, caller-dtype outputs, and fp32-master gradients."""
     torch.manual_seed(0)
@@ -434,7 +434,7 @@ E2E_ROTATIONS = [
 ]
 
 
-@fp8_only
+@cuda_sm89_or_newer
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("rotation", E2E_ROTATIONS)
 def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation):

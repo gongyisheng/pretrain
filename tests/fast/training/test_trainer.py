@@ -10,7 +10,6 @@ import tempfile
 
 import numpy as np
 import pytest
-import torch
 
 from src.training.trainer import Trainer
 from src.utils.config import (
@@ -22,10 +21,9 @@ from src.utils.config import (
     TrainConfig,
     TrainingConfig,
 )
+from tests.fast.helper import cuda_only
 
-cuda_only = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="quantized trainer test needs CUDA"
-)
+pytestmark = cuda_only
 
 
 @pytest.fixture
@@ -191,8 +189,8 @@ def test_trainer_rejects_unknown_loss_fn(mock_memmap):
 
 
 # ---------------------------------------------------------------------------
-# quant metrics wiring: flag off -> no hooks, no train-quant/ keys (runs everywhere);
-# flag on -> train-quant/ keys dispatched (needs CUDA, see cuda_only below).
+# quant metrics wiring: flag off -> no hooks, no train-quant/ keys;
+# flag on -> train-quant/ keys dispatched.
 # ---------------------------------------------------------------------------
 
 
@@ -240,7 +238,6 @@ def _tiny_fp8_config(tmp_dir):
     return cfg
 
 
-@cuda_only
 def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
     """log_quant_metrics=True with an fp8 quant recipe: at least one train-quant/
     key from the diagnostic pass reaches the logger."""
@@ -278,7 +275,6 @@ def test_activation_norms_reach_both_train_and_val_keys(mock_memmap):
         assert any(k.startswith("val-act/norm/") for m in logged for k in m)
 
 
-@cuda_only
 def test_quant_diagnostics_do_not_change_training(mock_memmap):
     """The diagnostic pass runs its own fwd/bwd; the trained loss must not move.
 

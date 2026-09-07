@@ -8,7 +8,7 @@ from src.kernel.backends.triton import hadamard as triton_hadamard
 from tests.fast.helper import cuda_only
 
 
-pytestmark = cuda_only("Triton Hadamard kernels are CUDA only")
+pytestmark = cuda_only
 
 
 HADAMARD_BLOCKS = (2, 16, 128)
