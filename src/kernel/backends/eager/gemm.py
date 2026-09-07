@@ -64,10 +64,13 @@ def _apply_global_scale(out, gsa, gsb, group=None):
     `gsa`/`gsb` hold one value per group; `group` selects it for a grouped call and
     is None for a dense one, whose single value broadcasts over the output.
     """
-    for g in (gsa, gsb):
-        if g is not None:
-            out = out * (g if group is None else g[group])
-    return out
+    if gsa is None:
+        return out if gsb is None else out * (gsb if group is None else gsb[group])
+    if gsb is None:
+        return out * (gsa if group is None else gsa[group])
+    gsa_value = gsa if group is None else gsa[group]
+    gsb_value = gsb if group is None else gsb[group]
+    return out * (gsa_value * gsb_value)
 
 
 def _dequant_a(q, scale, block_size):
