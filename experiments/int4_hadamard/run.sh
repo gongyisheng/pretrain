@@ -6,9 +6,9 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-configs=()
+configs=(qwen3_51m_bf16)
 for arm in w4a16 w4a4; do
-    configs+=()
+    configs+=("qwen3_51m_int4_${arm}")
     for block in 16 32 64 128; do
         configs+=("qwen3_51m_int4_${arm}_hadamard_${block}")
     done
