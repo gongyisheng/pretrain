@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 
 from src.quant.constants import (
+    _FP4_FORMATS,
     _FP8_FORMATS,
     _INT8_FORMATS,
     _STR_TO_DTYPE,
@@ -35,6 +36,10 @@ def is_fp8(fmt: str) -> bool:
     return fmt in _FP8_FORMATS
 
 
+def is_fp4(fmt: str) -> bool:
+    return fmt in _FP4_FORMATS
+
+
 def is_int8s(fmt: str) -> bool:
     return fmt in _INT8_FORMATS
 
@@ -62,6 +67,11 @@ def _resolve_gemm_quantization_family(
     scale_dtype: torch.dtype,
     block_shape: tuple[int, int],
 ) -> str | None:
+    if is_fp4(a_fmt) and is_fp4(b_fmt):
+        if scale_dtype == torch.float8_e4m3fn:
+            if block_shape[1] == 16:
+                return "nvfp4"
+            return "nvfp4_plus"
     if is_fp8(a_fmt) and is_fp8(b_fmt):
         if scale_dtype == torch.float8_e8m0fnu:
             # 1D (1x32) or 2D (32X32)
@@ -81,8 +91,8 @@ def scaled_mm_op(
     block_shape: tuple[int, int],
 ) -> str | None:
     family = _resolve_gemm_quantization_family(a_fmt, b_fmt, scale_dtype, block_shape)
-    if family == "mxfp8_plus":
-        family = "mxfp8"
+    if family in {"mxfp8_plus", "nvfp4_plus"}:
+        family = family.removesuffix("_plus")
     return None if family is None else f"gemm.{family}_scaled_mm"
 
 
@@ -93,8 +103,8 @@ def scaled_grouped_mm_op(
     block_shape: tuple[int, int],
 ) -> str | None:
     family = _resolve_gemm_quantization_family(a_fmt, b_fmt, scale_dtype, block_shape)
-    if family == "mxfp8_plus":
-        family = "mxfp8"
+    if family in {"mxfp8_plus", "nvfp4_plus"}:
+        family = family.removesuffix("_plus")
     return None if family is None else f"gemm.{family}_scaled_grouped_mm"
 
 
