@@ -42,9 +42,9 @@ If W4A4 at `block_size` 32 lands near its W4A16 twin, int4 activations are an ou
 
 Config names are `qwen3_51m_int4_<arm>_hadamard_<block_size>`, with controls `qwen3_51m_int4_<arm>`.
 
-All runs: ~51M params (`d_model=512`, 8 layers, 8/4 Q/KV heads, `intermediate_size=1536`), seq_len=1024, batch=16, grad_accum=16 (effective batch=256), 50K steps, Muon (`match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup steps, min_lr=5e-5, OpenWebText, bf16 mixed precision, seed 42, `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`.
+All runs: ~51M params (`d_model=512`, 8 layers, 8/4 Q/KV heads, `intermediate_size=1536`), seq_len=1024, effective batch=256 (bf16 and unrotated controls use batch=16/grad_accum=16; Hadamard runs use batch=64/grad_accum=4), 50K steps, Muon (`match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup steps, min_lr=5e-5, OpenWebText, bf16 mixed precision, seed 42, `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`.
 
-Every `block_size` must be a power of two dividing each contraction extent. The extents here are 256 (k/v_proj dgrad), 512 (all `d_model` contractions), 1536 (down_proj fwd, gate/up_proj dgrad), and 16384 tokens (wgrad), so all four block sizes are legal; `lm_head` (50257) is excluded from quantization.
+Every `block_size` must be a power of two dividing each contraction extent. The extents here are 256 (k/v_proj dgrad), 512 (all `d_model` contractions), 1536 (down_proj fwd, gate/up_proj dgrad), and the per-microbatch token count (wgrad: 16384 for controls, 65536 for Hadamard runs), so all four block sizes are legal; `lm_head` (50257) is excluded from quantization.
 
 ## Run
 
