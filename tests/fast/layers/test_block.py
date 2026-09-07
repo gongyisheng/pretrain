@@ -3,7 +3,11 @@ import torch
 
 from src.layers.block import TransformerBlock
 from src.utils.config import ModelConfig
-from tests.fast.helper import ATTN_IMPLEMENTATION, make_attn_mask, skip_if_unsupported
+from tests.fast.layers.helper import (
+    ATTN_IMPLEMENTATION,
+    make_attn_mask,
+    skip_if_unsupported,
+)
 
 
 def _block_cfg(impl):

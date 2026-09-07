@@ -15,7 +15,7 @@ from src.layers.attention import (
 )
 from src.layers.pos_emb import RoPE
 from src.utils.masking_utils import build_intra_doc_attention_mask
-from tests.fast.helper import (
+from tests.fast.layers.helper import (
     ATTN_IMPLEMENTATION,
     MASK_KIND,
     make_attn_mask,

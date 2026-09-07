@@ -1,8 +1,7 @@
 """Shared helpers for attention-related tests.
 
-Used by ``tests/fast/layers/test_attention.py`` plus the model-level tests
-(``tests/fast/model/test_gpt2.py``, ``test_qwen3.py``) so they parametrize
-identically over ``attn_implementation`` × mask kind.
+Used by attention-related layer, model, metrics, and masking tests so they
+parametrize identically over ``attn_implementation`` × mask kind.
 """
 
 import pytest
