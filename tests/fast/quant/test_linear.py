@@ -39,8 +39,9 @@ ROTATION_CFG = {
     "rotation_cls": "hadamard",
     "rotation_kwargs": {"block_size": 32, "random_sign": True, "seed": 42},
 }
-
-ROTATED_REL_TOL = 1e-2
+# Worst errors over the full valid rotated grids are 8.56e-5 forward, 7.88e-5
+# dgrad, and 9.68e-5 wgrad; the margins are 3.50x, 3.81x, and 3.10x.
+LINEAR_REL_TOL = 3e-4
 
 
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
@@ -183,8 +184,7 @@ def test_quantized_linear_forward_precision(dtype, scale_cfg, bias, rotation_cfg
         ref2d = ref2d + lin.bias.float()
     ref = ref2d.to(torch.bfloat16).unflatten(0, x.shape[:-1])
     assert out.shape == (2, 128, 128) and out.dtype == torch.bfloat16
-    tol = ROTATED_REL_TOL if rotation_cfg is not None else 3e-4
-    assert rel(out, ref) < tol
+    assert rel(out, ref) < LINEAR_REL_TOL
 
 
 # 250 exercises the wgrad contraction pad.
@@ -259,19 +259,18 @@ def test_quantized_linear_backward_precision(
         rotation=rotation if rotated["wgrad"] else None,
     )
     expected = [
-        (x.grad, dx_ref.unflatten(0, x.shape[:-1]), rotated["dgrad"]),
-        (q.weight.grad, dw_ref, rotated["wgrad"]),
+        (x.grad, dx_ref.unflatten(0, x.shape[:-1])),
+        (q.weight.grad, dw_ref),
     ]
     if bias:
-        expected.append((q.bias.grad, g2d.sum(0), False))  # db bypasses GEMM
+        expected.append((q.bias.grad, g2d.sum(0)))  # db bypasses GEMM
     likes = (x, q.weight) + ((q.bias,) if bias else ())
-    for (grad, ref, is_rotated), like in zip(expected, likes):
+    for (grad, ref), like in zip(expected, likes):
         assert torch.isfinite(grad).all()
         assert grad.dtype == like.dtype
         assert grad.shape == like.shape
         # Compare in the gradient's master dtype.
-        tol = ROTATED_REL_TOL if is_rotated else 3e-4
-        assert rel(grad, ref.to(grad.dtype)) < tol
+        assert rel(grad, ref.to(grad.dtype)) < LINEAR_REL_TOL
 
 
 def test_quantized_linear_only_quantizes_during_training():

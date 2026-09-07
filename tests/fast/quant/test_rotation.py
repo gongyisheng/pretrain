@@ -18,11 +18,17 @@ CONTRACT_DIMS = (-2, -1)
 ROTATION_SHAPES = ((64, 128), (3, 64, 128))
 GEMM_SHAPES = ((7, 8, 13), (16, 32, 24), (33, 64, 15))
 GEMM_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+# Worst errors over the full shape/dtype grid are 1.14e-5, 1.56e-2, and 1.25e-1;
+# the margins are 4.37x, 4.48x, and 4.00x.
 GEMM_ATOL = {
-    torch.float32: 4.6e-5,
-    torch.float16: 0.065,
-    torch.bfloat16: 0.52,
+    torch.float32: 5e-5,
+    torch.float16: 7e-2,
+    torch.bfloat16: 5e-1,
 }
+# Worst inverse and isometry errors over ROTATION_SHAPES x CONTRACT_DIMS are
+# 4.77e-7 and 1.95e-3; the margins are 4.19x and 3.58x.
+INVERSE_ATOL = 2e-6
+ISOMETRY_ATOL = 7e-3
 ROTATION_DEVICES = ("cpu", pytest.param("cuda", marks=cuda_only))
 INVALID_HADAMARD_KWARGS = [
     {"random_sign": 1},
@@ -81,9 +87,9 @@ def test_hadamard_rotation_inverse(shape, contract_dim):
     restored = rotation.inverse(transformed, contract_dim)
 
     assert transformed.shape == x.shape
-    torch.testing.assert_close(restored, x, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(restored, x, atol=INVERSE_ATOL, rtol=0)
     torch.testing.assert_close(
-        transformed.square().sum(), x.square().sum(), atol=1e-4, rtol=1e-4
+        transformed.square().sum(), x.square().sum(), atol=ISOMETRY_ATOL, rtol=0
     )
 
 
