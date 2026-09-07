@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run the int4 randomized-Hadamard sweep (4 Hadamard block sizes x W4A16/W4A4, plus
-# unrotated controls) vs bf16 at 51M on Qwen3. Scale granularity is fixed at (1, 32).
+# unrotated controls) vs bf16 at 51M on Qwen3. Scale granularity is fixed at (1, 16).
 # Usage: nohup bash experiments/int4_hadamard/run.sh > logs/int4_hadamard.log 2>&1 &
 
 set -e
