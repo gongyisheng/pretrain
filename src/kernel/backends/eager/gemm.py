@@ -58,13 +58,13 @@ def grouped_mm(
     raise AssertionError("ragged-N bias should have been rejected")
 
 
-def _apply_global(out, ga, gb, group=None):
+def _apply_global_scale(out, gsa, gsb, group=None):
     """Scale a GEMM result by its operands' global scales.
 
-    `ga`/`gb` hold one value per group; `group` selects it for a grouped call and
+    `gsa`/`gsb` hold one value per group; `group` selects it for a grouped call and
     is None for a dense one, whose single value broadcasts over the output.
     """
-    for g in (ga, gb):
+    for g in (gsa, gsb):
         if g is not None:
             out = out * (g if group is None else g[group])
     return out
@@ -123,15 +123,15 @@ def scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
-    ga: torch.Tensor | None = None,
-    gb: torch.Tensor | None = None,
+    gsa: torch.Tensor | None = None,
+    gsb: torch.Tensor | None = None,
     unpack_e2m1: bool = False,
 ) -> torch.Tensor:
     if unpack_e2m1:
         aq = _unpack_e2m1(aq, -1)
         bq = _unpack_e2m1(bq, -2)
     out = _dequant_a(aq, sa, block_size) @ _dequant_b(bq, sb, block_size)
-    out = _apply_global(out, ga, gb)
+    out = _apply_global_scale(out, gsa, gsb)
     if bias is not None:
         out = out + bias.float()
     return out.to(out_dtype)
@@ -141,7 +141,7 @@ register_kernel(
     op="gemm.nvfp4_scaled_mm",
     backend="eager",
     build="eager",
-    autograd=False,
+    autograd=True,
     capabilities=frozenset(),
     reference=True,
 )(partial(scaled_mm, unpack_e2m1=True))
@@ -180,8 +180,8 @@ def scaled_grouped_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
-    ga: torch.Tensor | None = None,
-    gb: torch.Tensor | None = None,
+    gsa: torch.Tensor | None = None,
+    gsb: torch.Tensor | None = None,
     unpack_e2m1: bool = False,
 ) -> torch.Tensor:
     if unpack_e2m1:
@@ -199,8 +199,8 @@ def scaled_grouped_mm(
     if a_is_2d and not b_is_2d:
         a = _dequant_a(aq, sa, block_size)
         pieces = [
-            _apply_global(
-                a[lo:hi] @ _dequant_b(bq[group], sb[group], block_size), ga, gb, group
+            _apply_global_scale(
+                a[lo:hi] @ _dequant_b(bq[group], sb[group], block_size), gsa, gsb, group
             )
             for group, (lo, hi) in enumerate(bounds)
         ]
@@ -216,16 +216,16 @@ def scaled_grouped_mm(
             scale_end = scale_start + block_count
             a = _dequant_a(aq[:, lo:hi], sa[:, scale_start:scale_end], block_size)
             b = _dequant_b(bq[lo:hi], sb[scale_start:scale_end], block_size)
-            pieces.append(_apply_global(a @ b, ga, gb, group))
+            pieces.append(_apply_global_scale(a @ b, gsa, gsb, group))
             scale_start = scale_end
         out = torch.stack(pieces)
     else:
         b = _dequant_b(bq, sb, block_size)
         pieces = [
-            _apply_global(
+            _apply_global_scale(
                 _dequant_a(aq[group], sa[group], block_size) @ b[:, lo:hi],
-                ga,
-                gb,
+                gsa,
+                gsb,
                 group,
             )
             for group, (lo, hi) in enumerate(bounds)
@@ -245,7 +245,7 @@ register_kernel(
     op="gemm.nvfp4_scaled_grouped_mm",
     backend="eager",
     build="eager",
-    autograd=False,
+    autograd=True,
     capabilities=frozenset(),
     reference=True,
 )(partial(scaled_grouped_mm, unpack_e2m1=True))

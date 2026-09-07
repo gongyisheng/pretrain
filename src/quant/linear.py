@@ -39,9 +39,9 @@ def quantized_mm(
         scale_cfg.get("scale_dtype"),
         block_shape,
     )
-    aq = sa = ga = bq = sb = gb = None
+    aq = sa = gsa = bq = sb = gsb = None
     if is_quantized(a_fmt):
-        aq, sa, ga = quantize_operand(
+        aq, sa, gsa = quantize_operand(
             a,
             -1,
             a_fmt,
@@ -50,10 +50,10 @@ def quantized_mm(
             rotation=rotation,
         )
         record_operand(
-            a_stats, a, aq, sa, -1, scale_cfg, rotation=rotation, global_scale=ga
+            a_stats, a, aq, sa, -1, scale_cfg, rotation=rotation, global_scale=gsa
         )
     if is_quantized(b_fmt):
-        bq, sb, gb = quantize_operand(
+        bq, sb, gsb = quantize_operand(
             b,
             -2,
             b_fmt,
@@ -62,21 +62,21 @@ def quantized_mm(
             rotation=rotation,
         )
         record_operand(
-            b_stats, b, bq, sb, -2, scale_cfg, rotation=rotation, global_scale=gb
+            b_stats, b, bq, sb, -2, scale_cfg, rotation=rotation, global_scale=gsb
         )
 
     if op is not None:
         return SCALED_MM_OPS[op](
-            aq, bq, sa, sb, out_dtype, block_shape[1], bias=bias, ga=ga, gb=gb
+            aq, bq, sa, sb, out_dtype, block_shape[1], bias=bias, gsa=gsa, gsb=gsb
         )
 
     if aq is not None:
         a = dequantize_operand(
-            aq, sa, -1, scale_cfg, rotation=rotation, global_scale=ga
+            aq, sa, -1, scale_cfg, rotation=rotation, global_scale=gsa
         ).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(
-            bq, sb, -2, scale_cfg, rotation=rotation, global_scale=gb
+            bq, sb, -2, scale_cfg, rotation=rotation, global_scale=gsb
         ).to(b.dtype)
     # Match fused kernels by adding bias in the accumulator before casting.
     y = a @ b if bias is None else torch.addmm(bias, a, b)
