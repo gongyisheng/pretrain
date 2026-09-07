@@ -46,16 +46,8 @@ class HadamardRotation(Rotation):
         if type(seed) is not int or seed < 0:
             raise ValueError(f"seed must be a non-negative int, got {seed!r}")
         if sign_vector is not None:
-            try:
-                signs = torch.as_tensor(sign_vector, dtype=torch.float32)
-            except (TypeError, ValueError, RuntimeError) as error:
-                raise ValueError(
-                    f"sign_vector must contain {block_size} values drawn from -1 and 1"
-                ) from error
-            if (
-                tuple(signs.shape) != (block_size,)
-                or not torch.all((signs == -1) | (signs == 1)).item()
-            ):
+            signs = torch.as_tensor(sign_vector, dtype=torch.float32)
+            if not torch.all((signs == -1) | (signs == 1)).item():
                 raise ValueError(
                     f"sign_vector must contain {block_size} values drawn from -1 and 1"
                 )

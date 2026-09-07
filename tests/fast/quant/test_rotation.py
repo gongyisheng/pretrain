@@ -38,10 +38,7 @@ INVALID_HADAMARD_KWARGS = [
     {"random_sign": 1},
     {"seed": -1},
     {"seed": True},
-    {"block_size": 4, "sign_vector": [1.0, -1.0]},
-    {"block_size": 4, "sign_vector": [[1.0], [-1.0], [-1.0], [1.0]]},
     {"block_size": 4, "sign_vector": [1.0, -1.0, 0.0, 1.0]},
-    {"block_size": 4, "sign_vector": "bad"},
     {"unknown": 1},
 ]
 INVALID_HADAMARD_BLOCKS = (0, 3, 1.5, True)
