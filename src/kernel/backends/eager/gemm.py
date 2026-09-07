@@ -1,3 +1,5 @@
+from functools import partial
+
 import torch
 
 from src.kernel.registry import register_kernel
@@ -80,6 +82,15 @@ def _dequant_b(q, scale, block_size):
     return q.float() * expanded
 
 
+def _unpack_e2m1(q: torch.Tensor, dim: int) -> torch.Tensor:
+    """Decode low-nibble-first packed E2M1 along `dim`."""
+    axis = dim % q.ndim
+    codes = torch.stack((q & 0xF, q >> 4), dim=axis + 1).flatten(axis, axis + 1)
+    magnitude = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=q.device)
+    values = magnitude[codes.long() & 0x7]
+    return torch.where(codes & 0x8 != 0, -values, values)
+
+
 @register_kernel(
     op="gemm.int8_scaled_mm",
     backend="eager",
@@ -114,12 +125,26 @@ def scaled_mm(
     bias: torch.Tensor | None = None,
     ga: torch.Tensor | None = None,
     gb: torch.Tensor | None = None,
+    unpack_e2m1: bool = False,
 ) -> torch.Tensor:
+    if unpack_e2m1:
+        aq = _unpack_e2m1(aq, -1)
+        bq = _unpack_e2m1(bq, -2)
     out = _dequant_a(aq, sa, block_size) @ _dequant_b(bq, sb, block_size)
     out = _apply_global(out, ga, gb)
     if bias is not None:
         out = out + bias.float()
     return out.to(out_dtype)
+
+
+register_kernel(
+    op="gemm.nvfp4_scaled_mm",
+    backend="eager",
+    build="eager",
+    autograd=False,
+    capabilities=frozenset(),
+    reference=True,
+)(partial(scaled_mm, unpack_e2m1=True))
 
 
 @register_kernel(
@@ -157,7 +182,11 @@ def scaled_grouped_mm(
     bias: torch.Tensor | None = None,
     ga: torch.Tensor | None = None,
     gb: torch.Tensor | None = None,
+    unpack_e2m1: bool = False,
 ) -> torch.Tensor:
+    if unpack_e2m1:
+        aq = _unpack_e2m1(aq, -1)
+        bq = _unpack_e2m1(bq, -2)
     a_is_2d = aq.ndim == 2
     b_is_2d = bq.ndim == 2
     bounds = _to_bounds(offs)
@@ -210,3 +239,13 @@ def scaled_grouped_mm(
             rows = torch.arange(out.shape[0], device=offs.device)
             out = out + bias.float()[torch.searchsorted(offs, rows, right=True)]
     return out.to(out_dtype)
+
+
+register_kernel(
+    op="gemm.nvfp4_scaled_grouped_mm",
+    backend="eager",
+    build="eager",
+    autograd=False,
+    capabilities=frozenset(),
+    reference=True,
+)(partial(scaled_grouped_mm, unpack_e2m1=True))
