@@ -11,6 +11,7 @@ from src.quant.rotation import (
     build_rotation,
     build_rotation_key,
 )
+from tests.fast.helper import cuda_only
 
 
 CONTRACT_DIMS = (-2, -1)
@@ -22,7 +23,7 @@ GEMM_ATOL = {
     torch.float16: 0.065,
     torch.bfloat16: 0.52,
 }
-ROTATION_DEVICES = ("cpu", "cuda")
+ROTATION_DEVICES = ("cpu", pytest.param("cuda", marks=cuda_only))
 INVALID_HADAMARD_KWARGS = [
     {"random_sign": 1},
     {"seed": -1},
@@ -117,8 +118,6 @@ def test_hadamard_rotation_apply_seed():
 @pytest.mark.parametrize("dtype", GEMM_DTYPES)
 def test_hadamard_rotation_apply_out_dtype(dtype, contract_dim, device):
     """Promoting on the store is exactly the pre-cast it replaces, in one pass."""
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA required")
     torch.manual_seed(0)
     rotation = HadamardRotation(block_size=8, seed=7)
     x = torch.randn(64, 128, dtype=dtype, device=device)
