@@ -38,22 +38,9 @@ INPUT_CASES = [
     (torch.float32, "tiny"),
 ]
 
-ROTATION_CFG_CASES = [
-    pytest.param(
-        {
-            "rotation_cls": "hadamard",
-            "rotation_kwargs": {"block_size": 32, "random_sign": False},
-        },
-        id="hadamard_unsigned_block32",
-    ),
-    pytest.param(
-        {
-            "rotation_cls": "hadamard",
-            "rotation_kwargs": {"block_size": 32, "random_sign": True, "seed": 42},
-        },
-        id="hadamard_signed_seed42_block32",
-    ),
-]
+ROTATION_BLOCK_SIZES = [32]
+ROTATION_RANDOM_SIGNS = [False, True]
+ROTATION_SEEDS = [42]
 ROTATION_BLOCK1_CFG = {
     "rotation_cls": "hadamard",
     "rotation_kwargs": {"block_size": 1, "random_sign": False},
@@ -105,6 +92,19 @@ def _ragged_offs(extent):
 def _bits(codes):
     """View one-byte codes as bytes to distinguish signed zero."""
     return codes.contiguous().view(torch.uint8)
+
+
+def _rotation_cfg(block_size, random_sign, seed):
+    rotation_kwargs = {
+        "block_size": block_size,
+        "random_sign": random_sign,
+    }
+    if random_sign:
+        rotation_kwargs["seed"] = seed
+    return {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": rotation_kwargs,
+    }
 
 
 def _n_blocks(extent, scale_cfg, ragged=False):
@@ -538,8 +538,12 @@ def test_dequantize_operand_precision(
 # --- quantize/dequantize with rotation ---
 
 
-@pytest.mark.parametrize("rotation_cfg", ROTATION_CFG_CASES)
-def test_quantize_operand_rotation_improves_sqnr(rotation_cfg):
+@pytest.mark.parametrize("rotation_seed", ROTATION_SEEDS)
+@pytest.mark.parametrize("rotation_random_sign", ROTATION_RANDOM_SIGNS)
+@pytest.mark.parametrize("rotation_block_size", ROTATION_BLOCK_SIZES)
+def test_quantize_operand_rotation_improves_sqnr(
+    rotation_block_size, rotation_random_sign, rotation_seed
+):
     """On outlier-corrupted int8, a block-32 rotation lifts SQNR by >3 dB."""
 
     torch.manual_seed(0)
@@ -552,7 +556,13 @@ def test_quantize_operand_rotation_improves_sqnr(rotation_cfg):
             -1,
             "int8",
             TENSORWISE,
-            rotation=build_rotation(rotation_cfg),
+            rotation=build_rotation(
+                _rotation_cfg(
+                    rotation_block_size,
+                    rotation_random_sign,
+                    rotation_seed,
+                )
+            ),
         ),
     )
     # Measured gain is ~8 dB over 30 seeds; 3 dB leaves an order of magnitude.
@@ -582,16 +592,24 @@ def test_quantize_operand_rotation_block1_matches_baseline(contract_dim):
 RAGGED_DENSE_CONTRACTIONS = [(-1, -2), (-2, -1)]
 
 
-@pytest.mark.parametrize("rotation_cfg", ROTATION_CFG_CASES)
+@pytest.mark.parametrize("rotation_seed", ROTATION_SEEDS)
+@pytest.mark.parametrize("rotation_random_sign", ROTATION_RANDOM_SIGNS)
+@pytest.mark.parametrize("rotation_block_size", ROTATION_BLOCK_SIZES)
 @pytest.mark.parametrize("contract_dim, ragged_dim", RAGGED_DENSE_CONTRACTIONS)
 def test_quantize_operand_rotation_ragged_outer_axis(
-    contract_dim, ragged_dim, rotation_cfg
+    contract_dim,
+    ragged_dim,
+    rotation_block_size,
+    rotation_random_sign,
+    rotation_seed,
 ):
     """A ragged outer axis leaves the rotated contraction dense, so groups never mix."""
     torch.manual_seed(0)
     x = _make("normal", (64, 64))
     offs = _offs([21, 0, 43])
-    rotation = build_rotation(rotation_cfg)
+    rotation = build_rotation(
+        _rotation_cfg(rotation_block_size, rotation_random_sign, rotation_seed)
+    )
 
     codes, scale = quantize_operand(
         x,
@@ -615,11 +633,17 @@ def test_quantize_operand_rotation_ragged_outer_axis(
     assert _sqnr(x, deq) > 10.0
 
 
-@pytest.mark.parametrize("rotation_cfg", ROTATION_CFG_CASES)
-def test_quantize_operand_rotation_ragged_contraction_roundtrip(rotation_cfg):
+@pytest.mark.parametrize("rotation_seed", ROTATION_SEEDS)
+@pytest.mark.parametrize("rotation_random_sign", ROTATION_RANDOM_SIGNS)
+@pytest.mark.parametrize("rotation_block_size", ROTATION_BLOCK_SIZES)
+def test_quantize_operand_rotation_ragged_contraction_roundtrip(
+    rotation_block_size, rotation_random_sign, rotation_seed
+):
     """Aligned groups support a rotated ragged-contraction roundtrip."""
     x = torch.randn(64, 64)
-    rotation = build_rotation(rotation_cfg)
+    rotation = build_rotation(
+        _rotation_cfg(rotation_block_size, rotation_random_sign, rotation_seed)
+    )
     offs = _offs([32, 32])
     codes, scale = quantize_operand(
         x,
@@ -728,8 +752,12 @@ def test_dequantize_operand_compiled_raise_error():
         torch.set_default_device(prev)
 
 
-@pytest.mark.parametrize("rotation_cfg", ROTATION_CFG_CASES)
-def test_quantize_operand_rotation_roundtrip_approximates_baseline(rotation_cfg):
+@pytest.mark.parametrize("rotation_seed", ROTATION_SEEDS)
+@pytest.mark.parametrize("rotation_random_sign", ROTATION_RANDOM_SIGNS)
+@pytest.mark.parametrize("rotation_block_size", ROTATION_BLOCK_SIZES)
+def test_quantize_operand_rotation_roundtrip_approximates_baseline(
+    rotation_block_size, rotation_random_sign, rotation_seed
+):
     """Rotated roundtrip error stays within fp32 reconstruction error.
 
     The rotation is an isometry, so the quantize->dequantize error should be
@@ -738,7 +766,9 @@ def test_quantize_operand_rotation_roundtrip_approximates_baseline(rotation_cfg)
     torch.manual_seed(0)
     x = _make("normal", (64, 128))
     baseline_deq = roundtrip(x, -1, "int8", TENSORWISE)
-    rotation = build_rotation(rotation_cfg)
+    rotation = build_rotation(
+        _rotation_cfg(rotation_block_size, rotation_random_sign, rotation_seed)
+    )
     rotated_deq = roundtrip(x, -1, "int8", TENSORWISE, rotation=rotation)
     # Both must reconstruct x reasonably; neither is allowed to blow up.
     assert _sqnr(x, baseline_deq) > 10.0
