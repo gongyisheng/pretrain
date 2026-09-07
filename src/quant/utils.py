@@ -9,6 +9,7 @@ from src.quant.constants import (
     _STR_TO_DTYPE,
     _STR_TO_FP8_ULP,
     _STR_TO_QMAX,
+    _STR_TO_QMIN,
 )
 from src.utils.config import QuantizationConfig
 
@@ -19,6 +20,10 @@ def str_to_dtype(fmt: str) -> torch.dtype:
 
 def str_to_qmax(fmt: str) -> float:
     return _STR_TO_QMAX[fmt]
+
+
+def str_to_qmin(fmt: str) -> float:
+    return _STR_TO_QMIN[fmt]
 
 
 def str_to_fp8_ulp(fmt: str) -> tuple[int, int]:

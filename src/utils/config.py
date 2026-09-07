@@ -29,6 +29,7 @@ _DEVICES = frozenset({"auto", "cuda", "cpu"})
 _SCALE_DTYPES = {
     "fp32": torch.float32,
     "fp8_e8m0": torch.float8_e8m0fnu,
+    "fp8_e4m3": torch.float8_e4m3fn,
 }
 
 

@@ -166,6 +166,10 @@ BLOCKWISE2D_64 = scale_of("blockwise", (64, 64))
 BLOCKWISE2D_128 = scale_of("blockwise", (128, 128))
 BLOCKWISE1D_32_E8M0 = scale_of("blockwise", (1, 32), torch.float8_e8m0fnu)
 BLOCKWISE2D_64_E8M0 = scale_of("blockwise", (64, 64), torch.float8_e8m0fnu)
+# An e4m3 scale is defined over every element format, unlike e8m0.
+ROWWISE_E4M3 = scale_of("rowwise", scale_dtype=torch.float8_e4m3fn)
+BLOCKWISE1D_16_E4M3 = scale_of("blockwise", (1, 16), torch.float8_e4m3fn)
+BLOCKWISE2D_16_E4M3 = scale_of("blockwise", (16, 16), torch.float8_e4m3fn)
 
 
 ALL_SCALES = [
@@ -181,6 +185,8 @@ ALL_SCALES = [
     BLOCKWISE2D_128,
     BLOCKWISE1D_32_E8M0,
     BLOCKWISE2D_64_E8M0,
+    BLOCKWISE1D_16_E4M3,
+    BLOCKWISE2D_16_E4M3,
 ]
 
 SCALES_COARSE_TO_FINE = [
@@ -192,7 +198,11 @@ SCALES_COARSE_TO_FINE = [
     BLOCKWISE1D_16,
 ]
 
-SCALE_DTYPE_NAMES = {torch.float32: "fp32", torch.float8_e8m0fnu: "fp8_e8m0"}
+SCALE_DTYPE_NAMES = {
+    torch.float32: "fp32",
+    torch.float8_e8m0fnu: "fp8_e8m0",
+    torch.float8_e4m3fn: "fp8_e4m3",
+}
 
 
 def roundtrip(x, contract_dim, fmt, scale_cfg, rotation=None):

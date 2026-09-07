@@ -2,9 +2,9 @@ import pytest
 import torch
 
 from src.quant.constants import EPS
-from src.quant.quantize import dequantize_operand, quantize_operand
+from src.quant.quantize import _compute_scale, dequantize_operand, quantize_operand
 from src.quant.rotation import build_rotation
-from src.quant.utils import is_int8s, str_to_dtype, str_to_qmax
+from src.quant.utils import is_int8s, str_to_dtype, str_to_qmax, str_to_qmin
 from tests.fast.helper import cuda_sm89_or_newer
 from tests.fast.quant.helper import (
     ALL_QUANT_FORMATS,
@@ -168,11 +168,27 @@ def _block_extents(x, contract_dim, scale_cfg):
     return block_size, block_size if block_outer > 1 else 1
 
 
+# Every value e4m3 represents from +0 to its max, ascending; 0x7F is NaN and excluded.
+_E4M3_GRID = torch.arange(0, 127, dtype=torch.uint8).view(torch.float8_e4m3fn).float()
+
+
 def _ref_scale(amax, fmt, scale_dtype):
-    """Return the reference scale, including E8M0 exponent rounding."""
+    """Return the reference scale, including narrow scale-dtype rounding.
+
+    What this oracle derives independently is how blocks are cut and expanded, not
+    the scalar formula, so a narrow dtype's rounding is mirrored here: divide by an
+    unrounded scale and every code drifts a ULP from what the operand really used.
+    """
     if scale_dtype is torch.float8_e8m0fnu:
         exp = torch.ceil(torch.log2(amax / str_to_qmax(fmt))).clamp(-127, 127)
         return torch.exp2(exp).to(scale_dtype).float()
+    if scale_dtype is torch.float8_e4m3fn:
+        low, high = str_to_qmin("fp8_e4m3"), str_to_qmax("fp8_e4m3")
+        exact = (amax / str_to_qmax(fmt)).clamp(low, high)
+        # Ceiling by lookup over every value e4m3 represents, which cross-checks the
+        # implementation's byte increment without restating it.
+        grid = _E4M3_GRID.to(exact.device)
+        return grid[torch.searchsorted(grid, exact.contiguous())]
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 
@@ -349,6 +365,15 @@ def test_quantize_operand_precision(fmt, scale_cfg, contract_dim, geometry, inpu
         ratio = (x.abs().float() / div).amax().item()
         if scale_cfg["scale_dtype"] is torch.float32:
             assert ratio == pytest.approx(qmax, rel=1e-6)  # The peak maps to qmax.
+        elif scale_cfg["scale_dtype"] is torch.float8_e4m3fn:
+            # A scale floored at e4m3's min subnormal cannot be tight: fp8_e5m2's
+            # qmax of 57344 puts its natural scale three decades under that floor,
+            # so every block floors and utilisation collapses to 0.038. Normalising
+            # that is the global scale's job, so only blocks inside e4m3's window
+            # are held to the bound. Measured worst case over the grid: 0.967 qmax.
+            unfloored = div > str_to_qmin("fp8_e4m3")
+            if unfloored.any():
+                assert (x.abs().float() / div)[unfloored].amax().item() > qmax / 2
         else:
             assert ratio > qmax / 2  # E8M0 rounding leaves under one binade unused.
 
@@ -372,6 +397,68 @@ def test_quantize_operand_granularity_sqnr(fmt, contract_dim, shape):
         assert sqnrs == sorted(sqnrs)
     # 1.1 dB leaves margin below the measured 3.33 dB minimum.
     assert sqnrs[-1] - sqnrs[1] > 1.1
+
+
+# An operand magnitude far under e4m3's min scale, and one far over its max.
+E4M3_SCALE_RANGE_MAGNITUDES = [1e-6, 1e9]
+
+
+@pytest.mark.parametrize("magnitude", E4M3_SCALE_RANGE_MAGNITUDES)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("fmt", ALL_QUANT_FORMATS)
+def test_quantize_operand_e4m3_scale_clamps_to_representable_window(
+    fmt, contract_dim, magnitude
+):
+    """An e4m3 scale outside its window clamps to the window's edge, on any device.
+
+    Neither edge may lean on the cast. Below the min subnormal it would round to
+    zero and divide the operand by zero; above the max it is device-dependent --
+    a bare CPU cast of 1e10 yields NaN (e4m3's top encoding) while CUDA saturates
+    to 448 -- so an unclamped overflow would poison every scale on CPU only.
+    """
+    scale_cfg = scale_of("blockwise", (1, 16), torch.float8_e4m3fn)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.float32) * magnitude
+    codes, scale = quantize_operand(x, contract_dim, fmt, scale_cfg)
+    assert scale.dtype is torch.float8_e4m3fn
+    scale_values = scale.float()
+    assert torch.isfinite(scale_values).all()
+    assert (scale_values >= str_to_qmin("fp8_e4m3")).all()
+    assert (scale_values <= str_to_qmax("fp8_e4m3")).all()
+    assert torch.isfinite(codes.float()).all()
+    assert torch.isfinite(
+        dequantize_operand(codes, scale, contract_dim, scale_cfg)
+    ).all()
+
+
+# The scale dtypes whose narrow range forces a clamp. An fp32 scale is deliberately
+# absent: it holds an infinite amax as inf, which is pre-existing behaviour and only
+# reachable once the operand itself has diverged.
+CLAMPED_SCALE_DTYPES = [torch.float8_e8m0fnu, torch.float8_e4m3fn]
+# Block maxima on both sides of every narrow scale dtype's representable window.
+OUT_OF_WINDOW_AMAX = [0.0, 1e-30, 1e30, float("inf")]
+
+
+@pytest.mark.parametrize("amax_value", OUT_OF_WINDOW_AMAX)
+@pytest.mark.parametrize("scale_dtype", CLAMPED_SCALE_DTYPES)
+def test_compute_scale_clamps_to_representable_window(scale_dtype, amax_value):
+    """A narrow scale clamps into its own range, identically on CPU and CUDA.
+
+    Neither edge may lean on the cast. Below e4m3's min subnormal a scale rounds to
+    zero and divides its operand by zero. Above its max the cast is device-dependent:
+    a bare CPU cast of 1e10 or inf yields NaN, e4m3's top encoding, while CUDA
+    saturates to 448. Asserting across devices is what gives the ceiling teeth --
+    a CUDA-only assertion passes whether or not the clamp is there.
+    """
+    scales = [
+        _compute_scale(
+            torch.tensor([amax_value], device=device), "fp8_e4m3", scale_dtype
+        ).float()
+        for device in ("cpu", "cuda")
+    ]
+    for scale in scales:
+        assert torch.isfinite(scale).all()
+        assert (scale > 0).all()
+    assert torch.equal(scales[0], scales[1].cpu())
 
 
 @pytest.mark.parametrize("enable_sr", [False, True])

@@ -8,6 +8,7 @@ from src.quant.utils import (
     is_int8s,
     str_to_fp8_ulp,
     str_to_qmax,
+    str_to_qmin,
     str_to_dtype,
 )
 
@@ -35,12 +36,27 @@ def _scale_block_map(
 def _compute_scale(
     amax: torch.Tensor, fmt: str, scale_dtype: torch.dtype
 ) -> torch.Tensor:
-    """Return fp32 or fp8_e8m0 dequantization scales from block maxima."""
+    """Return dequantization scales in `scale_dtype` from block maxima."""
     if scale_dtype is torch.float8_e8m0fnu:
         # Clamp E8M0 exponents, preserving its full lower range; `log2(0)` selects 2**-127.
         exp = torch.ceil(torch.log2(amax / str_to_qmax(fmt)))
         # E8M0 cast corrects CUDA `exp2(-127)` being one ULP low.
         return torch.exp2(exp.clamp(-127, 127)).to(scale_dtype)
+    if scale_dtype is torch.float8_e4m3fn:
+        # Clamp into e4m3's representable window. The floor stops a scale from
+        # rounding to zero and dividing its operand by zero. The ceiling avoids
+        # relying on the cast to saturate: e4m3's top encoding is NaN, so an
+        # unclamped overflow could poison a tensor's scales instead of pinning them
+        # at the maximum, and an infinite amax already casts to NaN.
+        low, high = str_to_qmin("fp8_e4m3"), str_to_qmax("fp8_e4m3")
+        exact = (amax / str_to_qmax(fmt)).clamp(low, high)
+        coded = exact.to(scale_dtype)
+        # Round up to the next representable scale, as the E8M0 branch's ceil does.
+        # A scale rounded down leaves its block's largest element above qmax, to be
+        # clipped. Positive e4m3 values increase with their encoding, so the next
+        # representable value up is the next byte; the clamp keeps that off NaN.
+        bits = coded.contiguous().view(torch.uint8)
+        return torch.where(coded.float() < exact, bits + 1, bits).view(scale_dtype)
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 

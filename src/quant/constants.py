@@ -80,6 +80,20 @@ _STR_TO_QMAX = {
     "int4": 7.0,
 }
 
+# The smallest positive magnitude each format represents: one code for an integer,
+# the min subnormal for an fp8, matching that format's grid in _STR_TO_FP8_ULP. A
+# narrow scale clamps up to this so it can never round to zero and divide its
+# operand by zero.
+_STR_TO_QMIN = {
+    "fp8_e4m3": 2.0**-9,
+    "fp8_e5m2": 2.0**-16,
+    "int8": 1.0,
+    "int7": 1.0,
+    "int6": 1.0,
+    "int5": 1.0,
+    "int4": 1.0,
+}
+
 # (mantissa bits, log2 subnormal spacing) define each fp8 format's binade grid.
 # New float formats must declare their grid explicitly.
 _STR_TO_FP8_ULP = {

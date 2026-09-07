@@ -333,16 +333,17 @@ def _scaled_mm_kernel(
             a = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0)
             block_acc += tl.dot(a, b).to(tl.float32)
+        # Cast so a narrow (e4m3) scale becomes arithmetic-capable; a no-op for fp32.
         sa = tl.load(
             sa_ptr + offs_m * stride_sam + scale_block_idx * stride_sak,
             mask=m_mask,
             other=0.0,
-        )
+        ).to(tl.float32)
         sb = tl.load(
             sb_ptr + scale_block_idx * stride_sbk + offs_n * stride_sbn,
             mask=n_mask,
             other=0.0,
-        )
+        ).to(tl.float32)
         acc += sa[:, None] * block_acc * sb[None, :]
     # Bias is unscaled: apply it to acc, not each scaled block partial.
     if HAS_BIAS:
@@ -799,6 +800,7 @@ def _scaled_grouped_mm_kernel(
                         b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0
                     )
                     block_acc += tl.dot(a, b).to(tl.float32)
+                # Cast so a narrow (e4m3) scale is arithmetic-capable; fp32 is a no-op.
                 sa = tl.load(
                     sa_ptr
                     + (0 if A_IS_2D else g * stride_sag)
@@ -806,7 +808,7 @@ def _scaled_grouped_mm_kernel(
                     + scale_block_idx * stride_sak,
                     mask=m_mask,
                     other=0.0,
-                )
+                ).to(tl.float32)
                 sb = tl.load(
                     sb_ptr
                     + (0 if B_IS_2D else g * stride_sbg)
@@ -814,7 +816,7 @@ def _scaled_grouped_mm_kernel(
                     + (n_start + offs_n) * stride_sbn,
                     mask=n_mask,
                     other=0.0,
-                )
+                ).to(tl.float32)
                 acc += sa[:, None] * block_acc * sb[None, :]
             # Bias is unscaled: apply it to acc, not each scaled block partial.
             if HAS_BIAS:
