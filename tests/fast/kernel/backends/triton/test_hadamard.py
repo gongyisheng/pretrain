@@ -5,11 +5,10 @@ import torch
 
 from src.kernel.backends.eager import hadamard as eager_hadamard
 from src.kernel.backends.triton import hadamard as triton_hadamard
+from tests.fast.helper import cuda_only
 
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="Triton Hadamard kernels are CUDA only"
-)
+pytestmark = cuda_only("Triton Hadamard kernels are CUDA only")
 
 
 HADAMARD_BLOCKS = (2, 16, 128)
@@ -32,6 +31,8 @@ LAYOUTS = ("dense", "permuted", "strided-last-axis", "broadcast")
 @pytest.mark.parametrize("with_signs", (False, True))
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_rotate_precision(shape, block, dtype, out_dtype, inverse, with_signs, layout):
+    if shape[-1] % block:
+        pytest.skip("hadamard block must divide the rotated extent")
     torch.manual_seed(0)
     if layout == "permuted":
         source = torch.randn((2, 3, *shape), dtype=dtype, device="cuda")
@@ -44,8 +45,6 @@ def test_rotate_precision(shape, block, dtype, out_dtype, inverse, with_signs, l
         x = source.expand(48, *shape)
     else:
         x = torch.randn(shape, dtype=dtype, device="cuda")
-    if x.shape[-1] % block:
-        pytest.skip("hadamard block must divide the rotated extent")
 
     signs = None
     if with_signs:
