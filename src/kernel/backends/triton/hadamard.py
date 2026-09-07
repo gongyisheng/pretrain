@@ -101,12 +101,7 @@ def rotate(
         return x.to(out_dtype, copy=True)
     shape = x.shape
     rows, cols = x.shape[-2:]
-    # Flatten only the leading batch axes. This remains a view for regular layouts,
-    # including the standard -2 transpose, and materializes only non-flattenable
-    # leading permutations before the kernel addresses batches by one stride.
     x = x.reshape(-1, rows, cols)
-    # The kernel stores through `x`'s strides, so `out` must mirror them. `empty_like`
-    # does that for any non-overlapping layout; materialize the views it cannot mirror.
     out = torch.empty_like(x, dtype=out_dtype)
     if out.stride() != x.stride():
         x = x.contiguous()
