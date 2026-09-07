@@ -109,6 +109,6 @@ _STR_TO_FP8_ULP = {
 
 EPS = 1e-30
 
-# Operand formats only: fp8_e8m0 is a scale dtype, never an operand's.
 _FP8_FORMATS = frozenset({"fp8_e4m3", "fp8_e5m2"})
+_FP4_FORMATS = frozenset({"fp4_e2m1"})
 _INT8_FORMATS = frozenset({"int8", "int7", "int6", "int5", "int4"})
