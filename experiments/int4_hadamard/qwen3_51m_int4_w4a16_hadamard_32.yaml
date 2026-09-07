@@ -46,6 +46,7 @@ training:
         block_size: 32
         random_sign: true
       gemms: [fwd, dgrad, wgrad]
+    include: ['*mlp.*']
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int4_hadamard/qwen3_51m_int4_w4a16_hadamard_32/

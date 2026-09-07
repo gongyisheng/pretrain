@@ -40,6 +40,7 @@ training:
     scale:
       granularity: blockwise
       block_shape: [1, 16]
+    include: ['*mlp.*']
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int4_hadamard/qwen3_51m_int4_w4a4/
