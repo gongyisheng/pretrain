@@ -106,16 +106,22 @@ class HadamardRotation(Rotation):
             raise ValueError(f"contract_dim must be -2 or -1, got {contract_dim}")
         if self.block_size == 1:
             return x if out_dtype is None else x.to(out_dtype)
+        device = x.device
         if contract_dim == -1:
-            return rotate(x, self.block_size, self._signs(x), inverse, out_dtype)
-        return rotate(
-            x.transpose(-2, -1), self.block_size, self._signs(x), inverse, out_dtype
-        ).transpose(-2, -1)
+            return rotate(x, self.block_size, self._signs(device), inverse, out_dtype)
+        elif contract_dim == -2:
+            return rotate(
+                x.transpose(-2, -1),
+                self.block_size,
+                self._signs(device),
+                inverse,
+                out_dtype,
+            ).transpose(-2, -1)
 
-    def _signs(self, x: torch.Tensor) -> torch.Tensor | None:
+    def _signs(self, device: torch.device) -> torch.Tensor | None:
         if self.sign_vector is None:
             return None
-        return self.sign_vector.to(device=x.device, dtype=torch.float32)
+        return self.sign_vector.to(device=device, dtype=torch.float32)
 
 
 ROTATION_REGISTRY: dict[str, type[Rotation]] = {"hadamard": HadamardRotation}
