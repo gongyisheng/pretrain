@@ -41,14 +41,6 @@ class HadamardRotation(Rotation):
     ):
         super().__init__()
 
-        if (
-            type(block_size) is not int
-            or block_size < 1
-            or block_size & (block_size - 1)
-        ):
-            raise ValueError(
-                f"block_size must be a positive power of two, got {block_size!r}"
-            )
         if type(random_sign) is not bool:
             raise ValueError(f"random_sign must be a bool, got {random_sign!r}")
         if type(seed) is not int or seed < 0:
@@ -104,8 +96,6 @@ class HadamardRotation(Rotation):
     ) -> torch.Tensor:
         if contract_dim not in (-2, -1):
             raise ValueError(f"contract_dim must be -2 or -1, got {contract_dim}")
-        if self.block_size == 1:
-            return x if out_dtype is None else x.to(out_dtype)
         device = x.device
         if contract_dim == -1:
             return rotate(x, self.block_size, self._signs(device), inverse, out_dtype)

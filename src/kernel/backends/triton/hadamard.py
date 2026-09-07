@@ -15,25 +15,39 @@ def _butterfly(
     BLOCK_COL: tl.constexpr,
     LOG2_HADAMARD_BLOCK: tl.constexpr,
 ):
-    """Hadamard-transform each Hadamard-block-wide group of `v` in registers.
-
-    A Hadamard block factors into LOG2_HADAMARD_BLOCK two-point stages, one per
-    index bit, so no matrix is ever loaded. Stage `s` pairs entries whose indices
-    differ in bit `s`: reshaping the axis to (..., 2, low) puts that bit on its own
-    axis, and because every group transforms identically the leading groups collapse
-    into one axis.
-    """
     for stage in tl.static_range(LOG2_HADAMARD_BLOCK):
-        # `1 << stage` is the stride of the paired bit; a named constexpr cannot be
-        # rebound across loop iterations, so it stays inline.
         pairs = tl.reshape(v, (BLOCK_ROW, BLOCK_COL // (2 << stage), 2, 1 << stage))
-        # `tl.split` consumes a trailing axis of size 2, so move the paired bit last.
         even, odd = tl.split(tl.permute(pairs, (0, 1, 3, 2)))
         joined = tl.permute(tl.join(even + odd, even - odd), (0, 1, 3, 2))
         v = tl.reshape(joined, (BLOCK_ROW, BLOCK_COL))
     return v
 
 
+_ROTATE_CFG = [
+    (64, 16, 8),
+    (32, 64, 4),
+    (32, 64, 8),
+    (64, 64, 8),
+    (16, 128, 4),
+    (16, 128, 8),
+    (32, 128, 8),
+    (8, 256, 4),
+    (4, 512, 4),
+    (4, 512, 8),
+]
+_ROTATE_CONFIGS = [
+    triton.Config({"BLOCK_ROW": block_row, "BLOCK_COL": block_col}, num_warps=warps)
+    for block_row, block_col, warps in _ROTATE_CFG
+]
+
+
+@triton.autotune(
+    configs=_ROTATE_CONFIGS,
+    key=["n_row", "n_col", "stride_col", "HADAMARD_BLOCK"],
+)
+@triton.heuristics(
+    values={"BLOCK_COL": lambda meta: max(meta["BLOCK_COL"], meta["HADAMARD_BLOCK"])}
+)
 @triton.jit
 def _rotate_kernel(
     x_ptr,
@@ -53,9 +67,9 @@ def _rotate_kernel(
     BLOCK_ROW: tl.constexpr,
     BLOCK_COL: tl.constexpr,
 ):
-    batch_idx = tl.program_id(2)
     off_row = tl.program_id(0) * BLOCK_ROW + tl.arange(0, BLOCK_ROW)
     off_col = tl.program_id(1) * BLOCK_COL + tl.arange(0, BLOCK_COL)
+    batch_idx = tl.program_id(2)
     base = batch_idx * stride_batch
     in_row, in_col = off_row < n_row, off_col < n_col
 
@@ -97,10 +111,8 @@ def rotate(
 ) -> torch.Tensor:
     """Block-Hadamard rotation along the final axis of logical [batch, row, col]."""
     out_dtype = x.dtype if out_dtype is None else out_dtype
-    if hadamard_block == 1:
-        return x.to(out_dtype, copy=True)
     shape = x.shape
-    n_row, n_col = x.shape[-2:]
+    n_row, n_col = (1, x.shape[-1]) if x.ndim == 1 else x.shape[-2:]
     x = x.reshape(-1, n_row, n_col)
     out = torch.empty_like(x, dtype=out_dtype)
     if out.stride() != x.stride():
@@ -112,14 +124,13 @@ def rotate(
 
     stride_row, stride_col = x.stride(-2), x.stride(-1)
 
-    # BLOCK_COL must cover whole rotation blocks, so never fall below `hadamard_block`.
-    block_col = max(hadamard_block, 64)
-    block_row = max(2048 // block_col, 8)
-    grid = (
-        triton.cdiv(n_row, block_row),
-        triton.cdiv(n_col, block_col),
-        n_batch,
-    )
+    def grid(meta):
+        return (
+            triton.cdiv(n_row, meta["BLOCK_ROW"]),
+            triton.cdiv(n_col, meta["BLOCK_COL"]),
+            n_batch,
+        )
+
     wrap_triton(_rotate_kernel)[grid](
         x,
         out,
@@ -135,8 +146,5 @@ def rotate(
         POST_SCALE=post_scale,
         HAS_SIGNS=sign_vector is not None,
         INVERSE=inverse,
-        BLOCK_ROW=block_row,
-        BLOCK_COL=block_col,
-        num_warps=4,
     )
     return out.reshape(shape)

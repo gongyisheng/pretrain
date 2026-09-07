@@ -35,10 +35,6 @@ LARGE_ROTATION_ATOL = {
     torch.bfloat16: 2.6e31,
 }
 INVALID_HADAMARD_KWARGS = [
-    {"block_size": 0},
-    {"block_size": 3},
-    {"block_size": 1.5},
-    {"block_size": True},
     {"random_sign": 1},
     {"seed": -1},
     {"seed": True},
@@ -48,7 +44,8 @@ INVALID_HADAMARD_KWARGS = [
     {"block_size": 4, "sign_vector": "bad"},
     {"unknown": 1},
 ]
-INVALID_BUILD_ROTATION_KWARGS = [{"unknown": 1}, {"block_size": 3}]
+INVALID_HADAMARD_BLOCKS = (0, 3, 1.5, True)
+INVALID_BUILD_ROTATION_KWARGS = [{"unknown": 1}]
 SIGNED_HADAMARD_ORACLE_CASES = [
     pytest.param(
         -1,
@@ -242,8 +239,16 @@ def test_hadamard_rotation_apply_block_one_identity():
     x = torch.randn(3, 4)
 
     assert rotation(x, -1) is x
-    assert rotation.inverse(x, -2) is x
+    assert torch.equal(rotation.inverse(x, -2), x)
     assert rotation(x, -1, torch.bfloat16).dtype is torch.bfloat16
+
+
+@pytest.mark.parametrize("block_size", INVALID_HADAMARD_BLOCKS)
+def test_hadamard_rotation_apply_invalid_block_raise_error(block_size):
+    rotation = HadamardRotation(block_size=block_size, random_sign=False)
+
+    with pytest.raises(ValueError, match="power of two"):
+        rotation(torch.randn(8, 16), -1)
 
 
 def test_hadamard_rotation_apply_raise_error():

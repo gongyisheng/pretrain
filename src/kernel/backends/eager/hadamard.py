@@ -36,8 +36,6 @@ def rotate(
 ) -> torch.Tensor:
     """Block-Hadamard rotation along the final axis, computed in float32."""
     out_dtype = x.dtype if out_dtype is None else out_dtype
-    if hadamard_block == 1:
-        return x.to(out_dtype)
     signs = None if sign_vector is None else sign_vector.to(x.device, torch.float32)
     # The +-1 matrix is unscaled, so the operand carries the 1/sqrt(block) normalization.
     pre_scale, post_scale = to_hadamard_scales(hadamard_block)

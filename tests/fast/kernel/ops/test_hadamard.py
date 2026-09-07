@@ -13,7 +13,7 @@ HADAMARD_BLOCKS = (2, 16, 128)
 DTYPES = (torch.float32, torch.float16, torch.bfloat16)
 INVERSE = (False, True)
 # Shapes whose rotated extent is a multiple of every block in HADAMARD_BLOCKS.
-SHAPES = ((256, 256), (3, 128, 384))
+SHAPES = ((256,), (256, 256), (3, 128, 384))
 # Extents that are not multiples of 128, exercising the tail mask on both axes.
 RAGGED_TAIL_SHAPES = ((48, 80), (2, 16, 176))
 EMPTY_SHAPES = ((0, 64), (8, 0), (2, 0, 64))
@@ -180,12 +180,16 @@ def test_rotate_backends_agree_cpu_signs_strided_last_axis(out_dtype):
     assert torch.equal(eager, triton)
 
 
-def test_rotate_block_one_is_identity():
-    """HadamardRotation treats block 1 as a no-op, so the op must agree."""
-    x = torch.randn(16, 16, dtype=torch.bfloat16)
+@CUDA
+@pytest.mark.parametrize("backend", (None, "eager", "triton"))
+def test_rotate_block_one_is_identity(backend):
+    """The op handles block one before selecting a backend."""
+    x = torch.randn(16, 16, dtype=torch.bfloat16, device="cuda")
 
-    assert torch.equal(rotate(x, 1, torch.ones(1), False), x)
-    promoted = rotate(x, 1, torch.ones(1), False, torch.float32)
+    assert torch.equal(
+        rotate(x, 1, torch.ones(1, device="cuda"), False, backend=backend), x
+    )
+    promoted = rotate(x, 1, torch.ones(1, device="cuda"), False, torch.float32, backend)
     assert promoted.dtype is torch.float32 and torch.equal(promoted, x.float())
 
 
