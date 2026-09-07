@@ -260,7 +260,7 @@ def make_scaled_mm_inputs(
     torch.manual_seed(seed)
     rows = case.m if case.m is not None else 8 * 1024
     a = _make_random_tensor((rows, case.k), device, out_dtype)
-    b = _make_random_tensor((case.k, case.n), device, out_dtype)
+    b = _make_random_tensor((case.n, case.k), device, out_dtype).mT
     scale_config = {
         "granularity": scale.granularity,
         "block_shape": scale.block_shape,

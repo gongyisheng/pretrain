@@ -208,7 +208,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         # dgrad: grad_a = grad_y @ b^T
         grad_a = quantized_grouped_mm(
             grad_y,
-            b.transpose(-2, -1).contiguous(),
+            b.transpose(-2, -1),
             offs,
             cfg.dtype["grad_out"]["dgrad"],
             cfg.dtype["weight"]["dgrad"],

@@ -30,6 +30,7 @@ GEOMETRY_CASES = [
 RAGGED_GROUPS = 3
 INPUT_CASES = [
     (torch.float32, "normal"),
+    (torch.float32, "transposed"),
     (torch.float16, "normal"),
     (torch.bfloat16, "normal"),
     (torch.bfloat16, "spread"),
@@ -77,6 +78,8 @@ def _make(init_method, shape, dtype=torch.float32):
     torch.manual_seed(0)
     if init_method == "normal":
         return torch.randn(*shape, dtype=dtype) * 10.0
+    if init_method == "transposed":
+        return torch.randn(*shape[:-2], shape[-1], shape[-2], dtype=dtype).mT * 10.0
     if init_method == "spread":
         x = torch.randn(*shape, dtype=dtype)
         x[..., ::2, :] *= 100.0
@@ -306,10 +309,13 @@ def test_quantize_operand_precision(fmt, scale_cfg, contract_dim, geometry, inpu
     )
 
     assert codes.shape == x.shape and codes.dtype == str_to_dtype(fmt)
-    assert codes.is_contiguous()
+    if init_method == "transposed" and scale_cfg["granularity"] != "blockwise":
+        assert codes.stride() == x.stride()
     assert codes.float().abs().amax() <= str_to_qmax(fmt)
     assert tuple(scale.shape) == tuple(expected)
-    assert scale.dtype is scale_cfg["scale_dtype"] and scale.is_contiguous()
+    assert scale.dtype is scale_cfg["scale_dtype"]
+    if ragged_dim is None and scale_cfg["granularity"] == "tensorwise":
+        assert 0 in scale.stride()
     # E8M0 carries no comparison or log2 kernel, so check the decoded exponents.
     decoded = scale.float()
     assert torch.isfinite(decoded).all() and (decoded > 0).all()

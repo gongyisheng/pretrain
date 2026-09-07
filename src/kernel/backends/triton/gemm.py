@@ -404,15 +404,16 @@ def _mxfp8_scaled_mm_kernel(
     stride_biasn,
     A_FORMAT: tl.constexpr,
     B_FORMAT: tl.constexpr,
+    SCALE_BLOCK_SIZE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """MXFP8 scaled GEMM; scales apply per 32-element K group, then bias is added.
+    """MXFP8 scaled GEMM; scales apply per `SCALE_BLOCK_SIZE` K group.
 
     `tl.dot_scaled` applies e8m0 factors per 32-element group inside the MMA, so
-    scales do not enter the accumulator or require a scale-block loop.
+    wider input scales are selected repeatedly without host-side expansion.
 
     `sa`/`sb` are e8m0 exponent bytes viewed as uint8. `sb` is read through transposed
     strides because the instruction indexes B scales as (N, K/32).
@@ -439,7 +440,7 @@ def _mxfp8_scaled_mm_kernel(
             other=0.0,
         )
         # A masked scale multiplies a zeroed operand, so its value is irrelevant.
-        sk = k0 // 32 + offs_sk
+        sk = (k0 + offs_sk * 32) // SCALE_BLOCK_SIZE
         sk_mask = sk < n_scale_blocks
         sa = tl.load(
             sa_ptr + offs_m[:, None] * stride_sam + sk[None, :] * stride_sak,
@@ -556,7 +557,7 @@ def mxfp8_scaled_mm(
     Inputs must be compatible CUDA tensors; `block_size` must be a nonzero multiple
     of 32.
     """
-    # Zero means one block over K, not a width; reject it before modulo/replication.
+    # Zero means one block over K, not a width; reject it before modulo/indexing.
     if block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
         raise ValueError(
             f"mxfp8 block_size must be a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}"
@@ -568,15 +569,9 @@ def mxfp8_scaled_mm(
     def grid(meta):
         return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
 
-    # The MMA scale vector is 32 wide; replicate wider host blocks across 32-wide groups.
-    rep_k = block_size // _MXFP8_BLOCK_SIZE
-    # Use ceil: quantization pads and retains a trailing partial scale block.
-    n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
-    sa_mx = sa.repeat_interleave(rep_k, 1)[:, :n_mx]
-    sb_mx = sb.repeat_interleave(rep_k, 0)[:n_mx]
     # e8m0 stores a bare exponent; the kernel consumes its bytes, not float scales.
-    sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
-    sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
+    sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
+    sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
     wrap_triton(_mxfp8_scaled_mm_kernel)[grid](
         aq,
         bq,
@@ -587,7 +582,7 @@ def mxfp8_scaled_mm(
         M,
         N,
         K,
-        n_mx,
+        sa.shape[1],
         aq.stride(0),
         aq.stride(1),
         bq.stride(0),
@@ -601,6 +596,7 @@ def mxfp8_scaled_mm(
         0 if bias is None else bias.stride(0),
         A_FORMAT=_MXFP8_FORMAT[aq.dtype],
         B_FORMAT=_MXFP8_FORMAT[bq.dtype],
+        SCALE_BLOCK_SIZE=block_size,
         HAS_BIAS=bias is not None,
     )
     return c
@@ -900,9 +896,8 @@ def _mxfp8_scaled_grouped_mm_kernel(
     """Ragged MXFP8 grouped GEMM; e8m0 scales enter the MMA (`QMMA.SF`).
 
     Each 32-wide MMA group uses `scale_block_start + (k0 + 32 * i) // SCALE_BLOCK_SIZE`.
-    Ragged-K uses native blocks and carries the cursor across groups; dense-K uses 32,
-    after host-side scale replication. Both widths are multiples of 32, so groups do
-    not straddle scale blocks.
+    Ragged-K carries the scale cursor across groups. Scale widths are multiples of
+    32, so MMA groups do not straddle scale blocks.
     """
     M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
     N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
@@ -1046,7 +1041,6 @@ def mxfp8_scaled_grouped_mm(
     Callers must supply compatible CUDA tensors. `block_size` may be any nonzero
     multiple of 32.
     """
-    is_ragged_k = aq.ndim == 2 and bq.ndim == 2
     if block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
         raise ValueError(
             f"mxfp8 grouped GEMM requires block_size a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}"
@@ -1067,21 +1061,8 @@ def mxfp8_scaled_grouped_mm(
     c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
     num_sms = _num_sms(aq.device)
 
-    if is_ragged_k:
-        # Ragged-K re-tiles blocks per group; global replication would misplace later
-        # groups, so the kernel indexes native-width blocks directly.
-        sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
-        sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
-    else:
-        # K is shared by every group, so replication over each scale axis is exact for
-        # ragged M and N.
-        rep_k = block_size // _MXFP8_BLOCK_SIZE
-        # Use ceil: quantization pads and retains a trailing partial scale block.
-        n_mx = triton.cdiv(K, _MXFP8_BLOCK_SIZE)
-        sa_mx = sa.repeat_interleave(rep_k, dim=-1).narrow(-1, 0, n_mx)
-        sb_mx = sb.repeat_interleave(rep_k, dim=-2).narrow(-2, 0, n_mx)
-        sa8 = sa_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
-        sb8 = sb_mx.contiguous().to(torch.float8_e8m0fnu).view(torch.uint8)
+    sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
+    sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
     wrap_triton(_mxfp8_scaled_grouped_mm_kernel)[(num_sms,)](
         aq,
         bq,
@@ -1117,7 +1098,7 @@ def mxfp8_scaled_grouped_mm(
         A_FORMAT=_MXFP8_FORMAT[aq.dtype],
         B_FORMAT=_MXFP8_FORMAT[bq.dtype],
         HAS_BIAS=bias is not None,
-        SCALE_BLOCK_SIZE=block_size if is_ragged_k else _MXFP8_BLOCK_SIZE,
+        SCALE_BLOCK_SIZE=block_size,
     )
     return c
 

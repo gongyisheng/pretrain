@@ -376,7 +376,8 @@ def quantize_operand(
     `contract_dim` and `ragged_dim` must be -2 or -1. When given, `offs` keeps
     ragged-axis scale blocks within groups; 2D blockwise quantization uses either
     ragged axis. Returns codes in `fmt` and fp32 or E8M0 scales with the outer axis
-    expanded and the contraction axis blockwise.
+    expanded and the contraction axis blockwise. Output strides are unspecified so
+    consumers can use broadcast scales and preserve useful operand layouts.
 
     `rotation` preconditions `x` before quantizing and is inverted by
     `dequantize_operand`. On a ragged contraction axis, every group boundary must
@@ -424,7 +425,7 @@ def quantize_operand(
             )
     else:
         raise ValueError(f"unknown granularity: {granularity!r}")
-    return codes.contiguous(), scale.contiguous()
+    return codes, scale
 
 
 def dequantize_operand(
