@@ -44,25 +44,7 @@ def accumulate_quantization_sums(
     ragged_dim=None,
     rotated_source=None,
 ):
-    """One operand's quantization-error partial sums, for folding into a window.
-
-    Returns `(src_sq, err_sq, under, numel, nonzero)`, each a 1D fp32 tensor:
-    length 1 for a dense operand, length n_experts for a grouped one. These are
-    sums, not metrics, because sqnr (a log of a ratio) does not accumulate --
-    `compute_quantization_metrics` divides once at read time over the window.
-
-    `numel` counts every element (the validity signal for whether an expert got
-    tokens); `nonzero` counts elements that could underflow (the rate's denominator).
-    `codes == 0` is exact for rounding-to-zero since scales are positive.
-    `rotated_source` is the source in the codes' (rotated) basis, used only for the
-    underflow/nonzero mask; `source` and `dequantized` stay in the original basis so
-    energy and reconstruction error are rotation-agnostic.
-
-    `offs` (cumulative end-offsets) switches the reduction to per-expert so a cold,
-    badly scaled expert is not averaged away. Stacked expert weights carry the
-    expert on dim 0; a 2D dispatched operand is ragged along `ragged_dim`, which
-    defaults to rows for existing callers.
-    """
+    """Return per-group quantization-error sums for a monitoring window."""
     source = source_tensor.float()
     mask_source = source if rotated_source is None else rotated_source.float()
     dequantized = dequantized_tensor.float()
