@@ -34,8 +34,8 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 16
-  gradient_accumulation_steps: 16
+  batch_size: 32
+  gradient_accumulation_steps: 8
   max_steps: 50000
   mixed_precision: bf16
   quantization:
@@ -45,7 +45,8 @@ training:
       act: int8
       grad_out: bf16
     scale:
-      granularity: tensorwise
+      granularity: blockwise
+      block_shape: [32, 32]
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int8_activation_limit/qwen3_51m_int8_w8a8_act_limit7/
