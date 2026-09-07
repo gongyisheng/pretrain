@@ -22,13 +22,7 @@ GEMM_ATOL = {
     torch.float16: 0.065,
     torch.bfloat16: 0.52,
 }
-ROTATION_DEVICES = [
-    "cpu",
-    pytest.param(
-        "cuda",
-        marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
-    ),
-]
+ROTATION_DEVICES = ("cpu", "cuda")
 LARGE_ROTATION_ATOL = {
     # Worst dense-oracle errors are 1.18e-3 and 4.96e30; margins are 3.5x and 5.2x.
     torch.float16: 0.0041,
@@ -41,25 +35,25 @@ INVALID_HADAMARD_KWARGS = [
     {"block_size": 4, "sign_vector": [1.0, -1.0, 0.0, 1.0]},
     {"unknown": 1},
 ]
-INVALID_HADAMARD_BLOCKS = (0, 3, 1.5, True)
-INVALID_BUILD_ROTATION_KWARGS = [{"unknown": 1}]
-SIGNED_HADAMARD_ORACLE_CASES = [
-    pytest.param(
-        -1,
-        torch.tensor([[1.0, 2.0, 3.0, 4.0]]),
-        torch.tensor([[0.0, -2.0, -1.0, 5.0]]),
-        torch.tensor([[0.0, -2.0, -1.0, 5.0]]),
-        torch.tensor([[1.0, 2.0, 3.0, 4.0]]),
-        id="contract-last-dimension",
-    ),
-    pytest.param(
-        -2,
-        torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]),
-        torch.tensor([[0.0, 0.0], [-4.0, -4.0], [-2.0, -2.0], [8.0, 10.0]]),
-        torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]),
-        torch.tensor([[8.0, 10.0], [2.0, 2.0], [4.0, 4.0], [0.0, 0.0]]),
-        id="contract-penultimate-dimension",
-    ),
+SYLVESTER_4 = torch.tensor(
+    [
+        [0.5, 0.5, 0.5, 0.5],
+        [0.5, -0.5, 0.5, -0.5],
+        [0.5, 0.5, -0.5, -0.5],
+        [0.5, -0.5, -0.5, 0.5],
+    ]
+)
+SIGN_VECTOR_4 = torch.tensor([1.0, -1.0, -1.0, 1.0])
+HADAMARD_SIGN_VECTORS = (None, SIGN_VECTOR_4)
+HADAMARD_DIRECTIONS = (False, True)
+HADAMARD_ORACLE_INPUT = torch.arange(1, 17, dtype=torch.float32).reshape(4, 4)
+INVALID_HADAMARD_APPLY_CASES = [
+    (0, (8, 16), -1, "power of two"),
+    (3, (8, 16), -1, "power of two"),
+    (1.5, (8, 16), -1, "power of two"),
+    (True, (8, 16), -1, "power of two"),
+    (8, (8, 10), -1, "block 8 must divide"),
+    (8, (8, 16), 0, "contract_dim must be -2 or -1"),
 ]
 
 
@@ -82,32 +76,14 @@ def test_hadamard_rotation_init_raise_error(kwargs):
         HadamardRotation(**kwargs)
 
 
-@pytest.mark.parametrize("rotation_kwargs", INVALID_BUILD_ROTATION_KWARGS)
-def test_build_rotation_raise_error(rotation_kwargs):
+def test_build_rotation_raise_error():
     with pytest.raises(ValueError, match="invalid quant rotation"):
         build_rotation(
             {
                 "rotation_cls": "hadamard",
-                "rotation_kwargs": rotation_kwargs,
+                "rotation_kwargs": {"unknown": 1},
             }
         )
-
-
-def test_hadamard_rotation_apply_sylvester():
-    rotation = HadamardRotation(block_size=4, random_sign=False)
-    basis = torch.eye(4)
-    expected = torch.tensor(
-        [
-            [0.5, 0.5, 0.5, 0.5],
-            [0.5, -0.5, 0.5, -0.5],
-            [0.5, 0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5, 0.5],
-        ]
-    )
-
-    transformed = rotation(basis, -1)
-
-    assert torch.equal(transformed, expected)
 
 
 @pytest.mark.parametrize("shape", ROTATION_SHAPES)
@@ -141,18 +117,27 @@ def test_hadamard_rotation_apply_gemm(shape, dtype):
     torch.testing.assert_close(transformed, a @ b, atol=GEMM_ATOL[dtype], rtol=0)
 
 
-@pytest.mark.parametrize(
-    "contract_dim, x, expected_transformed, inverse_input, expected_inverse",
-    SIGNED_HADAMARD_ORACLE_CASES,
-)
-def test_hadamard_rotation_signed_oracle(
-    contract_dim, x, expected_transformed, inverse_input, expected_inverse
-):
-    signs = torch.tensor([1.0, -1.0, -1.0, 1.0])
-    rotation = HadamardRotation(block_size=4, sign_vector=signs)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("sign_vector", HADAMARD_SIGN_VECTORS)
+@pytest.mark.parametrize("inverse", HADAMARD_DIRECTIONS)
+def test_hadamard_rotation_apply_oracle(contract_dim, sign_vector, inverse):
+    rotation = HadamardRotation(
+        block_size=4, random_sign=False, sign_vector=sign_vector
+    )
+    transform = SYLVESTER_4
+    if sign_vector is not None:
+        transform = (
+            transform * sign_vector
+            if inverse
+            else sign_vector.unsqueeze(-1) * transform
+        )
+    x = HADAMARD_ORACLE_INPUT
+    expected = (x.movedim(contract_dim, -1) @ transform).movedim(-1, contract_dim)
+    transformed = (
+        rotation.inverse(x, contract_dim) if inverse else rotation(x, contract_dim)
+    )
 
-    assert torch.equal(rotation(x, contract_dim), expected_transformed)
-    assert torch.equal(rotation.inverse(inverse_input, contract_dim), expected_inverse)
+    assert torch.equal(transformed, expected)
 
 
 def test_hadamard_rotation_apply_seed():
@@ -168,18 +153,30 @@ def test_hadamard_rotation_apply_seed():
 
 
 @pytest.mark.parametrize("device", ROTATION_DEVICES)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_hadamard_rotation_apply_dtype_device(dtype, device):
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("dtype", GEMM_DTYPES)
+def test_hadamard_rotation_apply_out_dtype(dtype, contract_dim, device):
+    """Promoting on the store is exactly the pre-cast it replaces, in one pass."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
     torch.manual_seed(0)
-    rotation = HadamardRotation(block_size=8, random_sign=False)
-    x = torch.randn(16, 64, dtype=dtype, device=device)
+    rotation = HadamardRotation(block_size=8, seed=7)
+    x = torch.randn(64, 128, dtype=dtype, device=device)
     other_device = "cuda" if device == "cpu" else "cpu"
 
     with torch.device(other_device):
-        transformed = rotation(x, -1)
+        transformed = rotation(x, contract_dim)
+        promoted = rotation(x, contract_dim, torch.float32)
 
     assert transformed.dtype == dtype
     assert transformed.device == x.device
+    assert promoted.dtype is torch.float32
+    assert promoted.device == x.device
+    assert torch.equal(promoted, rotation(x.float(), contract_dim))
+    assert torch.equal(
+        rotation.inverse(x, contract_dim, torch.float32),
+        rotation.inverse(x.float(), contract_dim),
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -212,25 +209,6 @@ def test_hadamard_rotation_apply_precision(dtype):
     )
 
 
-@pytest.mark.parametrize("device", ROTATION_DEVICES)
-@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
-@pytest.mark.parametrize("dtype", GEMM_DTYPES)
-def test_hadamard_rotation_apply_out_dtype(dtype, contract_dim, device):
-    """Promoting on the store is exactly the pre-cast it replaces, in one pass."""
-    torch.manual_seed(0)
-    rotation = HadamardRotation(block_size=8, seed=7).to(device)
-    x = torch.randn(64, 128, dtype=dtype, device=device)
-
-    promoted = rotation(x, contract_dim, torch.float32)
-
-    assert promoted.dtype is torch.float32
-    assert torch.equal(promoted, rotation(x.float(), contract_dim))
-    assert torch.equal(
-        rotation.inverse(x, contract_dim, torch.float32),
-        rotation.inverse(x.float(), contract_dim),
-    )
-
-
 def test_hadamard_rotation_apply_block_one_identity():
     rotation = HadamardRotation(block_size=1)
     x = torch.randn(3, 4)
@@ -240,21 +218,16 @@ def test_hadamard_rotation_apply_block_one_identity():
     assert rotation(x, -1, torch.bfloat16).dtype is torch.bfloat16
 
 
-@pytest.mark.parametrize("block_size", INVALID_HADAMARD_BLOCKS)
-def test_hadamard_rotation_apply_invalid_block_raise_error(block_size):
+@pytest.mark.parametrize(
+    "block_size, shape, contract_dim, error_match", INVALID_HADAMARD_APPLY_CASES
+)
+def test_hadamard_rotation_apply_raise_error(
+    block_size, shape, contract_dim, error_match
+):
     rotation = HadamardRotation(block_size=block_size, random_sign=False)
 
-    with pytest.raises(ValueError, match="power of two"):
-        rotation(torch.randn(8, 16), -1)
-
-
-def test_hadamard_rotation_apply_raise_error():
-    rotation = HadamardRotation(block_size=8, random_sign=False)
-
-    with pytest.raises(ValueError, match="block 8 must divide"):
-        rotation(torch.randn(8, 10), -1)
-    with pytest.raises(ValueError, match="contract_dim must be -2 or -1"):
-        rotation(torch.randn(8, 16), 0)
+    with pytest.raises(ValueError, match=error_match):
+        rotation(torch.randn(shape), contract_dim)
 
 
 # --- rotation identity -------------------------------------------------------
@@ -266,76 +239,36 @@ BASE_ROTATION = {
 }
 BASE_INCLUDE = ["*attn*", "*mlp*"]
 BASE_EXCLUDE = ["lm_head", "*router*"]
-ROTATION_KEY_IDENTITY_CASES = [
-    pytest.param(
-        {
-            **BASE_ROTATION,
-            "rotation_kwargs": {"block_size": 16, "seed": 1, "random_sign": True},
-        },
-        None,
-        None,
-        True,
-        id="same-transform-default-random-sign",
-    ),
-    pytest.param(
-        {**BASE_ROTATION, "gemms": ["fwd", "wgrad"]},
-        None,
-        None,
-        True,
-        id="same-transform-different-gemms",
-    ),
-    pytest.param(
-        {**BASE_ROTATION, "rotation_kwargs": {"block_size": 32, "seed": 1}},
-        None,
-        None,
-        False,
-        id="different-block-size",
-    ),
-    pytest.param(
-        {**BASE_ROTATION, "rotation_kwargs": {"block_size": 16, "seed": 2}},
-        None,
-        None,
-        False,
-        id="different-seed",
-    ),
-    pytest.param(
-        {
-            **BASE_ROTATION,
-            "rotation_kwargs": {"block_size": 16, "seed": 1, "random_sign": False},
-        },
-        None,
-        None,
-        False,
-        id="different-random-sign",
-    ),
-    pytest.param(
-        BASE_ROTATION,
-        ["*mlp*"],
-        None,
-        False,
-        id="different-include-scope",
-    ),
-    pytest.param(
-        BASE_ROTATION,
-        None,
-        ["lm_head"],
-        False,
-        id="different-exclude-scope",
-    ),
-    pytest.param(
-        BASE_ROTATION,
-        [],
-        None,
-        False,
-        id="empty-include-scope",
-    ),
-    pytest.param(
-        BASE_ROTATION,
-        BASE_INCLUDE[::-1],
-        BASE_EXCLUDE[::-1],
-        True,
-        id="glob-order-does-not-matter",
-    ),
+DEFAULT_RANDOM_SIGN_ROTATION = {
+    **BASE_ROTATION,
+    "rotation_kwargs": {"block_size": 16, "seed": 1, "random_sign": True},
+}
+MULTI_GEMM_ROTATION = {**BASE_ROTATION, "gemms": ["fwd", "wgrad"]}
+BLOCK_32_ROTATION = {
+    **BASE_ROTATION,
+    "rotation_kwargs": {"block_size": 32, "seed": 1},
+}
+SEED_2_ROTATION = {
+    **BASE_ROTATION,
+    "rotation_kwargs": {"block_size": 16, "seed": 2},
+}
+UNSIGNED_ROTATION = {
+    **BASE_ROTATION,
+    "rotation_kwargs": {"block_size": 16, "seed": 1, "random_sign": False},
+}
+ROTATION_KEY_IDENTITY_EQUAL_CASES = [
+    {"rotation": DEFAULT_RANDOM_SIGN_ROTATION},
+    {"rotation": MULTI_GEMM_ROTATION},
+    {"include": BASE_INCLUDE[::-1]},
+    {"exclude": BASE_EXCLUDE[::-1]},
+]
+ROTATION_KEY_IDENTITY_DIFFERENT_CASES = [
+    {"rotation": BLOCK_32_ROTATION},
+    {"rotation": SEED_2_ROTATION},
+    {"rotation": UNSIGNED_ROTATION},
+    {"include": ["*mlp*"]},
+    {"include": []},
+    {"exclude": ["lm_head"]},
 ]
 
 
@@ -347,20 +280,19 @@ def _key(rotation=None, include=None, exclude=None):
     )
 
 
-def test_build_rotation_key_is_a_legal_state_dict_path():
-    key = _key()
+@pytest.mark.parametrize("key_kwargs", ROTATION_KEY_IDENTITY_EQUAL_CASES)
+def test_build_rotation_key_identity_equal(key_kwargs):
+    key = _key(**key_kwargs)
 
     assert key.startswith("hadamard-")
     assert "." not in key
     nn.ModuleDict({key: HadamardRotation(block_size=16)})
+    assert key == _key()
 
 
-@pytest.mark.parametrize(
-    "rotation, include, exclude, expected_equal",
-    ROTATION_KEY_IDENTITY_CASES,
-)
-def test_build_rotation_key_identity(rotation, include, exclude, expected_equal):
-    assert (_key(rotation, include, exclude) == _key()) is expected_equal
+@pytest.mark.parametrize("key_kwargs", ROTATION_KEY_IDENTITY_DIFFERENT_CASES)
+def test_build_rotation_key_identity_different(key_kwargs):
+    assert _key(**key_kwargs) != _key()
 
 
 def test_build_rotation_key_reproducible_across_processes():
