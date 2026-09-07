@@ -267,9 +267,15 @@ _SCALED_CONFIGS = [
 
 
 def _early_prune_scaled_configs(
-    configs, named_args, SCALE_BLOCK_SIZE, HAS_BIAS, grid=None, warmup=None
+    configs,
+    named_args,
+    SCALE_BLOCK_SIZE,
+    HAS_BIAS,
+    HAS_GLOBAL,
+    grid=None,
+    warmup=None,
 ):
-    del named_args, HAS_BIAS, grid, warmup
+    del named_args, HAS_BIAS, HAS_GLOBAL, grid, warmup
     scale_block = SCALE_BLOCK_SIZE
     if not scale_block:
         return configs
@@ -289,6 +295,8 @@ def _scaled_mm_kernel(
     sa_ptr,
     sb_ptr,
     bias_ptr,
+    ga_ptr,
+    gb_ptr,
     M,
     N,
     K,
@@ -306,6 +314,7 @@ def _scaled_mm_kernel(
     stride_biasn,
     SCALE_BLOCK_SIZE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -345,6 +354,9 @@ def _scaled_mm_kernel(
             other=0.0,
         ).to(tl.float32)
         acc += sa[:, None] * block_acc * sb[None, :]
+    # Per-tensor global scales rescale the whole accumulator once, before bias.
+    if HAS_GLOBAL:
+        acc *= tl.load(ga_ptr) * tl.load(gb_ptr)
     # Bias is unscaled: apply it to acc, not each scaled block partial.
     if HAS_BIAS:
         bias = tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)
@@ -487,12 +499,17 @@ def scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    ga: torch.Tensor | None = None,
+    gb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N).
 
     `block_size` 0 means one scale block over K; nonzero multi-block widths must be
     powers of two at least 16. Optional `(N,)` bias is broadcast over rows and added
     after scaling. Inputs must be compatible CUDA tensors.
+
+    `ga`/`gb` are optional per-tensor fp32 global scales, shape (1,), applied to the
+    accumulator before bias. Both are given together or not at all.
     """
     M, K = aq.shape
     N = bq.shape[1]
@@ -515,6 +532,8 @@ def scaled_mm(
         sa,
         sb,
         bias,
+        ga,
+        gb,
         M,
         N,
         K,
@@ -532,6 +551,7 @@ def scaled_mm(
         0 if bias is None else bias.stride(0),
         SCALE_BLOCK_SIZE=SCALE_BLOCK_SIZE,
         HAS_BIAS=bias is not None,
+        HAS_GLOBAL=ga is not None,
     )
     return c
 
@@ -644,10 +664,11 @@ def _early_prune_scaled_grouped_configs(
     B_IS_2D,
     SCALE_BLOCK_SIZE,
     HAS_BIAS,
+    HAS_GLOBAL,
     grid=None,
     warmup=None,
 ):
-    del named_args, NUM_SMS, A_IS_2D, B_IS_2D, HAS_BIAS, grid, warmup
+    del named_args, NUM_SMS, A_IS_2D, B_IS_2D, HAS_BIAS, HAS_GLOBAL, grid, warmup
     scale_block = SCALE_BLOCK_SIZE
     if not scale_block:
         return configs
@@ -667,6 +688,8 @@ def _scaled_grouped_mm_kernel(
     sa_ptr,
     sb_ptr,
     bias_ptr,
+    ga_ptr,
+    gb_ptr,
     offs_ptr,
     G,
     M,
@@ -694,6 +717,7 @@ def _scaled_grouped_mm_kernel(
     B_IS_2D: tl.constexpr,
     SCALE_BLOCK_SIZE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -818,6 +842,9 @@ def _scaled_grouped_mm_kernel(
                     other=0.0,
                 ).to(tl.float32)
                 acc += sa[:, None] * block_acc * sb[None, :]
+            # Each group owns one global scale per operand; apply them before bias.
+            if HAS_GLOBAL:
+                acc *= tl.load(ga_ptr + g) * tl.load(gb_ptr + g)
             # Bias is unscaled: apply it to acc, not each scaled block partial.
             if HAS_BIAS:
                 bias_ptrs = (
@@ -1129,6 +1156,8 @@ def scaled_grouped_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    ga: torch.Tensor | None = None,
+    gb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Ragged scaled grouped GEMM; layout follows operand ranks.
 
@@ -1142,6 +1171,9 @@ def scaled_grouped_mm(
     `block_size` 0 means one scale block spanning the whole contraction segment.
 
     `bias` is optional (E,N), broadcasts over output rows, and is added after scaling.
+
+    `ga`/`gb` are optional per-group fp32 global scales, shape (G,), applied to each
+    group's accumulator before bias. Both are given together or not at all.
 
     Callers must supply compatible CUDA tensors. `block_size` may be zero for one
     scale block; nonzero widths must be powers of two of at least 16, matching dense
@@ -1178,6 +1210,8 @@ def scaled_grouped_mm(
         sa,
         sb,
         bias,
+        ga,
+        gb,
         offs,
         E,
         M,
@@ -1205,5 +1239,6 @@ def scaled_grouped_mm(
         B_IS_2D=b_is_2d,
         SCALE_BLOCK_SIZE=block_size,
         HAS_BIAS=bias is not None,
+        HAS_GLOBAL=ga is not None,
     )
     return c

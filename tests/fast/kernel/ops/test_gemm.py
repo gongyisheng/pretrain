@@ -70,6 +70,8 @@ class MMCase:
     block_size: int = 0
     shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
     non_contiguous_offs: bool = False
+    # fp32 global scales to attach, by argument name, as {"ga": shape, ...}.
+    global_shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 def make_inputs(case):
@@ -84,6 +86,7 @@ def make_inputs(case):
         "out_dtype": torch.bfloat16,
         "block_size": case.block_size,
     }
+    args |= {name: torch.ones(shape) for name, shape in case.global_shapes.items()}
     if case.layout == "mm":
         return args
     offs = torch.arange(1, E + 1, dtype=torch.int32) * OFFS_STRIDE[case.layout]
@@ -99,6 +102,11 @@ SCALED_MM_ERROR_CASES = (
     MMCase("contraction", "mm", "contraction mismatch", shapes={"bq": (K + 32, N)}),
     MMCase("sa_blocks", "mm", "sa block count", 32, {"sa": (M, 4)}),
     MMCase("sb_blocks", "mm", "sb block count", 32, {"sb": (4, N)}),
+    # A dense call is one group, so any other global-scale length is wrong. mxfp8
+    # declines even a well-shaped one, so every op raises and both say "global scale".
+    MMCase("ga_shape", "mm", "global scale", 32, global_shapes={"ga": (2,)}),
+    # One operand's scale alone: Triton's single HAS_GLOBAL constexpr cannot express it.
+    MMCase("ga_alone", "mm", "global scale", 32, global_shapes={"ga": (1,)}),
 )
 
 SCALED_GROUPED_MM_ERROR_CASES = (
@@ -120,6 +128,17 @@ SCALED_GROUPED_MM_ERROR_CASES = (
         "offs groups",
         0,
         {"sa": (M, E + 1), "sb": (E + 1, N)},
+    ),
+    MMCase("ga_shape", "ragged_m", "global scale", 0, global_shapes={"ga": (E + 1,)}),
+    MMCase("ga_alone", "ragged_m", "global scale", 0, global_shapes={"ga": (E,)}),
+)
+
+# A valid global scale, which only mxfp8 rejects: its e8m0 block scales absorb one.
+MXFP8_GLOBAL_SCALE_CASES = (
+    (mxfp8_scaled_mm, MMCase("mm", "mm", global_shapes={"ga": (1,), "gb": (1,)})),
+    (
+        mxfp8_scaled_grouped_mm,
+        MMCase("ragged_m", "ragged_m", global_shapes={"ga": (E,), "gb": (E,)}),
     ),
 )
 
@@ -149,6 +168,15 @@ def test_scaled_mm_raise_error(op, case):
 )
 def test_scaled_grouped_mm_raise_error(op, case):
     with pytest.raises(ValueError, match=case.match):
+        op(**make_inputs(case))
+
+
+@pytest.mark.parametrize(
+    ("op", "case"), MXFP8_GLOBAL_SCALE_CASES, ids=["mm", "grouped"]
+)
+def test_scaled_mm_mxfp8_global_scale_raise_error(op, case):
+    """mxfp8 declines a well-formed global scale rather than silently ignoring it."""
+    with pytest.raises(ValueError, match="does not accept a global scale"):
         op(**make_inputs(case))
 
 

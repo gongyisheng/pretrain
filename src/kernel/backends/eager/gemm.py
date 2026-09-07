@@ -56,6 +56,18 @@ def grouped_mm(
     raise AssertionError("ragged-N bias should have been rejected")
 
 
+def _apply_global(out, ga, gb, group=None):
+    """Scale a GEMM result by its operands' global scales.
+
+    `ga`/`gb` hold one value per group; `group` selects it for a grouped call and
+    is None for a dense one, whose single value broadcasts over the output.
+    """
+    for g in (ga, gb):
+        if g is not None:
+            out = out * (g if group is None else g[group])
+    return out
+
+
 def _dequant_a(q, scale, block_size):
     width = block_size or q.shape[-1]
     expanded = scale.float().repeat_interleave(width, dim=-1)[..., : q.shape[-1]]
@@ -100,8 +112,11 @@ def scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    ga: torch.Tensor | None = None,
+    gb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     out = _dequant_a(aq, sa, block_size) @ _dequant_b(bq, sb, block_size)
+    out = _apply_global(out, ga, gb)
     if bias is not None:
         out = out + bias.float()
     return out.to(out_dtype)
@@ -140,6 +155,8 @@ def scaled_grouped_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    ga: torch.Tensor | None = None,
+    gb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     a_is_2d = aq.ndim == 2
     b_is_2d = bq.ndim == 2
@@ -153,14 +170,16 @@ def scaled_grouped_mm(
     if a_is_2d and not b_is_2d:
         a = _dequant_a(aq, sa, block_size)
         pieces = [
-            a[lo:hi] @ _dequant_b(bq[group], sb[group], block_size)
+            _apply_global(
+                a[lo:hi] @ _dequant_b(bq[group], sb[group], block_size), ga, gb, group
+            )
             for group, (lo, hi) in enumerate(bounds)
         ]
         out = torch.cat(pieces, dim=0)
     elif a_is_2d and b_is_2d:
         pieces = []
         scale_start = 0
-        for lo, hi in bounds:
+        for group, (lo, hi) in enumerate(bounds):
             size = hi - lo
             block_count = (
                 1 if block_size == 0 else (size + block_size - 1) // block_size
@@ -168,13 +187,18 @@ def scaled_grouped_mm(
             scale_end = scale_start + block_count
             a = _dequant_a(aq[:, lo:hi], sa[:, scale_start:scale_end], block_size)
             b = _dequant_b(bq[lo:hi], sb[scale_start:scale_end], block_size)
-            pieces.append(a @ b)
+            pieces.append(_apply_global(a @ b, ga, gb, group))
             scale_start = scale_end
         out = torch.stack(pieces)
     else:
         b = _dequant_b(bq, sb, block_size)
         pieces = [
-            _dequant_a(aq[group], sa[group], block_size) @ b[:, lo:hi]
+            _apply_global(
+                _dequant_a(aq[group], sa[group], block_size) @ b[:, lo:hi],
+                ga,
+                gb,
+                group,
+            )
             for group, (lo, hi) in enumerate(bounds)
         ]
         out = torch.cat(pieces, dim=1)

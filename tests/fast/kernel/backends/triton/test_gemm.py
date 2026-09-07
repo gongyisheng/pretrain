@@ -33,6 +33,16 @@ from tests.fast.helper import (
 
 pytestmark = cuda_only
 
+# The global-scale epilogue is a backend contract, so both implement it.
+GLOBAL_SCALE_BACKENDS = (triton_mm, eager_mm)
+# The epilogue runs after the dot, so it cannot depend on the element format. One
+# integer and one fp8 pair cover both operand-dtype paths into it. All five formats
+# were run once and agreed, at 1040 cells against 416; the rest are compile-time
+# specialisations of a path the element format does not reach.
+GLOBAL_SCALE_FORMAT_CASES = tuple(
+    case for case in QUANT_FORMAT_CASES if case.name in {"int8xint8", "e4m3xe4m3"}
+)
+
 
 @pytest.mark.parametrize("case", GROUPED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
@@ -97,6 +107,32 @@ def test_scaled_mm_precision(case, format, scale, with_bias, out_dtype):
     torch.testing.assert_close(
         actual, expected, rtol=out_dtype.rtol, atol=out_dtype.atol
     )
+
+
+@pytest.mark.parametrize("backend", GLOBAL_SCALE_BACKENDS, ids=["triton", "eager"])
+@pytest.mark.parametrize("case", SCALED_MM_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize(
+    "format", GLOBAL_SCALE_FORMAT_CASES, ids=lambda case: case.name
+)
+@pytest.mark.parametrize("scale", QUANT_SCALE_CASES, ids=lambda case: case.name)
+def test_scaled_mm_global_scale_matches_folded_scale(backend, case, format, scale):
+    """A global scale in the epilogue equals folding it into the block scales.
+
+    The factors are powers of two, so folding them into fp32 block scales is exact
+    and both orderings produce bit-identical fp32 output. That makes this an oracle
+    for the epilogue's semantics, which triton-vs-eager parity alone cannot supply:
+    both backends could apply the scale wrongly in the same way.
+    """
+    aq, bq, sa, sb, _, block_size, _ = make_scaled_mm_inputs(
+        case, format, scale, with_bias=False, out_dtype=torch.float32
+    )
+    ga = torch.full((1,), 4.0, device=aq.device)
+    gb = torch.full((1,), 2.0, device=aq.device)
+    got = backend.scaled_mm(aq, bq, sa, sb, torch.float32, block_size, None, ga, gb)
+    want = backend.scaled_mm(
+        aq, bq, sa * 4.0, sb * 2.0, torch.float32, block_size, None
+    )
+    assert torch.equal(got, want)
 
 
 @pytest.mark.parametrize("case", SCALED_MM_CASES, ids=lambda case: case.name)
@@ -200,6 +236,52 @@ def test_scaled_grouped_mm_precision(case, scale, format, layout, with_bias, out
     torch.testing.assert_close(
         actual, expected, rtol=out_dtype.rtol, atol=out_dtype.atol
     )
+
+
+@pytest.mark.parametrize("backend", GLOBAL_SCALE_BACKENDS, ids=["triton", "eager"])
+@pytest.mark.parametrize("case", SCALED_GROUPED_MM_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
+@pytest.mark.parametrize(
+    "format", GLOBAL_SCALE_FORMAT_CASES, ids=lambda case: case.name
+)
+@pytest.mark.parametrize("scale", QUANT_SCALE_CASES, ids=lambda case: case.name)
+def test_scaled_grouped_mm_global_scale_matches_folded_scale(
+    backend, case, layout, format, scale
+):
+    """Each group's global scale equals folding that group's factor into its scales.
+
+    Distinct per-group factors are what separate a correct per-group epilogue from
+    one that reuses group 0's value for every group.
+    """
+    if layout in {"ragged_k", "ragged_n"} and all(
+        dimension > 1 for dimension in scale.block_shape
+    ):
+        pytest.skip("2D scales cross ragged groups during quantization")
+    aq, bq, sa, sb, offs, _, kbs, _ = make_scaled_grouped_mm_inputs(
+        case, layout, format, scale, with_bias=False, out_dtype=torch.float32
+    )
+    groups = offs.numel()
+    # Distinct powers of two per group: exact under fp32, and a product of 4**g that
+    # no group shares, so reusing one group's factor everywhere fails the assert.
+    exponents = torch.arange(groups, device=aq.device, dtype=torch.float32)
+    ga, gb = 2.0**exponents, 2.0**exponents
+    got = backend.scaled_grouped_mm(
+        aq, bq, sa, sb, offs, torch.float32, kbs, None, ga, gb
+    )
+    base = backend.scaled_grouped_mm(aq, bq, sa, sb, offs, torch.float32, kbs, None)
+
+    factor = ga * gb
+    want = base.clone()
+    if layout == "ragged_k":  # (E, M, N): one output slab per group
+        want *= factor[:, None, None]
+    else:
+        ends = offs.tolist()
+        for group, (lo, hi) in enumerate(zip([0, *ends[:-1]], ends)):
+            if layout == "ragged_m":  # (M, N): output rows partitioned by offs
+                want[lo:hi] *= factor[group]
+            else:  # ragged_n -> (M, N): output columns partitioned by offs
+                want[:, lo:hi] *= factor[group]
+    assert torch.equal(got, want)
 
 
 @pytest.mark.parametrize("case", SCALED_GROUPED_MM_CASES, ids=lambda case: case.name)
