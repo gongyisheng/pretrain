@@ -29,7 +29,6 @@ Tested on
 ---------
 NVIDIA RTX 5090, torch 2.10.0+cu128, CUDA 12.8, bf16 autocast.
 """
-from __future__ import annotations
 import argparse
 import contextlib
 import time

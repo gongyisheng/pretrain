@@ -79,7 +79,9 @@ class Trainer:
         self.pad_token_id = self.eot_token_id
 
         # Model
-        self.eager_model = build_model(config).to(self.device)
+        self.eager_model = build_model(config)
+        apply_quantization(self.eager_model, config)
+        self.eager_model.to(self.device)
 
         # Data
         if not os.path.isdir(config.data.data_dir):
@@ -150,11 +152,13 @@ class Trainer:
             worker_init_fn=Trainer._worker_init_fn,
         )
 
-        # Quantization: swap eligible nn.Linear modules to QuantizedLinear
-        # (before torch.compile).
-        apply_quantization(self.eager_model, config)
         self.logger = WandbLogger(config, enabled=wandb_enabled)
         self.metrics = MetricsCollector(config, self.device, logger=self.logger)
+
+        if config.logging.log_activation_norms:
+            apply_activation_monitoring(self.eager_model)
+        if config.logging.log_quant_metrics:
+            apply_quantization_monitoring(self.eager_model)
 
         # Optimizer & scheduler
         self.optimizer = build_optimizer(self.eager_model, config)
@@ -178,11 +182,6 @@ class Trainer:
         import torch._inductor.config as inductor_config
 
         inductor_config.assert_indirect_indexing = False
-
-        if config.logging.log_activation_norms:
-            apply_activation_monitoring(self.eager_model)
-        if config.logging.log_quant_metrics:
-            apply_quantization_monitoring(self.eager_model)
 
         if config.training.enable_torch_compile:
             self.model = torch.compile(self.eager_model)

@@ -15,11 +15,10 @@ from tests.fast.kernel.backends.helper import (
     MXFP8_SCALED_MM_CASES,
     make_scaled_mm_inputs,
 )
+from tests.fast.helper import cuda_only, cuda_sm100_or_newer
 
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="cuBLASLt MM kernels are CUDA only"
-)
+pytestmark = cuda_only
 
 MXFP8_SUPPORT_CASES = (
     (torch.float8_e4m3fn, torch.float8_e4m3fn, 32, True),
@@ -46,14 +45,12 @@ def test_supports_mxfp8_scaled_mm(a_dtype, b_dtype, block_size, supported):
     )
 
 
+@cuda_sm100_or_newer
 @pytest.mark.parametrize("case", MXFP8_SCALED_MM_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("format", MXFP8_FORMAT_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("scale", MXFP8_SCALE_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("with_bias", BIAS_CASES, ids=["no-bias", "bias"])
 def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias):
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("cuBLASLt mxfp8 scaled MM requires SM100+")
-
     # the kernel returns bf16 and rejects every other request by contract, so
     # unlike the Triton tests there is no out_dtype axis to bound against
     aq, bq, sa, sb, out_dtype, block_size, bias = make_scaled_mm_inputs(

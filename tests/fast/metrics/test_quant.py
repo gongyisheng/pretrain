@@ -3,7 +3,13 @@ import pytest
 
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.metrics.functional import _quantization_metrics, compute_quantization_metrics
-from src.metrics.quant import QuantizationStats, accumulate_quantization_sums
+from src.metrics.quant import (
+    QuantizationStats,
+    accumulate_quantization_sums,
+    record_operand,
+    set_quantization_monitoring_status,
+)
+from src.quant.rotation import HadamardRotation
 
 _TENSORWISE = {
     "granularity": "tensorwise",
@@ -13,6 +19,7 @@ _TENSORWISE = {
 
 METRICS = ("sqnr", "underflow_rate")
 SPREAD_METRICS = ("sqnr_min", "underflow_rate_max")
+RAGGED_DIM_CASES = [(-2, False), (-1, True)]
 
 
 # --- compute_quantization_metrics: a pure function of (source, dequantized, codes) ---
@@ -91,6 +98,30 @@ def test_an_all_zero_expert_stays_valid():
     assert nonzero[1].item() == 0.0 and nonzero[2].item() == 0.0
 
 
+@pytest.mark.parametrize("ragged_dim,transpose", RAGGED_DIM_CASES)
+def test_accumulate_quantization_sums_ragged_dim(ragged_dim, transpose):
+    source = torch.arange(1, 11, dtype=torch.float32).reshape(5, 2)
+    if transpose:
+        source = source.mT
+    offs = torch.tensor([2, 5])
+    sums = accumulate_quantization_sums(
+        source,
+        source,
+        source,
+        offs=offs,
+        ragged_dim=ragged_dim,
+    )
+    expected = (
+        torch.tensor([30.0, 355.0]),
+        torch.zeros(2),
+        torch.zeros(2),
+        torch.tensor([4.0, 6.0]),
+        torch.tensor([4.0, 6.0]),
+    )
+    for got, want in zip(sums, expected):
+        assert torch.equal(got, want)
+
+
 def test_sqnr_matches_hand_computed_ratio():
     x = torch.tensor([[3.0, 4.0]])  # norm 5
     deq = torch.tensor([[3.0, 3.0]])  # error norm 1
@@ -162,6 +193,34 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
     q, scale = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
     m = _metrics(x, dequantize_operand(q, scale, -1, _TENSORWISE), q)
     assert m["underflow_rate"].item() > 0.9
+
+
+def test_record_operand_rotation_aligns_underflow_with_codes():
+    source = torch.ones(1, 4)
+    rotation = HadamardRotation(block_size=4, random_sign=False)
+    codes, scale = quantize_operand(source, -1, "int8", _TENSORWISE, rotation=rotation)
+    stats = QuantizationStats("act/x", 1, source.device)
+
+    set_quantization_monitoring_status(True)
+    try:
+        record_operand(
+            stats,
+            source,
+            codes,
+            scale,
+            -1,
+            _TENSORWISE,
+            rotation=rotation,
+        )
+    finally:
+        set_quantization_monitoring_status(False)
+
+    dequantized = dequantize_operand(codes, scale, -1, _TENSORWISE, rotation=rotation)
+    assert stats.err_sq.item() == pytest.approx(
+        (source - dequantized).square().sum().item()
+    )
+    assert stats.under.item() == 0.0
+    assert stats.nonzero.item() == 1.0
 
 
 # --- accumulation: the property the fold/read split exists to provide ---
