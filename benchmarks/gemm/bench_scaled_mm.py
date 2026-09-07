@@ -277,8 +277,8 @@ def _bench_scheme(a, b, config):
     block_size = config["block_size"] or 0
     scale = _scale_for_config(config)
     fmt = _FMT[E4M3] if config["dtype"] == "fp8" else "int8"
-    aq, sa = quantize_operand(a, -1, fmt, scale)
-    bq, sb = quantize_operand(b, -2, fmt, scale)
+    aq, sa, _ = quantize_operand(a, -1, fmt, scale)
+    bq, sb, _ = quantize_operand(b, -2, fmt, scale)
     scale_dtype = scale["scale_dtype"]
 
     ref = _scaled_mm(

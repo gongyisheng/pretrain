@@ -30,6 +30,12 @@ QUANT_SCALE_RECIPES = {
         "block_shape": (1, 32),
         "scale_dtype": "fp8_e8m0",
     },
+    "nvfp4": {
+        "granularity": "blockwise",
+        "block_shape": (1, 16),
+        "scale_dtype": "fp8_e4m3",
+        "global_scale": True,
+    },
 }
 
 QUANT_DTYPE_RECIPES = {

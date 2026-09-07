@@ -1298,6 +1298,7 @@ def test_quant_mxfp8_recipe_expands_dtype_and_scale():
         "granularity": "blockwise",
         "block_shape": (1, 32),
         "scale_dtype": torch.float8_e8m0fnu,
+        "global_scale": False,
     }
 
 
@@ -1311,6 +1312,71 @@ def test_quant_mxfp8_scale_recipe_expands():
     assert q.scale["block_shape"] == (1, 32)
     assert q.scale["scale_dtype"] is torch.float8_e8m0fnu
     assert "recipe" not in q.scale  # recipe key is consumed on expansion
+
+
+def test_quant_nvfp4_scale_recipe_expands():
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"weight": "int4", "act": "int4"},
+        scale={"recipe": "nvfp4"},
+    )
+    assert q.scale["granularity"] == "blockwise"
+    assert q.scale["block_shape"] == (1, 16)
+    assert q.scale["scale_dtype"] is torch.float8_e4m3fn
+    assert q.scale["global_scale"] is True
+    assert "recipe" not in q.scale  # recipe key is consumed on expansion
+
+
+# Scale dtypes wide enough to absorb a global factor, leaving it nothing to do.
+GLOBAL_SCALE_DEGENERATE_SCALES = [
+    {"granularity": "rowwise", "scale_dtype": "fp32"},
+    {"granularity": "blockwise", "block_shape": (1, 32), "scale_dtype": "fp8_e8m0"},
+]
+
+
+@pytest.mark.parametrize("scale", GLOBAL_SCALE_DEGENERATE_SCALES)
+def test_quant_global_scale_disabled_for_wide_scale_dtype(scale):
+    """A global factor cancels against a wide scale, so the flag is normalised off.
+
+    Left on, it would be a swept knob that provably cannot move a result: an fp32
+    scale absorbs the factor exactly, an e8m0 one up to a shift of its power-of-two
+    grid. Normalising here keeps exactly one representation of that no-op.
+    """
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3"},
+        scale={**scale, "global_scale": True},
+    )
+    assert q.scale["global_scale"] is False
+
+
+def test_quant_global_scale_kept_for_narrow_scale_dtype():
+    """e4m3 block scales have a range to normalise into, at any granularity."""
+    for granularity, extra in (
+        ("tensorwise", {}),
+        ("rowwise", {}),
+        ("blockwise", {"block_shape": (1, 16)}),
+    ):
+        q = QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "int4", "act": "int4"},
+            scale={
+                "granularity": granularity,
+                "scale_dtype": "fp8_e4m3",
+                "global_scale": True,
+                **extra,
+            },
+        )
+        assert q.scale["global_scale"] is True, granularity
+
+
+def test_quant_global_scale_raise_error():
+    with pytest.raises(ValueError, match="global_scale"):
+        QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "int4"},
+            scale={"granularity": "rowwise", "global_scale": "yes"},
+        )
 
 
 def test_quant_mxfp8_scale_recipe_explicit_keys_win():

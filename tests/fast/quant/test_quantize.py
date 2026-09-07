@@ -9,7 +9,12 @@ from tests.fast.helper import cuda_sm89_or_newer
 from tests.fast.quant.helper import (
     ALL_QUANT_FORMATS,
     ALL_SCALES,
+    BLOCKWISE1D_16_E4M3,
+    BLOCKWISE2D_16_E4M3,
     E4M3,
+    NVFP4_16,
+    NVFP4_2D_16,
+    NVFP4_SCALES,
     ROWWISE,
     SCALES_COARSE_TO_FINE,
     TENSORWISE,
@@ -81,6 +86,16 @@ def _make(init_method, shape, dtype=torch.float32):
         # This requires a scale below E8M0's floor, forcing scale clamping.
         x[..., 0, 0] = 2**-136
     return x
+
+
+def _rel_mse(source, dequantized):
+    """Relative MSE in float64.
+
+    An fp32 sum of squares underflows to zero for a tiny operand -- (2**-136)**2 is
+    below fp32's min subnormal -- which would make the ratio NaN rather than small.
+    """
+    src, out = source.double(), dequantized.double()
+    return ((src - out).square().sum() / src.square().sum()).item()
 
 
 def _ragged_offs(extent):
@@ -234,7 +249,11 @@ QUANTIZE_ERROR_CASES = [
         x=torch.ones(2, 2),
         contract_dim=-1,
         fmt=E4M3,
-        scale_cfg={"granularity": "rowwise", "block_shape": (0, 0)},
+        scale_cfg={
+            "granularity": "rowwise",
+            "block_shape": (0, 0),
+            "global_scale": False,
+        },
     ),
     ErrorCase(
         "unknown_granularity",
@@ -320,7 +339,7 @@ def test_quantize_operand_precision(fmt, scale_cfg, contract_dim, geometry, inpu
     )
 
     rng = torch.random.get_rng_state()
-    codes, scale = quantize_operand(
+    codes, scale, _ = quantize_operand(
         x, contract_dim, fmt, scale_cfg, offs=offs, ragged_dim=ragged_dim
     )
 
@@ -342,7 +361,7 @@ def test_quantize_operand_precision(fmt, scale_cfg, contract_dim, geometry, inpu
     assert torch.equal(_bits(codes), _bits(_ref_codes(x, div, fmt)))
 
     assert torch.equal(torch.random.get_rng_state(), rng)
-    again, _ = quantize_operand(
+    again, _, _ = quantize_operand(
         x, contract_dim, fmt, scale_cfg, offs=offs, ragged_dim=ragged_dim
     )
     assert torch.equal(_bits(again), _bits(codes))
@@ -351,8 +370,10 @@ def test_quantize_operand_precision(fmt, scale_cfg, contract_dim, geometry, inpu
         per_expert = [
             quantize_operand(expert, contract_dim, fmt, scale_cfg) for expert in x
         ]
-        assert torch.equal(_bits(codes), _bits(torch.stack([q for q, _ in per_expert])))
-        assert torch.equal(scale, torch.stack([s for _, s in per_expert]))
+        assert torch.equal(
+            _bits(codes), _bits(torch.stack([q for q, _, _ in per_expert]))
+        )
+        assert torch.equal(scale, torch.stack([s for _, s, _ in per_expert]))
 
     qmax = str_to_qmax(fmt)
     # Every block peak is in range, so code clamping is inactive.
@@ -418,7 +439,7 @@ def test_quantize_operand_e4m3_scale_clamps_to_representable_window(
     """
     scale_cfg = scale_of("blockwise", (1, 16), torch.float8_e4m3fn)
     x = torch.randn(64, 128, device="cuda", dtype=torch.float32) * magnitude
-    codes, scale = quantize_operand(x, contract_dim, fmt, scale_cfg)
+    codes, scale, _ = quantize_operand(x, contract_dim, fmt, scale_cfg)
     assert scale.dtype is torch.float8_e4m3fn
     scale_values = scale.float()
     assert torch.isfinite(scale_values).all()
@@ -461,6 +482,166 @@ def test_compute_scale_clamps_to_representable_window(scale_dtype, amax_value):
     assert torch.equal(scales[0], scales[1].cpu())
 
 
+# Eight decades of operand magnitude. Without a global scale an e4m3 block scale is
+# only usable near 1e0; the whole point of the scale is that these agree.
+GLOBAL_SCALE_MAGNITUDES = [1e-4, 1e-2, 1.0, 1e2, 1e4]
+# Worst round-trip relMSE over the nvfp4 scale x geometry x contract_dim x input grid,
+# times 4.3. The worst cell is a 2D block over a logspace-spread operand, where int4's
+# own resolution dominates; this bound guards the (G,) plumbing, not the magnitude
+# property, which the per-format bounds below carry.
+GLOBAL_SCALE_ROUNDTRIP_BOUND = 0.17
+# Worst relMSE over magnitude x contract_dim with the nvfp4 recipe, times 4.3. The
+# bounds are per format because a single loose one would let int8 regress 300x and
+# still pass. Unscaled, the far magnitudes sit near 1.0, so every bound has teeth.
+GLOBAL_SCALE_REL_MSE_BOUND = {
+    "fp8_e4m3": 0.0028,  # measured 6.429e-04
+    "fp8_e5m2": 0.011,  # measured 2.647e-03
+    "int4": 0.036,  # measured 8.479e-03
+    "int5": 0.0078,  # measured 1.802e-03
+    "int6": 0.0018,  # measured 4.221e-04
+    "int7": 0.00045,  # measured 1.040e-04
+    "int8": 0.00011,  # measured 2.570e-05
+}
+
+
+@pytest.mark.parametrize("magnitude", GLOBAL_SCALE_MAGNITUDES)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("fmt", ALL_QUANT_FORMATS)
+def test_quantize_operand_global_scale_is_magnitude_invariant(
+    fmt, contract_dim, magnitude
+):
+    """A global scale makes a narrow block scale work at any operand magnitude.
+
+    This is the property the feature exists for, and the only one a silently
+    no-op implementation fails: at 1e0 an e4m3 scale needs no help, so an
+    on-versus-off comparison there shows almost nothing. Away from 1e0 the
+    unscaled version collapses -- every block scale floors or saturates.
+    """
+    torch.manual_seed(0)
+    base = torch.randn(64, 128, device="cuda", dtype=torch.float32)
+    x = base * magnitude
+    deq = roundtrip(x, contract_dim, fmt, NVFP4_16)
+    assert _rel_mse(x, deq) < GLOBAL_SCALE_REL_MSE_BOUND[fmt]
+
+
+# The nvfp4 cells paired with the identical config minus the global scale.
+GLOBAL_SCALE_OFF_PAIRS = [
+    (NVFP4_16, BLOCKWISE1D_16_E4M3),
+    (NVFP4_2D_16, BLOCKWISE2D_16_E4M3),
+]
+
+
+@pytest.mark.parametrize(("on_cfg", "off_cfg"), GLOBAL_SCALE_OFF_PAIRS)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("fmt", ALL_QUANT_FORMATS)
+def test_quantize_operand_global_scale_disabled_changes_nothing(
+    fmt, contract_dim, on_cfg, off_cfg
+):
+    """With the flag off, the nvfp4 config is bit-identical to the plain e4m3 one.
+
+    Pins that the feature is inert when disabled, so an existing run's numerics
+    cannot shift underneath it.
+    """
+    x = torch.randn(64, 128, device="cuda", dtype=torch.float32) * 3
+    off = dict(on_cfg, global_scale=False)
+    codes_off, scale_off, g_off = quantize_operand(x, contract_dim, fmt, off)
+    codes_plain, scale_plain, g_plain = quantize_operand(x, contract_dim, fmt, off_cfg)
+    assert g_off is None and g_plain is None
+    assert torch.equal(_bits(codes_off), _bits(codes_plain))
+    assert torch.equal(scale_off.float(), scale_plain.float())
+
+    # And that it is not inert when on, or the test above would prove nothing.
+    codes_on, _, g_on = quantize_operand(x, contract_dim, fmt, on_cfg)
+    assert g_on is not None and g_on.dtype is torch.float32
+
+
+GLOBAL_SCALE_SHAPE_CASES = [
+    ((64, 128), None, None, 1),  # dense 2D is one group
+    ((3, 64, 128), None, None, 3),  # stacked 3D is one group per expert
+    ((70, 130), -2, RAGGED_GROUPS, RAGGED_GROUPS),
+    ((70, 130), -1, RAGGED_GROUPS, RAGGED_GROUPS),
+]
+
+
+@pytest.mark.parametrize(
+    ("shape", "ragged_dim", "groups", "expected"), GLOBAL_SCALE_SHAPE_CASES
+)
+def test_quantize_operand_global_scale_shape(shape, ragged_dim, groups, expected):
+    """One fp32 global scale per group, whatever supplies the groups."""
+    x = torch.randn(*shape, device="cuda", dtype=torch.float32)
+    offs = None if groups is None else _ragged_offs(shape[ragged_dim])
+    _, _, g = quantize_operand(
+        x, -1, "int4", NVFP4_16, offs=offs, ragged_dim=ragged_dim
+    )
+    assert g.shape == (expected,)
+    assert g.dtype is torch.float32
+    assert (g > 0).all()
+
+
+@pytest.mark.parametrize("input_case", INPUT_CASES)
+@pytest.mark.parametrize(("shape", "ragged_dim"), GEOMETRY_CASES)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("scale_cfg", NVFP4_SCALES)
+def test_quantize_operand_global_scale_roundtrip(
+    scale_cfg, contract_dim, shape, ragged_dim, input_case
+):
+    """A global scale round-trips over every geometry that supplies its groups."""
+    dtype, init_method = input_case
+    x = _make(init_method, shape, dtype).cuda()
+    offs = None if ragged_dim is None else _ragged_offs(shape[ragged_dim])
+    codes, scale, g = quantize_operand(
+        x, contract_dim, "int4", scale_cfg, offs=offs, ragged_dim=ragged_dim
+    )
+    expected_groups = 1 if offs is None else offs.numel()
+    assert g.shape == (len(x) if x.ndim == 3 else expected_groups,)
+    deq = dequantize_operand(
+        codes,
+        scale,
+        contract_dim,
+        scale_cfg,
+        offs=offs,
+        ragged_dim=ragged_dim,
+        global_scale=g,
+    )
+    assert torch.isfinite(deq).all()
+    source = x.float()
+    if init_method in ("zeros", "tiny"):
+        # An operand under EPS floors the scale and flushes to zero. The plain fp32
+        # scale path does exactly the same, so this is not the global scale's doing;
+        # only e8m0, whose floor is 2**-127 rather than 1e-30, reaches low enough to
+        # carry 2**-136 through.
+        assert torch.equal(deq, torch.zeros_like(deq))
+        return
+    assert _rel_mse(source, deq) < GLOBAL_SCALE_ROUNDTRIP_BOUND
+
+
+def test_quantize_operand_global_scale_is_per_group():
+    """A loud group must not degrade a quiet one -- the reason it is per group.
+
+    Contrasted against one scale over the whole tensor, where the loud group sets g
+    and drives every quiet block's scale under e4m3's floor.
+    """
+    torch.manual_seed(0)
+    quiet = torch.randn(32, 128, device="cuda", dtype=torch.float32)
+    loud = torch.randn(32, 128, device="cuda", dtype=torch.float32) * 1e6
+    x = torch.cat([quiet, loud], dim=0)
+    offs = _offs([32, 32])
+
+    def quiet_error(**ragged):
+        codes, scale, g = quantize_operand(x, -1, "int4", NVFP4_16, **ragged)
+        deq = dequantize_operand(codes, scale, -1, NVFP4_16, global_scale=g, **ragged)
+        per_row = (x - deq).square().sum(-1) / x.square().sum(-1)
+        return per_row[:32].mean().item(), g
+
+    grouped, g_grouped = quiet_error(offs=offs, ragged_dim=-2)
+    pooled, g_pooled = quiet_error()
+    assert g_grouped.shape == (2,) and g_pooled.shape == (1,)
+    # Measured 8.3e-3 per group against 5.0e-1 pooled: a 60x gap, the quiet group
+    # wiped out because the loud group's amax sets g and floors every quiet block.
+    assert grouped < 1e-2
+    assert pooled > 0.3
+
+
 @pytest.mark.parametrize("enable_sr", [False, True])
 @pytest.mark.parametrize("fmt", ALL_QUANT_FORMATS)
 def test_quantize_operand_stochastic_rounding(fmt, enable_sr):
@@ -468,7 +649,7 @@ def test_quantize_operand_stochastic_rounding(fmt, enable_sr):
     torch.manual_seed(0)
     grid = _code_grid(fmt)
     probe = torch.cat([grid, (grid[:-1] + grid[1:]) / 2]).reshape(1, -1)
-    codes, scale = quantize_operand(
+    codes, scale, _ = quantize_operand(
         probe, -1, fmt, TENSORWISE, stochastic_rounding=enable_sr
     )
     assert scale.item() == 1.0  # The row peak is qmax.
@@ -480,7 +661,7 @@ def test_quantize_operand_stochastic_rounding(fmt, enable_sr):
     )
 
     qmax = str_to_qmax(fmt)
-    ends, _ = quantize_operand(
+    ends, _, _ = quantize_operand(
         torch.tensor([[1.0, 0.0, -0.0, -1.0]]),
         -1,
         fmt,
@@ -493,10 +674,12 @@ def test_quantize_operand_stochastic_rounding(fmt, enable_sr):
 
     # The leading 1 fixes the scale; 0.3 lies between codes in every format.
     x = torch.cat([torch.ones(1), torch.full((9999,), 0.3)]).reshape(1, -1)
-    draws, scale = quantize_operand(
+    draws, scale, _ = quantize_operand(
         x, -1, fmt, TENSORWISE, stochastic_rounding=enable_sr
     )
-    again, _ = quantize_operand(x, -1, fmt, TENSORWISE, stochastic_rounding=enable_sr)
+    again, _, _ = quantize_operand(
+        x, -1, fmt, TENSORWISE, stochastic_rounding=enable_sr
+    )
     reached = draws.float()[0, 1:].unique().numel()
 
     if not enable_sr:
@@ -571,7 +754,7 @@ DEQUANTIZE_ERROR_CASES = [
         xq=torch.ones(4, 4, dtype=torch.int8),
         scale=torch.ones(4, 1),
         contract_dim=-1,
-        scale_cfg={"granularity": "rowwise"},
+        scale_cfg={"granularity": "rowwise", "global_scale": False},
     ),
     ErrorCase(
         "rotation_with_unaligned_ragged_contraction",
@@ -610,7 +793,7 @@ def test_dequantize_operand_precision(
     x = _make(init_method, shape, dtype)
     offs = None if ragged_dim is None else _ragged_offs(shape[ragged_dim])
     div = _ref_divisor(x, contract_dim, fmt, scale_cfg, offs, ragged_dim)
-    codes, scale = quantize_operand(
+    codes, scale, _ = quantize_operand(
         x, contract_dim, fmt, scale_cfg, offs=offs, ragged_dim=ragged_dim
     )
     deq = dequantize_operand(
@@ -664,11 +847,11 @@ def test_quantize_operand_rotation_block1_matches_baseline(contract_dim):
     """
     torch.manual_seed(0)
     x = _make("outlier", (64, 128))
-    baseline_codes, baseline_scale = quantize_operand(
+    baseline_codes, baseline_scale, _ = quantize_operand(
         x, contract_dim, "int8", TENSORWISE
     )
     rotation = build_rotation(ROTATION_BLOCK1_CFG)
-    codes, scale = quantize_operand(
+    codes, scale, _ = quantize_operand(
         x, contract_dim, "int8", TENSORWISE, rotation=rotation
     )
     assert torch.equal(codes, baseline_codes)
@@ -698,7 +881,7 @@ def test_quantize_operand_rotation_ragged_outer_axis(
         _rotation_cfg(rotation_block_size, rotation_random_sign, rotation_seed)
     )
 
-    codes, scale = quantize_operand(
+    codes, scale, _ = quantize_operand(
         x,
         contract_dim,
         "int8",
@@ -732,7 +915,7 @@ def test_quantize_operand_rotation_ragged_contraction_roundtrip(
         _rotation_cfg(rotation_block_size, rotation_random_sign, rotation_seed)
     )
     offs = _offs([32, 32])
-    codes, scale = quantize_operand(
+    codes, scale, _ = quantize_operand(
         x,
         -2,
         "int8",
@@ -762,20 +945,30 @@ def test_quantize_operand_rotation_rejects_indivisible_block():
 
 
 @cuda_sm89_or_newer
-def test_quantize_operand_compiles_fullgraph():
-    """Rotated FP8 quantization must have identical eager and compiled bits."""
+@pytest.mark.parametrize("scale_cfg", [ROWWISE, NVFP4_16])
+def test_quantize_operand_compiles_fullgraph(scale_cfg):
+    """Rotated FP8 quantization must have identical eager and compiled bits.
+
+    The nvfp4 case also pins that a global scale stays a tensor: reading it back
+    as a Python float would sync the device and break fullgraph here.
+    """
     torch.manual_seed(0)
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     rotation = build_rotation(ROTATION_BLOCK32_CFG).cuda()
 
     def quantize(x):
-        return quantize_operand(x, -1, E4M3, ROWWISE, rotation=rotation)
+        return quantize_operand(x, -1, E4M3, scale_cfg, rotation=rotation)
 
-    eager_codes, eager_scale = quantize(x)
-    compiled_codes, compiled_scale = torch.compile(quantize, fullgraph=True)(x)
+    eager_codes, eager_scale, eager_global = quantize(x)
+    compiled_codes, compiled_scale, compiled_global = torch.compile(
+        quantize, fullgraph=True
+    )(x)
 
     assert torch.equal(compiled_codes, eager_codes)
     assert torch.equal(compiled_scale, eager_scale)
+    assert (eager_global is None) == (compiled_global is None)
+    if eager_global is not None:
+        assert torch.equal(compiled_global, eager_global)
 
 
 def test_quantize_operand_compiled_raise_error():
@@ -786,7 +979,7 @@ def test_quantize_operand_compiled_raise_error():
         offs = _offs([2, 6])
         rotation = build_rotation(ROTATION_BLOCK4_CFG)
 
-        def call() -> tuple[torch.Tensor, torch.Tensor]:
+        def call() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
             return quantize_operand(
                 x,
                 -1,

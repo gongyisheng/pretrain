@@ -154,6 +154,42 @@ def _segment_amax(
     )
 
 
+def _global_amax(
+    xf: torch.Tensor,
+    offs: torch.Tensor | None,
+    ragged_dim: int | None,
+) -> torch.Tensor:
+    """Absolute maximum per group, shaped (G,).
+
+    A dense 2D operand is one group, a stacked 3D operand one per expert, and a
+    ragged operand one per `offs` group.
+    """
+    if offs is None:
+        return xf.abs().amax((-2, -1)).reshape(-1)
+    dense_dim = -1 if ragged_dim == -2 else -2
+    row_blocks, n_blocks = _scale_block_map(offs, xf.shape[ragged_dim], 0)
+    return _segment_amax(
+        xf.abs().amax(dense_dim, keepdim=True), ragged_dim, row_blocks, n_blocks
+    ).reshape(-1)
+
+
+def _global_divisor(
+    global_scale: torch.Tensor,
+    x: torch.Tensor,
+    offs: torch.Tensor | None,
+    ragged_dim: int | None,
+) -> torch.Tensor:
+    """Broadcast a (G,) global scale over `x`."""
+    if offs is None:
+        # 3D carries one scale per expert, 2D a single value over the whole operand.
+        if x.ndim == 3:
+            return global_scale.reshape(-1, 1, 1)
+        return global_scale.reshape(())
+    row_blocks, _ = _scale_block_map(offs, x.shape[ragged_dim], 0)
+    expanded = global_scale.index_select(0, row_blocks)
+    return expanded.reshape(-1, 1) if ragged_dim == -2 else expanded.reshape(1, -1)
+
+
 def _check_dims(
     x: torch.Tensor,
     contract_dim: int,
@@ -398,6 +434,10 @@ def quantize_operand(
     `rotation` preconditions `x` before quantizing and is inverted by
     `dequantize_operand`. On a ragged contraction axis, every group boundary must
     align with a rotation block so the transform cancels within each GEMM group.
+
+    A `scale_cfg` with `global_scale` also returns one fp32 scale per group, shaped
+    (G,), that the block scales are expressed relative to; it is None otherwise.
+    `dequantize_operand` and the scaled GEMM kernels both need it back.
     """
     _check_dims(x, contract_dim, ragged_dim, offs)
     if rotation is not None:
@@ -408,6 +448,22 @@ def quantize_operand(
     granularity = scale_cfg["granularity"]
     block_outer, block_size = scale_cfg["block_shape"]
     scale_dtype = scale_cfg["scale_dtype"]
+
+    global_scale = None
+    if scale_cfg["global_scale"]:
+        # Map the operand's amax to the top of the block-scale dtype's range, so a
+        # narrow scale neither floors nor saturates at any operand magnitude.
+        # QuantizationConfig only leaves this on for a scale dtype narrow enough for
+        # it to mean something; a wide one would absorb the factor exactly.
+        global_scale = (
+            _global_amax(xf, offs, ragged_dim)
+            / (str_to_qmax(fmt) * float(torch.finfo(scale_dtype).max))
+        ).clamp_min(EPS)
+        # Pre-dividing leaves every granularity helper below correct unchanged:
+        # amax' = amax/g gives blk = cast(amax'/qmax), and round(xf'/blk) is
+        # round(xf/(g*blk)), which is the two-level formula.
+        xf = xf / _global_divisor(global_scale, xf, offs, ragged_dim)
+
     if granularity == "tensorwise":
         codes, scale = _quantize_tensorwise(
             xf, contract_dim, fmt, scale_dtype, offs, ragged_dim, stochastic_rounding
@@ -441,7 +497,7 @@ def quantize_operand(
             )
     else:
         raise ValueError(f"unknown granularity: {granularity!r}")
-    return codes, scale
+    return codes, scale, global_scale
 
 
 def dequantize_operand(
@@ -452,6 +508,7 @@ def dequantize_operand(
     offs: torch.Tensor | None = None,
     ragged_dim: int | None = None,
     rotation: Rotation | None = None,
+    global_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dequantize `xq` in fp32 using `quantize_operand`'s scale layout."""
     _check_dims(xq, contract_dim, ragged_dim, offs)
@@ -470,6 +527,9 @@ def dequantize_operand(
             contract_dim,
             length,
         )
+    if global_scale is not None:
+        # Before the inverse, mirroring quantize: it rotated, then divided by g.
+        deq = deq * _global_divisor(global_scale, deq, offs, ragged_dim)
     if rotation is not None:
         deq = rotation.inverse(deq, contract_dim)
     return deq

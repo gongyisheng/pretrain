@@ -145,11 +145,14 @@ BACKWARD_DTYPES = [
 ]
 
 
-def scale_of(granularity, block_shape=(0, 0), scale_dtype=torch.float32):
+def scale_of(
+    granularity, block_shape=(0, 0), scale_dtype=torch.float32, global_scale=False
+):
     return {
         "granularity": granularity,
         "block_shape": block_shape,
         "scale_dtype": scale_dtype,
+        "global_scale": global_scale,
     }
 
 
@@ -170,6 +173,10 @@ BLOCKWISE2D_64_E8M0 = scale_of("blockwise", (64, 64), torch.float8_e8m0fnu)
 ROWWISE_E4M3 = scale_of("rowwise", scale_dtype=torch.float8_e4m3fn)
 BLOCKWISE1D_16_E4M3 = scale_of("blockwise", (1, 16), torch.float8_e4m3fn)
 BLOCKWISE2D_16_E4M3 = scale_of("blockwise", (16, 16), torch.float8_e4m3fn)
+# NVFP4's own shape: a 16-wide e4m3 block scale under a per-tensor fp32 global scale.
+NVFP4_16 = scale_of("blockwise", (1, 16), torch.float8_e4m3fn, global_scale=True)
+NVFP4_2D_16 = scale_of("blockwise", (16, 16), torch.float8_e4m3fn, global_scale=True)
+NVFP4_ROWWISE = scale_of("rowwise", scale_dtype=torch.float8_e4m3fn, global_scale=True)
 
 
 ALL_SCALES = [
@@ -188,6 +195,12 @@ ALL_SCALES = [
     BLOCKWISE1D_16_E4M3,
     BLOCKWISE2D_16_E4M3,
 ]
+# The nvfp4 cells stay out of ALL_SCALES. The precision oracle there independently
+# re-derives how blocks are cut and expanded; a global scale is orthogonal to that
+# (one scalar per group, applied before blocking), so including it would only force
+# the oracle to restate the two-level formula. It is covered directly instead, by
+# the global-scale tests in test_quantize.py.
+NVFP4_SCALES = [NVFP4_16, NVFP4_2D_16, NVFP4_ROWWISE]
 
 SCALES_COARSE_TO_FINE = [
     TENSORWISE,
@@ -209,8 +222,10 @@ def roundtrip(x, contract_dim, fmt, scale_cfg, rotation=None):
     """Return a quantized operand after dequantization."""
     if not is_quantized(fmt):
         return x
-    xq, scale = quantize_operand(x, contract_dim, fmt, scale_cfg, rotation=rotation)
-    return dequantize_operand(xq, scale, contract_dim, scale_cfg, rotation=rotation)
+    xq, scale, g = quantize_operand(x, contract_dim, fmt, scale_cfg, rotation=rotation)
+    return dequantize_operand(
+        xq, scale, contract_dim, scale_cfg, rotation=rotation, global_scale=g
+    )
 
 
 def fused_op_exists(a_fmt, b_fmt):

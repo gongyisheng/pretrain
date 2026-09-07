@@ -443,6 +443,22 @@ class QuantizationConfig:
                             f"{tensor}.{gemm}, got {fmt!r}"
                         )
 
+        global_scale = self.scale.setdefault("global_scale", False)
+        if not isinstance(global_scale, bool):
+            raise ValueError(
+                f"quant scale 'global_scale' must be a bool, got {global_scale!r}"
+            )
+        # Only a narrow scale dtype has a range to normalise into. An fp32 scale
+        # absorbs a global factor exactly and an e8m0 one up to a shift of its
+        # power-of-two grid, so leaving the flag on there would be a knob that
+        # measures nothing. Normalise it away and say so.
+        if global_scale and scale_dtype != "fp8_e4m3":
+            print(
+                f"quant: global_scale disabled -- {scale_dtype!r} block scales "
+                "absorb a global factor, leaving it with nothing to do"
+            )
+            self.scale["global_scale"] = False
+
         self.scale["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
 
     def _post_init_rounding(self):

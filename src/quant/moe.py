@@ -81,9 +81,9 @@ def quantized_grouped_mm(
         src_a, contract_a, a_offs, a_ragged_dim = a, -1, offs, -2
         b_offs, b_ragged_dim = None, None
 
-    aq = sa = bq = sb = None
+    aq = sa = ga = bq = sb = gb = None
     if is_quantized(a_fmt):
-        aq, sa = quantize_operand(
+        aq, sa, ga = quantize_operand(
             src_a,
             contract_a,
             a_fmt,
@@ -103,9 +103,10 @@ def quantized_grouped_mm(
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             rotation=rotation,
+            global_scale=ga,
         )
     if is_quantized(b_fmt):
-        bq, sb = quantize_operand(
+        bq, sb, gb = quantize_operand(
             b,
             -2,
             b_fmt,
@@ -126,6 +127,7 @@ def quantized_grouped_mm(
             offs=offs,
             ragged_dim=b_ragged_dim,
             rotation=rotation,
+            global_scale=gb,
         )
 
     if op is not None:
@@ -138,6 +140,8 @@ def quantized_grouped_mm(
             out_dtype,
             block_size,
             bias=bias,
+            ga=ga,
+            gb=gb,
         )
 
     if aq is not None:
@@ -149,6 +153,7 @@ def quantized_grouped_mm(
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             rotation=rotation,
+            global_scale=ga,
         ).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(
@@ -159,6 +164,7 @@ def quantized_grouped_mm(
             offs=b_offs,
             ragged_dim=b_ragged_dim,
             rotation=rotation,
+            global_scale=gb,
         ).to(b.dtype)
     y = grouped_mm(
         src_a.to(out_dtype),
