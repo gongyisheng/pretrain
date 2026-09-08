@@ -181,12 +181,13 @@ def scaled_mm_mxfp8(
     gsb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     _check_mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
-    del out_dtype, block_size
+    del block_size
     return torch.ops.aot_kernel._scaled_mm_mxfp8_cublaslt(
         aq,
         to_column_major(bq),
         to_swizzle_32_4_4(sa),
         to_swizzle_32_4_4(sb.t()),
+        out_dtype,
         bias,
         gsa,
         gsb,
