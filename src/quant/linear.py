@@ -32,6 +32,10 @@ def quantized_mm(
     operands with the same block-Hadamard; scaled kernels consume those codes
     directly, while emulation inverts each dequantized operand.
     """
+    if a.dtype != b.dtype:
+        raise ValueError(
+            f"a and b must have the same dtype, got {a.dtype} and {b.dtype}"
+        )
     block_shape = scale_cfg.get("block_shape", (0, 0))
     op = scaled_mm_op(
         a_fmt,
@@ -67,7 +71,15 @@ def quantized_mm(
 
     if op is not None:
         return SCALED_MM_OPS[op](
-            aq, bq, sa, sb, out_dtype, block_shape[1], bias=bias, gsa=gsa, gsb=gsb
+            aq,
+            bq,
+            sa,
+            sb,
+            out_dtype,
+            block_shape[1],
+            bias=None if bias is None else bias.to(out_dtype),
+            gsa=gsa,
+            gsb=gsb,
         )
 
     if aq is not None:
@@ -78,8 +90,7 @@ def quantized_mm(
         b = dequantize_operand(
             bq, sb, -2, scale_cfg, rotation=rotation, global_scale=gsb
         ).to(b.dtype)
-    # Match fused kernels by adding bias in the accumulator before casting.
-    y = a @ b if bias is None else torch.addmm(bias, a, b)
+    y = a @ b if bias is None else torch.addmm(bias.to(a.dtype), a, b)
     return y.to(out_dtype)
 
 
@@ -102,7 +113,7 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["weight"]["fwd"],
             compute_dtype,
             cfg.scale,
-            bias=None if bias is None else bias.to(compute_dtype),
+            bias=bias,
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("act"),
@@ -123,6 +134,7 @@ class QuantizedLinearFn(torch.autograd.Function):
         ctx.x_shape = x.shape
         ctx.x_dtype = x.dtype
         ctx.w_dtype = weight.dtype
+        ctx.bias_dtype = None if bias is None else bias.dtype
         return y.reshape(*x.shape[:-1], weight.shape[0])
 
     @staticmethod
@@ -169,11 +181,11 @@ class QuantizedLinearFn(torch.autograd.Function):
                 else None
             ),
         )
-        db = g.sum(dim=0) if ctx.has_bias else None
+        db = g.sum(dim=0, dtype=torch.float32) if ctx.has_bias else None
 
         dx = dx.reshape(*ctx.x_shape).to(ctx.x_dtype)
         dw = dw.to(ctx.w_dtype)
-        db = db.to(ctx.w_dtype) if db is not None else None
+        db = db.to(ctx.bias_dtype) if db is not None else None
         return dx, dw, db, None, None, None
 
 

@@ -63,6 +63,14 @@ def test_quantized_mm_passthrough(fmt, dtype, out_dtype):
     )
 
 
+def test_quantized_mm_raise_error():
+    a = torch.ones(2, 4, device="cpu", dtype=torch.bfloat16)
+    b = torch.ones(4, 3, device="cpu", dtype=torch.float16)
+
+    with pytest.raises(ValueError, match="dtype"):
+        quantized_mm(a, b, "bf16", "fp16", torch.bfloat16, {})
+
+
 @cuda_sm89_or_newer
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("rotation_cfg", [None, ROTATION_CFG])
@@ -180,11 +188,28 @@ def test_quantized_linear_forward_precision(dtype, scale_cfg, bias, rotation_cfg
         rotation=rotation,
     )
     if bias:
-        # Bias is added in the fp32 accumulator before the final round.
         ref2d = ref2d + lin.bias.float()
     ref = ref2d.to(torch.bfloat16).unflatten(0, x.shape[:-1])
     assert out.shape == (2, 128, 128) and out.dtype == torch.bfloat16
     assert rel(out, ref) < LINEAR_REL_TOL
+
+
+@cuda_sm89_or_newer
+def test_quantized_linear_backward_bias_precision():
+    linear = nn.Linear(1, 1, device="cuda", dtype=torch.float32)
+    quantized = QuantizedLinear.from_module(
+        linear,
+        rule({"weight": "bf16", "act": "bf16", "grad_out": "bf16"}),
+    )
+    x = torch.ones(257, 1, device="cuda", dtype=torch.float32, requires_grad=True)
+
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        quantized(x).sum().backward()
+
+    assert quantized.bias.grad.dtype is torch.float32
+    torch.testing.assert_close(
+        quantized.bias.grad, torch.tensor([257.0], device="cuda")
+    )
 
 
 # 250 exercises the wgrad contraction pad.

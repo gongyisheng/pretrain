@@ -1577,6 +1577,21 @@ def test_grouped_mm_fn_bias_grads_match_eager(layout):
 
 
 @cuda_only
+def test_grouped_mm_fn_bias_grad_precision():
+    rows = 257
+    a = torch.ones(rows, 1, device="cuda", dtype=torch.bfloat16)
+    b = torch.ones(1, 1, 1, device="cuda", dtype=torch.bfloat16)
+    bias = torch.zeros(1, 1, device="cuda", requires_grad=True)
+    offs = torch.tensor([rows], device="cuda", dtype=torch.int32)
+
+    out = GroupedGemmFn.apply(a, b, bias, offs)
+    out.backward(torch.ones_like(out))
+
+    assert bias.grad.dtype is torch.float32
+    torch.testing.assert_close(bias.grad, torch.full_like(bias, rows), atol=0, rtol=0)
+
+
+@cuda_only
 def test_grouped_mm_fn_compiles_fullgraph_and_matches_eager():
     # Forward compiles with no graph break; the Function's backward runs eager
     # (Dynamo cannot trace the autograd engine under fullgraph), so we compile

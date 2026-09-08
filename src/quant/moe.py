@@ -31,6 +31,10 @@ def quantized_grouped_mm(
     Operand ranks select the layout. `bias` has shape (E, N), broadcasts over output
     rows, and is not quantized.
     """
+    if a.dtype != b.dtype:
+        raise ValueError(
+            f"a and b must have the same dtype, got {a.dtype} and {b.dtype}"
+        )
     block_size = scale_cfg["block_shape"][1]
     op = scaled_grouped_mm_op(
         a_fmt,
@@ -139,7 +143,7 @@ def quantized_grouped_mm(
             offs,
             out_dtype,
             block_size,
-            bias=bias,
+            bias=None if bias is None else bias.to(out_dtype),
             gsa=gsa,
             gsb=gsb,
         )
@@ -203,6 +207,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         ctx.stats = stats
         ctx.rotation = rotation
         ctx.bias_needs_grad = ctx.needs_input_grad[2]
+        ctx.bias_dtype = None if bias is None else bias.dtype
         return y
 
     @staticmethod
@@ -256,7 +261,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             group_of_row = torch.searchsorted(offs, rows, right=True)
             acc = grad_y.new_zeros(offs.shape[0], grad_y.shape[1], dtype=torch.float32)
             acc.index_add_(0, group_of_row, grad_y.float())
-            grad_bias = acc.to(grad_y.dtype)
+            grad_bias = acc.to(ctx.bias_dtype)
         return grad_a, grad_b, grad_bias, None, None, None, None
 
 

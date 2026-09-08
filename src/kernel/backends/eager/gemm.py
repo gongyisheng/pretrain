@@ -28,6 +28,10 @@ def grouped_mm(
     b_is_2d = b.ndim == 2
     bounds = _to_bounds(offs)
 
+    if a.dtype != b.dtype:
+        raise ValueError(
+            f"a and b must have the same dtype, got {a.dtype} and {b.dtype}"
+        )
     if not a_is_2d and not b_is_2d:
         raise NotImplementedError("3D x 3D not supported")
     if bias is not None and not a_is_2d:
@@ -41,21 +45,21 @@ def grouped_mm(
             return torch.stack([a[:, lo:hi] @ b[lo:hi] for lo, hi in bounds])
         pieces = [a[group] @ b[:, lo:hi] for group, (lo, hi) in enumerate(bounds)]
         return torch.cat(pieces, dim=1)
-
-    if a_is_2d and not b_is_2d:
-        pieces = [
-            torch.addmm(bias[group], a[lo:hi], b[group])
-            for group, (lo, hi) in enumerate(bounds)
-        ]
-        return torch.cat(pieces, dim=0)
-    if a_is_2d and b_is_2d:
-        return torch.stack(
-            [
-                torch.addmm(bias[group], a[:, lo:hi], b[lo:hi])
+    else:
+        if a_is_2d and not b_is_2d:
+            pieces = [
+                torch.addmm(bias[group].to(a.dtype), a[lo:hi], b[group])
                 for group, (lo, hi) in enumerate(bounds)
             ]
-        )
-    raise AssertionError("ragged-N bias should have been rejected")
+            return torch.cat(pieces, dim=0)
+        if a_is_2d and b_is_2d:
+            return torch.stack(
+                [
+                    torch.addmm(bias[group].to(a.dtype), a[:, lo:hi], b[lo:hi])
+                    for group, (lo, hi) in enumerate(bounds)
+                ]
+            )
+        raise AssertionError("ragged-N bias should have been rejected")
 
 
 def _apply_global_scale(out, gsa, gsb, group=None):

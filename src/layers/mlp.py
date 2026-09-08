@@ -11,9 +11,16 @@ class GroupedGemmFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b, bias, offs, backend: str | None = None):
         ctx.has_backend_arg = len(ctx.needs_input_grad) == 5
-        y = grouped_mm(a, b, offs, bias=bias, backend=backend)
+        y = grouped_mm(
+            a,
+            b,
+            offs,
+            bias=None if bias is None else bias.to(a.dtype),
+            backend=backend,
+        )
         ctx.save_for_backward(a, b, offs)
         ctx.bias_needs_grad = ctx.needs_input_grad[2]
+        ctx.bias_dtype = None if bias is None else bias.dtype
         ctx.backend = backend
         return y
 
@@ -23,12 +30,15 @@ class GroupedGemmFn(torch.autograd.Function):
         grad_bias = None
         if ctx.bias_needs_grad:
             if grad_c.ndim == 3:
-                grad_bias = grad_c.sum(1, dtype=torch.float32).to(grad_c.dtype)
+                grad_bias = grad_c.sum(1, dtype=torch.float32)
             else:
-                ones = grad_c.new_ones(1, grad_c.shape[0])
-                grad_bias = grouped_mm(ones, grad_c, offs, backend=ctx.backend).squeeze(
-                    1
+                rows = torch.arange(grad_c.shape[0], device=offs.device)
+                groups = torch.searchsorted(offs, rows, right=True)
+                grad_bias = grad_c.new_zeros(
+                    offs.shape[0], grad_c.shape[1], dtype=torch.float32
                 )
+                grad_bias.index_add_(0, groups, grad_c.float())
+            grad_bias = grad_bias.to(ctx.bias_dtype)
         grads = (
             grouped_mm(grad_c, b.mT, offs, backend=ctx.backend),
             grouped_mm(a.mT, grad_c, offs, backend=ctx.backend),
@@ -64,7 +74,6 @@ def grouped_mlp(
             return None if t is None else t.to(dt)
 
         x, w_up, w_gate, w_down = cast(x), cast(w_up), cast(w_gate), cast(w_down)
-        b_up, b_gate, b_down = cast(b_up), cast(b_gate), cast(b_down)
     # the per-expert bias is (E, out) and rides in the GEMM epilogue
     if w_gate is not None:
         h = act_fn(

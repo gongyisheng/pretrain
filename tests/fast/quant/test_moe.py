@@ -79,6 +79,15 @@ def _make(counts, K, N, seed=0):
 GROUPED_LAYOUTS = ["ragged_m", "ragged_k", "ragged_n"]
 
 
+def test_quantized_grouped_mm_raise_error():
+    a = torch.ones(2, 4, device="cpu", dtype=torch.bfloat16)
+    b = torch.ones(1, 4, 3, device="cpu", dtype=torch.float16)
+    offs = torch.tensor([2], device="cpu", dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="dtype"):
+        quantized_grouped_mm(a, b, offs, "bf16", "fp16", a.dtype, ROWWISE)
+
+
 @cuda_sm89_or_newer
 @pytest.mark.parametrize("a_fmt", ALL_FORMATS)
 @pytest.mark.parametrize("b_fmt", ALL_FORMATS)
@@ -364,6 +373,22 @@ def test_scaled_grouped_gemm_fn_backward_precision(dtype, scale_cfg, bias):
         expected.append(("grad_bias", bias_q.grad, acc.to(bias0.dtype)))
     for name, got, ref in expected:
         assert rel(got, ref) < PRECISION_BOUND, (name, rel(got, ref))
+
+
+@cuda_sm89_or_newer
+def test_scaled_grouped_gemm_fn_bias_grad_precision():
+    rows = 257
+    a = torch.ones(rows, 1, device="cuda", dtype=torch.bfloat16)
+    b = torch.ones(1, 1, 1, device="cuda", dtype=torch.bfloat16)
+    bias = torch.zeros(1, 1, device="cuda", requires_grad=True)
+    offs = torch.tensor([rows], device="cuda", dtype=torch.int32)
+    dtype = {"weight": "bf16", "act": "bf16", "grad_out": "bf16"}
+
+    out = _expert_mm(_cfg(dtype=dtype), a, b, offs, bias=bias)
+    out.backward(torch.ones_like(out))
+
+    assert bias.grad.dtype is torch.float32
+    torch.testing.assert_close(bias.grad, torch.full_like(bias, rows), atol=0, rtol=0)
 
 
 # --- QuantizedSparseMoEBlock ---
