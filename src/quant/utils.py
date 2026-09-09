@@ -45,7 +45,7 @@ def is_int8s(fmt: str) -> bool:
 
 
 def is_quantized(fmt: str) -> bool:
-    return is_fp8(fmt) or is_int8s(fmt)
+    return is_fp8(fmt) or is_fp4(fmt) or is_int8s(fmt)
 
 
 def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:
@@ -68,8 +68,13 @@ def _resolve_gemm_quantization_family(
     block_shape: tuple[int, int],
 ) -> str | None:
     if is_fp4(a_fmt) and is_fp4(b_fmt):
-        if scale_dtype == torch.float8_e4m3fn:
-            if block_shape[1] == 16:
+        block_size = block_shape[1]
+        if (
+            scale_dtype == torch.float8_e4m3fn
+            and block_size > 0
+            and block_size % 16 == 0
+        ):
+            if block_size == 16:
                 return "nvfp4"
             return "nvfp4_plus"
     if is_fp8(a_fmt) and is_fp8(b_fmt):

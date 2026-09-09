@@ -3,15 +3,21 @@
 import pytest
 import torch
 
-from src.quant.constants import QUANT_PASSTHROUGH, _FP8_FORMATS, _INT8_FORMATS
+from src.quant.constants import (
+    QUANT_PASSTHROUGH,
+    _FP4_FORMATS,
+    _FP8_FORMATS,
+    _INT8_FORMATS,
+)
 from src.quant.quantize import dequantize_operand, quantize_operand
-from src.quant.utils import is_fp8, is_int8s, is_quantized
+from src.quant.utils import is_quantized, scaled_mm_op
 from src.utils.config import TrainingConfig
 
 E4M3 = "fp8_e4m3"
 FP8_FORMATS = sorted(_FP8_FORMATS)
+FP4_FORMATS = sorted(_FP4_FORMATS)
 INT_FORMATS = sorted(_INT8_FORMATS)
-ALL_QUANT_FORMATS = FP8_FORMATS + INT_FORMATS
+ALL_QUANT_FORMATS = FP8_FORMATS + INT_FORMATS + FP4_FORMATS
 PASSTHROUGH_FORMATS = sorted(QUANT_PASSTHROUGH)
 ALL_FORMATS = ALL_QUANT_FORMATS + PASSTHROUGH_FORMATS
 FP8_E4M3_W8A8_DTYPES = {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "bf16"}
@@ -48,6 +54,13 @@ INT7_W8A16_DTYPES = {"weight": "int7", "act": "bf16", "grad_out": "bf16"}
 INT6_W8A16_DTYPES = {"weight": "int6", "act": "bf16", "grad_out": "bf16"}
 INT5_W8A16_DTYPES = {"weight": "int5", "act": "bf16", "grad_out": "bf16"}
 INT4_W8A16_DTYPES = {"weight": "int4", "act": "bf16", "grad_out": "bf16"}
+FP4_E2M1_W4A4G4_DTYPES = {
+    "weight": "fp4_e2m1",
+    "act": "fp4_e2m1",
+    "grad_out": "fp4_e2m1",
+}
+FP4_E2M1_W4A4_DTYPES = {"weight": "fp4_e2m1", "act": "fp4_e2m1", "grad_out": "bf16"}
+FP4_E2M1_W4A16_DTYPES = {"weight": "fp4_e2m1", "act": "bf16", "grad_out": "bf16"}
 
 FP8_E4M3_W8A8G8_GWHP_DTYPES = {
     "weight": "fp8_e4m3",
@@ -102,6 +115,8 @@ INT8_W8A8G8_GIHP_DTYPES = {
 
 
 FORWARD_DTYPES = [
+    FP4_E2M1_W4A4_DTYPES,
+    FP4_E2M1_W4A16_DTYPES,
     FP8_E4M3_W8A8_DTYPES,
     FP8_E4M3_W16A8_DTYPES,
     FP8_E4M3_W8A16_DTYPES,
@@ -115,6 +130,9 @@ FORWARD_DTYPES = [
 ]
 
 BACKWARD_DTYPES = [
+    FP4_E2M1_W4A4_DTYPES,
+    FP4_E2M1_W4A4G4_DTYPES,
+    FP4_E2M1_W4A16_DTYPES,
     FP8_E4M3_W8A8_DTYPES,
     FP8_E4M3_W16A8_DTYPES,
     FP8_E4M3_W8A16_DTYPES,
@@ -146,13 +164,16 @@ BACKWARD_DTYPES = [
 
 
 def scale_of(
-    granularity, block_shape=(0, 0), scale_dtype=torch.float32, global_scale=False
+    granularity,
+    block_shape=(0, 0),
+    scale_dtype=torch.float32,
+    enable_global_scale=False,
 ):
     return {
         "granularity": granularity,
         "block_shape": block_shape,
         "scale_dtype": scale_dtype,
-        "global_scale": global_scale,
+        "enable_global_scale": enable_global_scale,
     }
 
 
@@ -173,10 +194,34 @@ BLOCKWISE2D_64_E8M0 = scale_of("blockwise", (64, 64), torch.float8_e8m0fnu)
 ROWWISE_E4M3 = scale_of("rowwise", scale_dtype=torch.float8_e4m3fn)
 BLOCKWISE1D_16_E4M3 = scale_of("blockwise", (1, 16), torch.float8_e4m3fn)
 BLOCKWISE2D_16_E4M3 = scale_of("blockwise", (16, 16), torch.float8_e4m3fn)
-# NVFP4's own shape: a 16-wide e4m3 block scale under a per-tensor fp32 global scale.
-NVFP4_16 = scale_of("blockwise", (1, 16), torch.float8_e4m3fn, global_scale=True)
-NVFP4_2D_16 = scale_of("blockwise", (16, 16), torch.float8_e4m3fn, global_scale=True)
-NVFP4_ROWWISE = scale_of("rowwise", scale_dtype=torch.float8_e4m3fn, global_scale=True)
+# E2M1 uses e4m3 block scales under a per-tensor fp32 global scale.
+BLOCKWISE1D_16_E2M1 = scale_of(
+    "blockwise", (1, 16), torch.float8_e4m3fn, enable_global_scale=True
+)
+BLOCKWISE1D_32_E2M1 = scale_of(
+    "blockwise", (1, 32), torch.float8_e4m3fn, enable_global_scale=True
+)
+BLOCKWISE1D_64_E2M1 = scale_of(
+    "blockwise", (1, 64), torch.float8_e4m3fn, enable_global_scale=True
+)
+BLOCKWISE1D_128_E2M1 = scale_of(
+    "blockwise", (1, 128), torch.float8_e4m3fn, enable_global_scale=True
+)
+BLOCKWISE2D_16_E2M1 = scale_of(
+    "blockwise", (16, 16), torch.float8_e4m3fn, enable_global_scale=True
+)
+BLOCKWISE2D_32_E2M1 = scale_of(
+    "blockwise", (32, 32), torch.float8_e4m3fn, enable_global_scale=True
+)
+BLOCKWISE2D_64_E2M1 = scale_of(
+    "blockwise", (64, 64), torch.float8_e4m3fn, enable_global_scale=True
+)
+BLOCKWISE2D_128_E2M1 = scale_of(
+    "blockwise", (128, 128), torch.float8_e4m3fn, enable_global_scale=True
+)
+ROWWISE_E2M1 = scale_of(
+    "rowwise", scale_dtype=torch.float8_e4m3fn, enable_global_scale=True
+)
 
 
 ALL_SCALES = [
@@ -192,15 +237,19 @@ ALL_SCALES = [
     BLOCKWISE2D_128,
     BLOCKWISE1D_32_E8M0,
     BLOCKWISE2D_64_E8M0,
+    ROWWISE_E4M3,
     BLOCKWISE1D_16_E4M3,
     BLOCKWISE2D_16_E4M3,
+    BLOCKWISE1D_16_E2M1,
+    BLOCKWISE1D_32_E2M1,
+    BLOCKWISE1D_64_E2M1,
+    BLOCKWISE1D_128_E2M1,
+    BLOCKWISE2D_16_E2M1,
+    BLOCKWISE2D_32_E2M1,
+    BLOCKWISE2D_64_E2M1,
+    BLOCKWISE2D_128_E2M1,
+    ROWWISE_E2M1,
 ]
-# The nvfp4 cells stay out of ALL_SCALES. The precision oracle there independently
-# re-derives how blocks are cut and expanded; a global scale is orthogonal to that
-# (one scalar per group, applied before blocking), so including it would only force
-# the oracle to restate the two-level formula. It is covered directly instead, by
-# the global-scale tests in test_quantize.py.
-NVFP4_SCALES = [NVFP4_16, NVFP4_2D_16, NVFP4_ROWWISE]
 
 SCALES_COARSE_TO_FINE = [
     TENSORWISE,
@@ -228,9 +277,21 @@ def roundtrip(x, contract_dim, fmt, scale_cfg, rotation=None):
     )
 
 
-def fused_op_exists(a_fmt, b_fmt):
+def fused_op_exists(a_fmt, b_fmt, scale_cfg):
     """Whether both formats use the same fused scaled-GEMM family."""
-    return (is_fp8(a_fmt) and is_fp8(b_fmt)) or (is_int8s(a_fmt) and is_int8s(b_fmt))
+    return (
+        scaled_mm_op(
+            a_fmt,
+            b_fmt,
+            scale_cfg["scale_dtype"],
+            scale_cfg["block_shape"],
+        )
+        is not None
+    )
+
+
+def uses_fp4_gemm(a_fmt, b_fmt, scale_cfg):
+    return a_fmt == b_fmt == "fp4_e2m1" and fused_op_exists(a_fmt, b_fmt, scale_cfg)
 
 
 def mm_ref(a, a_fmt, b, b_fmt, scale_cfg, rotation=None):
@@ -239,7 +300,7 @@ def mm_ref(a, a_fmt, b, b_fmt, scale_cfg, rotation=None):
     Fused GEMMs accumulate in fp32. The fallback first restores operand dtype, then
     accumulates in fp32. Return fp32 so callers add bias and cast only once.
     """
-    dtype = torch.float32 if fused_op_exists(a_fmt, b_fmt) else a.dtype
+    dtype = torch.float32 if fused_op_exists(a_fmt, b_fmt, scale_cfg) else a.dtype
     return (
         roundtrip(a, -1, a_fmt, scale_cfg, rotation=rotation).to(dtype).float()
         @ roundtrip(b, -2, b_fmt, scale_cfg, rotation=rotation).to(dtype).float()
@@ -247,8 +308,12 @@ def mm_ref(a, a_fmt, b, b_fmt, scale_cfg, rotation=None):
 
 
 def skip_unsupported_fmt_scale(fmt, scale_cfg):
-    """Skip an E8M0 scale on an integer format, a pair QuantizationConfig rejects."""
-    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and is_int8s(fmt):
+    """Skip E8M0 scales on quantized formats other than FP8."""
+    if (
+        scale_cfg["scale_dtype"] is torch.float8_e8m0fnu
+        and is_quantized(fmt)
+        and fmt not in FP8_FORMATS
+    ):
         pytest.skip("an e8m0 scale is defined only over fp8 elements")
 
 
@@ -262,14 +327,10 @@ def skip_unsupported_ragged_k_scale(scale_cfg):
 
 
 def skip_unsupported_dtype_scale(dtype, scale_cfg):
-    """Skip E8M0 scales with integer formats, which QuantizationConfig rejects."""
-    has_int = any(
-        is_int8s(fmt)
-        for spec in dtype.values()
-        for fmt in (spec.values() if isinstance(spec, dict) else (spec,))
-    )
-    if scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and has_int:
-        pytest.skip("an e8m0 scale is defined only over fp8 elements")
+    """Skip format/scale combinations that QuantizationConfig rejects."""
+    for spec in dtype.values():
+        for fmt in spec.values() if isinstance(spec, dict) else (spec,):
+            skip_unsupported_fmt_scale(fmt, scale_cfg)
 
 
 def operand_fmt(dtype, tensor, gemm):

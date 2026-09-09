@@ -1,6 +1,6 @@
 import torch
 
-from src.quant.quantize import dequantize_operand
+from src.quant.quantize import unpack_e2m1, dequantize_operand
 from src.quant.rotation import Rotation
 
 
@@ -42,13 +42,19 @@ def accumulate_quantization_sums(
     dequantized_tensor,
     offs=None,
     ragged_dim=None,
+    contract_dim=None,
     rotated_source=None,
 ):
     """Return per-group quantization-error sums for a monitoring window."""
     source = source_tensor.float()
     mask_source = source if rotated_source is None else rotated_source.float()
     dequantized = dequantized_tensor.float()
-    code_values = codes.float()
+    if codes.dtype is torch.uint8:
+        if contract_dim is None:
+            raise ValueError("packed fp4 codes require contract_dim")
+        code_values = unpack_e2m1(codes, contract_dim)
+    else:
+        code_values = codes.float()
     squares = source.square()
     err_squares = (source - dequantized).square()
     nonzero_mask = mask_source != 0
@@ -145,6 +151,7 @@ def record_operand(
         dequantized,
         offs=offs,
         ragged_dim=ragged_dim,
+        contract_dim=contract_dim,
         rotated_source=rotated_source,
     )
     for name, value in zip(stats.FIELDS, sums):

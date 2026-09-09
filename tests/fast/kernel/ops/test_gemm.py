@@ -242,7 +242,7 @@ SCALED_MM_OUTPUT_CASES = (
 def operation_case_params(ops, cases):
     """Expand cases across their applicable operations."""
     return tuple(
-        pytest.param(op, case, id=f"{OP_IDS[op]}-{case.name}")
+        (op, case)
         for op in ops
         for case in cases
         if not case.applicable_ops or OP_IDS[op] in case.applicable_ops

@@ -8,7 +8,7 @@ from src.quant.convert import apply_quantization
 from src.quant.linear import QuantizedLinear, quantized_mm
 from src.quant.rotation import build_rotation
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
-from tests.fast.helper import cuda_sm89_or_newer
+from tests.fast.helper import cuda_capability_at_least, cuda_sm89_or_newer
 from tests.fast.quant.helper import (
     ALL_FORMATS,
     FORWARD_DTYPES,
@@ -25,6 +25,7 @@ from tests.fast.quant.helper import (
     rule,
     skip_unsupported_dtype_scale,
     skip_unsupported_fmt_scale,
+    uses_fp4_gemm,
 )
 
 
@@ -42,6 +43,11 @@ ROTATION_CFG = {
 # Worst errors over the full valid rotated grids are 8.56e-5 forward, 7.88e-5
 # dgrad, and 9.68e-5 wgrad; the margins are 3.50x, 3.81x, and 3.10x.
 LINEAR_REL_TOL = 3e-4
+MM_PRECISION_SHAPE = (256, 512, 128)
+NVFP4_MM_PRECISION_SHAPE = (32, 32, 16)
+MM_PRECISION_DEVICES = ["cpu", "cuda"]
+MM_PRECISION_BIASES = [False, True]
+MM_PRECISION_ROTATIONS = [None, ROTATION_CFG]
 
 
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
@@ -71,20 +77,29 @@ def test_quantized_mm_raise_error():
         quantized_mm(a, b, "bf16", "fp16", torch.bfloat16, {})
 
 
-@cuda_sm89_or_newer
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("rotation_cfg", [None, ROTATION_CFG])
-@pytest.mark.parametrize("scale_cfg", ALL_SCALES)
-@pytest.mark.parametrize("b_fmt", ALL_FORMATS)
+@pytest.mark.parametrize("device", MM_PRECISION_DEVICES)
 @pytest.mark.parametrize("a_fmt", ALL_FORMATS)
-def test_quantized_mm_precision(a_fmt, b_fmt, scale_cfg, bias, rotation_cfg):
+@pytest.mark.parametrize("b_fmt", ALL_FORMATS)
+@pytest.mark.parametrize("scale_cfg", ALL_SCALES)
+@pytest.mark.parametrize("bias", MM_PRECISION_BIASES)
+@pytest.mark.parametrize("rotation_cfg", MM_PRECISION_ROTATIONS)
+def test_quantized_mm_precision(device, a_fmt, b_fmt, scale_cfg, bias, rotation_cfg):
     """Compare each format pair with its dequantization oracle."""
+    has_fp4 = "fp4_e2m1" in (a_fmt, b_fmt)
+    if device == "cpu" and not has_fp4:
+        pytest.skip("CPU precision coverage is limited to FP4")
+    capability = (10, 0) if uses_fp4_gemm(a_fmt, b_fmt, scale_cfg) else (8, 9)
+    if device == "cuda" and not cuda_capability_at_least(capability):
+        pytest.skip(f"CUDA SM{capability[0]}{capability[1]} or newer required")
+    shape = NVFP4_MM_PRECISION_SHAPE if has_fp4 else MM_PRECISION_SHAPE
+    atol = 1e-5 if has_fp4 else 3e-4
     skip_unsupported_fmt_scale(a_fmt, scale_cfg)
     skip_unsupported_fmt_scale(b_fmt, scale_cfg)
     torch.manual_seed(0)
-    a = torch.randn(256, 512, device="cuda")
-    b = torch.randn(512, 128, device="cuda")
-    bias_t = torch.randn(128, device="cuda") if bias else None
+    n_rows, contraction_size, n_columns = shape
+    a = torch.randn(n_rows, contraction_size, device=device)
+    b = torch.randn(contraction_size, n_columns, device=device)
+    bias_t = torch.randn(n_columns, device=device) if bias else None
     # Share one rotation so the oracle and GEMM use the same baked-in sign vector.
     rotation = build_rotation(rotation_cfg)
     out = quantized_mm(
@@ -102,12 +117,12 @@ def test_quantized_mm_precision(a_fmt, b_fmt, scale_cfg, bias, rotation_cfg):
     )
     if bias:
         ref = ref + bias_t
-    # Use 3e-4 absolute tolerance: worst error is 3e-5 and reordering dominates near zero.
+    # Generic GEMMs use 3e-4: reordering dominates their 3e-5 worst error.
     torch.testing.assert_close(
         out,
         ref,
         rtol=0,
-        atol=3e-4,
+        atol=atol,
     )
 
 
@@ -170,6 +185,10 @@ def test_quantized_linear_forward_precision(dtype, scale_cfg, bias, rotation_cfg
         operand_fmt(dtype, "act", "fwd"),
         operand_fmt(dtype, "weight", "fwd"),
     )
+    if uses_fp4_gemm(act_fmt, weight_fmt, scale_cfg) and not cuda_capability_at_least(
+        (10, 0)
+    ):
+        pytest.skip("fused FP4 requires CUDA SM100 or newer")
     torch.manual_seed(0)
     lin = nn.Linear(256, 128, bias=bias).cuda().to(torch.bfloat16)
     cfg = rule(dtype, scale_cfg, rotation=rotation_cfg)
@@ -235,6 +254,29 @@ def test_quantized_linear_backward_precision(
     The unrotated cells retain non-divisible token counts to exercise Wgrad padding.
     """
     skip_unsupported_dtype_scale(dtype, scale_cfg)
+    fwd_uses_fused_fp4 = uses_fp4_gemm(
+        operand_fmt(dtype, "act", "fwd"), operand_fmt(dtype, "weight", "fwd"), scale_cfg
+    )
+    dgrad_uses_fused_fp4 = uses_fp4_gemm(
+        operand_fmt(dtype, "grad_out", "dgrad"),
+        operand_fmt(dtype, "weight", "dgrad"),
+        scale_cfg,
+    )
+    wgrad_uses_fused_fp4 = uses_fp4_gemm(
+        operand_fmt(dtype, "grad_out", "wgrad"),
+        operand_fmt(dtype, "act", "wgrad"),
+        scale_cfg,
+    )
+    if (
+        fwd_uses_fused_fp4 or dgrad_uses_fused_fp4 or wgrad_uses_fused_fp4
+    ) and not cuda_capability_at_least((10, 0)):
+        pytest.skip("fused FP4 requires CUDA SM100 or newer")
+    wgrad_uses_fp4 = (
+        operand_fmt(dtype, "act", "wgrad") == "fp4_e2m1"
+        or operand_fmt(dtype, "grad_out", "wgrad") == "fp4_e2m1"
+    )
+    if wgrad_uses_fp4 and n_tokens % 16:
+        pytest.skip("FP4 Wgrad requires a contraction extent divisible by 16")
     if (
         rotation_gemms is not None
         and n_tokens % ROTATION_CFG["rotation_kwargs"]["block_size"]

@@ -10,14 +10,14 @@ SWIZZLE_DTYPES = (torch.float8_e4m3fn, torch.float8_e8m0fnu)
 UNSUPPORTED_SWIZZLE_DTYPES = (torch.float32, torch.float8_e5m2)
 
 
-@pytest.mark.parametrize("shape", COLUMN_MAJOR_SHAPES, ids=["2d", "batched"])
+@pytest.mark.parametrize("shape", COLUMN_MAJOR_SHAPES)
 def test_to_column_major_returns_existing_column_major_tensor(shape):
     tensor = torch.randn(*shape).transpose(-1, -2).contiguous().transpose(-1, -2)
 
     assert to_column_major(tensor) is tensor
 
 
-@pytest.mark.parametrize("shape", COLUMN_MAJOR_SHAPES, ids=["2d", "batched"])
+@pytest.mark.parametrize("shape", COLUMN_MAJOR_SHAPES)
 def test_to_column_major_converts_row_major_tensor(shape):
     tensor = torch.randn(*shape)
 

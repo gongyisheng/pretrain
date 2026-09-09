@@ -8,7 +8,16 @@ QUANT_PASSTHROUGH = frozenset({"fp32", "fp16", "bf16"})
 # "fp8" is a dtype recipe, not an element format: QUANT_DTYPE_RECIPES expands it
 # to fp8_e4m3/fp8_e5m2 per operand, so it must never appear as an operand's dtype.
 QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset(
-    {"fp8_e4m3", "fp8_e5m2", "int8", "int7", "int6", "int5", "int4"}
+    {
+        "fp8_e4m3",
+        "fp8_e5m2",
+        "fp4_e2m1",
+        "int8",
+        "int7",
+        "int6",
+        "int5",
+        "int4",
+    }
 )
 
 QUANT_GRANULARITY = frozenset({"tensorwise", "rowwise", "blockwise"})
@@ -34,13 +43,14 @@ QUANT_SCALE_RECIPES = {
         "granularity": "blockwise",
         "block_shape": (1, 16),
         "scale_dtype": "fp8_e4m3",
-        "global_scale": True,
+        "enable_global_scale": True,
     },
 }
 
 QUANT_DTYPE_RECIPES = {
     "fp8": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
     "mxfp8": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"},
+    "nvfp4": {"weight": "fp4_e2m1", "act": "fp4_e2m1", "grad_out": "fp4_e2m1"},
     **{
         fmt: {"weight": fmt, "act": "bf16", "grad_out": "bf16"}
         for fmt in ("int8", "int7", "int6", "int5", "int4")
@@ -69,6 +79,8 @@ _STR_TO_DTYPE = {
     "fp8_e4m3": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
     "fp8_e8m0": torch.float8_e8m0fnu,
+    # E2M1 has no usable element dtype: two codes are packed into one byte.
+    "fp4_e2m1": torch.uint8,
     "int8": torch.int8,
     "int7": torch.int8,
     "int6": torch.int8,
@@ -79,6 +91,7 @@ _STR_TO_DTYPE = {
 _STR_TO_QMAX = {
     "fp8_e4m3": float(torch.finfo(torch.float8_e4m3fn).max),
     "fp8_e5m2": float(torch.finfo(torch.float8_e5m2).max),
+    "fp4_e2m1": 6.0,
     "int8": 127.0,
     "int7": 63.0,
     "int6": 31.0,
@@ -93,6 +106,7 @@ _STR_TO_QMAX = {
 _STR_TO_QMIN = {
     "fp8_e4m3": 2.0**-9,
     "fp8_e5m2": 2.0**-16,
+    "fp4_e2m1": 0.5,
     "int8": 1.0,
     "int7": 1.0,
     "int6": 1.0,
@@ -112,3 +126,5 @@ EPS = 1e-30
 _FP8_FORMATS = frozenset({"fp8_e4m3", "fp8_e5m2"})
 _FP4_FORMATS = frozenset({"fp4_e2m1"})
 _INT8_FORMATS = frozenset({"int8", "int7", "int6", "int5", "int4"})
+
+_FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)

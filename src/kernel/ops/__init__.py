@@ -9,6 +9,7 @@ from src.kernel.ops.gemm import (
     nvfp4_scaled_grouped_mm,
     nvfp4_scaled_mm,
 )
+from src.kernel.ops.quantize import pack_e2m1_rne
 
 __all__ = [
     "grouped_mm",
@@ -20,4 +21,5 @@ __all__ = [
     "fp8_scaled_grouped_mm",
     "mxfp8_scaled_grouped_mm",
     "nvfp4_scaled_grouped_mm",
+    "pack_e2m1_rne",
 ]

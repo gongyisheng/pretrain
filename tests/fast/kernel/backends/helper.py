@@ -317,7 +317,7 @@ def make_scaled_mm_inputs(
             "granularity": scale.granularity,
             "block_shape": scale.block_shape,
             "scale_dtype": scale_dtype,
-            "global_scale": False,
+            "enable_global_scale": False,
         }
         aq, sa, _ = quantize_operand(a, -1, format.a_format, scale_config)
         bq, sb, _ = quantize_operand(b, -2, format.b_format, scale_config)
@@ -373,7 +373,7 @@ def make_scaled_grouped_mm_inputs(
             "granularity": scale.granularity,
             "block_shape": scale.block_shape,
             "scale_dtype": scale_dtype,
-            "global_scale": False,
+            "enable_global_scale": False,
         }
         block_size = scale.block_size
 

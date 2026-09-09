@@ -5,7 +5,6 @@ from src.quant.constants import _FP4_FORMATS, _FP8_FORMATS, _INT8_FORMATS
 from src.quant.utils import (
     is_fp4,
     is_fp8,
-    is_quantized,
     resolve_quantization_config,
     scaled_grouped_mm_op,
     scaled_mm_op,
@@ -26,6 +25,8 @@ DTYPE_BY_FORMAT = {
     "fp8_e4m3": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
     "fp8_e8m0": torch.float8_e8m0fnu,
+    # E2M1 stores two logical FP4 codes in each uint8 element.
+    "fp4_e2m1": torch.uint8,
     **{fmt: torch.int8 for fmt in INT8_FORMATS},
 }
 
@@ -67,11 +68,6 @@ def test_is_fp8(fmt):
 @pytest.mark.parametrize("fmt", IS_FP4_BY_FORMAT)
 def test_is_fp4(fmt):
     assert is_fp4(fmt) is IS_FP4_BY_FORMAT[fmt]
-
-
-def test_is_quantized_fp4_is_false():
-    # E2M1 requires a packed-code encoder, which generic quantize_operand lacks.
-    assert is_quantized("fp4_e2m1") is False
 
 
 # --- module selection ---
@@ -147,6 +143,7 @@ GEMM_OP_CASES = [
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (32, 32), "nvfp4"),
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (64, 64), "nvfp4"),
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (128, 128), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (0, 0), None),
     ("fp4_e2m1", "fp4_e2m1", _FP32, (1, 16), None),
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (16, 32), "nvfp4"),
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (32, 16), "nvfp4"),

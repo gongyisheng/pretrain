@@ -1412,7 +1412,7 @@ def test_sparse_moe_latent_flops_less_than_dense_moe():
 
 @cuda_only
 @pytest.mark.parametrize("activation_cls", ["swiglu", "gelu"])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_sparse_moe_block_compiles_fullgraph(activation_cls, dtype):
     torch.manual_seed(0)
     blk = (
@@ -1505,7 +1505,6 @@ def _run_grouped_mm_apply(a0, b0, offs, grad, backend, include_backend):
 @pytest.mark.parametrize(
     ("backend", "include_backend"),
     [(None, False), ("triton", True)],
-    ids=["four_inputs", "forced_backend"],
 )
 def test_grouped_mm_fn_apply_backward_arity(backend, include_backend):
     a0, b0, offs = _make_grouped_layout("ragged_m")

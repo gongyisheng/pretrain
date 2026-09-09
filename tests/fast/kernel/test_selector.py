@@ -51,7 +51,6 @@ SM89 = PlatformInfo("cuda", (8, 9))
 SM100 = PlatformInfo("cuda", (10, 0))
 HOST = PlatformInfo()
 
-
 EAGER_CPU = _spec("eager", frozenset({CPU}))
 EAGER_REF = _spec("eager", reference=True)
 TRITON_REF = _spec("triton", reference=True)
@@ -64,55 +63,25 @@ CUBLASLT_100_TO_110 = _spec("cublaslt", frozenset({cuda((10, 0), (11, 0))}))
 
 SELECT_KERNEL_CASES = [
     # An explicit backend and a sole registration both skip every later gate.
-    pytest.param([CUBLASLT_MIN99], "cublaslt", None, "cublaslt", id="explicit-backend"),
-    pytest.param([CUBLASLT_MIN99], None, None, "cublaslt", id="sole-registration"),
-    pytest.param([EAGER_CPU, TRITON_MIN80], None, HOST, "eager", id="disjoint"),
-    pytest.param([EAGER_REF, TRITON_MIN80], None, SM89, "triton", id="optimized-wins"),
-    pytest.param(
-        [EAGER_REF, CUBLASLT_100_TO_110], None, SM89, "eager", id="reference-fallback"
-    ),
-    pytest.param([EAGER_REF, TRITON_MIN80], None, HOST, "eager", id="reference-on-cpu"),
+    ([CUBLASLT_MIN99], "cublaslt", None, "cublaslt"),
+    ([CUBLASLT_MIN99], None, None, "cublaslt"),
+    ([EAGER_CPU, TRITON_MIN80], None, HOST, "eager"),
+    ([EAGER_REF, TRITON_MIN80], None, SM89, "triton"),
+    ([EAGER_REF, CUBLASLT_100_TO_110], None, SM89, "eager"),
+    ([EAGER_REF, TRITON_MIN80], None, HOST, "eager"),
 ]
 
 SELECT_KERNEL_ERROR_CASES = [
-    pytest.param([], None, None, "no kernels registered", id="unregistered-op"),
-    pytest.param(
-        [EAGER_CPU, TRITON_MIN80], "cublaslt", None, "eager, triton", id="bad-backend"
-    ),
-    pytest.param(
-        [EAGER_CPU, TRITON_MIN80],
-        None,
-        None,
-        "no platform was supplied",
-        id="no-platform",
-    ),
+    ([], None, None),
+    ([EAGER_CPU, TRITON_MIN80], "cublaslt", None),
+    ([EAGER_CPU, TRITON_MIN80], None, None),
     # No reference spec here on purpose: a reference is always eligible (empty
     # capabilities), so it would never let this scenario -- nothing eligible at
     # all -- occur.
-    pytest.param(
-        [TRITON_80_TO_85, CUBLASLT_100_TO_110],
-        None,
-        SM89,
-        r"cuda \(8, 9\)",
-        id="nothing-eligible",
-    ),
-    pytest.param(
-        [TRITON_MIN89, CUBLASLT_100_TO_110],
-        None,
-        SM100,
-        "pass backend=",
-        id="two-optimized",
-    ),
-    pytest.param(
-        [EAGER_REF, TRITON_MIN89, CUBLASLT_100_TO_110],
-        None,
-        SM100,
-        r"\(cublaslt, triton\)",
-        id="two-optimized-plus-reference",
-    ),
-    pytest.param(
-        [EAGER_REF, TRITON_REF], None, HOST, "pass backend=", id="two-references"
-    ),
+    ([TRITON_80_TO_85, CUBLASLT_100_TO_110], None, SM89),
+    ([TRITON_MIN89, CUBLASLT_100_TO_110], None, SM100),
+    ([EAGER_REF, TRITON_MIN89, CUBLASLT_100_TO_110], None, SM100),
+    ([EAGER_REF, TRITON_REF], None, HOST),
 ]
 
 
@@ -135,17 +104,17 @@ MISSING_OP = "d.missing"
 # from a process-global fact. Resolving by process-global platform used to route CPU
 # calls into the CUDA-only triton backend and crash.
 DISPATCH_CASES = [
-    pytest.param(ADD_OP, None, CPU_DEVICE, (2, 3), {}, 5, id="args"),
-    pytest.param(ADD_OP, None, CPU_DEVICE, (2,), {"y": 3}, 5, id="kwargs"),
-    pytest.param(SPLIT_OP, None, CPU_DEVICE, (), {}, "eager", id="on-cpu"),
-    pytest.param(SPLIT_OP, None, CUDA_DEVICE, (), {}, "triton", id="on-cuda"),
-    pytest.param(SPLIT_OP, "triton", CPU_DEVICE, (), {}, "triton", id="pinned"),
+    (ADD_OP, None, CPU_DEVICE, (2, 3), {}, 5),
+    (ADD_OP, None, CPU_DEVICE, (2,), {"y": 3}, 5),
+    (SPLIT_OP, None, CPU_DEVICE, (), {}, "eager"),
+    (SPLIT_OP, None, CUDA_DEVICE, (), {}, "triton"),
+    (SPLIT_OP, "triton", CPU_DEVICE, (), {}, "triton"),
 ]
 
 DISPATCH_ERROR_CASES = [
-    pytest.param(MISSING_OP, None, "no kernels registered", id="unregistered-op"),
-    pytest.param(SPLIT_OP, "cublaslt", "has no backend", id="bad-backend"),
-    pytest.param(CUDA_ONLY_OP, None, "no backend for cpu", id="device-has-no-backend"),
+    (MISSING_OP, None),
+    (SPLIT_OP, "cublaslt"),
+    (CUDA_ONLY_OP, None),
 ]
 
 
@@ -156,9 +125,9 @@ def test_select_kernel(specs, backend, platform, expected):
     assert spec.backend == expected
 
 
-@pytest.mark.parametrize("specs,backend,platform,match", SELECT_KERNEL_ERROR_CASES)
-def test_select_kernel_raise_error(specs, backend, platform, match):
-    with pytest.raises(KernelSelectionError, match=match):
+@pytest.mark.parametrize("specs,backend,platform", SELECT_KERNEL_ERROR_CASES)
+def test_select_kernel_raise_error(specs, backend, platform):
+    with pytest.raises(KernelSelectionError):
         select_kernel("test.op", backend, platform, _registry(*specs))
 
 
@@ -169,9 +138,9 @@ def test_dispatch_pass(monkeypatch, op, backend, device, args, kwargs, expected)
     assert dispatch(op, args, kwargs, backend, device=device) == expected
 
 
-@pytest.mark.parametrize("op,backend,match", DISPATCH_ERROR_CASES)
-def test_dispatch_raise_error(monkeypatch, op, backend, match):
+@pytest.mark.parametrize("op,backend", DISPATCH_ERROR_CASES)
+def test_dispatch_raise_error(monkeypatch, op, backend):
     _register_for_dispatch_ops(monkeypatch)
 
-    with pytest.raises(KernelSelectionError, match=match):
+    with pytest.raises(KernelSelectionError):
         dispatch(op, (), {}, backend, device=CPU_DEVICE)

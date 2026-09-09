@@ -184,10 +184,10 @@ def test_mxfp8_scaled_mm_raise_error(case, format, scale, with_bias):
 
 @cuda_only
 @cuda_sm100_or_newer
-@pytest.mark.parametrize("case", NVFP4_SCALED_MM_CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("case", NVFP4_SCALED_MM_CASES)
 @pytest.mark.parametrize("out", OUT_DTYPE_CASES)
 @pytest.mark.parametrize("with_bias", BIAS_CASES)
-@pytest.mark.parametrize("with_global_scale", (False, True), ids=["local", "global"])
+@pytest.mark.parametrize("with_global_scale", (False, True))
 def test_nvfp4_scaled_mm_precision(case, out, with_bias, with_global_scale):
     if case.k % 32 != 0 or case.n % 16 != 0:
         pytest.skip("cuBLASLt NVFP4 requires K divisible by 32 and N divisible by 16")

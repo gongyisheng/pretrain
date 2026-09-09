@@ -333,7 +333,8 @@ class QuantizationConfig:
     enabled: bool = False
     # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
     dtype: dict = field(default_factory=dict)
-    scale: dict = field(default_factory=dict)  # {granularity, block_shape}
+    # {granularity, block_shape, scale_dtype, enable_global_scale}
+    scale: dict = field(default_factory=dict)
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
     rotation: Optional[dict] = None
     include: List[str] = field(default_factory=list)
@@ -374,9 +375,9 @@ class QuantizationConfig:
         for tensor, fmt in QUANT_DTYPE_RECIPES[recipe].items():
             for gemm in GEMM_OPS_BY_TENSOR[tensor]:
                 self.dtype.setdefault(tensor, {}).setdefault(gemm, fmt)
-        if recipe == "mxfp8":
-            # mxfp8 is an fp8 element paired with the "mxfp8" scale scheme; seed it.
-            self.scale.setdefault("recipe", "mxfp8")
+        if recipe in {"mxfp8", "nvfp4"}:
+            # Element recipes seed their scale scheme; explicit keys win.
+            self.scale.setdefault("recipe", recipe)
 
     def _post_init_scale(self):
         """Apply the scale recipe, then resolve granularity, block_shape and dtype."""
@@ -443,21 +444,19 @@ class QuantizationConfig:
                             f"{tensor}.{gemm}, got {fmt!r}"
                         )
 
-        global_scale = self.scale.setdefault("global_scale", False)
-        if not isinstance(global_scale, bool):
+        enable_global_scale = self.scale.setdefault("enable_global_scale", False)
+        if not isinstance(enable_global_scale, bool):
             raise ValueError(
-                f"quant scale 'global_scale' must be a bool, got {global_scale!r}"
+                "quant scale 'enable_global_scale' must be a bool, got "
+                f"{enable_global_scale!r}"
             )
-        # Only a narrow scale dtype has a range to normalise into. An fp32 scale
-        # absorbs a global factor exactly and an e8m0 one up to a shift of its
-        # power-of-two grid, so leaving the flag on there would be a knob that
-        # measures nothing. Normalise it away and say so.
-        if global_scale and scale_dtype != "fp8_e4m3":
-            print(
-                f"quant: global_scale disabled -- {scale_dtype!r} block scales "
-                "absorb a global factor, leaving it with nothing to do"
-            )
-            self.scale["global_scale"] = False
+        # Full arithmetic scale dtypes absorb a global factor. E8M0's exponent
+        # range makes normalization overflow fp32, so neither needs one.
+        if enable_global_scale and (
+            scale_dtype in QUANT_PASSTHROUGH or scale_dtype == "fp8_e8m0"
+        ):
+            print(f"quant: disabled enable_global_scale for {scale_dtype!r} scales")
+            self.scale["enable_global_scale"] = False
 
         self.scale["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
 

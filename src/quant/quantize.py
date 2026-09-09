@@ -1,9 +1,11 @@
 import torch
 import torch.nn.functional as F
 
-from src.quant.constants import EPS
+from src.kernel.ops.quantize import pack_e2m1_rne
+from src.quant.constants import EPS, _FP4_E2M1_VALUES
 from src.quant.rotation import Rotation
 from src.quant.utils import (
+    is_fp4,
     is_fp8,
     is_int8s,
     str_to_fp8_ulp,
@@ -13,13 +15,64 @@ from src.quant.utils import (
 )
 
 
+def _e2m1_stochastic_codes(xq: torch.Tensor) -> torch.Tensor:
+    """Encode scaled values into unpacked signed E2M1 nibbles."""
+    magnitude = torch.nan_to_num(xq.abs(), nan=6.0, posinf=6.0).clamp(max=6.0)
+    random_bits = torch.randint(
+        0, 256, magnitude.shape, dtype=torch.int32, device=magnitude.device
+    )
+    unit_random = random_bits.to(magnitude.dtype) * (1.0 / 256.0)
+    step = torch.where(
+        magnitude >= 4.0,
+        2.0,
+        torch.where(magnitude >= 2.0, 1.0, 0.5),
+    )
+    dithered = torch.addcmul(magnitude, unit_random, step)
+    rounded_step = torch.where(
+        dithered >= 4.0,
+        2.0,
+        torch.where(dithered >= 2.0, 1.0, 0.5),
+    )
+    rounded = (torch.floor(dithered / rounded_step) * rounded_step).clamp(max=6.0)
+    values = xq.new_tensor(_FP4_E2M1_VALUES)
+    code = torch.searchsorted(values, rounded).clamp(max=7)
+    negative = torch.signbit(xq) & ~torch.isnan(xq)
+    return code.to(torch.uint8) | negative.to(torch.uint8) << 3
+
+
+def _pack_e2m1(codes: torch.Tensor, dim: int) -> torch.Tensor:
+    """Pack low-nibble-first E2M1 codes along `dim`."""
+    _check_tile_dim(dim)
+    axis = dim % codes.ndim
+    packed_dim = codes.shape[axis]
+    if packed_dim % 2:
+        raise ValueError(f"fp4_e2m1 contraction extent must be even, got {packed_dim}")
+    moved = codes.movedim(axis, -1).contiguous()
+    packed = moved[..., 0::2] | moved[..., 1::2] << 4
+    return packed.movedim(-1, axis).contiguous()
+
+
+def _unpack_e2m1(codes: torch.Tensor, dim: int) -> torch.Tensor:
+    """Unpack low-nibble-first signed E2M1 codes into float32 values."""
+    _check_tile_dim(dim)
+    axis = dim % codes.ndim
+    moved = codes.movedim(axis, -1)
+    nibbles = torch.stack((moved & 0xF, moved >> 4), dim=-1).flatten(-2)
+    magnitude = torch.tensor(_FP4_E2M1_VALUES, dtype=torch.float32, device=codes.device)
+    values = magnitude[nibbles.long() & 0x7]
+    return torch.where(nibbles & 0x8 != 0, -values, values).movedim(-1, axis)
+
+
+unpack_e2m1 = _unpack_e2m1
+
+
 def _scale_block_map(
     offs: torch.Tensor, n_rows: int, block_size: int
 ) -> tuple[torch.Tensor, int]:
-    """Map rows to blocks that never cross `offs` groups; `n_blocks` is static under torch.compile."""
+    """Map rows to blocks without crossing `offs` groups."""
     n_groups = offs.shape[0]
     rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
-    # `right=True` maps each row to its containing end-offset group; clamp keeps gathers in bounds.
+    # `right=True` selects each row's end-offset group.
     group = torch.searchsorted(offs, rows, right=True).clamp_(max=n_groups - 1)
     if not block_size:
         return group.long(), n_groups
@@ -29,7 +82,7 @@ def _scale_block_map(
     first_block = torch.cat([offs.new_zeros(1), per_group.cumsum(0)])
     local = torch.div(rows - starts[group], block_size, rounding_mode="floor")
     row_blocks = first_block[group].long() + local.long()
-    # `floor(n_rows / block_size) + n_groups` is a static upper bound.
+    # Static upper bound for torch.compile.
     return row_blocks, n_rows // block_size + n_groups
 
 
@@ -38,23 +91,17 @@ def _compute_scale(
 ) -> torch.Tensor:
     """Return dequantization scales in `scale_dtype` from block maxima."""
     if scale_dtype is torch.float8_e8m0fnu:
-        # Clamp E8M0 exponents, preserving its full lower range; `log2(0)` selects 2**-127.
+        # Clamp E8M0 exponents; `log2(0)` selects 2**-127.
         exp = torch.ceil(torch.log2(amax / str_to_qmax(fmt)))
         # E8M0 cast corrects CUDA `exp2(-127)` being one ULP low.
         return torch.exp2(exp.clamp(-127, 127)).to(scale_dtype)
     if scale_dtype is torch.float8_e4m3fn:
-        # Clamp into e4m3's representable window. The floor stops a scale from
-        # rounding to zero and dividing its operand by zero. The ceiling avoids
-        # relying on the cast to saturate: e4m3's top encoding is NaN, so an
-        # unclamped overflow could poison a tensor's scales instead of pinning them
-        # at the maximum, and an infinite amax already casts to NaN.
+        # Clamp to E4M3's finite, nonzero range.
         low, high = str_to_qmin("fp8_e4m3"), str_to_qmax("fp8_e4m3")
         exact = (amax / str_to_qmax(fmt)).clamp(low, high)
         coded = exact.to(scale_dtype)
-        # Round up to the next representable scale, as the E8M0 branch's ceil does.
-        # A scale rounded down leaves its block's largest element above qmax, to be
-        # clipped. Positive e4m3 values increase with their encoding, so the next
-        # representable value up is the next byte; the clamp keeps that off NaN.
+        # Round up after a downward cast to avoid clipping block maxima.
+        # Positive E4M3 encodings are ordered, so the next byte is the next scale.
         bits = coded.contiguous().view(torch.uint8)
         return torch.where(coded.float() < exact, bits + 1, bits).view(scale_dtype)
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
@@ -63,7 +110,7 @@ def _compute_scale(
 def _compute_codes(
     xf: torch.Tensor, scale: torch.Tensor, fmt: str, stochastic_rounding: bool
 ) -> torch.Tensor:
-    """Scale float32 `xf` by broadcastable float32 `scale` and cast to `fmt`."""
+    """Scale `xf` by broadcastable `scale` and cast to `fmt`; FP4 returns scaled values."""
     qmax = str_to_qmax(fmt)
     xq = (xf / scale.float()).clamp(-qmax, qmax)
     if is_int8s(fmt):
@@ -74,17 +121,19 @@ def _compute_codes(
             xq = torch.round(xq)
     elif is_fp8(fmt):
         if stochastic_rounding:
-            # Construct binade ULPs from fp32 exponents; clamping gives subnormals their shared spacing.
+            # Clamp binade ULPs to the shared subnormal spacing.
             mantissa_bits, min_ulp_exp = str_to_fp8_ulp(fmt)
             exponent = ((xq.view(torch.int32) >> 23) & 0xFF) - mantissa_bits
             ulp = (exponent.clamp_min(127 + min_ulp_exp) << 23).view(torch.float32)
-            # `floor` makes the stochastic interval sign-safe.
+            # `floor` keeps the stochastic interval sign-safe.
             lower = torch.floor(xq / ulp) * ulp
             probability = (xq - lower) / ulp
             xq = torch.where(torch.rand_like(xq) < probability, lower + ulp, lower)
         else:
             # Hardware cast supplies RNE.
             pass
+    elif is_fp4(fmt):
+        return xq
     else:
         raise ValueError(f"Unknown fmt:{fmt}")
     return xq.to(str_to_dtype(fmt))
@@ -98,7 +147,6 @@ def _check_tile_dim(dim: int) -> None:
 
 def _tile(a: torch.Tensor, dim: int, block_size: int) -> torch.Tensor:
     """Pad and split `dim` into fixed-size blocks."""
-    # Validate because any non--1 dimension otherwise takes the -2 branch.
     _check_tile_dim(dim)
     length = a.shape[dim]
     n_blocks = (length + block_size - 1) // block_size
@@ -146,7 +194,7 @@ def _segment_amax(
     a: torch.Tensor, dim: int, row_blocks: torch.Tensor, n_blocks: int
 ) -> torch.Tensor:
     """Return segmented block maxima along `dim`."""
-    # Empty absolute-value blocks remain zero before `_compute_scale` clamps to EPS.
+    # Empty blocks have zero maxima.
     shape = list(a.shape)
     shape[dim] = n_blocks
     return a.new_zeros(shape).index_reduce_(
@@ -159,11 +207,7 @@ def _global_amax(
     offs: torch.Tensor | None,
     ragged_dim: int | None,
 ) -> torch.Tensor:
-    """Absolute maximum per group, shaped (G,).
-
-    A dense 2D operand is one group, a stacked 3D operand one per expert, and a
-    ragged operand one per `offs` group.
-    """
+    """Return absolute maxima for operands, experts, or ragged groups."""
     if offs is None:
         return xf.abs().amax((-2, -1)).reshape(-1)
     dense_dim = -1 if ragged_dim == -2 else -2
@@ -179,9 +223,8 @@ def _global_divisor(
     offs: torch.Tensor | None,
     ragged_dim: int | None,
 ) -> torch.Tensor:
-    """Broadcast a (G,) global scale over `x`."""
+    """Broadcast global scales over `x`."""
     if offs is None:
-        # 3D carries one scale per expert, 2D a single value over the whole operand.
         if x.ndim == 3:
             return global_scale.reshape(-1, 1, 1)
         return global_scale.reshape(())
@@ -208,6 +251,28 @@ def _check_dims(
         raise ValueError(f"a ragged axis needs a 2D operand, got {x.ndim}D")
 
 
+def _check_e2m1_dims(
+    x: torch.Tensor,
+    contract_dim: int,
+    ragged_dim: int | None,
+    offs: torch.Tensor | None,
+) -> None:
+    """Validate the logical E2M1 layout expected by NVFP4 kernels."""
+    logical_k = x.shape[contract_dim]
+    if logical_k % 16:
+        raise ValueError(
+            f"fp4_e2m1 contraction extent must be a multiple of 16, got {logical_k}"
+        )
+    if offs is None or ragged_dim != contract_dim:
+        return
+    valid = torch.all(offs.remainder(2) == 0) & (offs[-1] == logical_k)
+    message = "fp4_e2m1 ragged contraction offsets must be even and end at logical K"
+    if torch.compiler.is_compiling():
+        torch._assert_async(valid, message)
+    else:
+        torch._assert(valid, message)
+
+
 def _check_rotation_dims(
     contract_dim: int,
     ragged_dim: int | None,
@@ -219,8 +284,7 @@ def _check_rotation_dims(
         return
     aligned = torch.all(offs.remainder(rotation.alignment) == 0)
     if torch.compiler.is_compiling():
-        # Fullgraph cannot trace the synchronous check; fail invalid compiled
-        # callers rather than silently mix rotation blocks across groups.
+        # Fullgraph requires an asynchronous assertion.
         torch._assert_async(
             aligned, "ragged contraction boundaries must align with rotation blocks"
         )
@@ -281,7 +345,7 @@ def _quantize_tensorwise(
     div = scale if row_blocks is None else scale.index_select(ragged_dim, row_blocks)
     codes = _compute_codes(xf, div, fmt, stochastic_rounding)
 
-    # Returned scales expand the outer axis and remain blockwise on the contraction axis.
+    # Expand scales across the outer axis.
     if ragged_dim == outer_dim:
         return codes, div
     shape = list(scale.shape)
@@ -378,7 +442,7 @@ def _quantize_blockwise_2d(
     """Quantize with square blocks that stay within ragged groups."""
     outer_dim = -1 if contract_dim == -2 else -2
     if offs is None:
-        # Dense 2D avoids the ragged path's slower materialized divisor.
+        # Dense 2D avoids a materialized ragged divisor.
         rows, cols = xf.shape[-2:]
         tiled = _tile2d(xf, block_size)
         blocks = _compute_scale(tiled.abs().amax((-3, -1)), fmt, scale_dtype)
@@ -393,7 +457,7 @@ def _quantize_blockwise_2d(
             blocks, outer_dim, block_size, rows if outer_dim == -2 else cols, None
         )
 
-    # Ragged 2D uses a block map and gathered divisor instead of reshape/broadcast.
+    # Ragged blocks use a gathered divisor.
     ragged_map = _scale_block_map(offs, xf.shape[ragged_dim], block_size)
     dense_dim = contract_dim if ragged_dim == outer_dim else outer_dim
     amax = _axis_amax(
@@ -422,46 +486,39 @@ def quantize_operand(
     ragged_dim: int | None = None,
     stochastic_rounding: bool = False,
     rotation: Rotation | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Quantize `x` with scales along `contract_dim`.
 
-    `contract_dim` and `ragged_dim` must be -2 or -1. When given, `offs` keeps
-    ragged-axis scale blocks within groups; 2D blockwise quantization uses either
-    ragged axis. Returns codes in `fmt` and fp32 or E8M0 scales with the outer axis
-    expanded and the contraction axis blockwise. Output strides are unspecified so
-    consumers can use broadcast scales and preserve useful operand layouts.
+    `contract_dim` and `ragged_dim` are -2 or -1; `offs` and `ragged_dim` are
+    supplied together, and `offs` keeps blocks within groups. In 2D blockwise
+    quantization, either axis may be ragged. Returns codes in `fmt` (packed uint8
+    for fp4_e2m1), scales expanded on the outer axis and blockwise on the
+    contraction axis, and `global_scale`. Output strides are unspecified.
 
-    `rotation` preconditions `x` before quantizing and is inverted by
-    `dequantize_operand`. On a ragged contraction axis, every group boundary must
-    align with a rotation block so the transform cancels within each GEMM group.
-
-    A `scale_cfg` with `global_scale` also returns one fp32 scale per group, shaped
-    (G,), that the block scales are expressed relative to; it is None otherwise.
-    `dequantize_operand` and the scaled GEMM kernels both need it back.
+    `rotation` preconditions `x` and is inverted by `dequantize_operand`; ragged
+    contraction boundaries must align with its blocks. With `enable_global_scale`,
+    `global_scale` is an fp32 `(G,)` factor that block scales are relative to;
+    otherwise it is None. Pass it to dequantization or scaled GEMM.
     """
     _check_dims(x, contract_dim, ragged_dim, offs)
+    if is_fp4(fmt):
+        _check_e2m1_dims(x, contract_dim, ragged_dim, offs)
     if rotation is not None:
         _check_rotation_dims(contract_dim, ragged_dim, offs, rotation)
-    # The rotation kernel transforms in float32 and stores float32 directly,
-    # so the operand is never rounded back to its own dtype in between.
+    # Rotation retains fp32 values.
     xf = x.float() if rotation is None else rotation(x, contract_dim, torch.float32)
     granularity = scale_cfg["granularity"]
     block_outer, block_size = scale_cfg["block_shape"]
     scale_dtype = scale_cfg["scale_dtype"]
 
     global_scale = None
-    if scale_cfg["global_scale"]:
-        # Map the operand's amax to the top of the block-scale dtype's range, so a
-        # narrow scale neither floors nor saturates at any operand magnitude.
-        # QuantizationConfig only leaves this on for a scale dtype narrow enough for
-        # it to mean something; a wide one would absorb the factor exactly.
+    if scale_cfg["enable_global_scale"]:
+        # Fit block scales in the finite range of `scale_dtype`.
         global_scale = (
             _global_amax(xf, offs, ragged_dim)
             / (str_to_qmax(fmt) * float(torch.finfo(scale_dtype).max))
         ).clamp_min(EPS)
-        # Pre-dividing leaves every granularity helper below correct unchanged:
-        # amax' = amax/g gives blk = cast(amax'/qmax), and round(xf'/blk) is
-        # round(xf/(g*blk)), which is the two-level formula.
+        # Block scales are relative to the global factor.
         xf = xf / _global_divisor(global_scale, xf, offs, ragged_dim)
 
     if granularity == "tensorwise":
@@ -497,6 +554,12 @@ def quantize_operand(
             )
     else:
         raise ValueError(f"unknown granularity: {granularity!r}")
+    if is_fp4(fmt):
+        codes = (
+            _pack_e2m1(_e2m1_stochastic_codes(codes), contract_dim)
+            if stochastic_rounding
+            else pack_e2m1_rne(codes, contract_dim)
+        )
     return codes, scale, global_scale
 
 
@@ -511,6 +574,8 @@ def dequantize_operand(
     global_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dequantize `xq` in fp32 using `quantize_operand`'s scale layout."""
+    if xq.dtype is torch.uint8:
+        xq = _unpack_e2m1(xq, contract_dim)
     _check_dims(xq, contract_dim, ragged_dim, offs)
     if rotation is not None:
         _check_rotation_dims(contract_dim, ragged_dim, offs, rotation)
@@ -528,7 +593,7 @@ def dequantize_operand(
             length,
         )
     if global_scale is not None:
-        # Before the inverse, mirroring quantize: it rotated, then divided by g.
+        # Restore the global factor before inverse rotation.
         deq = deq * _global_divisor(global_scale, deq, offs, ragged_dim)
     if rotation is not None:
         deq = rotation.inverse(deq, contract_dim)

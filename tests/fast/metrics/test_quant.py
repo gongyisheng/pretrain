@@ -13,7 +13,7 @@ from src.quant.rotation import HadamardRotation
 
 _TENSORWISE = {
     "granularity": "tensorwise",
-    "global_scale": False,
+    "enable_global_scale": False,
     "block_shape": (0, 0),
     "scale_dtype": torch.float32,
 }
@@ -57,6 +57,14 @@ def test_underflow_ignores_zeros_already_in_the_source():
     x = torch.tensor([[0.0, 0.0, 1.0, 2.0]])
     m = _metrics(x, x, _codes(x, x))["underflow_rate"]
     assert m.item() == 0.0
+
+
+def test_accumulate_quantization_sums_counts_packed_fp4_underflow():
+    source = torch.ones(1, 16)
+    codes = torch.full((1, 8), 0x11, dtype=torch.uint8)
+    codes[0, 0] = 0x10
+    sums = accumulate_quantization_sums(source, codes, source, contract_dim=-1)
+    assert sums[2].item() == 1.0
 
 
 def test_underflow_rate_is_not_diluted_by_zeros_already_in_the_source():
@@ -228,7 +236,7 @@ def test_record_operand_rotation_aligns_underflow_with_codes():
 
 _NVFP4 = {
     "granularity": "blockwise",
-    "global_scale": True,
+    "enable_global_scale": True,
     "block_shape": (1, 16),
     "scale_dtype": torch.float8_e4m3fn,
 }

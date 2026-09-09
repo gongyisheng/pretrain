@@ -710,7 +710,6 @@ def _gpt2_layernorm_learned_cfg(impl):
 @pytest.mark.parametrize(
     "factory",
     [*_CFG_FACTORIES.values(), _gpt2_layernorm_learned_cfg],
-    ids=[*_CFG_FACTORIES, "gpt2_layernorm_learned"],
 )
 def test_count_parameters_matches_real_model(factory):
     """Analytic count_parameters reproduces the live model's param counts exactly

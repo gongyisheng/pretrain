@@ -1,6 +1,7 @@
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
@@ -11,6 +12,7 @@ from src.quant.moe import (
     ScaledGroupedGemmFn,
     quantized_grouped_mm,
 )
+from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.constants import GEMM_OPS
 from src.quant.rotation import build_rotation
 from src.utils.config import (
@@ -19,16 +21,18 @@ from src.utils.config import (
     TrainConfig,
     TrainingConfig,
 )
-from tests.fast.helper import cuda_sm89_or_newer
+from tests.fast.helper import cuda_capability_at_least, cuda_sm89_or_newer
 from tests.fast.quant.helper import (
     ALL_FORMATS,
     FORWARD_DTYPES,
     BACKWARD_DTYPES,
     INT4_W8A16_DTYPES,
     FP8_E4M3_W8A8_E5M2_G8_DTYPES,
+    FP4_E2M1_W4A4G4_DTYPES,
     ALL_SCALES,
     BLOCKWISE1D_16,
     BLOCKWISE1D_32_E8M0,
+    BLOCKWISE1D_16_E2M1,
     ROWWISE,
     SCALE_DTYPE_NAMES,
     mm_ref,
@@ -38,6 +42,7 @@ from tests.fast.quant.helper import (
     skip_unsupported_dtype_scale,
     skip_unsupported_ragged_k_scale,
     skip_unsupported_fmt_scale,
+    uses_fp4_gemm,
 )
 
 
@@ -47,6 +52,8 @@ PRECISION_BOUND = 1e-3
 
 # 299 rows across four experts; expert 1 is empty to test expert boundaries.
 COUNTS = [128, 0, 130, 41]
+FP4_COUNTS = [128, 0, 128, 48]
+GROUPED_COUNTS = [COUNTS, FP4_COUNTS]
 
 
 def _cfg(scale_cfg=ROWWISE, dtype=None):
@@ -94,17 +101,21 @@ def test_quantized_grouped_mm_raise_error():
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("layout", GROUPED_LAYOUTS)
 @pytest.mark.parametrize("bias", [False, True])
-def test_quantized_grouped_mm_precision(a_fmt, b_fmt, scale_cfg, layout, bias):
+@pytest.mark.parametrize("counts", GROUPED_COUNTS)
+def test_quantized_grouped_mm_precision(a_fmt, b_fmt, scale_cfg, layout, bias, counts):
     """Compare each layout with per-expert dequantized GEMM, including optional bias."""
     skip_unsupported_fmt_scale(a_fmt, scale_cfg)
     skip_unsupported_fmt_scale(b_fmt, scale_cfg)
+    has_fp4 = "fp4_e2m1" in (a_fmt, b_fmt)
+    if uses_fp4_gemm(a_fmt, b_fmt, scale_cfg) and not cuda_capability_at_least((10, 0)):
+        pytest.skip("fused FP4 requires CUDA SM100 or newer")
     if layout == "ragged_k":
         skip_unsupported_ragged_k_scale(scale_cfg)
     if bias and layout != "ragged_m":
         pytest.skip(
             "bias is defined per expert over the row axis, which only ragged-M has"
         )
-    a, b, offs = _make(COUNTS, K=64, N=48)
+    a, b, offs = _make(counts, K=64, N=48)
 
     if layout == "ragged_m":
         # Ragged-M: (R,K) x (E,K,N) -> (R,N)
@@ -148,39 +159,60 @@ def test_quantized_grouped_mm_precision(a_fmt, b_fmt, scale_cfg, layout, bias):
         lo = 0
         for group, hi in enumerate(offs.tolist()):
             if hi > lo:
+                padding = (-(hi - lo)) % 16 if has_fp4 else 0
                 ref[group] = mm_ref(
-                    a[lo:hi].t(), a_fmt, gy[lo:hi], b_fmt, scale_cfg
+                    F.pad(a[lo:hi].t(), (0, padding)),
+                    a_fmt,
+                    F.pad(gy[lo:hi], (0, 0, 0, padding)),
+                    b_fmt,
+                    scale_cfg,
                 ).to(out.dtype)
             lo = hi
 
     assert rel(out, ref) < PRECISION_BOUND, rel(out, ref)
 
 
-# (a_fmt, b_fmt, monitoring, a_folded, b_folded)
-GROUPED_STATS_CASES = [
-    ("int8", "int8", False, False, False),  # no monitoring
-    ("int8", "bf16", True, True, False),
-    ("int8", "int8", True, True, True),
+# Format pairs bind the expected statistics and scale configuration.
+GROUPED_STATS_CONFIGS = [
+    ("int8", "int8", False, False, False, ROWWISE),
+    ("int8", "bf16", True, True, False, ROWWISE),
+    ("int8", "int8", True, True, True, ROWWISE),
+    ("fp4_e2m1", "fp4_e2m1", True, True, True, BLOCKWISE1D_16_E2M1),
 ]
 GROUPED_STATS_LAYOUTS = ["ragged_m", "ragged_k"]
+GROUPED_STATS_DEVICES = ["cpu", "cuda"]
 
 
-@cuda_sm89_or_newer
-@pytest.mark.parametrize(
-    "a_fmt,b_fmt,with_stats,a_folded,b_folded", GROUPED_STATS_CASES
-)
+@pytest.mark.parametrize("device", GROUPED_STATS_DEVICES)
 @pytest.mark.parametrize("layout", GROUPED_STATS_LAYOUTS)
-def test_quantized_grouped_mm_records_stats(
-    a_fmt, b_fmt, with_stats, a_folded, b_folded, layout
-):
-    a, b, offs = _make(COUNTS, K=64, N=48)
+@pytest.mark.parametrize("config", GROUPED_STATS_CONFIGS)
+def test_quantized_grouped_mm_records_stats(device, layout, config):
+    a_fmt, b_fmt, with_stats, a_folded, b_folded, scale_cfg = config
+    nvfp4 = a_fmt == "fp4_e2m1"
+    if nvfp4 and layout != "ragged_m":
+        pytest.skip("NVFP4 statistics coverage uses ragged-M")
+    if not nvfp4 and device == "cpu":
+        pytest.skip("CPU statistics coverage is limited to NVFP4")
+    capability = (10, 0) if nvfp4 else (8, 9)
+    if device == "cuda" and not cuda_capability_at_least(capability):
+        pytest.skip(f"CUDA SM{capability[0]}{capability[1]} or newer required")
+    if a_fmt == "fp4_e2m1":
+        torch.manual_seed(0)
+        counts = [16, 16]
+        offs = torch.tensor(counts, device=device, dtype=torch.int32).cumsum(
+            0, dtype=torch.int32
+        )
+        a = torch.randn(sum(counts), 32, device=device)
+        b = torch.randn(len(counts), 32, 16, device=device)
+    else:
+        a, b, offs = _make(COUNTS, K=64, N=48)
     if layout == "ragged_m":
         src_a, src_b = a, b
     else:
         src_a = a.mT
         src_b = torch.randn(a.shape[0], b.shape[-1], device=a.device, dtype=a.dtype)
     # Allocate one stats slot per expert to catch cold experts.
-    experts = len(COUNTS)
+    experts = len(offs)
     a_stats = QuantizationStats("act/x", experts, a.device) if with_stats else None
     b_stats = QuantizationStats("weight/x", experts, b.device) if with_stats else None
     set_quantization_monitoring_status(True)
@@ -191,15 +223,30 @@ def test_quantized_grouped_mm_records_stats(
             offs,
             a_fmt,
             b_fmt,
-            a.dtype,
-            ROWWISE,
+            torch.float32 if a_fmt == "fp4_e2m1" else a.dtype,
+            scale_cfg,
             a_stats=a_stats,
             b_stats=b_stats,
         )
     finally:
         set_quantization_monitoring_status(False)
-    assert torch.isfinite(out).all()
-    if with_stats:
+    if a_fmt == "fp4_e2m1":
+        expected = []
+        start = 0
+        for group, stop in enumerate(offs.tolist()):
+            aq, sa, gsa = quantize_operand(a[start:stop], -1, a_fmt, scale_cfg)
+            bq, sb, gsb = quantize_operand(b[group], -2, b_fmt, scale_cfg)
+            expected.append(
+                dequantize_operand(aq, sa, -1, scale_cfg, global_scale=gsa)
+                @ dequantize_operand(bq, sb, -2, scale_cfg, global_scale=gsb)
+            )
+            start = stop
+        torch.testing.assert_close(out, torch.cat(expected), rtol=0, atol=1e-5)
+        assert a_stats.numel.tolist() == [16 * 32, 16 * 32]
+        assert b_stats.numel.tolist() == [32 * 16, 32 * 16]
+    else:
+        assert torch.isfinite(out).all()
+    if with_stats and a_fmt != "fp4_e2m1":
         assert a_stats.numel.shape == (experts,)
         assert a_stats.numel.sum().item() == (src_a.numel() if a_folded else 0)
         assert b_stats.numel.sum().item() == (src_b.numel() if b_folded else 0)
@@ -265,13 +312,30 @@ def test_quantized_grouped_mm_rotation_precision(fmt, scale_cfg, layout, rotatio
 
 # --- ScaledGroupedGemmFn ---
 
+COMPILE_DTYPES = [FP8_E4M3_W8A8_E5M2_G8_DTYPES, FP4_E2M1_W4A4G4_DTYPES]
+COMPILE_SCALES = [ROWWISE, BLOCKWISE1D_16_E2M1]
+COMPILE_COUNTS = [COUNTS, [0, 7, 9, 0]]
+COMPILE_ROTATION_GEMMS = [None, list(GEMM_OPS)]
+# Compiler arithmetic can cross quantization thresholds; worst relative norm
+# across this grid is 0.00985, with a 3.76x margin.
+COMPILE_REL_BOUND = 0.037
+
 
 @cuda_sm89_or_newer
-@pytest.mark.parametrize("rotation_gemms", [None, list(GEMM_OPS)])
-def test_scaled_grouped_gemm_fn_compiles_fullgraph(rotation_gemms):
-    """Fullgraph covers forward; autograd backward remains eager."""
-    a, b, offs = _make(COUNTS, K=64, N=48)
-    cfg = _cfg(ROWWISE)
+@pytest.mark.parametrize("dtype", COMPILE_DTYPES)
+@pytest.mark.parametrize("scale_cfg", COMPILE_SCALES)
+@pytest.mark.parametrize("counts", COMPILE_COUNTS)
+@pytest.mark.parametrize("rotation_gemms", COMPILE_ROTATION_GEMMS)
+def test_scaled_grouped_gemm_fn_compiles_fullgraph(
+    rotation_gemms, counts, scale_cfg, dtype
+):
+    """Check fullgraph forward/backward and zero gradients for empty experts."""
+    if uses_fp4_gemm(
+        dtype["act"], dtype["weight"], scale_cfg
+    ) and not cuda_capability_at_least((10, 0)):
+        pytest.skip("fused FP4 requires CUDA SM100 or newer")
+    a, b, offs = _make(counts, K=64, N=48)
+    cfg = _cfg(scale_cfg, dtype)
     rotation = None
     if rotation_gemms is not None:
         rotation_cfg = {
@@ -294,17 +358,29 @@ def test_scaled_grouped_gemm_fn_compiles_fullgraph(rotation_gemms):
     eager = run(fwd)
     compiled = run(torch.compile(fwd, fullgraph=True))
     for got, ref in zip(compiled, eager):
-        torch.testing.assert_close(got, ref, atol=0, rtol=0)
+        assert got.shape == ref.shape and got.dtype == ref.dtype
+        if dtype == FP8_E4M3_W8A8_E5M2_G8_DTYPES and scale_cfg == ROWWISE:
+            torch.testing.assert_close(got, ref, atol=0, rtol=0)
+        else:
+            assert rel(got, ref) < COMPILE_REL_BOUND
+    for group, count in enumerate(counts):
+        if count == 0:
+            assert torch.count_nonzero(compiled[2][group]) == 0
 
 
 @cuda_sm89_or_newer
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("dtype", FORWARD_DTYPES)
-def test_scaled_grouped_gemm_fn_forward_precision(dtype, scale_cfg, bias):
+@pytest.mark.parametrize("counts", GROUPED_COUNTS)
+def test_scaled_grouped_gemm_fn_forward_precision(dtype, scale_cfg, bias, counts):
     """Check forward precision across formats, scales, bias, and empty experts."""
     skip_unsupported_dtype_scale(dtype, scale_cfg)
-    a, b, offs = _make(COUNTS, K=64, N=48)
+    if uses_fp4_gemm(
+        operand_fmt(dtype, "act", "fwd"), operand_fmt(dtype, "weight", "fwd"), scale_cfg
+    ) and not cuda_capability_at_least((10, 0)):
+        pytest.skip("fused FP4 requires CUDA SM100 or newer")
+    a, b, offs = _make(counts, K=64, N=48)
     bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16) * 0.1
     y = _expert_mm(
         _cfg(scale_cfg, dtype), a, b, offs, bias=bias0.clone() if bias else None
@@ -332,12 +408,34 @@ def test_scaled_grouped_gemm_fn_forward_precision(dtype, scale_cfg, bias):
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("scale_cfg", ALL_SCALES)
 @pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
-def test_scaled_grouped_gemm_fn_backward_precision(dtype, scale_cfg, bias):
+@pytest.mark.parametrize("counts", GROUPED_COUNTS)
+def test_scaled_grouped_gemm_fn_backward_precision(dtype, scale_cfg, bias, counts):
     """Check backward precision and fp32 bias-gradient accumulation."""
     skip_unsupported_dtype_scale(dtype, scale_cfg)
+    fwd_uses_fused_fp4 = uses_fp4_gemm(
+        operand_fmt(dtype, "act", "fwd"), operand_fmt(dtype, "weight", "fwd"), scale_cfg
+    )
+    dgrad_uses_fused_fp4 = uses_fp4_gemm(
+        operand_fmt(dtype, "grad_out", "dgrad"),
+        operand_fmt(dtype, "weight", "dgrad"),
+        scale_cfg,
+    )
+    wgrad_uses_fused_fp4 = uses_fp4_gemm(
+        operand_fmt(dtype, "act", "wgrad"),
+        operand_fmt(dtype, "grad_out", "wgrad"),
+        scale_cfg,
+    )
+    if (
+        fwd_uses_fused_fp4 or dgrad_uses_fused_fp4 or wgrad_uses_fused_fp4
+    ) and not cuda_capability_at_least((10, 0)):
+        pytest.skip("fused FP4 requires CUDA SM100 or newer")
+    wgrad_uses_fp4 = (
+        operand_fmt(dtype, "act", "wgrad") == "fp4_e2m1"
+        or operand_fmt(dtype, "grad_out", "wgrad") == "fp4_e2m1"
+    )
     # The wgrad of a grouped GEMM contracts over the ragged axis.
     skip_unsupported_ragged_k_scale(scale_cfg)
-    a, b, offs = _make(COUNTS, K=64, N=48)
+    a, b, offs = _make(counts, K=64, N=48)
     bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16) * 0.1
     a_q, b_q = a.clone().requires_grad_(True), b.clone().requires_grad_(True)
     bias_q = bias0.clone().requires_grad_(True) if bias else None
@@ -356,10 +454,11 @@ def test_scaled_grouped_gemm_fn_backward_precision(dtype, scale_cfg, bias):
                 operand_fmt(dtype, "weight", "dgrad"),
                 scale_cfg,
             ).to(y.dtype)
+            padding = (-(hi - lo)) % 16 if wgrad_uses_fp4 else 0
             gb_ref[group] = mm_ref(
-                a[lo:hi].t(),
+                F.pad(a[lo:hi].t(), (0, padding)),
                 operand_fmt(dtype, "act", "wgrad"),
-                gy[lo:hi],
+                F.pad(gy[lo:hi], (0, 0, 0, padding)),
                 operand_fmt(dtype, "grad_out", "wgrad"),
                 scale_cfg,
             ).to(y.dtype)
@@ -448,6 +547,7 @@ def test_quantized_sparse_moe_block_autocast():
 
 # Block 16 divides both expert contractions below (64 and 48); wgrad reaches the
 # ragged contraction, so it is the case segment padding has to carry.
+E2E_RECIPES = ["fp8", "nvfp4"]
 E2E_ROTATIONS = [
     None,
     {
@@ -460,10 +560,13 @@ E2E_ROTATIONS = [
 
 
 @cuda_sm89_or_newer
+@pytest.mark.parametrize("recipe", E2E_RECIPES)
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("rotation", E2E_ROTATIONS)
-def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation):
-    """Check one converted FP8 MoE step and fused per-expert bias gradients."""
+def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation, recipe):
+    """Check one converted MoE step and fused per-expert bias gradients."""
+    if recipe == "nvfp4" and not cuda_capability_at_least((10, 0)):
+        pytest.skip("fused FP4 requires CUDA SM100 or newer")
     config = TrainConfig(
         max_seq_len=64,
         model=ModelConfig(
@@ -492,8 +595,8 @@ def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation):
             mixed_precision="bf16",
             quantization={
                 "enabled": True,
-                "dtype": {"recipe": "fp8"},
-                "scale": {"recipe": "rowwise"},
+                "dtype": {"recipe": recipe},
+                "scale": {"recipe": "rowwise"} if recipe == "fp8" else {},
                 "rotation": rotation,
             },
         ),

@@ -1,4 +1,5 @@
 import copy
+import math
 
 import torch
 
@@ -7,7 +8,7 @@ from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import QuantizationStats, record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.rotation import Rotation
-from src.quant.utils import is_quantized, scaled_grouped_mm_op
+from src.quant.utils import is_fp4, is_quantized, scaled_grouped_mm_op
 from src.utils.config import QuantizationConfig
 
 
@@ -53,32 +54,38 @@ def quantized_grouped_mm(
         # Ragged K: both operands share their contraction axis.
         src_a, contract_a, a_ragged_dim = a, -1, -1
         b_ragged_dim = -2
-        if rotation is not None:
-            alignment = rotation.alignment
-            if alignment > 1:
-                n_rows, n_groups = src_a.shape[-1], offs.shape[0]
-                starts = torch.cat([offs.new_zeros(1), offs[:-1]])
-                counts = offs - starts
-                ceil_inputs = counts + alignment - 1
-                padded_blocks = torch.div(ceil_inputs, alignment, rounding_mode="floor")
-                padded_counts = padded_blocks * alignment
-                padded_offs = padded_counts.cumsum(0).to(offs.dtype)
-                padded_starts = torch.cat([padded_offs.new_zeros(1), padded_offs[:-1]])
-                rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
-                group = torch.searchsorted(offs, rows, right=True)
-                group.clamp_(max=n_groups - 1)
-                index = (padded_starts[group] + rows - starts[group]).long()
-                max_padded_rows = n_rows + n_groups * alignment
-                n_padded = -(-max_padded_rows // alignment) * alignment
-                src_a_shape = (src_a.shape[-2], n_padded)
-                padded_src_a = src_a.new_zeros(src_a_shape, dtype=torch.float32)
-                padded_src_a.index_copy_(1, index, src_a.float())
-                src_a = padded_src_a
-                b_shape = (n_padded, b.shape[-1])
-                padded_b = b.new_zeros(b_shape, dtype=torch.float32)
-                padded_b.index_copy_(0, index, b.float())
-                b = padded_b
-                offs = padded_offs
+        has_fp4 = is_fp4(a_fmt) or is_fp4(b_fmt)
+        alignment = math.lcm(
+            rotation.alignment if rotation is not None else 1,
+            16 if has_fp4 else 1,
+        )
+        if alignment > 1:
+            n_rows, n_groups = src_a.shape[-1], offs.shape[0]
+            starts = torch.cat([offs.new_zeros(1), offs[:-1]])
+            counts = offs - starts
+            ceil_inputs = counts + alignment - 1
+            padded_blocks = torch.div(ceil_inputs, alignment, rounding_mode="floor")
+            padded_counts = padded_blocks * alignment
+            padded_offs = padded_counts.cumsum(0).to(offs.dtype)
+            padded_starts = torch.cat([padded_offs.new_zeros(1), padded_offs[:-1]])
+            rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
+            group = torch.searchsorted(offs, rows, right=True)
+            group.clamp_(max=n_groups - 1)
+            index = (padded_starts[group] + rows - starts[group]).long()
+            max_padded_rows = n_rows + n_groups * alignment
+            n_padded = -(-max_padded_rows // alignment) * alignment
+            src_a_shape = (src_a.shape[-2], n_padded)
+            padded_src_a = src_a.new_zeros(src_a_shape, dtype=torch.float32)
+            padded_src_a.index_copy_(1, index, src_a.float())
+            src_a = padded_src_a
+            b_shape = (n_padded, b.shape[-1])
+            padded_b = b.new_zeros(b_shape, dtype=torch.float32)
+            padded_b.index_copy_(0, index, b.float())
+            b = padded_b
+            if has_fp4:
+                # Keep allocation static and include the zero tail in the last group.
+                padded_offs[-1] = n_padded
+            offs = padded_offs
         a_offs, b_offs = offs, offs
     else:
         # Ragged M: only A is mapped.
