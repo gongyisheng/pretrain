@@ -333,7 +333,7 @@ class QuantizationConfig:
     enabled: bool = False
     # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
     dtype: dict = field(default_factory=dict)
-    # {granularity, block_shape, scale_dtype, enable_global_scale}
+    # {granularity, block_shape: {tensor: (outer, contract)}, scale_dtype, enable_global_scale}
     scale: dict = field(default_factory=dict)
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
     rotation: Optional[dict] = None
@@ -380,12 +380,24 @@ class QuantizationConfig:
             self.scale.setdefault("recipe", recipe)
 
     def _post_init_scale(self):
-        """Apply the scale recipe, then resolve granularity, block_shape and dtype."""
+        """Apply the scale recipe, then resolve granularity, block shape and dtype."""
+        if "block_shape" in self.scale:
+            if not isinstance(self.scale["block_shape"], dict):
+                self.scale.pop("block_shape")
         recipe = self.scale.pop("recipe", None)
         if recipe is not None:
             _check_one_of("quant scale recipe", recipe, QUANT_SCALE_RECIPES)
-            for key, val in QUANT_SCALE_RECIPES[recipe].items():
-                self.scale.setdefault(key, val)  # explicit scale keys win
+            for key, recepie_val in QUANT_SCALE_RECIPES[recipe].items():
+                if key != "block_shape":
+                    self.scale.setdefault(key, recepie_val)  # explicit scale keys win
+                    continue
+                if "block_shape" not in self.scale:
+                    self.scale["block_shape"] = dict(recepie_val)
+                elif isinstance(self.scale["block_shape"], dict):
+                    self.scale["block_shape"] = {
+                        **recepie_val,
+                        **self.scale["block_shape"],
+                    }
 
         granularity = self.scale.setdefault("granularity", "tensorwise")
         _check_one_of("quant granularity", granularity, QUANT_GRANULARITY)
@@ -398,39 +410,55 @@ class QuantizationConfig:
             raise ValueError(
                 "quant scale_dtype 'fp8_e8m0' requires granularity 'blockwise'"
             )
-        if granularity == "blockwise":
-            block_shape = self.scale.get("block_shape")
-            if (
-                not isinstance(block_shape, (list, tuple))
-                or len(block_shape) != 2
-                or not all(isinstance(v, int) for v in block_shape)
-            ):
-                raise ValueError(
-                    "quant granularity 'blockwise' requires block_shape, a pair of "
-                    f"ints (outer, contract), got {block_shape!r}"
-                )
-            outer, contract = block_shape
-            if outer != 1 and outer != contract:
-                raise ValueError(
-                    "quant block_shape must be 1D (1, N) or a square tile (N, N), "
-                    f"got {block_shape!r}"
-                )
-            if contract <= 0 or contract % 16 != 0:
-                raise ValueError(
-                    "quant block_shape contract extent must be a positive multiple "
-                    f"of 16, got {contract}"
-                )
-            if scale_dtype == "fp8_e8m0" and contract % 32 != 0:
-                raise ValueError(
-                    "quant scale_dtype 'fp8_e8m0' needs a contract extent that is a "
-                    f"multiple of 32, the mx scale vector, got {contract}"
-                )
-            self.scale["block_shape"] = (outer, contract)
+        block_shape = self.scale.get("block_shape", {})
+        block_shape = dict(block_shape)
+        for tensor in block_shape:
+            _check_one_of("quant block_shape key", tensor, GEMM_OPS_BY_TENSOR)
+
+        if granularity != "blockwise":
+            self.scale["block_shape"] = dict.fromkeys(GEMM_TENSORS, (0, 0))
         else:
-            # block_shape only means anything blockwise. Normalize it to the sentinel
-            # every consumer reads as "one scale block per contraction segment", so
-            # nothing downstream has to re-check the granularity to know that.
-            self.scale["block_shape"] = (0, 0)
+            missing = set(GEMM_TENSORS) - set(block_shape)
+            if missing:
+                raise ValueError(
+                    "quant granularity 'blockwise' requires block_shape entries for "
+                    f"{sorted(missing)}"
+                )
+            resolved_shapes = {}
+            for tensor in GEMM_TENSORS:
+                shape = block_shape[tensor]
+                if (
+                    not isinstance(shape, (list, tuple))
+                    or len(shape) != 2
+                    or not all(isinstance(v, int) for v in shape)
+                ):
+                    raise ValueError(
+                        f"quant block_shape.{tensor} must be a pair of ints, got {shape!r}"
+                    )
+                outer, contract = shape
+                if outer != 1 and outer != contract:
+                    raise ValueError(
+                        "quant block_shape must be 1D (1, N) or a square tile "
+                        f"(N, N), got {shape!r}"
+                    )
+                if contract <= 0 or contract % 16 != 0:
+                    raise ValueError(
+                        "quant block_shape contract extent must be a positive "
+                        f"multiple of 16, got {contract}"
+                    )
+                if scale_dtype == "fp8_e8m0" and contract % 32 != 0:
+                    raise ValueError(
+                        "quant scale_dtype 'fp8_e8m0' needs a contract extent that "
+                        f"is a multiple of 32, the mx scale vector, got {contract}"
+                    )
+                resolved_shapes[tensor] = (outer, contract)
+            contract_extents = {shape[1] for shape in resolved_shapes.values()}
+            if len(contract_extents) != 1:
+                raise ValueError(
+                    "quant block_shape contract extents must match across weight, "
+                    "act, and grad_out"
+                )
+            self.scale["block_shape"] = resolved_shapes
 
         # The e8m0 shared exponent only has fp8 kernels, so mxfp8 + int8 (or any
         # other non-fp8 element) is rejected here. Pass-through formats are exempt:

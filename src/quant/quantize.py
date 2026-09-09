@@ -492,7 +492,7 @@ def quantize_operand(
     `contract_dim` and `ragged_dim` are -2 or -1; `offs` and `ragged_dim` are
     supplied together, and `offs` keeps blocks within groups. In 2D blockwise
     quantization, either axis may be ragged. Returns codes in `fmt` (packed uint8
-    for fp4_e2m1), scales expanded on the outer axis and blockwise on the
+    for FP4 formats), scales expanded on the outer axis and blockwise on the
     contraction axis, and `global_scale`. Output strides are unspecified.
 
     `rotation` preconditions `x` and is inverted by `dequantize_operand`; ragged

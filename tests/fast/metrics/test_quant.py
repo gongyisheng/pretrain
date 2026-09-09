@@ -10,6 +10,7 @@ from src.metrics.quant import (
     set_quantization_monitoring_status,
 )
 from src.quant.rotation import HadamardRotation
+from src.quant.utils import is_fp4
 
 _TENSORWISE = {
     "granularity": "tensorwise",
@@ -242,7 +243,11 @@ _NVFP4 = {
 }
 
 
-def test_record_operand_global_scale_tracks_true_error():
+GLOBAL_SCALE_FORMATS = ["int4", "fp4_e2m1", "fp4_e2m1_4over6"]
+
+
+@pytest.mark.parametrize("fmt", GLOBAL_SCALE_FORMATS)
+def test_record_operand_global_scale_tracks_true_error(fmt):
     """The monitored error must use the global scale the operand was quantized with.
 
     Dropped, the metric dequantizes codes at the wrong magnitude entirely and reports
@@ -250,7 +255,7 @@ def test_record_operand_global_scale_tracks_true_error():
     """
     torch.manual_seed(0)
     source = torch.randn(8, 128, device="cuda") * 1e4
-    codes, scale, global_scale = quantize_operand(source, -1, "int4", _NVFP4)
+    codes, scale, global_scale = quantize_operand(source, -1, fmt, _NVFP4)
     stats = QuantizationStats("act/x", 1, source.device)
 
     set_quantization_monitoring_status(True)
@@ -264,10 +269,13 @@ def test_record_operand_global_scale_tracks_true_error():
     dequantized = dequantize_operand(
         codes, scale, -1, _NVFP4, global_scale=global_scale
     )
+    if is_fp4(fmt):
+        assert codes.dtype is torch.uint8 and codes.shape == (8, 64)
+    assert global_scale is not None and torch.isfinite(global_scale).all()
     assert stats.err_sq.item() == pytest.approx(
         (source - dequantized).square().sum().item(), rel=1e-6
     )
-    # int4 over 16-wide blocks; the ratio is ~1.0 if the global scale is dropped.
+    # NVFP4 and int4 over 16-wide blocks; the ratio is ~1.0 if global_scale drops.
     assert (stats.err_sq / stats.src_sq).item() < 3.7e-2
 
 

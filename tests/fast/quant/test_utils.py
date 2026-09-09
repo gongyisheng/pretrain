@@ -10,6 +10,7 @@ from src.quant.utils import (
     scaled_mm_op,
     should_quantize,
     str_to_dtype,
+    str_to_qmax,
 )
 from src.utils.config import QuantizationConfig
 
@@ -18,6 +19,7 @@ from src.utils.config import QuantizationConfig
 INT8_FORMATS = sorted(_INT8_FORMATS)
 FP8_FORMATS = sorted(_FP8_FORMATS)
 FP4_FORMATS = sorted(_FP4_FORMATS)
+FP4_QMAX_CASES = [("fp4_e2m1", 6.0), ("fp4_e2m1_4over6", 4.0)]
 PASSTHROUGH_FORMATS = ["fp32", "fp16", "bf16"]
 RECIPES = ["fp8", "mxfp8", "nvfp4"]
 
@@ -27,6 +29,7 @@ DTYPE_BY_FORMAT = {
     "fp8_e8m0": torch.float8_e8m0fnu,
     # E2M1 stores two logical FP4 codes in each uint8 element.
     "fp4_e2m1": torch.uint8,
+    "fp4_e2m1_4over6": torch.uint8,
     **{fmt: torch.int8 for fmt in INT8_FORMATS},
 }
 
@@ -52,6 +55,11 @@ IS_FP4_BY_FORMAT = {
 @pytest.mark.parametrize("fmt", DTYPE_BY_FORMAT)
 def test_str_to_dtype(fmt):
     assert str_to_dtype(fmt) == DTYPE_BY_FORMAT[fmt]
+
+
+@pytest.mark.parametrize("fmt,expected", FP4_QMAX_CASES)
+def test_str_to_qmax(fmt, expected):
+    assert str_to_qmax(fmt) == expected
 
 
 @pytest.mark.parametrize("fmt", NON_ELEMENT_FORMATS)
@@ -136,6 +144,9 @@ GEMM_OP_CASES = [
     ("fp8_e4m3", "fp8_e4m3", _E8M0, (1, 64), "mxfp8"),
     ("fp8_e4m3", "fp8_e4m3", _E8M0, (32, 32), "mxfp8"),
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 16), "nvfp4"),
+    ("fp4_e2m1_4over6", "fp4_e2m1_4over6", _E4M3, (1, 16), "nvfp4"),
+    ("fp4_e2m1_4over6", "fp4_e2m1", _E4M3, (1, 16), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1_4over6", _E4M3, (16, 16), "nvfp4"),
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 32), "nvfp4"),
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 64), "nvfp4"),
     ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 128), "nvfp4"),

@@ -8,7 +8,7 @@ from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import QuantizationStats, record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.rotation import Rotation
-from src.quant.utils import is_fp4, is_quantized, scaled_grouped_mm_op
+from src.quant.utils import is_fp4, is_quantized, resolve_scale, scaled_grouped_mm_op
 from src.utils.config import QuantizationConfig
 
 
@@ -19,7 +19,8 @@ def quantized_grouped_mm(
     a_fmt: str,
     b_fmt: str,
     out_dtype: torch.dtype,
-    scale_cfg: dict,
+    a_scale: dict,
+    b_scale: dict,
     bias: torch.Tensor | None = None,
     a_stochastic_rounding: bool = False,
     b_stochastic_rounding: bool = False,
@@ -36,12 +37,12 @@ def quantized_grouped_mm(
         raise ValueError(
             f"a and b must have the same dtype, got {a.dtype} and {b.dtype}"
         )
-    block_size = scale_cfg["block_shape"][1]
+    block_size = a_scale["block_shape"][1]
     op = scaled_grouped_mm_op(
         a_fmt,
         b_fmt,
-        scale_cfg["scale_dtype"],
-        scale_cfg["block_shape"],
+        a_scale["scale_dtype"],
+        a_scale["block_shape"],
     )
     ragged_k = a.ndim == 2 and b.ndim == 2
 
@@ -98,7 +99,7 @@ def quantized_grouped_mm(
             src_a,
             contract_a,
             a_fmt,
-            scale_cfg,
+            a_scale,
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             stochastic_rounding=a_stochastic_rounding,
@@ -110,7 +111,7 @@ def quantized_grouped_mm(
             aq,
             sa,
             contract_a,
-            scale_cfg,
+            a_scale,
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             rotation=rotation,
@@ -121,7 +122,7 @@ def quantized_grouped_mm(
             b,
             -2,
             b_fmt,
-            scale_cfg,
+            b_scale,
             offs=b_offs,
             ragged_dim=b_ragged_dim,
             stochastic_rounding=b_stochastic_rounding,
@@ -134,7 +135,7 @@ def quantized_grouped_mm(
             bq,
             sb,
             -2,
-            scale_cfg,
+            b_scale,
             offs=offs,
             ragged_dim=b_ragged_dim,
             rotation=rotation,
@@ -160,7 +161,7 @@ def quantized_grouped_mm(
             aq,
             sa,
             contract_a,
-            scale_cfg,
+            a_scale,
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             rotation=rotation,
@@ -171,7 +172,7 @@ def quantized_grouped_mm(
             bq,
             sb,
             -2,
-            scale_cfg,
+            b_scale,
             offs=b_offs,
             ragged_dim=b_ragged_dim,
             rotation=rotation,
@@ -197,7 +198,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["act"]["fwd"],
             cfg.dtype["weight"]["fwd"],
             out_dtype,
-            cfg.scale,
+            resolve_scale(cfg.scale, "act"),
+            resolve_scale(cfg.scale, "weight"),
             bias=bias,
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
@@ -231,7 +233,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["grad_out"]["dgrad"],
             cfg.dtype["weight"]["dgrad"],
             out_dtype,
-            cfg.scale,
+            resolve_scale(cfg.scale, "grad_out"),
+            resolve_scale(cfg.scale, "weight"),
             a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("grad_out"),
@@ -250,7 +253,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["act"]["wgrad"],
             cfg.dtype["grad_out"]["wgrad"],
             out_dtype,
-            cfg.scale,
+            resolve_scale(cfg.scale, "act"),
+            resolve_scale(cfg.scale, "grad_out"),
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             a_stats=stats.get("act"),

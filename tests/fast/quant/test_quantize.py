@@ -37,7 +37,7 @@ INPUT_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 INIT_METHODS = ["normal", "transposed", "spread", "zeros", "tiny"]
 TEST_DEVICES = ["cpu", "cuda"]
 STOCHASTIC_ROUNDING = [False, True]
-COMPILED_FORMATS = [E4M3, "fp4_e2m1"]
+COMPILED_FORMATS = [E4M3, "fp4_e2m1", "fp4_e2m1_4over6"]
 COMPILED_SCALES = [ROWWISE, BLOCKWISE1D_16_E2M1]
 
 ROTATION_BLOCK_SIZES = [1, 32]
@@ -649,6 +649,7 @@ GLOBAL_SCALE_REL_MSE_BOUND = {
     "fp8_e4m3": 0.0028,  # measured 6.429e-04
     "fp8_e5m2": 0.011,  # measured 2.647e-03
     "fp4_e2m1": 0.045,  # measured 1.003e-02
+    "fp4_e2m1_4over6": 0.048,  # measured 1.108e-02, margin 4.33x
     "int4": 0.036,  # measured 8.479e-03
     "int5": 0.0078,  # measured 1.802e-03
     "int6": 0.0018,  # measured 4.221e-04
@@ -844,6 +845,7 @@ def test_quantize_operand_stochastic_rounding(fmt, enable_sr, device):
         grid = torch.arange(-qmax, qmax + 1, dtype=torch.float32)
     elif is_fp4(fmt):
         grid = torch.tensor(E2M1_GRID)
+        grid = grid[grid.abs() <= str_to_qmax(fmt)]
     else:
         codes = torch.arange(256, dtype=torch.uint8).view(str_to_dtype(fmt)).float()
         grid = codes[codes.isfinite()].unique()
