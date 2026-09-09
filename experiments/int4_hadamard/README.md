@@ -1,6 +1,6 @@
 # Int4 Randomized Hadamard Transform
 
-Test whether **int4 survives a randomized Hadamard transform (RHT)** at Qwen3-51M, across two arms — **W4A16** (int4 weights, bf16 activations) and **W4A4** (int4 weights and activations) — against a shared bf16 baseline and per-arm unrotated int4 controls. Scale granularity is fixed at blockwise `(1, 16)` in every quantized run; the only variable is the Hadamard block size. `lm_head` is excluded from quantization in every quantized run. 11 runs: 1 baseline + 2 controls + 4 Hadamard block sizes × 2 arms.
+Test whether **int4 survives a randomized Hadamard transform (RHT)** at Qwen3-51M, across two arms — **W4A16** (int4 weights, bf16 activations) and **W4A4** (int4 weights and activations) — against a shared bf16 baseline and per-arm unrotated int4 controls. Scale granularity is fixed at blockwise `(1, 16)` in every quantized run; the only variable is the Hadamard block size. **Quantization is scoped to the MLP blocks only** (`include: ['*mlp.*']`): `gate_proj`, `up_proj` and `down_proj` are quantized in every quantized run, while the attention projections, `lm_head` and the embedding stay bf16. 11 runs: 1 baseline + 2 controls + 4 Hadamard block sizes × 2 arms.
 
 RHT preconditions a GEMM operand with a block-diagonal Hadamard of size `block_size`, each block sign-flipped by a random ±1 vector drawn from the run seed, applied along the contraction dimension before quantization and inverted after dequantization. The transform is orthonormal, so it is mathematically an identity on the GEMM; it changes only *what the quantizer sees*. This is the QuaRot / SpinQuant / QuIP# mechanism: mixing spreads outlier energy across `block_size` coordinates, pushing each scale block's distribution toward Gaussian so int4's 16 codes cover more of the mass instead of being stretched by one large element.
 
@@ -19,7 +19,7 @@ If W4A4 at `block_size` 32 lands near its W4A16 twin, int4 activations are an ou
 
 ## Setup
 
-**Hadamard axis** (identical in both arms). Effective bits/weight counts fp32 scale storage against the weight tensor only and is `4 + 32/16 = 6.00` for every quantized run here: RHT adds no stored bits, so the whole axis sits at one storage point. int4 sets a 4-bit code range (`qmax=7`) but the tensor container is int8, so this column is a logical accounting, not measured memory.
+**Hadamard axis** (identical in both arms). Effective bits/weight counts fp32 scale storage against the quantized (MLP) weight tensors only and is `4 + 32/16 = 6.00` for every quantized run here: RHT adds no stored bits, so the whole axis sits at one storage point. int4 sets a 4-bit code range (`qmax=7`) but the tensor container is int8, so this column is a logical accounting, not measured memory.
 
 | Rotation | `block_size` | Hadamard block vs `(1, 16)` scale block | Effective bits/weight |
 |---|---|---|---|
@@ -44,7 +44,9 @@ Config names are `qwen3_51m_int4_<arm>_hadamard_<block_size>`, with controls `qw
 
 All runs: ~51M params (`d_model=512`, 8 layers, 8/4 Q/KV heads, `intermediate_size=1536`), seq_len=1024, effective batch=256 (bf16 and unrotated controls use batch=32/grad_accum=8; Hadamard runs use batch=128/grad_accum=2), 50K steps, Muon (`match_rms_adamw`, momentum=0.95, nesterov), lr=5e-4, cosine schedule with 1500 warmup steps, min_lr=5e-5, OpenWebText, bf16 mixed precision, seed 42, `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`.
 
-Every `block_size` must be a power of two dividing each contraction extent. The extents here are 256 (k/v_proj dgrad), 512 (all `d_model` contractions), 1536 (down_proj fwd, gate/up_proj dgrad), and the per-microbatch token count (wgrad: 32768 for controls, 131072 for Hadamard runs), so all four block sizes are legal; `lm_head` (50257) is excluded from quantization.
+**Quantization scope.** Only the MLP is quantized — 24 of the 57 Linears (3 per block × 8 blocks). Attention (`q/k/v/o_proj`) and `lm_head` run in bf16, so in W4A4 the attention path never sees an int4 activation and the residual stream reaching each MLP is a bf16 tensor. This narrows the experiment to the question RHT is actually about (does a change of basis rescue 4-bit codes on the dense feed-forward GEMMs) and removes attention-side quantization damage as a confound, at the cost of no longer being a whole-model int4 result.
+
+Every `block_size` must be a power of two dividing each contraction extent. Within the MLP the extents are 512 (gate/up_proj fwd, down_proj dgrad), 1536 (down_proj fwd, gate/up_proj dgrad), and the per-microbatch token count (wgrad: 32768 for controls, 131072 for Hadamard runs), so all four block sizes are legal.
 
 ## Run
 
@@ -81,19 +83,19 @@ W&B project: `pretrain-int4-hadamard`. Baseline: `qwen3_51m_bf16`.
 
 ### Headline: does RHT move int4 past the granularity curve?
 
-`(1, 16)` is the finest cell in `experiments/int4_granularity/`, so the coarser `(1, 32)` column below is there only to show how much the last granularity halving bought — the comparison that matters is rotated vs unrotated at `(1, 16)`. Both unrotated columns come from `experiments/int4_granularity/qwen3_51m_int4_<arm>_blockwise1d_{32,16}`, which share every hyperparameter with this experiment.
+`(1, 16)` is the finest cell in `experiments/int4_granularity/`, so the halving gain there is the yardstick: it is what the last doubling of scale storage bought. The rotation gain measured here is what a change of basis buys at that same storage point. **The two are not the same scope** — `experiments/int4_granularity/` quantizes attention as well, so its columns are a cross-experiment reference, and only the last two columns below are in-experiment and directly differenced.
 
-| Arm | unrotated (1, 32) — 5.00 bits | unrotated (1, 16) — 6.00 bits | gain from halving the block | best RHT (1, 16) — 6.00 bits | gain from the rotation |
-|---|---|---|---|---|---|
-| W4A16 | | | | | |
-| W4A4 | | | | | |
+| Arm | granularity ref: unrotated (1, 32) — 5.00 bits | granularity ref: unrotated (1, 16) — 6.00 bits | gain from halving the block | this exp: unrotated (1, 16) | this exp: best RHT (1, 16) | gain from the rotation |
+|---|---|---|---|---|---|---|
+| W4A16 | | | | | | |
+| W4A4 | | | | | | |
 
-A rotation gain comparable to or larger than the halving gain means the basis mattered at least as much as the last doubling of scale storage.
+A rotation gain comparable to or larger than the halving gain means the basis mattered at least as much as the last doubling of scale storage. Since the reference columns carry attention quantization and these do not, compare the two *gains*, never the raw losses across the boundary.
 
 ## Notes
 
 - Compare each int4 run with this experiment's bf16 baseline using the mean validation loss over the final 10 evaluations.
-- The two unrotated controls duplicate `experiments/int4_granularity/qwen3_51m_int4_<arm>_blockwise1d_16` exactly — same granularity, same hyperparameters, same seed. They are re-run here so this experiment is self-contained; they should reproduce those cells, so a mismatch is a determinism bug worth chasing rather than a result.
+- The two unrotated controls share granularity, hyperparameters and seed with `experiments/int4_granularity/qwen3_51m_int4_<arm>_blockwise1d_16` but **not scope** — that experiment quantizes attention too. Expect the controls here to land closer to bf16; the gap between them prices attention-side int4 and is not a determinism signal. Every Δ in this experiment must be taken against this experiment's own control.
 - `weight rel. err` is measured in the *unrotated* basis: `accumulate_quantization_sums` squares `source - dequantized`, and `dequantize_operand` inverts the rotation first. So it is directly comparable across rotated and control runs and is the cleanest single-number read on whether the transform helped the quantizer. Compare its trend with validation loss to separate quantization error from training dynamics.
 - **Underflow is the metric RHT should move most**, and it is measured in the *rotated* basis — `record_operand` passes `rotated_source` so the nonzero mask asks "was a value the quantizer actually saw flushed to code 0". A scale set by one outlier is exactly what flushes the rest of a block to zero, so if RHT is working, underflow should drop before validation loss does. Track it per arm alongside `weight rel. err`.
 - Record instability, divergence, and loss spikes, not just final-window loss. Unrotated W4A4 at `(1, 16)` is the cell most likely to diverge; if it does and a rotated twin does not, note the step it diverged instead of reporting only a final number.
