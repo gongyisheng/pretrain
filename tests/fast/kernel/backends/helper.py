@@ -112,6 +112,7 @@ NVFP4_SCALED_MM_CASES = (
 )
 
 NVFP4_BLOCK_SIZES = (16, 32, 48, 64, 128, 256)
+NVFP4_SCALE_DTYPES = (torch.float8_e4m3fn, torch.float32)
 
 QUANT_FORMAT_CASES = (
     QuantFormatCase("int8xint8", "int8", "int8"),
@@ -192,6 +193,11 @@ MXFP8_PLUS_SCALE_ERROR_CASES = (
 SCALED_GROUPED_MM_CASES = (
     ScaledGroupedMMCase("scaled-grouped", 64, 48, RAGGED_COUNTS),
     ScaledGroupedMMCase("scaled-grouped-tail", 163, 48, RAGGED_COUNTS),
+)
+
+MXFP8_SCALED_GROUPED_MM_CASES = (
+    ScaledGroupedMMCase("mxfp8-grouped", 192, 48, (16, 32, 0, 32), m=40),
+    ScaledGroupedMMCase("mxfp8-grouped-tail", 112, 50, (70, 18, 0, 120), m=70),
 )
 
 NVFP4_SCALED_GROUPED_MM_CASES = (
@@ -395,6 +401,14 @@ def make_scaled_grouped_mm_inputs(
         scale_blocks = (case.k + block_size - 1) // block_size
         sa = _nvfp4_scales((expert_count, case.m, scale_blocks), device)
         sb = _nvfp4_scales((scale_blocks, rows), device)
+        result = aq, bq, sa, sb
+
+    elif packed_e2m1 and layout == "3d_x_3d":
+        aq = _pack_e2m1((expert_count, case.m, case.k), -1, device)
+        bq = _pack_e2m1((expert_count, case.k, case.n), -2, device)
+        scale_blocks = (case.k + block_size - 1) // block_size
+        sa = _nvfp4_scales((expert_count, case.m, scale_blocks), device)
+        sb = _nvfp4_scales((expert_count, scale_blocks, case.n), device)
         result = aq, bq, sa, sb
 
     elif layout == "ragged_m":
