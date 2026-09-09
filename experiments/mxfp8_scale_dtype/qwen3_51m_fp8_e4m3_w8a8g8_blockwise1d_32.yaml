@@ -36,9 +36,20 @@ training:
   mixed_precision: bf16
   seed: 42
   quantization:
-    enabled: false
+    enabled: true
+    dtype:
+      weight: fp8_e4m3
+      act: fp8_e4m3
+      grad_out: fp8_e4m3
+    scale:
+      granularity: blockwise
+      block_shape:
+        weight: [1, 32]
+        act: [1, 32]
+        grad_out: [1, 32]
+    exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/mxfp8/qwen3_51m_bf16/
+  checkpoint_dir: checkpoints/mxfp8_scale_dtype/qwen3_51m_fp8_e4m3_w8a8g8_blockwise1d_32/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -61,6 +72,7 @@ scheduler:
   min_lr: 5e-5
 
 logging:
-  wandb_project: pretrain-mxfp8
-  wandb_run_name: qwen3-51m-bf16
+  wandb_project: pretrain-mxfp8-scale-dtype
+  wandb_run_name: qwen3-51m-mxfp8-scale-dtype-w8a8g8-fp32
   log_every: 10
+  log_quant_metrics: true
