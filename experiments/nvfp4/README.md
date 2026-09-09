@@ -41,6 +41,6 @@ Replace `1` with the free GPU's index. The runner executes BF16 followed by NVFP
 
 - Compare `val/loss` and `val/bpb` at equal token counts. Evaluation uses the learned high-precision weights without operand quantization in both runs.
 - This uses the repository's NVFP4 implementation, not Transformer Engine. Hadamard intermediates use FP32 and stochastic rounding uses software RNG, so numerical and speed parity with NVIDIA's implementation is not assumed.
-- `dtype: {recipe: nvfp4}` alone supplies the format and 1D scaling. This experiment explicitly adds `scale.block_shape.weight: [16, 16]`, rounding, rotation, and layer exclusions.
+- `dtype: {recipe: nvfp4}` alone supplies the format and default scaling: 16×16 for weights and 1×16 for activations and output gradients. This experiment explicitly repeats `scale.block_shape.weight: [16, 16]`, then adds rounding, rotation, and layer exclusions.
 - Use `perf/tokens_per_sec` after compilation warmup, with identical hardware and logging settings. This small model may spend more time quantizing than it saves in GEMMs. Full training results remain unmeasured.
 - Validation: both configs load with identical non-quantization settings and 50,931,200 parameters; the NVFP4 scope contains 49 linear projections. Compiled GPU smoke runs passed on an RTX 5060 Ti using batch size 1, accumulation 1, sequence length 128, and disabled SVD/quantization metrics. These runs do not validate full-batch memory use or convergence.
