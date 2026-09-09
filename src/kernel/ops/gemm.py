@@ -59,8 +59,16 @@ def _check_scaled_mm(
     if packed_e2m1:
         if aq.dtype is not torch.uint8 or bq.dtype is not torch.uint8:
             raise ValueError("fp4_e2m1 operands must be packed in uint8 tensors")
-        if sa.dtype is not torch.float8_e4m3fn or sb.dtype is not torch.float8_e4m3fn:
-            raise ValueError("nvfp4 block scales must have float8_e4m3fn dtype")
+        if sa.dtype is torch.float8_e8m0fnu or sb.dtype is torch.float8_e8m0fnu:
+            raise ValueError("nvfp4 does not support float8_e8m0fnu block scales")
+        if block_size <= 0 or block_size % 16:
+            raise ValueError(
+                f"fp4_e2m1 block_size must be a positive multiple of 16, got {block_size}"
+            )
+        if logical_k % 16:
+            raise ValueError(
+                f"fp4_e2m1 logical contraction size must be a multiple of 16, got {logical_k}"
+            )
     _check_global_scale(gsa, gsb, 1)
     _check_contraction(aq, bq)
     blocks = -(-logical_k // block_size) if block_size else 1
@@ -86,8 +94,16 @@ def _check_scaled_grouped_mm(
     if packed_e2m1:
         if aq.dtype is not torch.uint8 or bq.dtype is not torch.uint8:
             raise ValueError("fp4_e2m1 operands must be packed in uint8 tensors")
-        if sa.dtype is not torch.float8_e4m3fn or sb.dtype is not torch.float8_e4m3fn:
-            raise ValueError("nvfp4 block scales must have float8_e4m3fn dtype")
+        if sa.dtype is torch.float8_e8m0fnu or sb.dtype is torch.float8_e8m0fnu:
+            raise ValueError("nvfp4 does not support float8_e8m0fnu block scales")
+        if block_size <= 0 or block_size % 16:
+            raise ValueError(
+                f"fp4_e2m1 block_size must be a positive multiple of 16, got {block_size}"
+            )
+        if logical_k % 16:
+            raise ValueError(
+                f"fp4_e2m1 logical contraction size must be a multiple of 16, got {logical_k}"
+            )
         if aq.ndim == 2 and bq.ndim == 2:
             valid = torch.all(offs.remainder(2) == 0) & (offs[-1] == logical_k)
             message = "nvfp4 ragged-K offsets must be even and end at logical K"
