@@ -65,3 +65,22 @@ uv run python scripts/train.py --config configs/gpt2_124m.yaml --resume checkpoi
 ```
 
 Architecture-specific experiments (attention variants, MoE, scaling laws, etc.) live in `experiments/` with their own configs and write-ups.
+
+Quantization rules go under `training.quantization`. Block shapes must be a dictionary
+keyed by `weight`, `act`, and `grad_out`; a shared list or tuple is rejected:
+
+```yaml
+training:
+  quantization:
+    enabled: true
+    dtype: {recipe: nvfp4}
+    scale:
+      block_shape:
+        weight: [16, 16]
+        act: [1, 16]
+        grad_out: [1, 16]
+```
+
+Each pair is `[outer, contract]`, either `[1, N]` or `[N, N]`, with the same
+contraction extent across tensors. Omitted tensor entries inherit the `mxfp8` or
+`nvfp4` scale recipe defaults; otherwise, specify all three entries.

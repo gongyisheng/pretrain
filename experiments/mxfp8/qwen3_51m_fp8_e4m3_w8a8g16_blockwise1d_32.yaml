@@ -43,7 +43,10 @@ training:
       grad_out: bf16
     scale:
       granularity: blockwise
-      block_shape: [1, 32]
+      block_shape:
+        weight: [1, 32]
+        act: [1, 32]
+        grad_out: [1, 32]
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/mxfp8/qwen3_51m_fp8_e4m3_w8a8g16_blockwise1d_32/

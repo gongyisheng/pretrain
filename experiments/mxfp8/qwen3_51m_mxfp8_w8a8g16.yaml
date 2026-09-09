@@ -43,7 +43,10 @@ training:
       grad_out: bf16
     scale:
       granularity: blockwise
-      block_shape: [1, 32]
+      block_shape:
+        weight: [1, 32]
+        act: [1, 32]
+        grad_out: [1, 32]
       scale_dtype: fp8_e8m0
     exclude: [lm_head]
   grad_clip: 1.0

@@ -39,7 +39,10 @@ training:
       grad_out: bf16
     scale:
       granularity: blockwise
-      block_shape: [1, 16]
+      block_shape:
+        weight: [1, 16]
+        act: [1, 16]
+        grad_out: [1, 16]
     rotation:
       rotation_cls: hadamard
       rotation_kwargs:
