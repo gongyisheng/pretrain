@@ -108,6 +108,7 @@ NVFP4_SCALED_MM_CASES = (
     ScaledMMCase("moe-gate-up", 512, 384, m=128),
     ScaledMMCase("moe-down", 192, 512, m=128),
     ScaledMMCase("mn-tail", 80, 50, m=70),
+    ScaledMMCase("tail", 160, 48, m=70),
 )
 
 NVFP4_BLOCK_SIZES = (16, 32, 48, 64, 128, 256)

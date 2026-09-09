@@ -29,13 +29,33 @@ MXFP8_SUPPORT_INPUTS = {
 
 MXFP8_SUPPORT_CASES = (
     ({}, True),
+    ({"bq": MXFP8_SUPPORT_INPUTS["bq"].t()}, True),
     ({"aq": MXFP8_SUPPORT_INPUTS["aq"][0]}, False),
+    ({"bq": MXFP8_SUPPORT_INPUTS["bq"][0]}, False),
+    ({"aq": torch.zeros((32, 16), dtype=torch.float8_e4m3fn)}, False),
+    (
+        {
+            "aq": torch.zeros((32, 31), dtype=torch.float8_e4m3fn),
+            "bq": torch.zeros((31, 32), dtype=torch.float8_e4m3fn),
+        },
+        False,
+    ),
+    (
+        {
+            "bq": torch.zeros((32, 31), dtype=torch.float8_e4m3fn),
+            "sb": torch.ones((1, 31), dtype=torch.float8_e8m0fnu),
+        },
+        False,
+    ),
+    ({"bq": torch.zeros((32, 64), dtype=torch.float8_e4m3fn)[:, ::2]}, False),
     ({"aq": MXFP8_SUPPORT_INPUTS["aq"].to(torch.float8_e5m2)}, False),
     ({"bq": MXFP8_SUPPORT_INPUTS["bq"].to(torch.float8_e5m2)}, False),
     ({"out_dtype": torch.float16}, False),
     ({"block_size": 64}, False),
     ({"sa": MXFP8_SUPPORT_INPUTS["sa"].to(torch.float8_e4m3fn)}, False),
+    ({"sb": MXFP8_SUPPORT_INPUTS["sb"].to(torch.float8_e4m3fn)}, False),
     ({"sa": torch.ones((31, 1), dtype=torch.float8_e8m0fnu)}, False),
+    ({"sb": torch.ones((1, 31), dtype=torch.float8_e8m0fnu)}, False),
     ({"bias": torch.zeros(32, dtype=torch.float16)}, False),
     ({"bias": torch.zeros(31, dtype=torch.bfloat16)}, False),
     ({"bias": torch.zeros(64, dtype=torch.bfloat16)[::2]}, False),
@@ -53,7 +73,19 @@ NVFP4_SUPPORT_INPUTS = {
 
 NVFP4_SUPPORT_CASES = (
     ({}, True),
+    ({"bq": torch.zeros((32, 16), dtype=torch.uint8).t()}, True),
+    ({"out_dtype": torch.float16}, True),
+    ({"out_dtype": torch.float32}, True),
     ({"aq": NVFP4_SUPPORT_INPUTS["aq"][0]}, False),
+    ({"bq": NVFP4_SUPPORT_INPUTS["bq"][0]}, False),
+    (
+        {
+            "aq": torch.zeros((32, 15), dtype=torch.uint8),
+            "bq": torch.zeros((15, 32), dtype=torch.uint8),
+        },
+        False,
+    ),
+    ({"aq": torch.zeros((32, 8), dtype=torch.uint8)}, False),
     ({"aq": torch.zeros((32, 32), dtype=torch.uint8)[:, ::2]}, False),
     ({"bq": torch.zeros((32, 32), dtype=torch.uint8)[::2]}, False),
     ({"aq": NVFP4_SUPPORT_INPUTS["aq"].to(torch.int8)}, False),
@@ -77,6 +109,8 @@ NVFP4_SUPPORT_CASES = (
         False,
     ),
     ({"sa": NVFP4_SUPPORT_INPUTS["sa"].to(torch.float16)}, False),
+    ({"sb": NVFP4_SUPPORT_INPUTS["sb"].to(torch.float16)}, False),
+    ({"sa": torch.ones((31, 2), dtype=torch.float8_e4m3fn)}, False),
     ({"sb": torch.ones((1, 32), dtype=torch.float8_e4m3fn)}, False),
     ({"out_dtype": torch.float32, "bias": torch.zeros(32, dtype=torch.float32)}, False),
     ({"bias": torch.zeros(32, dtype=torch.float16)}, False),
@@ -183,4 +217,5 @@ def test_nvfp4_scaled_mm_precision(case, out, with_bias, with_global_scale):
     assert actual.shape == expected.shape
     assert actual.dtype is out_dtype
     assert actual.stride() == (actual.shape[1], 1)
+    assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=out.rtol, atol=out.atol)
