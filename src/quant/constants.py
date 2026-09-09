@@ -12,6 +12,7 @@ QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset(
         "fp8_e4m3",
         "fp8_e5m2",
         "fp4_e2m1",
+        "fp4_e2m1_4over6",
         "int8",
         "int7",
         "int6",
@@ -29,19 +30,22 @@ QUANT_ROUNDING = frozenset({"RNE", "SR"})
 QUANT_SCALE_RECIPES = {
     "tensorwise": {"granularity": "tensorwise"},
     "rowwise": {"granularity": "rowwise"},
-    "blockwise": {
-        "granularity": "blockwise",
-        "block_shape": (1, 128),
-        "scale_dtype": "fp32",
-    },
     "mxfp8": {
         "granularity": "blockwise",
-        "block_shape": (1, 32),
+        "block_shape": {
+            "weight": (1, 32),
+            "act": (1, 32),
+            "grad_out": (1, 32),
+        },
         "scale_dtype": "fp8_e8m0",
     },
     "nvfp4": {
         "granularity": "blockwise",
-        "block_shape": (1, 16),
+        "block_shape": {
+            "weight": (16, 16),
+            "act": (1, 16),
+            "grad_out": (1, 16),
+        },
         "scale_dtype": "fp8_e4m3",
         "enable_global_scale": True,
     },
@@ -81,6 +85,7 @@ _STR_TO_DTYPE = {
     "fp8_e8m0": torch.float8_e8m0fnu,
     # E2M1 has no usable element dtype: two codes are packed into one byte.
     "fp4_e2m1": torch.uint8,
+    "fp4_e2m1_4over6": torch.uint8,
     "int8": torch.int8,
     "int7": torch.int8,
     "int6": torch.int8,
@@ -92,6 +97,7 @@ _STR_TO_QMAX = {
     "fp8_e4m3": float(torch.finfo(torch.float8_e4m3fn).max),
     "fp8_e5m2": float(torch.finfo(torch.float8_e5m2).max),
     "fp4_e2m1": 6.0,
+    "fp4_e2m1_4over6": 4.0,
     "int8": 127.0,
     "int7": 63.0,
     "int6": 31.0,
@@ -107,6 +113,7 @@ _STR_TO_QMIN = {
     "fp8_e4m3": 2.0**-9,
     "fp8_e5m2": 2.0**-16,
     "fp4_e2m1": 0.5,
+    "fp4_e2m1_4over6": 0.5,
     "int8": 1.0,
     "int7": 1.0,
     "int6": 1.0,
@@ -124,7 +131,7 @@ _STR_TO_FP8_ULP = {
 EPS = 1e-30
 
 _FP8_FORMATS = frozenset({"fp8_e4m3", "fp8_e5m2"})
-_FP4_FORMATS = frozenset({"fp4_e2m1"})
+_FP4_FORMATS = frozenset({"fp4_e2m1", "fp4_e2m1_4over6"})
 _INT8_FORMATS = frozenset({"int8", "int7", "int6", "int5", "int4"})
 
 _FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
