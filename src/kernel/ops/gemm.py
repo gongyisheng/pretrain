@@ -54,14 +54,17 @@ def _check_scaled_mm(
     gsb: torch.Tensor | None,
     block_size: int,
     packed_e2m1: bool = False,
+    require_nonzero_block_size: bool = False,
 ) -> None:
+    if require_nonzero_block_size and block_size == 0:
+        raise ValueError("block_size must be nonzero, got 0")
     logical_k = aq.shape[-1] * (2 if packed_e2m1 else 1)
     if packed_e2m1:
         if aq.dtype is not torch.uint8 or bq.dtype is not torch.uint8:
             raise ValueError("fp4_e2m1 operands must be packed in uint8 tensors")
         if sa.dtype is torch.float8_e8m0fnu or sb.dtype is torch.float8_e8m0fnu:
             raise ValueError("nvfp4 does not support float8_e8m0fnu block scales")
-        if block_size <= 0 or block_size % 16:
+        if block_size < 0 or block_size % 16:
             raise ValueError(
                 f"fp4_e2m1 block_size must be a positive multiple of 16, got {block_size}"
             )
@@ -88,15 +91,18 @@ def _check_scaled_grouped_mm(
     offs: torch.Tensor,
     block_size: int,
     packed_e2m1: bool = False,
+    require_nonzero_block_size: bool = False,
 ) -> None:
     """Validate grouped scale shapes."""
+    if require_nonzero_block_size and block_size == 0:
+        raise ValueError("block_size must be nonzero, got 0")
     logical_k = aq.shape[-1] * (2 if packed_e2m1 else 1)
     if packed_e2m1:
         if aq.dtype is not torch.uint8 or bq.dtype is not torch.uint8:
             raise ValueError("fp4_e2m1 operands must be packed in uint8 tensors")
         if sa.dtype is torch.float8_e8m0fnu or sb.dtype is torch.float8_e8m0fnu:
             raise ValueError("nvfp4 does not support float8_e8m0fnu block scales")
-        if block_size <= 0 or block_size % 16:
+        if block_size < 0 or block_size % 16:
             raise ValueError(
                 f"fp4_e2m1 block_size must be a positive multiple of 16, got {block_size}"
             )
@@ -258,7 +264,9 @@ def fp8_scaled_mm(
 def mxfp8_scaled_mm(
     aq, bq, sa, sb, out_dtype, block_size, bias=None, gsa=None, gsb=None, backend=None
 ):
-    _check_scaled_mm(aq, bq, sa, sb, gsa, gsb, block_size)
+    _check_scaled_mm(
+        aq, bq, sa, sb, gsa, gsb, block_size, require_nonzero_block_size=True
+    )
     selected_backend = backend
     if selected_backend is None:
         selected_backend = _select_mxfp8_scaled_mm_backend(
@@ -277,7 +285,17 @@ def nvfp4_scaled_mm(
     aq, bq, sa, sb, out_dtype, block_size, bias=None, gsa=None, gsb=None, backend=None
 ):
     """Multiply packed NVFP4 matrices with block and optional global scales."""
-    _check_scaled_mm(aq, bq, sa, sb, gsa, gsb, block_size, packed_e2m1=True)
+    _check_scaled_mm(
+        aq,
+        bq,
+        sa,
+        sb,
+        gsa,
+        gsb,
+        block_size,
+        packed_e2m1=True,
+        require_nonzero_block_size=True,
+    )
     selected_backend = backend
     if selected_backend is None:
         selected_backend = _select_nvfp4_scaled_mm_backend(
@@ -354,7 +372,17 @@ def mxfp8_scaled_grouped_mm(
     backend=None,
 ):
     _check_offs(offs)
-    _check_scaled_grouped_mm(aq, bq, sa, sb, gsa, gsb, offs, block_size)
+    _check_scaled_grouped_mm(
+        aq,
+        bq,
+        sa,
+        sb,
+        gsa,
+        gsb,
+        offs,
+        block_size,
+        require_nonzero_block_size=True,
+    )
     return dispatch(
         "gemm.mxfp8_scaled_grouped_mm",
         (aq, bq, sa, sb, offs, out_dtype, block_size, bias),
@@ -380,7 +408,16 @@ def nvfp4_scaled_grouped_mm(
     """Multiply grouped packed NVFP4 matrices with per-group scales."""
     _check_offs(offs)
     _check_scaled_grouped_mm(
-        aq, bq, sa, sb, gsa, gsb, offs, block_size, packed_e2m1=True
+        aq,
+        bq,
+        sa,
+        sb,
+        gsa,
+        gsb,
+        offs,
+        block_size,
+        packed_e2m1=True,
+        require_nonzero_block_size=True,
     )
     return dispatch(
         "gemm.nvfp4_scaled_grouped_mm",
