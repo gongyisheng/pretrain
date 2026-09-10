@@ -50,7 +50,7 @@ training:
       scale_dtype: fp8_e8m0
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/mxfp8_scale_dtype/qwen3_51m_mxfp8_w8a16/
+  checkpoint_dir: checkpoints/mxfp8_scale_dtype/qwen3_51m_fp8_w8a16_scale_e8m0/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -74,6 +74,6 @@ scheduler:
 
 logging:
   wandb_project: pretrain-mxfp8-scale-dtype
-  wandb_run_name: qwen3-51m-mxfp8-scale-dtype-w8a16-e8m0
+  wandb_run_name: qwen3-51m-fp8-w8a16-scale-e8m0
   log_every: 10
   log_quant_metrics: true

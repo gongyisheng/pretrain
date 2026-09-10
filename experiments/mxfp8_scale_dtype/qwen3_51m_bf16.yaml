@@ -62,5 +62,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-mxfp8-scale-dtype
-  wandb_run_name: qwen3-51m-mxfp8-scale-dtype-bf16
+  wandb_run_name: qwen3-51m-bf16
   log_every: 10

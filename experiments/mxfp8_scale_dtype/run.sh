@@ -12,12 +12,7 @@ configs=()
 configs+=(qwen3_51m_bf16)
 for recipe in "${recipes[@]}"; do
     for scale_dtype in "${scale_dtypes[@]}"; do
-        if [[ "${scale_dtype}" == "e8m0" ]]; then
-            config="qwen3_51m_mxfp8_${recipe}"
-        else
-            config="qwen3_51m_fp8_e4m3_${recipe}_blockwise1d_32"
-        fi
-        configs+=("${config}")
+        configs+=("qwen3_51m_fp8_${recipe}_scale_${scale_dtype}")
     done
 done
 

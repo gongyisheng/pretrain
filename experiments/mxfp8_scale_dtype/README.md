@@ -15,14 +15,16 @@ E8M0 power-of-two scale rounding may increase validation loss relative to FP32 s
 | Config | Weights / acts | `grad_out` | Scale | Block shape | Scale bits/value | Approx. params |
 |---|---|---|---|---|---:|---:|
 | `qwen3_51m_bf16` | bf16 | bf16 | — | — | — | ~51M |
-| `qwen3_51m_fp8_e4m3_w8a16_blockwise1d_32` | E4M3 / bf16 | bf16 | FP32 | (1, 32) | 1.00 | ~51M |
-| `qwen3_51m_mxfp8_w8a16` | E4M3 / bf16 | bf16 | E8M0 | (1, 32) | 0.25 | ~51M |
-| `qwen3_51m_fp8_e4m3_w8a8_blockwise1d_32` | E4M3 | bf16 | FP32 | (1, 32) | 1.00 | ~51M |
-| `qwen3_51m_mxfp8_w8a8` | E4M3 | bf16 | E8M0 | (1, 32) | 0.25 | ~51M |
-| `qwen3_51m_fp8_e4m3_w8a8g8_blockwise1d_32` | E4M3 | E4M3 | FP32 | (1, 32) | 1.00 | ~51M |
-| `qwen3_51m_mxfp8_w8a8g8` | E4M3 | E4M3 | E8M0 | (1, 32) | 0.25 | ~51M |
+| `qwen3_51m_fp8_w8a16_scale_fp32` | E4M3 / bf16 | bf16 | FP32 | (1, 32) | 1.00 | ~51M |
+| `qwen3_51m_fp8_w8a16_scale_e8m0` | E4M3 / bf16 | bf16 | E8M0 | (1, 32) | 0.25 | ~51M |
+| `qwen3_51m_fp8_w8a8_scale_fp32` | E4M3 | bf16 | FP32 | (1, 32) | 1.00 | ~51M |
+| `qwen3_51m_fp8_w8a8_scale_e8m0` | E4M3 | bf16 | E8M0 | (1, 32) | 0.25 | ~51M |
+| `qwen3_51m_fp8_w8a8g8_scale_fp32` | E4M3 | E4M3 | FP32 | (1, 32) | 1.00 | ~51M |
+| `qwen3_51m_fp8_w8a8g8_scale_e8m0` | E4M3 | E4M3 | E8M0 | (1, 32) | 0.25 | ~51M |
 
 All runs use OpenWebText, sequence length 1024, batch size 16, gradient accumulation 16 (effective batch 256), 50K steps, seed 42, bf16 mixed precision, Muon with `match_rms_adamw`, lr=5e-4, weight decay=0.1, and a cosine schedule (1500 warmup, min lr=5e-5). They explicitly use `checkpoint_every: 5000`, `eval_every: 100`, and `eval_steps: 100`. The lm head remains bf16; embeddings, norms, attention, residuals, loss, and optimizer state also stay bf16/fp32.
+
+W&B names are `qwen3-51m-bf16` and `qwen3-51m-fp8-{w8a16,w8a8,w8a8g8}-scale-{fp32,e8m0}`; checkpoints use `checkpoints/mxfp8_scale_dtype/<run_name_with_underscores>/`.
 
 W8A16 quantizes weights only: forward and input-gradient GEMMs use the one-sided fake-quantization fallback, while the weight-gradient GEMM stays bf16. W8A8 supports two-FP8 GEMMs in forward, but its backward GEMMs still contain one bf16 operand and use the fallback. W8A8G8 quantizes both operands of all three eligible linear GEMMs. Native MXFP8 execution requires a supported GPU and backend.
 
