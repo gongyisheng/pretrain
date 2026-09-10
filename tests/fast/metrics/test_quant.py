@@ -10,9 +10,11 @@ from src.metrics.quant import (
     set_quantization_monitoring_status,
 )
 from src.quant.rotation import HadamardRotation
+from src.quant.utils import is_fp4
 
 _TENSORWISE = {
     "granularity": "tensorwise",
+    "enable_global_scale": False,
     "block_shape": (0, 0),
     "scale_dtype": torch.float32,
 }
@@ -56,6 +58,14 @@ def test_underflow_ignores_zeros_already_in_the_source():
     x = torch.tensor([[0.0, 0.0, 1.0, 2.0]])
     m = _metrics(x, x, _codes(x, x))["underflow_rate"]
     assert m.item() == 0.0
+
+
+def test_accumulate_quantization_sums_counts_packed_fp4_underflow():
+    source = torch.ones(1, 16)
+    codes = torch.full((1, 8), 0x11, dtype=torch.uint8)
+    codes[0, 0] = 0x10
+    sums = accumulate_quantization_sums(source, codes, source, contract_dim=-1)
+    assert sums[2].item() == 1.0
 
 
 def test_underflow_rate_is_not_diluted_by_zeros_already_in_the_source():
@@ -180,7 +190,7 @@ def test_sqnr_min_ignores_an_all_zero_expert():
 def test_sqnr_positive_and_finite_over_a_real_round_trip(fmt):
     torch.manual_seed(0)
     x = torch.randn(64, 64)
-    q, scale = quantize_operand(x, -1, fmt, _TENSORWISE)
+    q, scale, _ = quantize_operand(x, -1, fmt, _TENSORWISE)
     m = _metrics(x, dequantize_operand(q, scale, -1, _TENSORWISE), q)
     assert torch.isfinite(m["sqnr"]) and m["sqnr"].item() > 10.0
 
@@ -190,7 +200,7 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
     x = torch.zeros(1, 256)
     x[0, 0] = 1000.0
     x[0, 1:] = 1e-3  # well below (1000/448) * 2^-9 for e4m3
-    q, scale = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
+    q, scale, _ = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
     m = _metrics(x, dequantize_operand(q, scale, -1, _TENSORWISE), q)
     assert m["underflow_rate"].item() > 0.9
 
@@ -198,7 +208,9 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
 def test_record_operand_rotation_aligns_underflow_with_codes():
     source = torch.ones(1, 4)
     rotation = HadamardRotation(block_size=4, random_sign=False)
-    codes, scale = quantize_operand(source, -1, "int8", _TENSORWISE, rotation=rotation)
+    codes, scale, _ = quantize_operand(
+        source, -1, "int8", _TENSORWISE, rotation=rotation
+    )
     stats = QuantizationStats("act/x", 1, source.device)
 
     set_quantization_monitoring_status(True)
@@ -223,6 +235,50 @@ def test_record_operand_rotation_aligns_underflow_with_codes():
     assert stats.nonzero.item() == 1.0
 
 
+_NVFP4 = {
+    "granularity": "blockwise",
+    "enable_global_scale": True,
+    "block_shape": (1, 16),
+    "scale_dtype": torch.float8_e4m3fn,
+}
+
+
+GLOBAL_SCALE_FORMATS = ["int4", "fp4_e2m1", "fp4_e2m1_4over6"]
+
+
+@pytest.mark.parametrize("fmt", GLOBAL_SCALE_FORMATS)
+def test_record_operand_global_scale_tracks_true_error(fmt):
+    """The monitored error must use the global scale the operand was quantized with.
+
+    Dropped, the metric dequantizes codes at the wrong magnitude entirely and reports
+    the operand itself as error -- near 1.0 -- no matter how well the quantizer did.
+    """
+    torch.manual_seed(0)
+    source = torch.randn(8, 128, device="cuda") * 1e4
+    codes, scale, global_scale = quantize_operand(source, -1, fmt, _NVFP4)
+    stats = QuantizationStats("act/x", 1, source.device)
+
+    set_quantization_monitoring_status(True)
+    try:
+        record_operand(
+            stats, source, codes, scale, -1, _NVFP4, global_scale=global_scale
+        )
+    finally:
+        set_quantization_monitoring_status(False)
+
+    dequantized = dequantize_operand(
+        codes, scale, -1, _NVFP4, global_scale=global_scale
+    )
+    if is_fp4(fmt):
+        assert codes.dtype is torch.uint8 and codes.shape == (8, 64)
+    assert global_scale is not None and torch.isfinite(global_scale).all()
+    assert stats.err_sq.item() == pytest.approx(
+        (source - dequantized).square().sum().item(), rel=1e-6
+    )
+    # NVFP4 and int4 over 16-wide blocks; the ratio is ~1.0 if global_scale drops.
+    assert (stats.err_sq / stats.src_sq).item() < 3.7e-2
+
+
 # --- accumulation: the property the fold/read split exists to provide ---
 
 
@@ -233,7 +289,7 @@ def _holder(sites):
 
 def _fold(stats, source, fmt="fp8_e4m3", offs=None, ragged_dim=None):
     """Quantize one operand and fold it in, the way `record_operand` does."""
-    codes, scale = quantize_operand(
+    codes, scale, _ = quantize_operand(
         source, -1, fmt, _TENSORWISE, offs=offs, ragged_dim=ragged_dim
     )
     deq = dequantize_operand(
@@ -253,7 +309,7 @@ def test_folding_chunks_equals_folding_the_whole_operand():
     """
     torch.manual_seed(0)
     x = torch.randn(24, 32)
-    codes, scale = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
+    codes, scale, _ = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
     deq = dequantize_operand(codes, scale, -1, _TENSORWISE)
 
     whole = accumulate_quantization_sums(x, codes, deq)

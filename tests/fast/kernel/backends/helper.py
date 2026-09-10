@@ -101,6 +101,19 @@ MXFP8_SCALED_MM_CASES = (
     ScaledMMCase("tail", 112, 144, m=80),
 )
 
+NVFP4_SCALED_MM_CASES = (
+    ScaledMMCase("attention", 512, 512, m=128),
+    ScaledMMCase("dense-gate-up", 512, 3072, m=128),
+    ScaledMMCase("dense-down", 1536, 512, m=128),
+    ScaledMMCase("moe-gate-up", 512, 384, m=128),
+    ScaledMMCase("moe-down", 192, 512, m=128),
+    ScaledMMCase("mn-tail", 80, 50, m=70),
+    ScaledMMCase("tail", 160, 48, m=70),
+)
+
+NVFP4_BLOCK_SIZES = (16, 32, 48, 64, 128, 256)
+NVFP4_SCALE_DTYPES = (torch.float8_e4m3fn, torch.float32)
+
 QUANT_FORMAT_CASES = (
     QuantFormatCase("int8xint8", "int8", "int8"),
     QuantFormatCase("e4m3xe4m3", "fp8_e4m3", "fp8_e4m3"),
@@ -182,10 +195,35 @@ SCALED_GROUPED_MM_CASES = (
     ScaledGroupedMMCase("scaled-grouped-tail", 163, 48, RAGGED_COUNTS),
 )
 
+MXFP8_SCALED_GROUPED_MM_CASES = (
+    ScaledGroupedMMCase("mxfp8-grouped", 192, 48, (16, 32, 0, 32), m=40),
+    ScaledGroupedMMCase("mxfp8-grouped-tail", 112, 50, (70, 18, 0, 120), m=70),
+)
+
+NVFP4_SCALED_GROUPED_MM_CASES = (
+    ScaledGroupedMMCase("nvfp4-grouped", 192, 48, (16, 32, 0, 32), m=40),
+    ScaledGroupedMMCase("nvfp4-grouped-tail", 208, 50, (70, 18, 0, 120), m=70),
+)
+
 BF16_OUT = OutDtypeCase("bf16", torch.bfloat16, rtol=2e-2, atol=2e-2)
 FP16_OUT = OutDtypeCase("fp16", torch.float16, rtol=2e-3, atol=2e-3)
 
 OUT_DTYPE_CASES = (BF16_OUT, FP16_OUT)
+
+
+def _pack_e2m1(shape: tuple[int, ...], dim: int, device: str) -> torch.Tensor:
+    codes = torch.randint(0, 16, shape, device=device, dtype=torch.uint8)
+    axis = dim % len(shape)
+    even = torch.arange(0, shape[axis], 2, device=device)
+    odd = even + 1
+    low = codes.index_select(axis, even)
+    high = codes.index_select(axis, odd)
+    return low | high << 4
+
+
+def _nvfp4_scales(shape: tuple[int, ...], device: str) -> torch.Tensor:
+    scales = torch.randint(1, 17, shape, device=device).float() / 8
+    return scales.to(torch.float8_e4m3fn)
 
 
 def _make_random_tensor(
@@ -241,13 +279,16 @@ def make_grouped_mm_inputs(
 
 def make_scaled_mm_inputs(
     case: ScaledMMCase,
-    format: QuantFormatCase,
-    scale: QuantScaleCase,
-    with_bias: bool,
+    format: QuantFormatCase | None = None,
+    scale: QuantScaleCase | None = None,
+    with_bias: bool = False,
     scale_dtype: torch.dtype = torch.float32,
     out_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
     seed: int = 0,
+    with_global_scale: bool = False,
+    packed_e2m1: bool = False,
+    block_size: int = 16,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -256,40 +297,60 @@ def make_scaled_mm_inputs(
     torch.dtype,
     int,
     torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
 ]:
     torch.manual_seed(seed)
     rows = case.m if case.m is not None else 8 * 1024
-    a = _make_random_tensor((rows, case.k), device, out_dtype)
-    b = _make_random_tensor((case.n, case.k), device, out_dtype).mT
-    scale_config = {
-        "granularity": scale.granularity,
-        "block_shape": scale.block_shape,
-        "scale_dtype": scale_dtype,
-    }
-    aq, sa = quantize_operand(a, -1, format.a_format, scale_config)
-    bq, sb = quantize_operand(b, -2, format.b_format, scale_config)
+    if packed_e2m1:
+        aq = _pack_e2m1((rows, case.k), -1, device)
+        bq = _pack_e2m1((case.k, case.n), -2, device)
+        scale_blocks = (case.k + block_size - 1) // block_size
+        sa = _nvfp4_scales((rows, scale_blocks), device)
+        sb = _nvfp4_scales((scale_blocks, case.n), device)
+    else:
+        if format is None or scale is None:
+            raise ValueError("format and scale are required unless packed_e2m1 is set")
+        a = _make_random_tensor((rows, case.k), device, out_dtype)
+        b = _make_random_tensor((case.n, case.k), device, out_dtype).mT
+        scale_config = {
+            "granularity": scale.granularity,
+            "block_shape": scale.block_shape,
+            "scale_dtype": scale_dtype,
+            "enable_global_scale": False,
+        }
+        aq, sa, _ = quantize_operand(a, -1, format.a_format, scale_config)
+        bq, sb, _ = quantize_operand(b, -2, format.b_format, scale_config)
+        block_size = scale.block_size
     bias = _make_random_tensor((case.n,), device, out_dtype) if with_bias else None
+    gsa = torch.tensor([0.5], device=device) if with_global_scale else None
+    gsb = torch.tensor([0.25], device=device) if with_global_scale else None
     return (
         aq,
         bq,
         sa,
         sb,
         out_dtype,
-        scale.block_size,
+        block_size,
         bias,
+        gsa,
+        gsb,
     )
 
 
 def make_scaled_grouped_mm_inputs(
     case: ScaledGroupedMMCase,
     layout: str,
-    format: QuantFormatCase,
-    scale: QuantScaleCase,
-    with_bias: bool,
+    format: QuantFormatCase | None = None,
+    scale: QuantScaleCase | None = None,
+    with_bias: bool = False,
     scale_dtype: torch.dtype = torch.float32,
     out_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
     seed: int = 0,
+    with_global_scale: bool = False,
+    packed_e2m1: bool = False,
+    block_size: int = 16,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -299,17 +360,59 @@ def make_scaled_grouped_mm_inputs(
     torch.dtype,
     int,
     torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
 ]:
     torch.manual_seed(seed)
     offs = _make_grouped_offsets(case.counts, device)
     expert_count, rows = len(case.counts), sum(case.counts)
-    scale_config = {
-        "granularity": scale.granularity,
-        "block_shape": scale.block_shape,
-        "scale_dtype": scale_dtype,
-    }
-    if layout == "ragged_m":
-        aq, sa = quantize_operand(
+    if not packed_e2m1:
+        if format is None or scale is None:
+            raise ValueError("format and scale are required unless packed_e2m1 is set")
+        scale_config = {
+            "granularity": scale.granularity,
+            "block_shape": scale.block_shape,
+            "scale_dtype": scale_dtype,
+            "enable_global_scale": False,
+        }
+        block_size = scale.block_size
+
+    if packed_e2m1 and layout == "ragged_m":
+        aq = _pack_e2m1((rows, case.k), -1, device)
+        bq = _pack_e2m1((expert_count, case.k, case.n), -2, device)
+        scale_blocks = (case.k + block_size - 1) // block_size
+        sa = _nvfp4_scales((rows, scale_blocks), device)
+        sb = _nvfp4_scales((expert_count, scale_blocks, case.n), device)
+        result = aq, bq, sa, sb
+
+    elif packed_e2m1 and layout == "ragged_k":
+        aq = _pack_e2m1((case.m, rows), -1, device)
+        bq = _pack_e2m1((rows, case.n), -2, device)
+        scale_blocks = sum(
+            (count + block_size - 1) // block_size for count in case.counts
+        )
+        sa = _nvfp4_scales((case.m, scale_blocks), device)
+        sb = _nvfp4_scales((scale_blocks, case.n), device)
+        result = aq, bq, sa, sb
+
+    elif packed_e2m1 and layout == "ragged_n":
+        aq = _pack_e2m1((expert_count, case.m, case.k), -1, device)
+        bq = _pack_e2m1((case.k, rows), -2, device)
+        scale_blocks = (case.k + block_size - 1) // block_size
+        sa = _nvfp4_scales((expert_count, case.m, scale_blocks), device)
+        sb = _nvfp4_scales((scale_blocks, rows), device)
+        result = aq, bq, sa, sb
+
+    elif packed_e2m1 and layout == "3d_x_3d":
+        aq = _pack_e2m1((expert_count, case.m, case.k), -1, device)
+        bq = _pack_e2m1((expert_count, case.k, case.n), -2, device)
+        scale_blocks = (case.k + block_size - 1) // block_size
+        sa = _nvfp4_scales((expert_count, case.m, scale_blocks), device)
+        sb = _nvfp4_scales((expert_count, scale_blocks, case.n), device)
+        result = aq, bq, sa, sb
+
+    elif layout == "ragged_m":
+        aq, sa, _ = quantize_operand(
             _make_random_tensor((rows, case.k), device, out_dtype),
             -1,
             format.a_format,
@@ -321,11 +424,11 @@ def make_scaled_grouped_mm_inputs(
                 for _ in range(expert_count)
             ]
         )
-        bq, sb = quantize_operand(b, -2, format.b_format, scale_config)
+        bq, sb, _ = quantize_operand(b, -2, format.b_format, scale_config)
         result = aq, bq, sa, sb
 
     elif layout == "ragged_k":
-        aq, sa = quantize_operand(
+        aq, sa, _ = quantize_operand(
             _make_random_tensor((rows, case.m), device, out_dtype),
             -2,
             format.a_format,
@@ -333,7 +436,7 @@ def make_scaled_grouped_mm_inputs(
             offs=offs,
             ragged_dim=-2,
         )
-        bq, sb = quantize_operand(
+        bq, sb, _ = quantize_operand(
             _make_random_tensor((rows, case.n), device, out_dtype),
             -2,
             format.b_format,
@@ -350,8 +453,8 @@ def make_scaled_grouped_mm_inputs(
                 for _ in range(expert_count)
             ]
         )
-        aq, sa = quantize_operand(a, -1, format.a_format, scale_config)
-        bqT, sbT = quantize_operand(
+        aq, sa, _ = quantize_operand(a, -1, format.a_format, scale_config)
+        bqT, sbT, _ = quantize_operand(
             _make_random_tensor((rows, case.k), device, out_dtype),
             -1,
             format.b_format,
@@ -361,14 +464,14 @@ def make_scaled_grouped_mm_inputs(
         )
         result = aq, bqT.mT, sa, sbT.mT
 
-    elif layout == "3d_x_3d":
-        aq, sa = quantize_operand(
+    elif not packed_e2m1 and layout == "3d_x_3d":
+        aq, sa, _ = quantize_operand(
             _make_random_tensor((expert_count, case.m, case.k), device, out_dtype),
             -1,
             format.a_format,
             scale_config,
         )
-        bq, sb = quantize_operand(
+        bq, sb, _ = quantize_operand(
             _make_random_tensor((expert_count, case.k, case.n), device, out_dtype),
             -2,
             format.b_format,
@@ -384,4 +487,14 @@ def make_scaled_grouped_mm_inputs(
         if with_bias
         else None
     )
-    return (*result, offs, out_dtype, scale.block_size, bias)
+    gsa = (
+        torch.arange(1, expert_count + 1, device=device).float() / 4
+        if with_global_scale
+        else None
+    )
+    gsb = (
+        torch.arange(expert_count, 0, -1, device=device).float() / 4
+        if with_global_scale
+        else None
+    )
+    return *result, offs, out_dtype, block_size, bias, gsa, gsb

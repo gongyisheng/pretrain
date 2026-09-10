@@ -1,47 +1,65 @@
 import pytest
 import torch
 
-from src.quant.constants import _FP8_FORMATS, _INT8_FORMATS
+from src.quant.constants import _FP4_FORMATS, _FP8_FORMATS, _INT8_FORMATS
 from src.quant.utils import (
+    is_fp4,
     is_fp8,
     resolve_quantization_config,
     scaled_grouped_mm_op,
     scaled_mm_op,
     should_quantize,
     str_to_dtype,
+    str_to_qmax,
 )
 from src.utils.config import QuantizationConfig
 
 # --- element formats ---
 
-INT_FORMATS = sorted(_INT8_FORMATS)
+INT8_FORMATS = sorted(_INT8_FORMATS)
 FP8_FORMATS = sorted(_FP8_FORMATS)
+FP4_FORMATS = sorted(_FP4_FORMATS)
+FP4_QMAX_CASES = [("fp4_e2m1", 6.0), ("fp4_e2m1_4over6", 4.0)]
 PASSTHROUGH_FORMATS = ["fp32", "fp16", "bf16"]
+RECIPES = ["fp8", "mxfp8", "nvfp4"]
 
 DTYPE_BY_FORMAT = {
     "fp8_e4m3": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
     "fp8_e8m0": torch.float8_e8m0fnu,
-    **{fmt: torch.int8 for fmt in INT_FORMATS},  # every int width stores in int8
+    # E2M1 stores two logical FP4 codes in each uint8 element.
+    "fp4_e2m1": torch.uint8,
+    "fp4_e2m1_4over6": torch.uint8,
+    **{fmt: torch.int8 for fmt in INT8_FORMATS},
 }
 
-# "fp8" expands to fp8_e4m3/fp8_e5m2 per operand, so it is a recipe rather than an
-# element format: it must reach the format helpers loudly, not as a silent
-# unquantized passthrough. Same for the compute dtypes, which are never elements.
-NON_ELEMENT_FORMATS = PASSTHROUGH_FORMATS + ["fp8"]
+# Recipes are not operand dtypes. Nor are compute dtypes, which must reach the
+# dtype helpers loudly instead of becoming an unquantized passthrough.
+NON_ELEMENT_FORMATS = PASSTHROUGH_FORMATS + RECIPES
 
 # _FP8_FORMATS was derived from the dtype map, so adding the int entries there
 # would have silently made is_fp8 true for them.
 IS_FP8_BY_FORMAT = {
     **{fmt: True for fmt in FP8_FORMATS},
-    **{fmt: False for fmt in INT_FORMATS + NON_ELEMENT_FORMATS},
-    "fp8_e8m0": False,  # a scale dtype, never an operand format
+    **{fmt: False for fmt in FP4_FORMATS + INT8_FORMATS + NON_ELEMENT_FORMATS},
+    "fp8_e8m0": False,  # a scale dtype, never an operand dtype
+}
+
+IS_FP4_BY_FORMAT = {
+    **{fmt: True for fmt in FP4_FORMATS},
+    **{fmt: False for fmt in FP8_FORMATS + INT8_FORMATS + NON_ELEMENT_FORMATS},
+    "fp8_e8m0": False,  # a scale dtype, never an operand dtype
 }
 
 
 @pytest.mark.parametrize("fmt", DTYPE_BY_FORMAT)
 def test_str_to_dtype(fmt):
     assert str_to_dtype(fmt) == DTYPE_BY_FORMAT[fmt]
+
+
+@pytest.mark.parametrize("fmt,expected", FP4_QMAX_CASES)
+def test_str_to_qmax(fmt, expected):
+    assert str_to_qmax(fmt) == expected
 
 
 @pytest.mark.parametrize("fmt", NON_ELEMENT_FORMATS)
@@ -53,6 +71,11 @@ def test_str_to_dtype_raise_error(fmt):
 @pytest.mark.parametrize("fmt", IS_FP8_BY_FORMAT)
 def test_is_fp8(fmt):
     assert is_fp8(fmt) is IS_FP8_BY_FORMAT[fmt]
+
+
+@pytest.mark.parametrize("fmt", IS_FP4_BY_FORMAT)
+def test_is_fp4(fmt):
+    assert is_fp4(fmt) is IS_FP4_BY_FORMAT[fmt]
 
 
 # --- module selection ---
@@ -106,9 +129,13 @@ def test_resolve_quantization_config(rules, fqn, expected):
 
 # --- GEMM op routing ---
 
-_FP32, _E8M0 = torch.float32, torch.float8_e8m0fnu
+_FP32, _E4M3, _E8M0 = (
+    torch.float32,
+    torch.float8_e4m3fn,
+    torch.float8_e8m0fnu,
+)
 
-# Both strict `mxfp8` and internal `mxfp8_plus` collapse to the same public op.
+# Strict and extended `mxfp8`/`nvfp4` recipes collapse to their public ops.
 GEMM_OP_CASES = [
     ("int8", "int8", _FP32, (0, 0), "int8"),
     ("fp8_e4m3", "fp8_e4m3", _FP32, (1, 32), "fp8"),
@@ -116,6 +143,24 @@ GEMM_OP_CASES = [
     ("fp8_e5m2", "fp8_e4m3", _E8M0, (1, 32), "mxfp8"),
     ("fp8_e4m3", "fp8_e4m3", _E8M0, (1, 64), "mxfp8"),
     ("fp8_e4m3", "fp8_e4m3", _E8M0, (32, 32), "mxfp8"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 16), "nvfp4"),
+    ("fp4_e2m1_4over6", "fp4_e2m1_4over6", _E4M3, (1, 16), "nvfp4"),
+    ("fp4_e2m1_4over6", "fp4_e2m1", _E4M3, (1, 16), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1_4over6", _E4M3, (16, 16), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 32), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 64), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 128), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (16, 16), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (32, 32), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (64, 64), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (128, 128), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (0, 0), None),
+    ("fp4_e2m1", "fp4_e2m1", _FP32, (1, 16), None),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (16, 32), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (32, 16), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (32, 64), "nvfp4"),
+    ("fp4_e2m1", "fp4_e2m1", _E4M3, (1, 256), "nvfp4"),
+    ("fp4_e2m1", "int4", _E4M3, (1, 16), None),
     ("int8", "fp8_e4m3", _FP32, (0, 0), None),
     ("bf16", "bf16", _FP32, (0, 0), None),
 ]

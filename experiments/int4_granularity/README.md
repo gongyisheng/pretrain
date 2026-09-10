@@ -2,7 +2,7 @@
 
 Sweep blockwise quantization scale granularity at Qwen3-51M with **int4 weights**, across three arms — **W4A16** (int4 weights, bf16 activations), **W4A4** (int4 weights and activations), and **W4A4G4** (int4 weights, activations, and `grad_out`) — against a shared bf16 baseline. Each arm adds one more int4 operand to the previous one; `lm_head` is excluded from quantization in every quantized run.
 
-Only blockwise layouts are swept: 1D `(1, N)` and square 2D `(N, N)` at extents 16, 32, and 64. (`block_shape` must be 1D or a square tile with a contract extent that is a positive multiple of 16.) `experiments/int8_granularity/` also runs extent 128; it is dropped here because 128 elements per scale leaves int4's 16 codes far too little resolution to be informative. 19 runs: 1 baseline + 6 granularities × 3 arms.
+Only blockwise layouts are swept: 1D `(1, N)` and square 2D `(N, N)` at extents 16, 32, and 64. (`block_shape` maps each tensor to a 1D block or square tile with a contract extent that is a positive multiple of 16.) `experiments/int8_granularity/` also runs extent 128; it is dropped here because 128 elements per scale leaves int4's 16 codes far too little resolution to be informative. 19 runs: 1 baseline + 6 granularities × 3 arms.
 
 ## Hypothesis
 

@@ -267,9 +267,15 @@ _SCALED_CONFIGS = [
 
 
 def _early_prune_scaled_configs(
-    configs, named_args, SCALE_BLOCK_SIZE, HAS_BIAS, grid=None, warmup=None
+    configs,
+    named_args,
+    SCALE_BLOCK_SIZE,
+    HAS_BIAS,
+    HAS_GLOBAL_SCALE,
+    grid=None,
+    warmup=None,
 ):
-    del named_args, HAS_BIAS, grid, warmup
+    del named_args, HAS_BIAS, HAS_GLOBAL_SCALE, grid, warmup
     scale_block = SCALE_BLOCK_SIZE
     if not scale_block:
         return configs
@@ -289,10 +295,11 @@ def _scaled_mm_kernel(
     sa_ptr,
     sb_ptr,
     bias_ptr,
+    gsa_ptr,
+    gsb_ptr,
     M,
     N,
     K,
-    n_scale_blocks,
     stride_am,
     stride_ak,
     stride_bk,
@@ -306,6 +313,7 @@ def _scaled_mm_kernel(
     stride_biasn,
     SCALE_BLOCK_SIZE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL_SCALE: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -318,6 +326,7 @@ def _scaled_mm_kernel(
     m_mask = offs_m < M
     n_mask = offs_n < N
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    n_scale_blocks = tl.cdiv(K, SCALE_BLOCK_SIZE)
     for scale_block_idx in range(n_scale_blocks):
         # tl.dot requires K >= 32. A 16-wide scale block therefore uses one 32-wide
         # tile; block_end keeps its extra lanes out of this block's scale.
@@ -333,17 +342,21 @@ def _scaled_mm_kernel(
             a = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0)
             block_acc += tl.dot(a, b).to(tl.float32)
+        # Cast so a narrow (e4m3) scale becomes arithmetic-capable; a no-op for fp32.
         sa = tl.load(
             sa_ptr + offs_m * stride_sam + scale_block_idx * stride_sak,
             mask=m_mask,
             other=0.0,
-        )
+        ).to(tl.float32)
         sb = tl.load(
             sb_ptr + scale_block_idx * stride_sbk + offs_n * stride_sbn,
             mask=n_mask,
             other=0.0,
-        )
+        ).to(tl.float32)
         acc += sa[:, None] * block_acc * sb[None, :]
+    # Per-tensor global scales rescale the whole accumulator once, before bias.
+    if HAS_GLOBAL_SCALE:
+        acc *= tl.load(gsa_ptr) * tl.load(gsb_ptr)
     # Bias is unscaled: apply it to acc, not each scaled block partial.
     if HAS_BIAS:
         bias = tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)
@@ -380,17 +393,18 @@ _MXFP8_BLOCK_SIZE = 32
 
 @triton.autotune(configs=_SCALED_MXFP8_CONFIGS, key=["M", "N", "K"])
 @triton.jit
-def _mxfp8_scaled_mm_kernel(
+def _mxfp8_plus_scaled_mm_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
     sa_ptr,
     sb_ptr,
     bias_ptr,
+    gsa_ptr,
+    gsb_ptr,
     M,
     N,
     K,
-    n_scale_blocks,
     stride_am,
     stride_ak,
     stride_bk,
@@ -406,6 +420,7 @@ def _mxfp8_scaled_mm_kernel(
     B_FORMAT: tl.constexpr,
     SCALE_BLOCK_SIZE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL_SCALE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -426,6 +441,7 @@ def _mxfp8_scaled_mm_kernel(
     m_mask = offs_m < M
     n_mask = offs_n < N
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    n_scale_blocks = tl.cdiv(K, SCALE_BLOCK_SIZE)
     for k0 in range(0, K, BLOCK_K):
         offs_k = k0 + tl.arange(0, BLOCK_K)
         k_mask = offs_k < K
@@ -453,6 +469,8 @@ def _mxfp8_scaled_mm_kernel(
             other=0,
         )
         acc = tl.dot_scaled(a, sa, A_FORMAT, b, sb, B_FORMAT, acc=acc)
+    if HAS_GLOBAL_SCALE:
+        acc *= tl.load(gsa_ptr) * tl.load(gsb_ptr)
     if HAS_BIAS:
         acc += tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)[
             None, :
@@ -460,6 +478,236 @@ def _mxfp8_scaled_mm_kernel(
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     tl.store(
         c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=m_mask[:, None] & n_mask[None, :]
+    )
+
+
+_SCALED_NVFP4_CFG = [
+    (64, 64, 64, 4, 3),
+    (64, 128, 64, 4, 3),
+    (64, 128, 128, 4, 3),
+    (64, 256, 64, 4, 3),
+    (128, 128, 64, 4, 3),
+    (128, 128, 64, 8, 4),
+    (128, 256, 64, 8, 4),
+    (256, 128, 64, 8, 3),
+]
+_SCALED_NVFP4_CONFIGS = [
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk},
+        num_warps=w,
+        num_stages=s,
+    )
+    for (bm, bn, bk, w, s) in _SCALED_NVFP4_CFG
+]
+
+
+@triton.autotune(configs=_SCALED_NVFP4_CONFIGS, key=["M", "N", "K"])
+@triton.jit
+def _nvfp4_scaled_mm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sa_ptr,
+    sb_ptr,
+    bias_ptr,
+    gsa_ptr,
+    gsb_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_sam,
+    stride_sak,
+    stride_sbk,
+    stride_sbn,
+    stride_biasn,
+    SCALE_BLOCK_SIZE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL_SCALE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Native NVFP4 GEMM; K is logical while operand storage is packed two per byte."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_sk = tl.arange(0, BLOCK_K // 16)
+    m_mask = offs_m < M
+    n_mask = offs_n < N
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        offs_k = k0 // 2 + tl.arange(0, BLOCK_K // 2)
+        k_mask = offs_k < K // 2
+        a = tl.load(
+            a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak,
+            mask=m_mask[:, None] & k_mask[None, :],
+            other=0,
+        )
+        b = tl.load(
+            b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn,
+            mask=k_mask[:, None] & n_mask[None, :],
+            other=0,
+        )
+        # `tl.dot_scaled` consumes one E4M3 scale per native 16-wide lane.
+        native_k = k0 + offs_sk * 16
+        scale_idx = native_k // SCALE_BLOCK_SIZE
+        scale_mask = native_k < K
+        sa = tl.load(
+            sa_ptr + offs_m[:, None] * stride_sam + scale_idx[None, :] * stride_sak,
+            mask=m_mask[:, None] & scale_mask[None, :],
+            other=0.0,
+        )
+        sb = tl.load(
+            sb_ptr + offs_n[:, None] * stride_sbn + scale_idx[None, :] * stride_sbk,
+            mask=n_mask[:, None] & scale_mask[None, :],
+            other=0.0,
+        )
+        acc = tl.dot_scaled(
+            a,
+            sa,
+            "e2m1",
+            b,
+            sb,
+            "e2m1",
+            acc=acc,
+            lhs_k_pack=True,
+            rhs_k_pack=True,
+        )
+    if HAS_GLOBAL_SCALE:
+        acc *= tl.load(gsa_ptr) * tl.load(gsb_ptr)
+    if HAS_BIAS:
+        acc += tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)[
+            None, :
+        ]
+    tl.store(
+        c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
+        acc.to(c_ptr.dtype.element_ty),
+        mask=m_mask[:, None] & n_mask[None, :],
+    )
+
+
+@triton.jit
+def _unpack_e2m1(codes):
+    """Decode low-nibble-first E2M1 codes to fp16 values."""
+    magnitude_code = codes & 0x7
+    exponent = magnitude_code >> 1
+    mantissa = magnitude_code & 1
+    normal = (1.0 + mantissa.to(tl.float32) * 0.5) * tl.exp2(
+        exponent.to(tl.float32) - 1.0
+    )
+    magnitude = tl.where(exponent == 0, mantissa.to(tl.float32) * 0.5, normal)
+    return tl.where(codes & 0x8 != 0, -magnitude, magnitude).to(tl.float16)
+
+
+_NVFP4_PLUS_SCALED_MM_CONFIGS = [
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk},
+        num_warps=w,
+        num_stages=s,
+    )
+    for (bm, bn, bk, w, s) in _SCALED_NVFP4_CFG
+    if bm <= 128 and bn <= 128
+]
+
+
+@triton.autotune(
+    configs=_NVFP4_PLUS_SCALED_MM_CONFIGS,
+    key=["M", "N", "K", "SCALE_BLOCK_SIZE"],
+)
+@triton.jit
+def _nvfp4_plus_scaled_mm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sa_ptr,
+    sb_ptr,
+    bias_ptr,
+    gsa_ptr,
+    gsb_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_sam,
+    stride_sak,
+    stride_sbk,
+    stride_sbn,
+    stride_biasn,
+    SCALE_BLOCK_SIZE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL_SCALE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """NVFP4 GEMM with arbitrary arithmetic block-scale formats."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_mask = offs_m < M
+    n_mask = offs_n < N
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    n_scale_blocks = tl.cdiv(K, SCALE_BLOCK_SIZE)
+    for scale_block_idx in range(n_scale_blocks):
+        block_end = tl.minimum(K, (scale_block_idx + 1) * SCALE_BLOCK_SIZE)
+        block_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k_in_block in range(0, SCALE_BLOCK_SIZE, BLOCK_K):
+            offs_k = (
+                scale_block_idx * SCALE_BLOCK_SIZE + k_in_block + tl.arange(0, BLOCK_K)
+            )
+            k_mask = offs_k < block_end
+            packed_k = offs_k // 2
+            a_codes = tl.load(
+                a_ptr + offs_m[:, None] * stride_am + packed_k[None, :] * stride_ak,
+                mask=m_mask[:, None] & k_mask[None, :],
+                other=0,
+            )
+            b_codes = tl.load(
+                b_ptr + packed_k[:, None] * stride_bk + offs_n[None, :] * stride_bn,
+                mask=k_mask[:, None] & n_mask[None, :],
+                other=0,
+            )
+            a_codes = tl.where(offs_k[None, :] & 1 == 0, a_codes & 0xF, a_codes >> 4)
+            b_codes = tl.where(offs_k[:, None] & 1 == 0, b_codes & 0xF, b_codes >> 4)
+            block_acc += tl.dot(_unpack_e2m1(a_codes), _unpack_e2m1(b_codes)).to(
+                tl.float32
+            )
+        sa = tl.load(
+            sa_ptr + offs_m * stride_sam + scale_block_idx * stride_sak,
+            mask=m_mask,
+            other=0,
+        )
+        sb = tl.load(
+            sb_ptr + scale_block_idx * stride_sbk + offs_n * stride_sbn,
+            mask=n_mask,
+            other=0,
+        )
+        sa = sa.to(tl.float32)
+        sb = sb.to(tl.float32)
+        acc += sa[:, None] * block_acc * sb[None, :]
+    if HAS_GLOBAL_SCALE:
+        acc *= tl.load(gsa_ptr) * tl.load(gsb_ptr)
+    if HAS_BIAS:
+        acc += tl.load(bias_ptr + offs_n * stride_biasn, mask=n_mask, other=0.0)[
+            None, :
+        ]
+    tl.store(
+        c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
+        acc.to(c_ptr.dtype.element_ty),
+        mask=m_mask[:, None] & n_mask[None, :],
     )
 
 
@@ -486,22 +734,26 @@ def scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    gsa: torch.Tensor | None = None,
+    gsb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Scaled GEMM, (M,K) x (K,N) -> (M,N).
 
     `block_size` 0 means one scale block over K; nonzero multi-block widths must be
     powers of two at least 16. Optional `(N,)` bias is broadcast over rows and added
     after scaling. Inputs must be compatible CUDA tensors.
+
+    `gsa`/`gsb` are optional per-tensor fp32 global scales, shape (1,), applied to the
+    accumulator before bias. Both are given together or not at all.
     """
     M, K = aq.shape
     N = bq.shape[1]
-    n_scale_blocks = sa.shape[1]
+    SCALE_BLOCK_SIZE = min(block_size, K) if block_size else K
     # This width tiles K below; invalid widths are not rejected by Triton but miscompute.
-    if n_scale_blocks > 1 and (block_size < 16 or block_size & (block_size - 1) != 0):
+    if SCALE_BLOCK_SIZE < K and (block_size < 16 or block_size & (block_size - 1) != 0):
         raise ValueError(
             f"block_size must be a power of two >= 16 when it tiles K, got {block_size}"
         )
-    SCALE_BLOCK_SIZE = block_size if n_scale_blocks > 1 else K
     c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
 
     def grid(meta):
@@ -514,10 +766,11 @@ def scaled_mm(
         sa,
         sb,
         bias,
+        gsa,
+        gsb,
         M,
         N,
         K,
-        n_scale_blocks,
         aq.stride(0),
         aq.stride(1),
         bq.stride(0),
@@ -531,6 +784,7 @@ def scaled_mm(
         0 if bias is None else bias.stride(0),
         SCALE_BLOCK_SIZE=SCALE_BLOCK_SIZE,
         HAS_BIAS=bias is not None,
+        HAS_GLOBAL_SCALE=gsa is not None,
     )
     return c
 
@@ -551,11 +805,14 @@ def mxfp8_scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    gsa: torch.Tensor | None = None,
+    gsb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """MXFP8 scaled GEMM, (M,K) x (K,N) -> (M,N).
 
     Inputs must be compatible CUDA tensors; `block_size` must be a nonzero multiple
-    of 32.
+    of 32. Optional paired fp32 global scales have shape `(1,)` and apply to the
+    accumulator before bias.
     """
     # Zero means one block over K, not a width; reject it before modulo/indexing.
     if block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
@@ -572,17 +829,18 @@ def mxfp8_scaled_mm(
     # e8m0 stores a bare exponent; the kernel consumes its bytes, not float scales.
     sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
     sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
-    wrap_triton(_mxfp8_scaled_mm_kernel)[grid](
+    wrap_triton(_mxfp8_plus_scaled_mm_kernel)[grid](
         aq,
         bq,
         c,
         sa8,
         sb8,
         bias,
+        gsa,
+        gsb,
         M,
         N,
         K,
-        sa.shape[1],
         aq.stride(0),
         aq.stride(1),
         bq.stride(0),
@@ -598,7 +856,81 @@ def mxfp8_scaled_mm(
         B_FORMAT=_MXFP8_FORMAT[bq.dtype],
         SCALE_BLOCK_SIZE=block_size,
         HAS_BIAS=bias is not None,
+        HAS_GLOBAL_SCALE=gsa is not None,
     )
+    return c
+
+
+@register_kernel(
+    op="gemm.nvfp4_scaled_mm",
+    backend="triton",
+    build="jit",
+    autograd=False,
+    capabilities=frozenset({cuda(min_arch=(10, 0))}),
+)
+@triton_op("jit_kernel::nvfp4_scaled_mm", mutates_args={})
+def nvfp4_scaled_mm(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    bias: torch.Tensor | None = None,
+    gsa: torch.Tensor | None = None,
+    gsb: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """NVFP4 GEMM with packed E2M1 operands and arithmetic block scales."""
+    if sa.dtype is torch.float8_e8m0fnu or sb.dtype is torch.float8_e8m0fnu:
+        raise ValueError("nvfp4 does not support MXFP4 (float8_e8m0fnu) block scales")
+    M, packed_k = aq.shape
+    K = packed_k * 2
+    N = bq.shape[1]
+    c = torch.empty((M, N), device=aq.device, dtype=out_dtype)
+
+    def grid(meta):
+        return (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
+
+    launch_args = (
+        aq,
+        bq,
+        c,
+        sa,
+        sb,
+        bias,
+        gsa,
+        gsb,
+        M,
+        N,
+        K,
+        aq.stride(0),
+        aq.stride(1),
+        bq.stride(0),
+        bq.stride(1),
+        c.stride(0),
+        c.stride(1),
+        sa.stride(0),
+        sa.stride(1),
+        sb.stride(0),
+        sb.stride(1),
+        0 if bias is None else bias.stride(0),
+    )
+    common_meta = {
+        "HAS_BIAS": bias is not None,
+        "HAS_GLOBAL_SCALE": gsa is not None,
+        "SCALE_BLOCK_SIZE": block_size,
+    }
+    native_e4m3 = sa.dtype is torch.float8_e4m3fn and sb.dtype is torch.float8_e4m3fn
+    if native_e4m3:
+        wrap_triton(_nvfp4_scaled_mm_kernel)[grid](
+            *launch_args,
+            **common_meta,
+        )
+    else:
+        wrap_triton(_nvfp4_plus_scaled_mm_kernel)[grid](
+            *launch_args,
+            **common_meta,
+        )
     return c
 
 
@@ -643,10 +975,11 @@ def _early_prune_scaled_grouped_configs(
     B_IS_2D,
     SCALE_BLOCK_SIZE,
     HAS_BIAS,
+    HAS_GLOBAL_SCALE,
     grid=None,
     warmup=None,
 ):
-    del named_args, NUM_SMS, A_IS_2D, B_IS_2D, HAS_BIAS, grid, warmup
+    del named_args, NUM_SMS, A_IS_2D, B_IS_2D, HAS_BIAS, HAS_GLOBAL_SCALE, grid, warmup
     scale_block = SCALE_BLOCK_SIZE
     if not scale_block:
         return configs
@@ -666,6 +999,8 @@ def _scaled_grouped_mm_kernel(
     sa_ptr,
     sb_ptr,
     bias_ptr,
+    gsa_ptr,
+    gsb_ptr,
     offs_ptr,
     G,
     M,
@@ -693,6 +1028,7 @@ def _scaled_grouped_mm_kernel(
     B_IS_2D: tl.constexpr,
     SCALE_BLOCK_SIZE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL_SCALE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -799,6 +1135,7 @@ def _scaled_grouped_mm_kernel(
                         b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0
                     )
                     block_acc += tl.dot(a, b).to(tl.float32)
+                # Cast so a narrow (e4m3) scale is arithmetic-capable; fp32 is a no-op.
                 sa = tl.load(
                     sa_ptr
                     + (0 if A_IS_2D else g * stride_sag)
@@ -806,7 +1143,7 @@ def _scaled_grouped_mm_kernel(
                     + scale_block_idx * stride_sak,
                     mask=m_mask,
                     other=0.0,
-                )
+                ).to(tl.float32)
                 sb = tl.load(
                     sb_ptr
                     + (0 if B_IS_2D else g * stride_sbg)
@@ -814,8 +1151,11 @@ def _scaled_grouped_mm_kernel(
                     + (n_start + offs_n) * stride_sbn,
                     mask=n_mask,
                     other=0.0,
-                )
+                ).to(tl.float32)
                 acc += sa[:, None] * block_acc * sb[None, :]
+            # Each group owns one global scale per operand; apply them before bias.
+            if HAS_GLOBAL_SCALE:
+                acc *= tl.load(gsa_ptr + g) * tl.load(gsb_ptr + g)
             # Bias is unscaled: apply it to acc, not each scaled block partial.
             if HAS_BIAS:
                 bias_ptrs = (
@@ -860,6 +1200,8 @@ def _mxfp8_scaled_grouped_mm_kernel(
     sa_ptr,
     sb_ptr,
     bias_ptr,
+    gsa_ptr,
+    gsb_ptr,
     offs_ptr,
     G,
     M,
@@ -888,6 +1230,7 @@ def _mxfp8_scaled_grouped_mm_kernel(
     A_FORMAT: tl.constexpr,
     B_FORMAT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL_SCALE: tl.constexpr,
     SCALE_BLOCK_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -987,6 +1330,8 @@ def _mxfp8_scaled_grouped_mm_kernel(
                     other=0,
                 )
                 acc = tl.dot_scaled(a, sa, A_FORMAT, b, sb, B_FORMAT, acc=acc)
+            if HAS_GLOBAL_SCALE:
+                acc *= tl.load(gsa_ptr + g) * tl.load(gsb_ptr + g)
             if HAS_BIAS:
                 acc += tl.load(
                     bias_ptr + g * stride_biasg + (n_start + offs_n) * stride_biasn,
@@ -1008,99 +1353,369 @@ def _mxfp8_scaled_grouped_mm_kernel(
         group_tile_start += group_tile_count
 
 
-@register_kernel(
-    op="gemm.mxfp8_scaled_grouped_mm",
-    backend="triton",
-    build="jit",
-    autograd=False,
-    capabilities=frozenset({cuda(min_arch=(10, 0))}),
-)
-@triton_op("jit_kernel::mxfp8_scaled_grouped_mm", mutates_args={})
-def mxfp8_scaled_grouped_mm(
-    aq: torch.Tensor,
-    bq: torch.Tensor,
-    sa: torch.Tensor,
-    sb: torch.Tensor,
-    offs: torch.Tensor,
-    out_dtype: torch.dtype,
-    block_size: int,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Ragged MXFP8 grouped GEMM; layout follows operand ranks.
-
-    Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
-        (M,K) x (E,K,N) -> (M,N)    ragged M
-        (M,K) x (K,N)   -> (E,M,N)  ragged K
-        (E,M,K) x (K,N) -> (M,N)    ragged N
-
-    `sa`/`sb` mirror their operand axes with K replaced by the scale-block axis; a
-    transposed operand must have its scale tensor transposed accordingly.
-
-    `bias` is optional (E,N), broadcasts over output rows, and is added after scaling.
-
-    Callers must supply compatible CUDA tensors. `block_size` may be any nonzero
-    multiple of 32.
-    """
-    if block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
-        raise ValueError(
-            f"mxfp8 grouped GEMM requires block_size a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}"
-        )
-    a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
-    E = offs.shape[0]
-    # Pass the ragged extent as 0; it is unused and keeps the autotune key stable.
-    if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
-        M, N, K = 0, bq.shape[2], aq.shape[1]
-        output_size = (aq.shape[0], N)
-    elif a_is_2d and b_is_2d:  # (M,K) x (K,N) -> (E,M,N), ragged K
-        M, N, K = aq.shape[0], bq.shape[1], 0
-        output_size = (E, M, N)
-    else:  # (E,M,K) x (K,N) -> (M,N), ragged N
-        M, N, K = aq.shape[1], 0, aq.shape[2]
-        output_size = (M, bq.shape[1])
-
-    c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
-    num_sms = _num_sms(aq.device)
-
-    sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
-    sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
-    wrap_triton(_mxfp8_scaled_grouped_mm_kernel)[(num_sms,)](
-        aq,
-        bq,
-        c,
-        sa8,
-        sb8,
-        bias,
-        offs,
-        E,
-        M,
-        N,
-        K,
-        0 if a_is_2d else aq.stride(0),
-        aq.stride(-2),
-        aq.stride(-1),
-        0 if b_is_2d else bq.stride(0),
-        bq.stride(-2),
-        bq.stride(-1),
-        c.stride(0) if c.ndim == 3 else 0,
-        c.stride(-2),
-        c.stride(-1),
-        0 if a_is_2d else sa8.stride(0),
-        sa8.stride(-2),
-        sa8.stride(-1),
-        0 if b_is_2d else sb8.stride(0),
-        sb8.stride(-2),
-        sb8.stride(-1),
-        0 if bias is None else bias.stride(0),
-        0 if bias is None else bias.stride(1),
-        NUM_SMS=num_sms,
-        A_IS_2D=a_is_2d,
-        B_IS_2D=b_is_2d,
-        A_FORMAT=_MXFP8_FORMAT[aq.dtype],
-        B_FORMAT=_MXFP8_FORMAT[bq.dtype],
-        HAS_BIAS=bias is not None,
-        SCALE_BLOCK_SIZE=block_size,
+_SCALED_GROUPED_NVFP4_CFG = [
+    (32, 64, 64, 4, 3),
+    (32, 128, 64, 4, 3),
+    (64, 64, 64, 4, 4),
+    (64, 128, 64, 8, 4),
+    (64, 256, 64, 8, 4),
+    (128, 64, 64, 8, 4),
+    (128, 128, 64, 8, 3),
+    (128, 128, 64, 8, 4),
+    (128, 256, 64, 8, 3),
+    (256, 128, 64, 8, 3),
+    (64, 64, 128, 4, 3),
+    (64, 128, 128, 8, 4),
+    (128, 64, 128, 8, 4),
+    (128, 128, 128, 8, 3),
+]
+_SCALED_GROUPED_NVFP4_CONFIGS = [
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=w, num_stages=s
     )
-    return c
+    for (bm, bn, bk, w, s) in _SCALED_GROUPED_NVFP4_CFG
+]
+_NVFP4_PLUS_SCALED_GROUPED_MM_CONFIGS = [
+    triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=w, num_stages=s
+    )
+    for (bm, bn, bk, w, s) in _SCALED_GROUPED_NVFP4_CFG
+    if bm <= 128 and bn <= 128
+]
+
+
+@triton.autotune(
+    configs=_NVFP4_PLUS_SCALED_GROUPED_MM_CONFIGS,
+    key=["M", "N", "K", "A_IS_2D", "B_IS_2D", "SCALE_BLOCK_SIZE"],
+)
+@triton.jit
+def _nvfp4_plus_scaled_grouped_mm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sa_ptr,
+    sb_ptr,
+    bias_ptr,
+    gsa_ptr,
+    gsb_ptr,
+    offs_ptr,
+    G,
+    M,
+    N,
+    K,
+    stride_ag,
+    stride_am,
+    stride_ak,
+    stride_bg,
+    stride_bk,
+    stride_bn,
+    stride_cg,
+    stride_cm,
+    stride_cn,
+    stride_sag,
+    stride_sam,
+    stride_sak,
+    stride_sbg,
+    stride_sbk,
+    stride_sbn,
+    stride_biasg,
+    stride_biasn,
+    NUM_SMS: tl.constexpr,
+    A_IS_2D: tl.constexpr,
+    B_IS_2D: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL_SCALE: tl.constexpr,
+    SCALE_BLOCK_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Grouped NVFP4 GEMM with arithmetic block scales and decoded E2M1."""
+    M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
+    N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
+    K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
+
+    global_tile_idx = tl.program_id(0)
+    group_tile_start = tl.zeros((), dtype=tl.int64)
+    m_end = 0
+    n_end = 0
+    k_end = 0
+    scale_block_end = 0
+    for g in range(G):
+        if M_VARY:
+            m_start = m_end
+            m_end = tl.load(offs_ptr + g)
+            m_size = m_end - m_start
+        else:
+            m_start = 0
+            m_size = M
+        if N_VARY:
+            n_start = n_end
+            n_end = tl.load(offs_ptr + g)
+            n_size = n_end - n_start
+        else:
+            n_start = 0
+            n_size = N
+        if K_VARY:
+            k_start = k_end
+            k_end = tl.load(offs_ptr + g)
+            k_size = k_end - k_start
+            scale_block_start = scale_block_end
+            scale_block_end = scale_block_start + tl.cdiv(k_size, SCALE_BLOCK_SIZE)
+        else:
+            k_start = 0
+            k_size = K
+            scale_block_start = 0
+            scale_block_end = tl.cdiv(K, SCALE_BLOCK_SIZE)
+
+        num_n_tiles = tl.cdiv(n_size, BLOCK_N)
+        num_m_tiles = tl.cdiv(m_size, BLOCK_M)
+        group_tile_count = num_m_tiles * num_n_tiles
+        while global_tile_idx < group_tile_start + group_tile_count:
+            group_tile_idx = global_tile_idx - group_tile_start
+            tile_m = group_tile_idx // num_n_tiles
+            tile_n = group_tile_idx % num_n_tiles
+            offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            m_mask = offs_m < m_size
+            n_mask = offs_n < n_size
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for scale_block_idx in range(scale_block_start, scale_block_end):
+                r0 = k_start + (scale_block_idx - scale_block_start) * SCALE_BLOCK_SIZE
+                r1 = tl.minimum(r0 + SCALE_BLOCK_SIZE, k_start + k_size)
+                block_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+                for step in range(tl.cdiv(r1 - r0, BLOCK_K)):
+                    offs_k = r0 + step * BLOCK_K + tl.arange(0, BLOCK_K)
+                    k_mask = offs_k < r1
+                    packed_k = offs_k // 2
+                    a_codes = tl.load(
+                        a_ptr
+                        + (0 if A_IS_2D else g * stride_ag)
+                        + (m_start + offs_m)[:, None] * stride_am
+                        + packed_k[None, :] * stride_ak,
+                        mask=m_mask[:, None] & k_mask[None, :],
+                        other=0,
+                    )
+                    b_codes = tl.load(
+                        b_ptr
+                        + (0 if B_IS_2D else g * stride_bg)
+                        + packed_k[:, None] * stride_bk
+                        + (n_start + offs_n)[None, :] * stride_bn,
+                        mask=k_mask[:, None] & n_mask[None, :],
+                        other=0,
+                    )
+                    a_codes = tl.where(
+                        (offs_k[None, :] & 1) == 0, a_codes & 0xF, a_codes >> 4
+                    )
+                    b_codes = tl.where(
+                        (offs_k[:, None] & 1) == 0, b_codes & 0xF, b_codes >> 4
+                    )
+                    block_acc += tl.dot(
+                        _unpack_e2m1(a_codes), _unpack_e2m1(b_codes)
+                    ).to(tl.float32)
+                sa = tl.load(
+                    sa_ptr
+                    + (0 if A_IS_2D else g * stride_sag)
+                    + (m_start + offs_m) * stride_sam
+                    + scale_block_idx * stride_sak,
+                    mask=m_mask,
+                    other=0,
+                )
+                sb = tl.load(
+                    sb_ptr
+                    + (0 if B_IS_2D else g * stride_sbg)
+                    + scale_block_idx * stride_sbk
+                    + (n_start + offs_n) * stride_sbn,
+                    mask=n_mask,
+                    other=0,
+                )
+                sa = sa.to(tl.float32)
+                sb = sb.to(tl.float32)
+                acc += sa[:, None] * block_acc * sb[None, :]
+            if HAS_GLOBAL_SCALE:
+                acc *= tl.load(gsa_ptr + g) * tl.load(gsb_ptr + g)
+            if HAS_BIAS:
+                acc += tl.load(
+                    bias_ptr + g * stride_biasg + (n_start + offs_n) * stride_biasn,
+                    mask=n_mask,
+                    other=0.0,
+                )[None, :]
+            tl.store(
+                c_ptr
+                + (g * stride_cg if K_VARY else 0)
+                + (m_start + offs_m)[:, None] * stride_cm
+                + (n_start + offs_n)[None, :] * stride_cn,
+                acc.to(c_ptr.dtype.element_ty),
+                mask=m_mask[:, None] & n_mask[None, :],
+            )
+            global_tile_idx += NUM_SMS
+        group_tile_start += group_tile_count
+
+
+@triton.autotune(
+    configs=_SCALED_GROUPED_NVFP4_CONFIGS,
+    key=["M", "N", "K", "A_IS_2D", "B_IS_2D"],
+)
+@triton.jit
+def _nvfp4_scaled_grouped_mm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sa_ptr,
+    sb_ptr,
+    bias_ptr,
+    gsa_ptr,
+    gsb_ptr,
+    offs_ptr,
+    G,
+    M,
+    N,
+    K,
+    stride_ag,
+    stride_am,
+    stride_ak,
+    stride_bg,
+    stride_bk,
+    stride_bn,
+    stride_cg,
+    stride_cm,
+    stride_cn,
+    stride_sag,
+    stride_sam,
+    stride_sak,
+    stride_sbg,
+    stride_sbk,
+    stride_sbn,
+    stride_biasg,
+    stride_biasn,
+    NUM_SMS: tl.constexpr,
+    A_IS_2D: tl.constexpr,
+    B_IS_2D: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_GLOBAL_SCALE: tl.constexpr,
+    SCALE_BLOCK_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Grouped NVFP4 GEMM; K offsets are logical and data offsets are packed."""
+    M_VARY: tl.constexpr = A_IS_2D and not B_IS_2D
+    N_VARY: tl.constexpr = not A_IS_2D and B_IS_2D
+    K_VARY: tl.constexpr = A_IS_2D and B_IS_2D
+
+    global_tile_idx = tl.program_id(0)
+    group_tile_start = tl.zeros((), dtype=tl.int64)
+    m_end = 0
+    n_end = 0
+    k_end = 0
+    scale_block_end = 0
+    for g in range(G):
+        if M_VARY:
+            m_start = m_end
+            m_end = tl.load(offs_ptr + g)
+            m_size = m_end - m_start
+        else:
+            m_start = 0
+            m_size = M
+        if N_VARY:
+            n_start = n_end
+            n_end = tl.load(offs_ptr + g)
+            n_size = n_end - n_start
+        else:
+            n_start = 0
+            n_size = N
+        if K_VARY:
+            k_start = k_end
+            k_end = tl.load(offs_ptr + g)
+            k_size = k_end - k_start
+            scale_block_start = scale_block_end
+            scale_block_end = scale_block_start + tl.cdiv(k_size, SCALE_BLOCK_SIZE)
+        else:
+            k_start = 0
+            k_size = K
+            scale_block_start = 0
+            scale_block_end = tl.cdiv(K, SCALE_BLOCK_SIZE)
+
+        num_n_tiles = tl.cdiv(n_size, BLOCK_N)
+        num_m_tiles = tl.cdiv(m_size, BLOCK_M)
+        group_tile_count = num_m_tiles * num_n_tiles
+        while global_tile_idx < group_tile_start + group_tile_count:
+            group_tile_idx = global_tile_idx - group_tile_start
+            tile_m = group_tile_idx // num_n_tiles
+            tile_n = group_tile_idx % num_n_tiles
+            offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            m_mask = offs_m < m_size
+            n_mask = offs_n < n_size
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for k0 in range(0, k_size, BLOCK_K):
+                offs_k = k0 // 2 + tl.arange(0, BLOCK_K // 2)
+                k_mask = offs_k < k_size // 2
+                a = tl.load(
+                    a_ptr
+                    + (0 if A_IS_2D else g * stride_ag)
+                    + (m_start + offs_m)[:, None] * stride_am
+                    + (k_start // 2 + offs_k)[None, :] * stride_ak,
+                    mask=m_mask[:, None] & k_mask[None, :],
+                    other=0,
+                )
+                b = tl.load(
+                    b_ptr
+                    + (0 if B_IS_2D else g * stride_bg)
+                    + (k_start // 2 + offs_k)[:, None] * stride_bk
+                    + (n_start + offs_n)[None, :] * stride_bn,
+                    mask=k_mask[:, None] & n_mask[None, :],
+                    other=0,
+                )
+                offs_sk = tl.arange(0, BLOCK_K // 16)
+                native_k = k0 + offs_sk * 16
+                scale_idx = scale_block_start + native_k // SCALE_BLOCK_SIZE
+                scale_mask = (native_k < k_size) & (scale_idx < scale_block_end)
+                sa = tl.load(
+                    sa_ptr
+                    + (0 if A_IS_2D else g * stride_sag)
+                    + (m_start + offs_m)[:, None] * stride_sam
+                    + scale_idx[None, :] * stride_sak,
+                    mask=m_mask[:, None] & scale_mask[None, :],
+                    other=0.0,
+                )
+                sb = tl.load(
+                    sb_ptr
+                    + (0 if B_IS_2D else g * stride_sbg)
+                    + (n_start + offs_n)[:, None] * stride_sbn
+                    + scale_idx[None, :] * stride_sbk,
+                    mask=n_mask[:, None] & scale_mask[None, :],
+                    other=0.0,
+                )
+                acc = tl.dot_scaled(
+                    a,
+                    sa,
+                    "e2m1",
+                    b,
+                    sb,
+                    "e2m1",
+                    acc=acc,
+                    lhs_k_pack=True,
+                    rhs_k_pack=True,
+                )
+            if HAS_GLOBAL_SCALE:
+                acc *= tl.load(gsa_ptr + g) * tl.load(gsb_ptr + g)
+            if HAS_BIAS:
+                acc += tl.load(
+                    bias_ptr + g * stride_biasg + (n_start + offs_n) * stride_biasn,
+                    mask=n_mask,
+                    other=0.0,
+                )[None, :]
+            tl.store(
+                c_ptr
+                + (g * stride_cg if K_VARY else 0)
+                + (m_start + offs_m)[:, None] * stride_cm
+                + (n_start + offs_n)[None, :] * stride_cn,
+                acc.to(c_ptr.dtype.element_ty),
+                mask=m_mask[:, None] & n_mask[None, :],
+            )
+            global_tile_idx += NUM_SMS
+        group_tile_start += group_tile_count
 
 
 @register_kernel(
@@ -1127,6 +1742,8 @@ def scaled_grouped_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None = None,
+    gsa: torch.Tensor | None = None,
+    gsb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Ragged scaled grouped GEMM; layout follows operand ranks.
 
@@ -1140,6 +1757,9 @@ def scaled_grouped_mm(
     `block_size` 0 means one scale block spanning the whole contraction segment.
 
     `bias` is optional (E,N), broadcasts over output rows, and is added after scaling.
+
+    `gsa`/`gsb` are optional per-group fp32 global scales, shape (G,), applied to each
+    group's accumulator before bias. Both are given together or not at all.
 
     Callers must supply compatible CUDA tensors. `block_size` may be zero for one
     scale block; nonzero widths must be powers of two of at least 16, matching dense
@@ -1176,6 +1796,8 @@ def scaled_grouped_mm(
         sa,
         sb,
         bias,
+        gsa,
+        gsb,
         offs,
         E,
         M,
@@ -1203,5 +1825,202 @@ def scaled_grouped_mm(
         B_IS_2D=b_is_2d,
         SCALE_BLOCK_SIZE=block_size,
         HAS_BIAS=bias is not None,
+        HAS_GLOBAL_SCALE=gsa is not None,
     )
+    return c
+
+
+@register_kernel(
+    op="gemm.mxfp8_scaled_grouped_mm",
+    backend="triton",
+    build="jit",
+    autograd=False,
+    capabilities=frozenset({cuda(min_arch=(10, 0))}),
+)
+@triton_op("jit_kernel::mxfp8_scaled_grouped_mm", mutates_args={})
+def mxfp8_scaled_grouped_mm(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    offs: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    bias: torch.Tensor | None = None,
+    gsa: torch.Tensor | None = None,
+    gsb: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Ragged MXFP8 grouped GEMM; layout follows operand ranks.
+
+    Layouts, by which dim `offs` (1-D int32 cumulative end-offsets) partitions:
+        (M,K) x (E,K,N) -> (M,N)    ragged M
+        (M,K) x (K,N)   -> (E,M,N)  ragged K
+        (E,M,K) x (K,N) -> (M,N)    ragged N
+
+    `sa`/`sb` mirror their operand axes with K replaced by the scale-block axis; a
+    transposed operand must have its scale tensor transposed accordingly.
+
+    `bias` is optional (E,N), broadcasts over output rows, and is added after scaling.
+    Paired fp32 global scales have shape `(E,)` and apply per group before bias.
+
+    Callers must supply compatible CUDA tensors. `block_size` may be any nonzero
+    multiple of 32.
+    """
+    if block_size == 0 or block_size % _MXFP8_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"mxfp8 grouped GEMM requires block_size a nonzero multiple of {_MXFP8_BLOCK_SIZE}, got {block_size}"
+        )
+    a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
+    E = offs.shape[0]
+    # Pass the ragged extent as 0; it is unused and keeps the autotune key stable.
+    if a_is_2d and not b_is_2d:  # (M,K) x (E,K,N) -> (M,N), ragged M
+        M, N, K = 0, bq.shape[2], aq.shape[1]
+        output_size = (aq.shape[0], N)
+    elif a_is_2d and b_is_2d:  # (M,K) x (K,N) -> (E,M,N), ragged K
+        M, N, K = aq.shape[0], bq.shape[1], 0
+        output_size = (E, M, N)
+    else:  # (E,M,K) x (K,N) -> (M,N), ragged N
+        M, N, K = aq.shape[1], 0, aq.shape[2]
+        output_size = (M, bq.shape[1])
+
+    c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
+    num_sms = _num_sms(aq.device)
+
+    sa8 = sa.to(torch.float8_e8m0fnu).view(torch.uint8)
+    sb8 = sb.to(torch.float8_e8m0fnu).view(torch.uint8)
+    wrap_triton(_mxfp8_scaled_grouped_mm_kernel)[(num_sms,)](
+        aq,
+        bq,
+        c,
+        sa8,
+        sb8,
+        bias,
+        gsa,
+        gsb,
+        offs,
+        E,
+        M,
+        N,
+        K,
+        0 if a_is_2d else aq.stride(0),
+        aq.stride(-2),
+        aq.stride(-1),
+        0 if b_is_2d else bq.stride(0),
+        bq.stride(-2),
+        bq.stride(-1),
+        c.stride(0) if c.ndim == 3 else 0,
+        c.stride(-2),
+        c.stride(-1),
+        0 if a_is_2d else sa8.stride(0),
+        sa8.stride(-2),
+        sa8.stride(-1),
+        0 if b_is_2d else sb8.stride(0),
+        sb8.stride(-2),
+        sb8.stride(-1),
+        0 if bias is None else bias.stride(0),
+        0 if bias is None else bias.stride(1),
+        NUM_SMS=num_sms,
+        A_IS_2D=a_is_2d,
+        B_IS_2D=b_is_2d,
+        A_FORMAT=_MXFP8_FORMAT[aq.dtype],
+        B_FORMAT=_MXFP8_FORMAT[bq.dtype],
+        SCALE_BLOCK_SIZE=block_size,
+        HAS_BIAS=bias is not None,
+        HAS_GLOBAL_SCALE=gsa is not None,
+    )
+    return c
+
+
+@register_kernel(
+    op="gemm.nvfp4_scaled_grouped_mm",
+    backend="triton",
+    build="jit",
+    autograd=False,
+    capabilities=frozenset({cuda(min_arch=(10, 0))}),
+)
+@triton_op("jit_kernel::nvfp4_scaled_grouped_mm", mutates_args={})
+def nvfp4_scaled_grouped_mm(
+    aq: torch.Tensor,
+    bq: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    offs: torch.Tensor,
+    out_dtype: torch.dtype,
+    block_size: int,
+    bias: torch.Tensor | None = None,
+    gsa: torch.Tensor | None = None,
+    gsb: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Grouped NVFP4 GEMM with packed operands and logical `offs`."""
+    if sa.dtype is torch.float8_e8m0fnu or sb.dtype is torch.float8_e8m0fnu:
+        raise ValueError("nvfp4 does not support MXFP4 (float8_e8m0fnu) block scales")
+    native_e4m3 = sa.dtype is torch.float8_e4m3fn and sb.dtype is torch.float8_e4m3fn
+    a_is_2d, b_is_2d = aq.ndim == 2, bq.ndim == 2
+    if not a_is_2d and not b_is_2d:
+        raise NotImplementedError("3D x 3D not supported")
+    E = offs.shape[0]
+    if a_is_2d and not b_is_2d:
+        M, N, K = 0, bq.shape[2], aq.shape[1] * 2
+        output_size = (aq.shape[0], N)
+    elif a_is_2d and b_is_2d:
+        M, N, K = aq.shape[0], bq.shape[1], 0
+        output_size = (E, M, N)
+    else:
+        if bias is not None:
+            raise NotImplementedError("bias not supported for ragged-N")
+        M, N, K = aq.shape[1], 0, aq.shape[2] * 2
+        output_size = (M, bq.shape[1])
+
+    c = torch.empty(output_size, device=aq.device, dtype=out_dtype)
+    num_sms = _num_sms(aq.device)
+    launch_args = (
+        aq,
+        bq,
+        c,
+        sa,
+        sb,
+        bias,
+        gsa,
+        gsb,
+        offs,
+        E,
+        M,
+        N,
+        K,
+        0 if a_is_2d else aq.stride(0),
+        aq.stride(-2),
+        aq.stride(-1),
+        0 if b_is_2d else bq.stride(0),
+        bq.stride(-2),
+        bq.stride(-1),
+        c.stride(0) if c.ndim == 3 else 0,
+        c.stride(-2),
+        c.stride(-1),
+        0 if a_is_2d else sa.stride(0),
+        sa.stride(-2),
+        sa.stride(-1),
+        0 if b_is_2d else sb.stride(0),
+        sb.stride(-2),
+        sb.stride(-1),
+        0 if bias is None else bias.stride(0),
+        0 if bias is None else bias.stride(1),
+    )
+    common_meta = {
+        "NUM_SMS": num_sms,
+        "A_IS_2D": a_is_2d,
+        "B_IS_2D": b_is_2d,
+        "HAS_BIAS": bias is not None,
+        "HAS_GLOBAL_SCALE": gsa is not None,
+        "SCALE_BLOCK_SIZE": block_size,
+    }
+    if native_e4m3:
+        wrap_triton(_nvfp4_scaled_grouped_mm_kernel)[(num_sms,)](
+            *launch_args,
+            **common_meta,
+        )
+    else:
+        wrap_triton(_nvfp4_plus_scaled_grouped_mm_kernel)[(num_sms,)](
+            *launch_args,
+            **common_meta,
+        )
     return c

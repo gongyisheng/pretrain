@@ -8,7 +8,7 @@ from src.kernel.ops.gemm import SCALED_MM_OPS
 from src.metrics.quant import QuantizationStats, record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.rotation import Rotation
-from src.quant.utils import is_quantized, scaled_mm_op
+from src.quant.utils import is_quantized, resolve_scale, scaled_mm_op
 from src.utils.config import QuantizationConfig
 
 
@@ -18,7 +18,8 @@ def quantized_mm(
     a_fmt: str,
     b_fmt: str,
     out_dtype: torch.dtype,
-    scale_cfg: dict,
+    a_scale: dict,
+    b_scale: dict,
     bias: torch.Tensor | None = None,
     a_stochastic_rounding: bool = False,
     b_stochastic_rounding: bool = False,
@@ -32,44 +33,64 @@ def quantized_mm(
     operands with the same block-Hadamard; scaled kernels consume those codes
     directly, while emulation inverts each dequantized operand.
     """
-    block_shape = scale_cfg.get("block_shape", (0, 0))
+    if a.dtype != b.dtype:
+        raise ValueError(
+            f"a and b must have the same dtype, got {a.dtype} and {b.dtype}"
+        )
     op = scaled_mm_op(
         a_fmt,
         b_fmt,
-        scale_cfg.get("scale_dtype"),
-        block_shape,
+        a_scale["scale_dtype"],
+        a_scale["block_shape"],
     )
-    aq = sa = bq = sb = None
+    aq = sa = gsa = bq = sb = gsb = None
     if is_quantized(a_fmt):
-        aq, sa = quantize_operand(
+        aq, sa, gsa = quantize_operand(
             a,
             -1,
             a_fmt,
-            scale_cfg,
+            a_scale,
             stochastic_rounding=a_stochastic_rounding,
             rotation=rotation,
         )
-        record_operand(a_stats, a, aq, sa, -1, scale_cfg, rotation=rotation)
+        record_operand(
+            a_stats, a, aq, sa, -1, a_scale, rotation=rotation, global_scale=gsa
+        )
     if is_quantized(b_fmt):
-        bq, sb = quantize_operand(
+        bq, sb, gsb = quantize_operand(
             b,
             -2,
             b_fmt,
-            scale_cfg,
+            b_scale,
             stochastic_rounding=b_stochastic_rounding,
             rotation=rotation,
         )
-        record_operand(b_stats, b, bq, sb, -2, scale_cfg, rotation=rotation)
+        record_operand(
+            b_stats, b, bq, sb, -2, b_scale, rotation=rotation, global_scale=gsb
+        )
 
     if op is not None:
-        return SCALED_MM_OPS[op](aq, bq, sa, sb, out_dtype, block_shape[1], bias=bias)
+        return SCALED_MM_OPS[op](
+            aq,
+            bq,
+            sa,
+            sb,
+            out_dtype,
+            a_scale["block_shape"][1],
+            bias=None if bias is None else bias.to(out_dtype),
+            gsa=gsa,
+            gsb=gsb,
+        )
 
     if aq is not None:
-        a = dequantize_operand(aq, sa, -1, scale_cfg, rotation=rotation).to(a.dtype)
+        a = dequantize_operand(
+            aq, sa, -1, a_scale, rotation=rotation, global_scale=gsa
+        ).to(a.dtype)
     if bq is not None:
-        b = dequantize_operand(bq, sb, -2, scale_cfg, rotation=rotation).to(b.dtype)
-    # Match fused kernels by adding bias in the accumulator before casting.
-    y = a @ b if bias is None else torch.addmm(bias, a, b)
+        b = dequantize_operand(
+            bq, sb, -2, b_scale, rotation=rotation, global_scale=gsb
+        ).to(b.dtype)
+    y = a @ b if bias is None else torch.addmm(bias.to(a.dtype), a, b)
     return y.to(out_dtype)
 
 
@@ -91,8 +112,9 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["act"]["fwd"],
             cfg.dtype["weight"]["fwd"],
             compute_dtype,
-            cfg.scale,
-            bias=None if bias is None else bias.to(compute_dtype),
+            resolve_scale(cfg.scale, "act"),
+            resolve_scale(cfg.scale, "weight"),
+            bias=bias,
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("act"),
@@ -113,6 +135,7 @@ class QuantizedLinearFn(torch.autograd.Function):
         ctx.x_shape = x.shape
         ctx.x_dtype = x.dtype
         ctx.w_dtype = weight.dtype
+        ctx.bias_dtype = None if bias is None else bias.dtype
         return y.reshape(*x.shape[:-1], weight.shape[0])
 
     @staticmethod
@@ -122,7 +145,6 @@ class QuantizedLinearFn(torch.autograd.Function):
         stats = ctx.stats
         compute_dtype = x2d.dtype
         g = grad_out.reshape(-1, grad_out.shape[-1]).to(compute_dtype)  # (M, N)
-
         # dX = g @ W, (M,N)@(N,K) -> (M,K)
         dx = quantized_mm(
             g,
@@ -130,7 +152,8 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["grad_out"]["dgrad"],
             cfg.dtype["weight"]["dgrad"],
             compute_dtype,
-            cfg.scale,
+            resolve_scale(cfg.scale, "grad_out"),
+            resolve_scale(cfg.scale, "weight"),
             a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("grad_out"),
@@ -148,7 +171,8 @@ class QuantizedLinearFn(torch.autograd.Function):
             cfg.dtype["grad_out"]["wgrad"],
             cfg.dtype["act"]["wgrad"],
             compute_dtype,
-            cfg.scale,
+            resolve_scale(cfg.scale, "grad_out"),
+            resolve_scale(cfg.scale, "act"),
             a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             b_stochastic_rounding=cfg.rounding["act"] == "SR",
             a_stats=stats.get("grad_out"),
@@ -159,11 +183,11 @@ class QuantizedLinearFn(torch.autograd.Function):
                 else None
             ),
         )
-        db = g.sum(dim=0) if ctx.has_bias else None
+        db = g.sum(dim=0, dtype=torch.float32) if ctx.has_bias else None
 
         dx = dx.reshape(*ctx.x_shape).to(ctx.x_dtype)
         dw = dw.to(ctx.w_dtype)
-        db = db.to(ctx.w_dtype) if db is not None else None
+        db = db.to(ctx.bias_dtype) if db is not None else None
         return dx, dw, db, None, None, None
 
 

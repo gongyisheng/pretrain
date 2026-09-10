@@ -1,6 +1,6 @@
 import torch
 
-from src.quant.quantize import dequantize_operand
+from src.quant.quantize import unpack_e2m1, dequantize_operand
 from src.quant.rotation import Rotation
 
 
@@ -42,13 +42,19 @@ def accumulate_quantization_sums(
     dequantized_tensor,
     offs=None,
     ragged_dim=None,
+    contract_dim=None,
     rotated_source=None,
 ):
     """Return per-group quantization-error sums for a monitoring window."""
     source = source_tensor.float()
     mask_source = source if rotated_source is None else rotated_source.float()
     dequantized = dequantized_tensor.float()
-    code_values = codes.float()
+    if codes.dtype is torch.uint8:
+        if contract_dim is None:
+            raise ValueError("packed fp4 codes require contract_dim")
+        code_values = unpack_e2m1(codes, contract_dim)
+    else:
+        code_values = codes.float()
     squares = source.square()
     err_squares = (source - dequantized).square()
     nonzero_mask = mask_source != 0
@@ -105,6 +111,7 @@ def record_operand(
     offs=None,
     ragged_dim=None,
     rotation: Rotation | None = None,
+    global_scale=None,
 ) -> None:
     """Fold one quantized operand into `stats`, if armed.
 
@@ -120,6 +127,10 @@ def record_operand(
     # Detach first: `codes`/`scale` are live graph nodes, so folding them in would
     # make the accumulator buffers require grad and retain the step's graph.
     source, codes, scale = source.detach(), codes.detach(), scale.detach()
+    if global_scale is not None:
+        # Without it the reported error is the operand's whole magnitude, not the
+        # quantizer's: the GEMM sees codes scaled by it, so the metric must too.
+        global_scale = global_scale.detach()
     # Must match `quantize_operand`'s rotation exactly, or the error metrics skew.
     rotated_source = (
         None if rotation is None else rotation(source, contract_dim, torch.float32)
@@ -132,6 +143,7 @@ def record_operand(
         offs=offs if ragged_dim is not None else None,
         ragged_dim=ragged_dim,
         rotation=rotation,
+        global_scale=global_scale,
     )
     sums = accumulate_quantization_sums(
         source,
@@ -139,6 +151,7 @@ def record_operand(
         dequantized,
         offs=offs,
         ragged_dim=ragged_dim,
+        contract_dim=contract_dim,
         rotated_source=rotated_source,
     )
     for name, value in zip(stats.FIELDS, sums):

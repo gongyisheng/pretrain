@@ -1412,7 +1412,7 @@ def test_sparse_moe_latent_flops_less_than_dense_moe():
 
 @cuda_only
 @pytest.mark.parametrize("activation_cls", ["swiglu", "gelu"])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_sparse_moe_block_compiles_fullgraph(activation_cls, dtype):
     torch.manual_seed(0)
     blk = (
@@ -1505,7 +1505,6 @@ def _run_grouped_mm_apply(a0, b0, offs, grad, backend, include_backend):
 @pytest.mark.parametrize(
     ("backend", "include_backend"),
     [(None, False), ("triton", True)],
-    ids=["four_inputs", "forced_backend"],
 )
 def test_grouped_mm_fn_apply_backward_arity(backend, include_backend):
     a0, b0, offs = _make_grouped_layout("ragged_m")
@@ -1574,6 +1573,21 @@ def test_grouped_mm_fn_bias_grads_match_eager(layout):
             torch.testing.assert_close(g.float(), r.float(), rtol=8e-2, atol=1.0)
         else:
             torch.testing.assert_close(g.float(), r.float(), rtol=2e-2, atol=2e-2)
+
+
+@cuda_only
+def test_grouped_mm_fn_bias_grad_precision():
+    rows = 257
+    a = torch.ones(rows, 1, device="cuda", dtype=torch.bfloat16)
+    b = torch.ones(1, 1, 1, device="cuda", dtype=torch.bfloat16)
+    bias = torch.zeros(1, 1, device="cuda", requires_grad=True)
+    offs = torch.tensor([rows], device="cuda", dtype=torch.int32)
+
+    out = GroupedGemmFn.apply(a, b, bias, offs)
+    out.backward(torch.ones_like(out))
+
+    assert bias.grad.dtype is torch.float32
+    torch.testing.assert_close(bias.grad, torch.full_like(bias, rows), atol=0, rtol=0)
 
 
 @cuda_only

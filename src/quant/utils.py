@@ -4,11 +4,13 @@ from typing import Optional
 import torch
 
 from src.quant.constants import (
+    _FP4_FORMATS,
     _FP8_FORMATS,
     _INT8_FORMATS,
     _STR_TO_DTYPE,
     _STR_TO_FP8_ULP,
     _STR_TO_QMAX,
+    _STR_TO_QMIN,
 )
 from src.utils.config import QuantizationConfig
 
@@ -21,6 +23,10 @@ def str_to_qmax(fmt: str) -> float:
     return _STR_TO_QMAX[fmt]
 
 
+def str_to_qmin(fmt: str) -> float:
+    return _STR_TO_QMIN[fmt]
+
+
 def str_to_fp8_ulp(fmt: str) -> tuple[int, int]:
     """(mantissa bits, log2 of the subnormal spacing) for an fp8 format."""
     return _STR_TO_FP8_ULP[fmt]
@@ -30,12 +36,20 @@ def is_fp8(fmt: str) -> bool:
     return fmt in _FP8_FORMATS
 
 
+def is_fp4(fmt: str) -> bool:
+    return fmt in _FP4_FORMATS
+
+
 def is_int8s(fmt: str) -> bool:
     return fmt in _INT8_FORMATS
 
 
 def is_quantized(fmt: str) -> bool:
-    return is_fp8(fmt) or is_int8s(fmt)
+    return is_fp8(fmt) or is_fp4(fmt) or is_int8s(fmt)
+
+
+def resolve_scale(scale_cfg: dict, tensor: str) -> dict:
+    return {**scale_cfg, "block_shape": scale_cfg["block_shape"][tensor]}
 
 
 def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:
@@ -57,6 +71,16 @@ def _resolve_gemm_quantization_family(
     scale_dtype: torch.dtype,
     block_shape: tuple[int, int],
 ) -> str | None:
+    if is_fp4(a_fmt) and is_fp4(b_fmt):
+        block_size = block_shape[1]
+        if (
+            scale_dtype == torch.float8_e4m3fn
+            and block_size > 0
+            and block_size % 16 == 0
+        ):
+            if block_size == 16:
+                return "nvfp4"
+            return "nvfp4_plus"
     if is_fp8(a_fmt) and is_fp8(b_fmt):
         if scale_dtype == torch.float8_e8m0fnu:
             # 1D (1x32) or 2D (32X32)
@@ -76,8 +100,8 @@ def scaled_mm_op(
     block_shape: tuple[int, int],
 ) -> str | None:
     family = _resolve_gemm_quantization_family(a_fmt, b_fmt, scale_dtype, block_shape)
-    if family == "mxfp8_plus":
-        family = "mxfp8"
+    if family in {"mxfp8_plus", "nvfp4_plus"}:
+        family = family.removesuffix("_plus")
     return None if family is None else f"gemm.{family}_scaled_mm"
 
 
@@ -88,8 +112,8 @@ def scaled_grouped_mm_op(
     block_shape: tuple[int, int],
 ) -> str | None:
     family = _resolve_gemm_quantization_family(a_fmt, b_fmt, scale_dtype, block_shape)
-    if family == "mxfp8_plus":
-        family = "mxfp8"
+    if family in {"mxfp8_plus", "nvfp4_plus"}:
+        family = family.removesuffix("_plus")
     return None if family is None else f"gemm.{family}_scaled_grouped_mm"
 
 

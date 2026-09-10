@@ -1,4 +1,5 @@
 import copy
+import math
 
 import torch
 
@@ -7,7 +8,7 @@ from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import QuantizationStats, record_operand
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.rotation import Rotation
-from src.quant.utils import is_quantized, scaled_grouped_mm_op
+from src.quant.utils import is_fp4, is_quantized, resolve_scale, scaled_grouped_mm_op
 from src.utils.config import QuantizationConfig
 
 
@@ -18,7 +19,8 @@ def quantized_grouped_mm(
     a_fmt: str,
     b_fmt: str,
     out_dtype: torch.dtype,
-    scale_cfg: dict,
+    a_scale: dict,
+    b_scale: dict,
     bias: torch.Tensor | None = None,
     a_stochastic_rounding: bool = False,
     b_stochastic_rounding: bool = False,
@@ -31,12 +33,16 @@ def quantized_grouped_mm(
     Operand ranks select the layout. `bias` has shape (E, N), broadcasts over output
     rows, and is not quantized.
     """
-    block_size = scale_cfg["block_shape"][1]
+    if a.dtype != b.dtype:
+        raise ValueError(
+            f"a and b must have the same dtype, got {a.dtype} and {b.dtype}"
+        )
+    block_size = a_scale["block_shape"][1]
     op = scaled_grouped_mm_op(
         a_fmt,
         b_fmt,
-        scale_cfg["scale_dtype"],
-        scale_cfg["block_shape"],
+        a_scale["scale_dtype"],
+        a_scale["block_shape"],
     )
     ragged_k = a.ndim == 2 and b.ndim == 2
 
@@ -49,45 +55,51 @@ def quantized_grouped_mm(
         # Ragged K: both operands share their contraction axis.
         src_a, contract_a, a_ragged_dim = a, -1, -1
         b_ragged_dim = -2
-        if rotation is not None:
-            alignment = rotation.alignment
-            if alignment > 1:
-                n_rows, n_groups = src_a.shape[-1], offs.shape[0]
-                starts = torch.cat([offs.new_zeros(1), offs[:-1]])
-                counts = offs - starts
-                ceil_inputs = counts + alignment - 1
-                padded_blocks = torch.div(ceil_inputs, alignment, rounding_mode="floor")
-                padded_counts = padded_blocks * alignment
-                padded_offs = padded_counts.cumsum(0).to(offs.dtype)
-                padded_starts = torch.cat([padded_offs.new_zeros(1), padded_offs[:-1]])
-                rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
-                group = torch.searchsorted(offs, rows, right=True)
-                group.clamp_(max=n_groups - 1)
-                index = (padded_starts[group] + rows - starts[group]).long()
-                max_padded_rows = n_rows + n_groups * alignment
-                n_padded = -(-max_padded_rows // alignment) * alignment
-                src_a_shape = (src_a.shape[-2], n_padded)
-                padded_src_a = src_a.new_zeros(src_a_shape, dtype=torch.float32)
-                padded_src_a.index_copy_(1, index, src_a.float())
-                src_a = padded_src_a
-                b_shape = (n_padded, b.shape[-1])
-                padded_b = b.new_zeros(b_shape, dtype=torch.float32)
-                padded_b.index_copy_(0, index, b.float())
-                b = padded_b
-                offs = padded_offs
+        has_fp4 = is_fp4(a_fmt) or is_fp4(b_fmt)
+        alignment = math.lcm(
+            rotation.alignment if rotation is not None else 1,
+            16 if has_fp4 else 1,
+        )
+        if alignment > 1:
+            n_rows, n_groups = src_a.shape[-1], offs.shape[0]
+            starts = torch.cat([offs.new_zeros(1), offs[:-1]])
+            counts = offs - starts
+            ceil_inputs = counts + alignment - 1
+            padded_blocks = torch.div(ceil_inputs, alignment, rounding_mode="floor")
+            padded_counts = padded_blocks * alignment
+            padded_offs = padded_counts.cumsum(0).to(offs.dtype)
+            padded_starts = torch.cat([padded_offs.new_zeros(1), padded_offs[:-1]])
+            rows = torch.arange(n_rows, device=offs.device, dtype=offs.dtype)
+            group = torch.searchsorted(offs, rows, right=True)
+            group.clamp_(max=n_groups - 1)
+            index = (padded_starts[group] + rows - starts[group]).long()
+            max_padded_rows = n_rows + n_groups * alignment
+            n_padded = -(-max_padded_rows // alignment) * alignment
+            src_a_shape = (src_a.shape[-2], n_padded)
+            padded_src_a = src_a.new_zeros(src_a_shape, dtype=torch.float32)
+            padded_src_a.index_copy_(1, index, src_a.float())
+            src_a = padded_src_a
+            b_shape = (n_padded, b.shape[-1])
+            padded_b = b.new_zeros(b_shape, dtype=torch.float32)
+            padded_b.index_copy_(0, index, b.float())
+            b = padded_b
+            if has_fp4:
+                # Keep allocation static and include the zero tail in the last group.
+                padded_offs[-1] = n_padded
+            offs = padded_offs
         a_offs, b_offs = offs, offs
     else:
         # Ragged M: only A is mapped.
         src_a, contract_a, a_offs, a_ragged_dim = a, -1, offs, -2
         b_offs, b_ragged_dim = None, None
 
-    aq = sa = bq = sb = None
+    aq = sa = gsa = bq = sb = gsb = None
     if is_quantized(a_fmt):
-        aq, sa = quantize_operand(
+        aq, sa, gsa = quantize_operand(
             src_a,
             contract_a,
             a_fmt,
-            scale_cfg,
+            a_scale,
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             stochastic_rounding=a_stochastic_rounding,
@@ -99,17 +111,18 @@ def quantized_grouped_mm(
             aq,
             sa,
             contract_a,
-            scale_cfg,
+            a_scale,
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             rotation=rotation,
+            global_scale=gsa,
         )
     if is_quantized(b_fmt):
-        bq, sb = quantize_operand(
+        bq, sb, gsb = quantize_operand(
             b,
             -2,
             b_fmt,
-            scale_cfg,
+            b_scale,
             offs=b_offs,
             ragged_dim=b_ragged_dim,
             stochastic_rounding=b_stochastic_rounding,
@@ -122,10 +135,11 @@ def quantized_grouped_mm(
             bq,
             sb,
             -2,
-            scale_cfg,
+            b_scale,
             offs=offs,
             ragged_dim=b_ragged_dim,
             rotation=rotation,
+            global_scale=gsb,
         )
 
     if op is not None:
@@ -137,7 +151,9 @@ def quantized_grouped_mm(
             offs,
             out_dtype,
             block_size,
-            bias=bias,
+            bias=None if bias is None else bias.to(out_dtype),
+            gsa=gsa,
+            gsb=gsb,
         )
 
     if aq is not None:
@@ -145,20 +161,22 @@ def quantized_grouped_mm(
             aq,
             sa,
             contract_a,
-            scale_cfg,
+            a_scale,
             offs=a_offs,
             ragged_dim=a_ragged_dim,
             rotation=rotation,
+            global_scale=gsa,
         ).to(a.dtype)
     if bq is not None:
         b = dequantize_operand(
             bq,
             sb,
             -2,
-            scale_cfg,
+            b_scale,
             offs=b_offs,
             ragged_dim=b_ragged_dim,
             rotation=rotation,
+            global_scale=gsb,
         ).to(b.dtype)
     y = grouped_mm(
         src_a.to(out_dtype),
@@ -180,7 +198,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["act"]["fwd"],
             cfg.dtype["weight"]["fwd"],
             out_dtype,
-            cfg.scale,
+            resolve_scale(cfg.scale, "act"),
+            resolve_scale(cfg.scale, "weight"),
             bias=bias,
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
@@ -197,6 +216,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
         ctx.stats = stats
         ctx.rotation = rotation
         ctx.bias_needs_grad = ctx.needs_input_grad[2]
+        ctx.bias_dtype = None if bias is None else bias.dtype
         return y
 
     @staticmethod
@@ -213,7 +233,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["grad_out"]["dgrad"],
             cfg.dtype["weight"]["dgrad"],
             out_dtype,
-            cfg.scale,
+            resolve_scale(cfg.scale, "grad_out"),
+            resolve_scale(cfg.scale, "weight"),
             a_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             b_stochastic_rounding=cfg.rounding["weight"] == "SR",
             a_stats=stats.get("grad_out"),
@@ -232,7 +253,8 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             cfg.dtype["act"]["wgrad"],
             cfg.dtype["grad_out"]["wgrad"],
             out_dtype,
-            cfg.scale,
+            resolve_scale(cfg.scale, "act"),
+            resolve_scale(cfg.scale, "grad_out"),
             a_stochastic_rounding=cfg.rounding["act"] == "SR",
             b_stochastic_rounding=cfg.rounding["grad_out"] == "SR",
             a_stats=stats.get("act"),
@@ -250,7 +272,7 @@ class ScaledGroupedGemmFn(torch.autograd.Function):
             group_of_row = torch.searchsorted(offs, rows, right=True)
             acc = grad_y.new_zeros(offs.shape[0], grad_y.shape[1], dtype=torch.float32)
             acc.index_add_(0, group_of_row, grad_y.float())
-            grad_bias = acc.to(grad_y.dtype)
+            grad_bias = acc.to(ctx.bias_dtype)
         return grad_a, grad_b, grad_bias, None, None, None, None
 
 

@@ -72,8 +72,8 @@ def _quant(a, b, scheme):
     """Quantize A (M,K) and per-expert B (E,K,N) rowwise; return aq,bq,sa,sb,bs."""
     fmt = _fmt(scheme)
     bs = 0  # rowwise: one scale block per contraction segment
-    aq, sa = quantize_operand(a, -1, fmt, _ROWWISE)
-    bq, sb = quantize_operand(b, -2, fmt, _ROWWISE)  # (E,K,N) in one call
+    aq, sa, _ = quantize_operand(a, -1, fmt, _ROWWISE)
+    bq, sb, _ = quantize_operand(b, -2, fmt, _ROWWISE)  # (E,K,N) in one call
     return aq, bq, sa, sb, bs
 
 
@@ -165,8 +165,8 @@ def _bench_wgrad_point(E, K, N, scheme):
     g = torch.randn(M_FIXED, N, device="cuda", dtype=torch.bfloat16) * 0.1
     fmt = _fmt(scheme)
     a = a.mT
-    aq, sa = quantize_operand(a, -1, fmt, _ROWWISE, offs=offs, ragged_dim=-1)
-    gq, sg = quantize_operand(g, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
+    aq, sa, _ = quantize_operand(a, -1, fmt, _ROWWISE, offs=offs, ragged_dim=-1)
+    gq, sg, _ = quantize_operand(g, -2, fmt, _ROWWISE, offs=offs, ragged_dim=-2)
     ref = _scaled_grouped_mm(
         fmt, aq, gq, sa, sg, offs, torch.bfloat16, 0, backend="eager"
     )
