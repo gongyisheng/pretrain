@@ -8,6 +8,7 @@ Single-GPU LLM pretraining in PyTorch, configured with YAML and logged to W&B. S
 
 ## Development
 
+- Code will be read and reviewed by humans, so prioritize readability with clear names and straightforward logic.
 - Run relevant tests before and after layer/model changes. Benchmark performance-sensitive changes with `benchmarks/bench_train.py` before and after.
 - Before GPU tests, training, or benchmarks, run `nvidia-smi` and pin a free device with `CUDA_VISIBLE_DEVICES=<idx>`. Do not assume GPU count or VRAM; training uses one device.
 - Keep `docs/superpowers/` ignored and uncommitted. If files there are tracked, untrack them while preserving local copies.
