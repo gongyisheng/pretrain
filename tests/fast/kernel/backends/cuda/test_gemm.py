@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.kernel.backends.cublaslt import gemm as cublaslt_mm
+from src.kernel.backends.cuda import gemm as cuda_mm
 from src.kernel.backends.eager import gemm as eager_mm
 from tests.fast.kernel.backends.helper import (
     BF16_OUT,
@@ -122,13 +122,13 @@ NVFP4_SUPPORT_CASES = (
 @pytest.mark.parametrize("overrides,supported", MXFP8_SUPPORT_CASES)
 def test_supports_mxfp8_scaled_mm(overrides, supported):
     inputs = MXFP8_SUPPORT_INPUTS | overrides
-    assert cublaslt_mm.supports_mxfp8_scaled_mm(**inputs) is supported
+    assert cuda_mm.supports_mxfp8_scaled_mm(**inputs) is supported
 
 
 @pytest.mark.parametrize("overrides,supported", NVFP4_SUPPORT_CASES)
 def test_supports_nvfp4_scaled_mm(overrides, supported):
     inputs = NVFP4_SUPPORT_INPUTS | overrides
-    assert cublaslt_mm.supports_nvfp4_scaled_mm(**inputs) is supported
+    assert cuda_mm.supports_nvfp4_scaled_mm(**inputs) is supported
 
 
 @cuda_only
@@ -149,7 +149,7 @@ def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias, with_global_s
         with_bias=with_bias,
         with_global_scale=with_global_scale,
     )
-    actual = cublaslt_mm.scaled_mm_mxfp8(
+    actual = cuda_mm.scaled_mm_mxfp8(
         aq, bq, sa, sb, out_dtype, block_size, bias, gsa, gsb
     )
     expected = eager_mm.scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias, gsa, gsb)
@@ -179,7 +179,7 @@ def test_mxfp8_scaled_mm_raise_error(case, format, scale, with_bias):
     )
     message = f"MXFP8 GEMM requires block_size=32, got {block_size}"
     with pytest.raises(ValueError, match=message):
-        cublaslt_mm.scaled_mm_mxfp8(aq, bq, sa, sb, out_dtype, block_size, bias)
+        cuda_mm.scaled_mm_mxfp8(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
 @cuda_only
@@ -198,7 +198,7 @@ def test_nvfp4_scaled_mm_precision(case, out, with_bias, with_global_scale):
         with_global_scale=with_global_scale,
         packed_e2m1=True,
     )
-    actual = cublaslt_mm.nvfp4_scaled_mm(
+    actual = cuda_mm.nvfp4_scaled_mm(
         aq, bq, sa, sb, out_dtype, block_size, bias, gsa, gsb
     )
     expected = eager_mm.scaled_mm(

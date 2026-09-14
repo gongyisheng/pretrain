@@ -14,14 +14,14 @@ def _spec(**overrides):
 
 
 REGISTERED_KERNELS = [
-    ("test.op", "cublaslt"),
+    ("test.op", "cuda"),
     ("gemm.fp8_scaled_mm", "eager"),
     ("test.op", "triton"),
     ("test.op", "eager"),
 ]
 
 LOOKUP_CASES = [
-    ("test.op", ("cublaslt", "triton", "eager")),
+    ("test.op", ("cuda", "triton", "eager")),
     ("gemm.fp8_scaled_mm", ("eager",)),
     ("test.missing", ()),
 ]

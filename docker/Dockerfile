@@ -5,7 +5,7 @@
 #   docker build -f docker/Dockerfile -t pretrain docker/
 #   docker run -e GIT_REF=v0.1.0 pretrain
 #
-# devel base for nvcc + cublasLt, needed by _bpe_engine and cublaslt/_C.
+# devel base for nvcc + cublasLt, needed by _bpe_engine and cuda/_C.
 FROM nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
