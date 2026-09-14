@@ -1,12 +1,12 @@
 import torch
 
-import src.kernel.backends.cublaslt as _cublaslt_backend
+import src.kernel.backends.cuda as _cuda_backend
 import src.kernel.backends.eager  # noqa: F401
 import src.kernel.backends.triton  # noqa: F401
 from src.kernel.registry import KERNEL_REGISTRY
 from src.kernel.selector import _platform_for, compile_safe_cache, dispatch
 
-_cublaslt = getattr(_cublaslt_backend, "_gemm", None)
+_cuda = getattr(_cuda_backend, "_gemm", None)
 
 
 def _check_same_dtype(a: torch.Tensor, b: torch.Tensor) -> None:
@@ -191,13 +191,11 @@ def _select_mxfp8_scaled_mm_backend(
     """Choose an optimized backend, or defer to capability-based dispatch."""
     op = "gemm.mxfp8_scaled_mm"
     if (
-        _cublaslt is not None
-        and _cublaslt.supports_mxfp8_scaled_mm(
-            aq, bq, sa, sb, out_dtype, block_size, bias
-        )
-        and _is_kernel_available(op, "cublaslt", aq.device)
+        _cuda is not None
+        and _cuda.supports_mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+        and _is_kernel_available(op, "cuda", aq.device)
     ):
-        return "cublaslt"
+        return "cuda"
     if _is_kernel_available(op, "triton", aq.device):
         return "triton"
     return None
@@ -214,13 +212,11 @@ def _select_nvfp4_scaled_mm_backend(
 ) -> str | None:
     op = "gemm.nvfp4_scaled_mm"
     if (
-        _cublaslt is not None
-        and _cublaslt.supports_nvfp4_scaled_mm(
-            aq, bq, sa, sb, out_dtype, block_size, bias
-        )
-        and _is_kernel_available(op, "cublaslt", aq.device)
+        _cuda is not None
+        and _cuda.supports_nvfp4_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+        and _is_kernel_available(op, "cuda", aq.device)
     ):
-        return "cublaslt"
+        return "cuda"
     if _is_kernel_available(op, "triton", aq.device):
         return "triton"
     return None

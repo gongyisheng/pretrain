@@ -6,7 +6,7 @@ import torch
 
 BuildMode = Literal["eager", "jit", "aot"]
 
-BACKENDS = frozenset({"eager", "triton", "cublaslt"})
+BACKENDS = frozenset({"eager", "triton", "cuda"})
 
 
 @dataclass(frozen=True, slots=True)

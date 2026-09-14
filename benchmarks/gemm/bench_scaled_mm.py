@@ -337,7 +337,7 @@ def _bench_scheme(a, b, config):
             torch.bfloat16,
             block_size,
             scale_dtype,
-            backend="cublaslt",
+            backend="cuda",
         )
 
     try:

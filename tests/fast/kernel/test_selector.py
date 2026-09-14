@@ -57,30 +57,30 @@ TRITON_REF = _spec("triton", reference=True)
 TRITON_MIN80 = _spec("triton", frozenset({cuda((8, 0))}))
 TRITON_MIN89 = _spec("triton", frozenset({cuda((8, 9))}))
 TRITON_80_TO_85 = _spec("triton", frozenset({cuda((8, 0), (8, 5))}))
-CUBLASLT_MIN99 = _spec("cublaslt", frozenset({cuda((99, 0))}))
-CUBLASLT_100_TO_110 = _spec("cublaslt", frozenset({cuda((10, 0), (11, 0))}))
+CUDA_MIN99 = _spec("cuda", frozenset({cuda((99, 0))}))
+CUDA_100_TO_110 = _spec("cuda", frozenset({cuda((10, 0), (11, 0))}))
 
 
 SELECT_KERNEL_CASES = [
     # An explicit backend and a sole registration both skip every later gate.
-    ([CUBLASLT_MIN99], "cublaslt", None, "cublaslt"),
-    ([CUBLASLT_MIN99], None, None, "cublaslt"),
+    ([CUDA_MIN99], "cuda", None, "cuda"),
+    ([CUDA_MIN99], None, None, "cuda"),
     ([EAGER_CPU, TRITON_MIN80], None, HOST, "eager"),
     ([EAGER_REF, TRITON_MIN80], None, SM89, "triton"),
-    ([EAGER_REF, CUBLASLT_100_TO_110], None, SM89, "eager"),
+    ([EAGER_REF, CUDA_100_TO_110], None, SM89, "eager"),
     ([EAGER_REF, TRITON_MIN80], None, HOST, "eager"),
 ]
 
 SELECT_KERNEL_ERROR_CASES = [
     ([], None, None),
-    ([EAGER_CPU, TRITON_MIN80], "cublaslt", None),
+    ([EAGER_CPU, TRITON_MIN80], "cuda", None),
     ([EAGER_CPU, TRITON_MIN80], None, None),
     # No reference spec here on purpose: a reference is always eligible (empty
     # capabilities), so it would never let this scenario -- nothing eligible at
     # all -- occur.
-    ([TRITON_80_TO_85, CUBLASLT_100_TO_110], None, SM89),
-    ([TRITON_MIN89, CUBLASLT_100_TO_110], None, SM100),
-    ([EAGER_REF, TRITON_MIN89, CUBLASLT_100_TO_110], None, SM100),
+    ([TRITON_80_TO_85, CUDA_100_TO_110], None, SM89),
+    ([TRITON_MIN89, CUDA_100_TO_110], None, SM100),
+    ([EAGER_REF, TRITON_MIN89, CUDA_100_TO_110], None, SM100),
     ([EAGER_REF, TRITON_REF], None, HOST),
 ]
 
@@ -93,7 +93,7 @@ CUDA_DEVICE = torch.device("cuda", 0)
 ADD_ON_CPU = ("eager", frozenset({CPU}), lambda x, y: x + y)
 ON_CPU = ("eager", frozenset({CPU}), None)
 ON_CUDA_80 = ("triton", frozenset({cuda((8, 0))}), None)
-ON_CUDA_100 = ("cublaslt", frozenset({cuda((10, 0))}), None)
+ON_CUDA_100 = ("cuda", frozenset({cuda((10, 0))}), None)
 
 ADD_OP = "d.add"
 SPLIT_OP = "d.split"
@@ -113,7 +113,7 @@ DISPATCH_CASES = [
 
 DISPATCH_ERROR_CASES = [
     (MISSING_OP, None),
-    (SPLIT_OP, "cublaslt"),
+    (SPLIT_OP, "cuda"),
     (CUDA_ONLY_OP, None),
 ]
 

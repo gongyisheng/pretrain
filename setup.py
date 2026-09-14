@@ -26,10 +26,10 @@ ext_modules = [
 if CUDA_HOME is not None:
     ext_modules.append(
         CUDAExtension(
-            "src.kernel.backends.cublaslt._C",
+            "src.kernel.backends.cuda._C",
             [
-                "src/kernel/backends/cublaslt/csrc/gemm.cpp",
-                "src/kernel/backends/cublaslt/csrc/matmul_scales.cu",
+                "src/kernel/backends/cuda/csrc/gemm.cpp",
+                "src/kernel/backends/cuda/csrc/matmul_scales.cu",
             ],
             libraries=["cublasLt"],
             extra_compile_args={"cxx": ["-O3"]},

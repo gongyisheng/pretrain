@@ -164,7 +164,7 @@ def supports_mxfp8_scaled_mm(
 
 @register_kernel(
     op="gemm.mxfp8_scaled_mm",
-    backend="cublaslt",
+    backend="cuda",
     build="aot",
     autograd=False,
     capabilities=frozenset({cuda(min_arch=(10, 0))}),
@@ -243,7 +243,7 @@ def supports_nvfp4_scaled_mm(
 
 @register_kernel(
     op="gemm.nvfp4_scaled_mm",
-    backend="cublaslt",
+    backend="cuda",
     build="aot",
     autograd=False,
     capabilities=frozenset({cuda(min_arch=(10, 0))}),
