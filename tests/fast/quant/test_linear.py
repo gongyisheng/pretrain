@@ -14,6 +14,8 @@ from tests.fast.quant.helper import (
     ALL_FORMATS,
     FORWARD_DTYPES,
     BACKWARD_DTYPES,
+    BLOCKWISE1D_32_E8M0,
+    FP8_E4M3_W8A16_DTYPES,
     INT4_W8A16_DTYPES,
     FP8_E4M3_W8A8_E5M2_G8_DTYPES,
     SCALE_PAIRS,
@@ -511,6 +513,30 @@ def test_quantized_linear_compiles_fullgraph(
     assert out.shape == (64, 128) and torch.isfinite(out).all()
     assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
     assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+@cuda_sm89_or_newer
+def test_quantized_linear_e8m0_compiles_fullgraph():
+    """Compiled W8A16 E8M0 agrees with eager forward and backward."""
+    torch.manual_seed(0)
+    linear = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
+    cfg = rule(FP8_E4M3_W8A16_DTYPES, BLOCKWISE1D_32_E8M0)
+    eager = QuantizedLinear.from_module(linear, cfg)
+    compiled = QuantizedLinear.from_module(linear, cfg)
+    eager_x = torch.randn(
+        64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    compiled_x = eager_x.detach().clone().requires_grad_()
+    grad_out = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+    eager_out = eager(eager_x)
+    eager_out.backward(grad_out)
+    compiled_out = torch.compile(compiled, fullgraph=True)(compiled_x)
+    compiled_out.backward(grad_out)
+
+    torch.testing.assert_close(compiled_out, eager_out, atol=0, rtol=0)
+    torch.testing.assert_close(compiled.weight.grad, eager.weight.grad, atol=0, rtol=0)
+    torch.testing.assert_close(compiled_x.grad, eager_x.grad, atol=0, rtol=0)
 
 
 @cuda_sm89_or_newer

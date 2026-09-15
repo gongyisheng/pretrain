@@ -10,6 +10,10 @@ from tests.fast.quant.helper import (
     ALL_QUANT_FORMATS,
     ALL_SCALES,
     BLOCKWISE1D_16,
+    BLOCKWISE1D_32,
+    BLOCKWISE1D_32_E8M0,
+    BLOCKWISE2D_16,
+    BLOCKWISE2D_32,
     E4M3,
     BLOCKWISE1D_16_E2M1,
     ROWWISE,
@@ -39,6 +43,8 @@ TEST_DEVICES = ["cpu", "cuda"]
 STOCHASTIC_ROUNDING = [False, True]
 COMPILED_FORMATS = [E4M3, "fp4_e2m1", "fp4_e2m1_4over6"]
 COMPILED_SCALES = [ROWWISE, BLOCKWISE1D_16_E2M1]
+STOCHASTIC_SCALES = [TENSORWISE, ROWWISE, BLOCKWISE1D_16, BLOCKWISE2D_16]
+COMPILED_STOCHASTIC_SCALES = STOCHASTIC_SCALES + [BLOCKWISE1D_32, BLOCKWISE2D_32]
 
 ROTATION_BLOCK_SIZES = [1, 32]
 ROTATION_RANDOM_SIGNS = [False, True]
@@ -912,8 +918,57 @@ def test_quantize_operand_stochastic_rounding(fmt, enable_sr, device):
     # Repeating all 9,999 stochastic draws is negligibly likely.
     assert not torch.equal(_bits(again), _bits(draws))
 
+    if is_fp4(fmt):
+        nan_codes, _, _ = quantize_operand(
+            x.new_full((1, 16), torch.nan),
+            -1,
+            fmt,
+            TENSORWISE,
+            stochastic_rounding=True,
+        )
+        max_code = E2M1_MAGNITUDES.index(str_to_qmax(fmt))
+        assert torch.equal(
+            nan_codes, torch.full_like(nan_codes, max_code | max_code << 4)
+        )
+
 
 # --- dequantize_operand ---
+
+E8M0_SCALE_BYTES = list(range(256))
+
+
+@pytest.mark.parametrize("compiled", COMPILED)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("device", TEST_DEVICES)
+def test_dequantize_operand_e8m0_bytes(device, contract_dim, compiled):
+    """Decode every E8M0 endpoint through the public scale layout."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    if compiled and device == "cpu":
+        pytest.skip("Inductor does not accept E8M0 CPU inputs")
+
+    code = torch.tensor(E8M0_SCALE_BYTES, dtype=torch.uint8, device=device)
+    if contract_dim == -1:
+        codes = torch.ones((2, 8192), device=device)
+        scale = code.repeat(2, 1).view(torch.float8_e8m0fnu)
+        expected = code.view(torch.float8_e8m0fnu).float().repeat_interleave(32)
+        expected = expected.expand(2, -1)
+    else:
+        codes = torch.ones((8192, 2), device=device)
+        scale = code[:, None].repeat(1, 2).view(torch.float8_e8m0fnu)
+        expected = code.view(torch.float8_e8m0fnu).float().repeat_interleave(32)
+        expected = expected[:, None].expand(-1, 2)
+
+    def dequantize(xq, operand_scale):
+        return dequantize_operand(xq, operand_scale, contract_dim, BLOCKWISE1D_32_E8M0)
+
+    actual = (
+        torch.compile(dequantize, fullgraph=True)(codes, scale)
+        if compiled
+        else dequantize(codes, scale)
+    )
+    assert torch.allclose(actual, expected, atol=0, rtol=0, equal_nan=True)
+
 
 DEQUANTIZE_ERROR_CASES = [
     (
@@ -1146,26 +1201,71 @@ def test_quantize_operand_compiles_fullgraph(scale_cfg, fmt):
 
 
 @cuda_sm89_or_newer
-def test_quantize_operand_fp4_e2m1_stochastic_rounding_compiles_fullgraph():
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+def test_quantize_operand_e8m0_compiles_fullgraph(contract_dim):
+    """Compiled E8M0 quantization preserves scale bytes and NaN propagation."""
+    torch.manual_seed(0)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    x[0, 0] = float("nan")
+
+    def quantize(source):
+        return quantize_operand(source, contract_dim, E4M3, BLOCKWISE1D_32_E8M0)
+
+    eager_codes, eager_scale, eager_global = quantize(x)
+    compiled_codes, compiled_scale, compiled_global = torch.compile(
+        quantize, fullgraph=True
+    )(x)
+    assert torch.equal(_bits(compiled_codes), _bits(eager_codes))
+    assert torch.equal(_bits(compiled_scale), _bits(eager_scale))
+    assert compiled_global is None and eager_global is None
+
+    def dequantize(codes, scale):
+        return dequantize_operand(codes, scale, contract_dim, BLOCKWISE1D_32_E8M0)
+
+    eager_dequantized = dequantize(eager_codes, eager_scale)
+    compiled_dequantized = torch.compile(dequantize, fullgraph=True)(
+        eager_codes, eager_scale
+    )
+    assert torch.allclose(
+        compiled_dequantized,
+        eager_dequantized,
+        atol=0,
+        rtol=0,
+        equal_nan=True,
+    )
+
+
+@cuda_sm89_or_newer
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("scale_cfg", COMPILED_STOCHASTIC_SCALES)
+def test_quantize_operand_fp4_e2m1_stochastic_rounding_compiles_fullgraph(
+    scale_cfg, contract_dim
+):
     """Compiled stochastic rounding produces legal codes with the expected mean."""
     torch.manual_seed(0)
     source = torch.full((4096, 16), 0.3, device="cuda")
     source[:, -1] = 6.0
+    if contract_dim == -2:
+        source = source.mT
 
     def quantize(x):
         return quantize_operand(
             x,
-            -1,
+            contract_dim,
             "fp4_e2m1",
-            BLOCKWISE1D_16,
+            scale_cfg,
             stochastic_rounding=True,
         )
 
     codes, scale, global_scale = torch.compile(quantize, fullgraph=True)(source)
     dequantized = dequantize_operand(
-        codes, scale, -1, BLOCKWISE1D_16, global_scale=global_scale
+        codes, scale, contract_dim, scale_cfg, global_scale=global_scale
     )
-    assert codes.dtype is torch.uint8 and codes.shape == (4096, 8)
+    expected_shape = list(source.shape)
+    expected_shape[contract_dim] //= 2
+    assert codes.dtype is torch.uint8 and codes.shape == tuple(expected_shape)
+    if contract_dim == -2:
+        source, dequantized = source.mT, dequantized.mT
     assert set(dequantized[:, :-1].unique().tolist()) == {0.0, 0.5}
     assert dequantized[:, :-1].mean().item() == pytest.approx(0.3, abs=0.005)
     torch.testing.assert_close(dequantized[:, -1], source[:, -1], rtol=0, atol=0)
@@ -1173,7 +1273,9 @@ def test_quantize_operand_fp4_e2m1_stochastic_rounding_compiles_fullgraph():
 
 E2M1_SR_MAGNITUDES = [
     0.0,
+    0.001,
     0.25,
+    0.3,
     0.5,
     0.75,
     1.0,
@@ -1198,47 +1300,56 @@ E2M1_SIGNS = [1.0, -1.0]
 
 
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("scale_cfg", STOCHASTIC_SCALES)
 @pytest.mark.parametrize("sign", E2M1_SIGNS)
 @pytest.mark.parametrize("magnitude", E2M1_SR_MAGNITUDES)
 def test_quantize_operand_fp4_e2m1_stochastic_rounding_precision(
-    monkeypatch, magnitude, sign, contract_dim
+    monkeypatch, magnitude, sign, contract_dim, scale_cfg
 ):
-    """Every 8-bit random value matches Transformer Engine's fallback."""
-    random_bytes = torch.arange(256, dtype=torch.int32, device="cpu")
+    """FP4 selects adjacent values at the exact probability threshold."""
     source = torch.full((256, 16), 6.0, device="cpu")
     source[:, 1] = sign * magnitude
-    random_bits = torch.zeros_like(source, dtype=torch.int32)
-    random_bits[:, 1] = random_bytes
+    stored = source[0, 1].abs().item()
+    lower = max(value for value in E2M1_MAGNITUDES if value <= stored)
+    upper = min((value for value in E2M1_MAGNITUDES if value > stored), default=lower)
+    probability = torch.tensor(
+        (stored - lower) / (upper - lower) if upper > lower else 0.0,
+        dtype=torch.float32,
+        device="cpu",
+    )
+    samples = torch.arange(256, dtype=torch.float32, device="cpu") / 256.0
+    samples[-5:] = torch.stack(
+        [
+            probability.new_tensor(1.0 / 1024.0),
+            probability.new_tensor(1.0 / 512.0),
+            torch.nextafter(probability, probability.new_tensor(-torch.inf)).clamp_min(
+                0
+            ),
+            probability,
+            torch.nextafter(probability, probability.new_tensor(torch.inf)),
+        ]
+    )
+    random_values = torch.zeros_like(source)
+    random_values[:, 1] = samples
     if contract_dim == -2:
-        source, random_bits = source.mT, random_bits.mT
+        source, random_values = source.mT, random_values.mT
 
-    def fixed_random_bits(low, high, size, dtype, device):
-        assert (low, high) == (0, 256)
-        assert tuple(size) == source.shape
-        assert dtype is torch.int32
-        assert torch.device(device).type == "cpu"
-        return random_bits
+    def fixed_random_values(tensor):
+        return random_values.reshape(tensor.shape)
 
-    monkeypatch.setattr(torch, "randint", fixed_random_bits)
+    monkeypatch.setattr(torch, "rand_like", fixed_random_values)
     codes, scale, global_scale = quantize_operand(
         source,
         contract_dim,
         "fp4_e2m1",
-        BLOCKWISE1D_16,
+        scale_cfg,
         stochastic_rounding=True,
     )
     actual = dequantize_operand(
-        codes, scale, contract_dim, BLOCKWISE1D_16, global_scale=global_scale
+        codes, scale, contract_dim, scale_cfg, global_scale=global_scale
     )
     actual = actual[:, 1] if contract_dim == -1 else actual[1, :]
     values = source[:, 1] if contract_dim == -1 else source[1, :]
-    magnitude = values.abs()
-    unit_random = random_bytes.float() / 256.0
-    step = torch.where(magnitude >= 4.0, 2.0, torch.where(magnitude >= 2.0, 1.0, 0.5))
-    dithered = torch.addcmul(magnitude, unit_random, step)
-    rounded_step = torch.where(
-        dithered >= 4.0, 2.0, torch.where(dithered >= 2.0, 1.0, 0.5)
-    )
-    rounded = (torch.floor(dithered / rounded_step) * rounded_step).clamp(max=6.0)
+    rounded = torch.where(samples < probability, upper, lower)
     expected = torch.copysign(rounded, values)
     assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
