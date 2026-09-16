@@ -10,7 +10,8 @@ Single-GPU LLM pretraining in PyTorch, configured with YAML and logged to W&B. S
 
 - Code will be read and reviewed by humans, so prioritize readability with clear names and straightforward logic.
 - Run relevant tests before and after layer/model changes. Benchmark performance-sensitive changes with `benchmarks/bench_train.py` before and after.
-- Before GPU tests, training, or benchmarks, run `nvidia-smi` and pin a free device with `CUDA_VISIBLE_DEVICES=<idx>`. Do not assume GPU count or VRAM; training uses one device.
+- Before GPU work, run `nvidia-smi` and verify that a free device has enough VRAM. Use one GPU; do not assume device count or memory.
+- Run GPU commands through `uv run python tests/ci/gpu_lock_exec.py -- <command>` to reserve `/tmp/gpu<idx>.lock` with `flock` and set `CUDA_VISIBLE_DEVICES` (`GPU_LOCK_DIR` overrides the directory). Hold the lock until all GPU work and children exit, then release it by closing the descriptor. Never delete lock files.
 - Keep `docs/superpowers/` ignored and uncommitted. If files there are tracked, untrack them while preserving local copies.
 
 ```bash
