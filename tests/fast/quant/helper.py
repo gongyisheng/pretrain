@@ -403,18 +403,13 @@ def mm_ref(a, b, a_fmt, b_fmt, a_scale, b_scale, rotation=None):
 
 
 def skip_unsupported_fmt_scale(fmt, scale_cfg):
-    """Skip unsupported E8M0 element formats and block widths."""
-    if (
-        scale_cfg["scale_dtype"] is torch.float8_e8m0fnu
-        and scale_cfg["block_shape"][1] % 32
-    ):
-        pytest.skip("E8M0 scales require a block width divisible by 32")
+    """Skip unsupported E8M0 element formats."""
     if (
         scale_cfg["scale_dtype"] is torch.float8_e8m0fnu
         and is_quantized(fmt)
-        and fmt not in FP8_FORMATS
+        and fmt != E4M3
     ):
-        pytest.skip("an e8m0 scale is defined only over fp8 elements")
+        pytest.skip("an e8m0 scale requires fp8_e4m3")
 
 
 def skip_unsupported_ragged_k_scale(scale_cfg):

@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.kernel.ops.gemm import SCALED_MM_OPS
-from src.metrics.quant import QuantizationStats, record_operand
-from src.quant.quantize import dequantize_operand, quantize_operand
+from src.metrics.quant import QuantizationStats, quantize_and_record
+from src.quant.quantize import dequantize_operand
 from src.quant.rotation import Rotation
 from src.quant.utils import is_quantized, resolve_scale, scaled_mm_op
 from src.utils.config import QuantizationConfig
@@ -45,28 +45,26 @@ def quantized_mm(
     )
     aq = sa = gsa = bq = sb = gsb = None
     if is_quantized(a_fmt):
-        aq, sa, gsa = quantize_operand(
+        aq, sa, gsa = quantize_and_record(
+            a_stats,
             a,
             -1,
             a_fmt,
             a_scale,
             stochastic_rounding=a_stochastic_rounding,
             rotation=rotation,
-        )
-        record_operand(
-            a_stats, a, aq, sa, -1, a_scale, rotation=rotation, global_scale=gsa
+            output_layout="row_major",
         )
     if is_quantized(b_fmt):
-        bq, sb, gsb = quantize_operand(
+        bq, sb, gsb = quantize_and_record(
+            b_stats,
             b,
             -2,
             b_fmt,
             b_scale,
             stochastic_rounding=b_stochastic_rounding,
             rotation=rotation,
-        )
-        record_operand(
-            b_stats, b, bq, sb, -2, b_scale, rotation=rotation, global_scale=gsb
+            output_layout="column_major" if op is not None else "row_major",
         )
 
     if op is not None:

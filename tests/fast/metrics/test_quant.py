@@ -6,6 +6,7 @@ from src.metrics.functional import _quantization_metrics, compute_quantization_m
 from src.metrics.quant import (
     QuantizationStats,
     accumulate_quantization_sums,
+    quantize_and_record,
     record_operand,
     set_quantization_monitoring_status,
 )
@@ -22,6 +23,54 @@ _TENSORWISE = {
 METRICS = ("sqnr", "underflow_rate")
 SPREAD_METRICS = ("sqnr_min", "underflow_rate_max")
 RAGGED_DIM_CASES = [(-2, False), (-1, True)]
+RECORD_FORMATS = ["fp8_e4m3", "int8", "fp4_e2m1"]
+
+
+@pytest.mark.parametrize("fmt", RECORD_FORMATS)
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("rotated", [False, True])
+def test_quantize_and_record(fmt, enabled, rotated):
+    source = torch.linspace(-7, 7, 256).reshape(8, 32).requires_grad_()
+    rotation = HadamardRotation(block_size=4, random_sign=False) if rotated else None
+    actual = QuantizationStats("act/x", 1, source.device)
+    expected = QuantizationStats("act/x", 1, source.device)
+    set_quantization_monitoring_status(enabled)
+    for _ in range(2):
+        result = quantize_and_record(
+            actual, source, -1, fmt, _TENSORWISE, rotation=rotation
+        )
+        collect = enabled and not rotated
+        ordinary = quantize_operand(
+            source,
+            -1,
+            fmt,
+            _TENSORWISE,
+            rotation=rotation,
+            return_quantization_stats=collect,
+        )
+        for got, want in zip(result, ordinary[:3]):
+            if want is None:
+                assert got is None
+            else:
+                assert torch.equal(got.view(torch.uint8), want.view(torch.uint8))
+        if collect:
+            assert ordinary[3] is not None
+            expected.quantization_stats.add_(ordinary[3])
+        else:
+            record_operand(
+                expected,
+                source,
+                *ordinary[:2],
+                -1,
+                _TENSORWISE,
+                rotation=rotation,
+                global_scale=ordinary[2],
+            )
+    torch.testing.assert_close(
+        actual.quantization_stats, expected.quantization_stats, rtol=0, atol=0
+    )
+    assert not actual.quantization_stats.requires_grad
+    assert actual.numel.item() == (2 * source.numel() if enabled else 0)
 
 
 # --- compute_quantization_metrics: a pure function of (source, dequantized, codes) ---

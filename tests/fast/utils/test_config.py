@@ -1591,11 +1591,13 @@ def test_quant_blockwise_requires_block_size():
         )
 
 
-def test_quant_mxfp8_rejects_int_element():
-    with pytest.raises(ValueError, match="fp8"):
-        QuantizationConfig(
-            enabled=True, dtype={"weight": "int8"}, scale={"recipe": "mxfp8"}
-        )
+@pytest.mark.parametrize("fmt", ["int8", "fp8_e5m2"])
+@pytest.mark.parametrize("tensor", ["weight", "act", "grad_out"])
+def test_quantization_config_mxfp8_element_raise_error(fmt, tensor):
+    dtype = {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"}
+    dtype[tensor] = fmt
+    with pytest.raises(ValueError):
+        QuantizationConfig(enabled=True, dtype=dtype, scale={"recipe": "mxfp8"})
 
 
 @pytest.mark.parametrize("scale_dtype", ({}, {"scale_dtype": None}))
@@ -2136,7 +2138,32 @@ def test_quant_block_shape_rejects_non_square():
         )
 
 
-def test_quant_e8m0_requires_contract_extent_multiple_of_32():
+@pytest.mark.parametrize("block_size", (16, 32, 64, 128))
+@pytest.mark.parametrize("square", (False, True))
+def test_quantization_config_mxfp8_block_shape(block_size, square):
+    block_shape = (block_size if square else 1, block_size)
+    config = QuantizationConfig(
+        enabled=True,
+        dtype={"recipe": "mxfp8"},
+        scale={
+            "recipe": "mxfp8",
+            "block_shape": {
+                "weight": block_shape,
+                "act": block_shape,
+                "grad_out": block_shape,
+            },
+        },
+    )
+    assert config.scale["block_shape"] == {
+        "weight": block_shape,
+        "act": block_shape,
+        "grad_out": block_shape,
+    }
+    assert config.scale["scale_dtype"] is torch.float8_e8m0fnu
+    assert config.scale["enable_global_scale"] is False
+
+
+def test_quantization_config_mxfp8_block_shape_raise_error():
     with pytest.raises(ValueError):
         QuantizationConfig(
             enabled=True,
@@ -2144,9 +2171,9 @@ def test_quant_e8m0_requires_contract_extent_multiple_of_32():
             scale={
                 "granularity": "blockwise",
                 "block_shape": {
-                    "weight": (16, 16),
-                    "act": (16, 16),
-                    "grad_out": (16, 16),
+                    "weight": (48, 48),
+                    "act": (48, 48),
+                    "grad_out": (48, 48),
                 },
                 "scale_dtype": "fp8_e8m0",
             },

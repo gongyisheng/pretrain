@@ -9,7 +9,19 @@ from src.kernel.ops.gemm import (
     nvfp4_scaled_grouped_mm,
     nvfp4_scaled_mm,
 )
-from src.kernel.ops.quantize import pack_e2m1_rne
+from src.kernel.ops.quantize import (
+    dequantize_dense,
+    dequantize_grouped,
+    quantize_fp8,
+    quantize_fp8_grouped,
+    quantize_int8,
+    quantize_int8_grouped,
+    quantize_mxfp8,
+    quantize_mxfp8_grouped,
+    quantize_nvfp4,
+    quantize_nvfp4_grouped,
+    unpack_e2m1,
+)
 
 __all__ = [
     "grouped_mm",
@@ -21,5 +33,15 @@ __all__ = [
     "fp8_scaled_grouped_mm",
     "mxfp8_scaled_grouped_mm",
     "nvfp4_scaled_grouped_mm",
-    "pack_e2m1_rne",
+    "unpack_e2m1",
+    "dequantize_dense",
+    "dequantize_grouped",
+    "quantize_fp8",
+    "quantize_fp8_grouped",
+    "quantize_int8",
+    "quantize_int8_grouped",
+    "quantize_mxfp8",
+    "quantize_mxfp8_grouped",
+    "quantize_nvfp4",
+    "quantize_nvfp4_grouped",
 ]

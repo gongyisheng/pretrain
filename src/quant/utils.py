@@ -83,6 +83,8 @@ def _resolve_gemm_quantization_family(
             return "nvfp4_plus"
     if is_fp8(a_fmt) and is_fp8(b_fmt):
         if scale_dtype == torch.float8_e8m0fnu:
+            if block_shape[1] % 32:
+                return None
             # 1D (1x32) or 2D (32X32)
             if a_fmt == "fp8_e4m3" and b_fmt == "fp8_e4m3" and block_shape[1] == 32:
                 return "mxfp8"

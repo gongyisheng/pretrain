@@ -23,6 +23,7 @@ import argparse
 import contextlib
 import json
 import os
+import statistics
 import sys
 
 # torch reads TORCH_COMPILE_DISABLE when its dynamo module is first imported, so
@@ -89,6 +90,7 @@ def run_benchmark(
                 "step": step,
                 "tokens_per_sec": metrics["perf/tokens_per_sec"],
                 "total_tokens": metrics["train/total_tokens"],
+                "loss": metrics["train/loss"],
             }
         )
         if cuda_profiler and not started and step >= warmup:
@@ -139,6 +141,10 @@ def run_benchmark(
         "elapsed_sec": round(elapsed, 2),
         "measured_tokens": measured_tokens,
         "tok_per_sec": round(tok_per_sec),
+        "median_tok_per_sec": round(
+            statistics.median(m["tokens_per_sec"] for m in measured)
+        ),
+        "measured_steps_metrics": measured,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         "torch_compile": enable_torch_compile,
     }

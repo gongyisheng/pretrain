@@ -30,9 +30,13 @@ if CUDA_HOME is not None:
             [
                 "src/kernel/backends/cuda/csrc/gemm.cpp",
                 "src/kernel/backends/cuda/csrc/matmul_scales.cu",
+                "src/kernel/backends/cuda/csrc/fp8.cu",
+                "src/kernel/backends/cuda/csrc/int8.cu",
+                "src/kernel/backends/cuda/csrc/nvfp4.cu",
+                "src/kernel/backends/cuda/csrc/mxfp8.cu",
             ],
             libraries=["cublasLt"],
-            extra_compile_args={"cxx": ["-O3"]},
+            extra_compile_args={"cxx": ["-O3"], "nvcc": ["-O3"]},
         )
     )
 
