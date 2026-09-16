@@ -23,7 +23,7 @@ Five runs: three W8A8 activation granularities, one BF16 baseline, and one W8A16
 | Model | Qwen3-style dense Transformer, 50,931,200 parameters (approximately 51M) |
 | Dimensions | `d_model=512`, 8 layers, 8 Q / 4 KV heads, QK norm, SwiGLU intermediate size 1,536 |
 | Data | OpenWebText, `tokenizers/custom_bpe_50k`, validation split 0.01 |
-| Sequence / batch | 1,024 tokens, batch 16, accumulation 16; 262,144 tokens per optimizer step |
+| Sequence / batch | 1,024 tokens, batch 128, accumulation 2; 262,144 tokens per optimizer step |
 | Budget | 50,000 steps; 13.1072B training tokens per run |
 | Optimizer | Muon, momentum 0.95, Nesterov, `match_rms_adamw`, weight decay 0.1 |
 | Learning rate | 5e-4, cosine decay to 5e-5, 1,500 warmup steps |
