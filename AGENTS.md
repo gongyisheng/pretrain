@@ -11,7 +11,7 @@ Single-GPU LLM pretraining in PyTorch, configured with YAML and logged to W&B. S
 - Code will be read and reviewed by humans, so prioritize readability with clear names and straightforward logic.
 - Run relevant tests before and after layer/model changes. Benchmark performance-sensitive changes with `benchmarks/bench_train.py` before and after.
 - Before GPU work, run `nvidia-smi` and verify that a free device has enough VRAM. Use one GPU; do not assume device count or memory.
-- Run GPU commands through `uv run python tests/ci/gpu_lock_exec.py -- <command>` to reserve `/tmp/gpu<idx>.lock` with `flock` and set `CUDA_VISIBLE_DEVICES` (`GPU_LOCK_DIR` overrides the directory). Hold the lock until all GPU work and children exit, then release it by closing the descriptor. Never delete lock files.
+- Before running a GPU command, create `/tmp/gpu<idx>.lock` for the chosen free GPU and set `CUDA_VISIBLE_DEVICES` to that GPU. Treat an existing lock file as a reservation; do not overwrite or remove another job's lock. Remove your lock file after the command and all its children finish, using an exit trap for cleanup. Create the file exclusively to prevent two jobs from reserving the same GPU at once.
 - Keep `docs/superpowers/` ignored and uncommitted. If files there are tracked, untrack them while preserving local copies.
 
 ```bash
@@ -22,10 +22,10 @@ uv run ruff format --check src/ tests/
 
 ## Tests
 
-Run fast and e2e trees separately. Always specify `-n`, including for subsets and single files: use `-n 6` by default, `-n 12 --dist load` for `kernel`, `quant`, and `metrics`, and `-n 0` only for e2e or debugging.
+Run fast and e2e trees separately. Always specify `-n`, including for subsets and single files: use `-n 12` by default, add `--dist load` for `kernel`, `quant`, and `metrics`, and use `-n 0` only for e2e or debugging.
 
 ```bash
-uv run pytest tests/fast -n 6
+uv run pytest tests/fast -n 12
 uv run pytest tests/fast/kernel tests/fast/quant tests/fast/metrics -n 12 --dist load
 uv run pytest tests/e2e -n 0
 ```
