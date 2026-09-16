@@ -38,7 +38,17 @@ training:
       act: fp8_e5m2
       grad_out: fp8_e4m3
     scale:
-      granularity: tensorwise
+      weight:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      act:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      grad_out:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      scale_dtype: fp32
+      enable_global_scale: false
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_tensor_dtype/qwen3_51m_fp8_e5m2_w8a8_e4m3_g8/

@@ -49,7 +49,13 @@ def is_quantized(fmt: str) -> bool:
 
 
 def resolve_scale(scale_cfg: dict, tensor: str) -> dict:
-    return {**scale_cfg, "block_shape": scale_cfg["block_shape"][tensor]}
+    tensor_scale = scale_cfg[tensor]
+    return {
+        "granularity": tensor_scale["granularity"],
+        "block_shape": tensor_scale["block_shape"],
+        "scale_dtype": scale_cfg["scale_dtype"],
+        "enable_global_scale": scale_cfg["enable_global_scale"],
+    }
 
 
 def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:

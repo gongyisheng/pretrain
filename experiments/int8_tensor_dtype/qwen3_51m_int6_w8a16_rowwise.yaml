@@ -38,7 +38,17 @@ training:
       act: bf16
       grad_out: bf16
     scale:
-      granularity: rowwise
+      weight:
+        granularity: rowwise
+        block_shape: [1, 0]
+      act:
+        granularity: rowwise
+        block_shape: [1, 0]
+      grad_out:
+        granularity: rowwise
+        block_shape: [1, 0]
+      scale_dtype: fp32
+      enable_global_scale: false
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int8_tensor_dtype/qwen3_51m_int6_w8a16_rowwise/

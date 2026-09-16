@@ -55,7 +55,7 @@ fp8_module_sensitivity/
 | `{recipe}/qwen3_77m_{recipe}_lm_head` | output head | `[lm_head]` | 1 |
 
 - Model: d_model=512, 8 layers, gqa 8/4, qk_norm, intermediate_size=1536, rope θ=10000, `tie_word_embeddings: false` (~77M).
-- FP8: `scale.granularity: tensorwise`, `exclude: []`; the `dtype` block is per recipe (table above). Only the matched GEMM operands are cast to FP8 on the fly; everything else stays bf16/fp32, hp master weights preserved.
+- FP8: tensorwise scales with `block_shape: [0, 0]` for every operand, `exclude: []`; the explicit `dtype` block follows the format set in the table above. Only the matched GEMM operands are cast to FP8 on the fly; everything else stays bf16/fp32, hp master weights preserved.
 - Optimizer: **Muon** (`MuonAdamWOptimizer`) on all runs — 2D hidden weights → Muon, embeddings/`lm_head`/1D → AdamW, `adjust_lr_fn=match_rms_adamw` (reuses AdamW-tuned lr/wd). `momentum=0.95`, `nesterov=true`.
 - All runs: seq_len=1024, batch=16, grad_accum=16 (eff. batch=256, ~262K tok/step), 50K steps (~13B tokens), bf16 mixed precision, lr=5e-4, cosine with 1500 warmup, min_lr=5e-5, seed=42, OpenWebText.
 - `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`.

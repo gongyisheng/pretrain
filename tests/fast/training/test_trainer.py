@@ -194,8 +194,8 @@ def test_trainer_rejects_unknown_loss_fn(mock_memmap):
 # ---------------------------------------------------------------------------
 
 
-def test_quant_metrics_without_a_quant_recipe(mock_memmap):
-    """With no quantization recipe, the install pass finds no quantized sites, so
+def test_quant_metrics_without_quantization(mock_memmap):
+    """With quantization disabled, the install pass finds no quantized sites, so
     there is no accumulator to fold into and no train-quant/ key is dispatched --
     independent of log_quant_metrics, which now defaults to True."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -231,7 +231,10 @@ def _tiny_fp8_config(tmp_dir):
         eval_every=100,
         eval_steps=2,
         enable_torch_compile=False,
-        quantization={"enabled": True, "dtype": {"recipe": "fp8"}},
+        quantization={
+            "enabled": True,
+            "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        },
     )
     cfg.logging.log_quant_metrics = True
     cfg.logging.log_every = 1
@@ -239,7 +242,7 @@ def _tiny_fp8_config(tmp_dir):
 
 
 def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
-    """log_quant_metrics=True with an fp8 quant recipe: at least one train-quant/
+    """log_quant_metrics=True with an FP8 quantization rule: at least one train-quant/
     key from the diagnostic pass reaches the logger."""
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)

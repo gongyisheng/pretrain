@@ -42,11 +42,15 @@ training:
       act: bf16
       grad_out: bf16
     scale:
-      granularity: blockwise
-      block_shape:
-        weight: [1, 16]
-        act: [1, 16]
-        grad_out: [1, 16]
+      weight:
+        granularity: blockwise
+        block_shape: [1, 16]
+      act:
+        granularity: blockwise
+        block_shape: [1, 16]
+      grad_out:
+        granularity: blockwise
+        block_shape: [1, 16]
     rounding:
       weight: SR
     exclude: [lm_head]

@@ -38,7 +38,17 @@ training:
       act: fp8_e4m3
       grad_out: fp8_e5m2
     scale:
-      granularity: rowwise
+      weight:
+        granularity: rowwise
+        block_shape: [1, 0]
+      act:
+        granularity: rowwise
+        block_shape: [1, 0]
+      grad_out:
+        granularity: rowwise
+        block_shape: [1, 0]
+      scale_dtype: fp32
+      enable_global_scale: false
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_granularity/qwen3_51m_fp8_rowwise/

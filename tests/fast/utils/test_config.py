@@ -17,6 +17,32 @@ from src.utils.config import (
 )
 
 
+SCALE_TENSORS = ("weight", "act", "grad_out")
+
+
+def _scale_config(
+    granularity="tensorwise",
+    block_shape=None,
+    scale_dtype=None,
+    enable_global_scale=None,
+):
+    if block_shape is None and granularity != "blockwise":
+        block_shape = (0, 0) if granularity == "tensorwise" else (1, 0)
+    shapes = block_shape if isinstance(block_shape, dict) else {}
+    scale = {
+        tensor: {
+            "granularity": granularity,
+            "block_shape": shapes.get(tensor, block_shape),
+        }
+        for tensor in SCALE_TENSORS
+    }
+    if scale_dtype is not None:
+        scale["scale_dtype"] = scale_dtype
+    if enable_global_scale is not None:
+        scale["enable_global_scale"] = enable_global_scale
+    return scale
+
+
 def _write_yaml(tmp_dir, data):
     path = os.path.join(tmp_dir, "test.yaml")
     with open(path, "w") as f:
@@ -138,17 +164,13 @@ def test_config_to_dict_roundtrip():
 @pytest.mark.parametrize(
     ("scale", "scale_dtype"),
     [
-        ({"granularity": "rowwise", "scale_dtype": "fp32"}, "fp32"),
+        (_scale_config("rowwise", scale_dtype="fp32"), "fp32"),
         (
-            {
-                "granularity": "blockwise",
-                "block_shape": {
-                    "weight": [1, 32],
-                    "act": [1, 32],
-                    "grad_out": [1, 32],
-                },
-                "scale_dtype": "fp8_e8m0",
-            },
+            _scale_config(
+                "blockwise",
+                {"weight": [1, 32], "act": [1, 32], "grad_out": [1, 32]},
+                scale_dtype="fp8_e8m0",
+            ),
             "fp8_e8m0",
         ),
     ],
@@ -215,9 +237,21 @@ def test_config_to_dict_roundtrips_per_tensor_block_shape(tensor, block_shape):
             mixed_precision="no",
             quantization={
                 "enabled": True,
-                "dtype": {"recipe": "nvfp4"},
+                "dtype": {
+                    "weight": "fp4_e2m1",
+                    "act": "fp4_e2m1",
+                    "grad_out": "fp4_e2m1",
+                },
                 "scale": {
-                    "block_shape": {tensor: block_shape},
+                    resolved_tensor: {
+                        "granularity": "blockwise",
+                        "block_shape": (
+                            block_shape
+                            if resolved_tensor == tensor
+                            else ((16, 16) if resolved_tensor == "weight" else (1, 16))
+                        ),
+                    }
+                    for resolved_tensor in SCALE_TENSORS
                 },
             },
         )
@@ -232,7 +266,10 @@ def test_config_to_dict_roundtrips_per_tensor_block_shape(tensor, block_shape):
         restored = load_config(path)
 
     rule = _only_rule(restored.training)
-    assert rule.scale["block_shape"] == {
+    assert {
+        resolved_tensor: rule.scale[resolved_tensor]["block_shape"]
+        for resolved_tensor in SCALE_TENSORS
+    } == {
         resolved_tensor: (
             block_shape
             if resolved_tensor == tensor
@@ -240,6 +277,52 @@ def test_config_to_dict_roundtrips_per_tensor_block_shape(tensor, block_shape):
         )
         for resolved_tensor in ("weight", "act", "grad_out")
     }
+
+
+@pytest.mark.parametrize(
+    ("granularity", "expected_shape"),
+    [("tensorwise", (0, 0)), ("rowwise", (1, 0))],
+)
+def test_config_to_dict_roundtrips_nonblock_scale_shape(granularity, expected_shape):
+    config = TrainConfig(
+        training=TrainingConfig(
+            mixed_precision="no",
+            quantization={
+                "enabled": True,
+                "dtype": {
+                    "weight": "fp8_e4m3",
+                    "act": "fp8_e4m3",
+                    "grad_out": "fp8_e5m2",
+                },
+                "scale": {
+                    tensor: {"granularity": granularity, "block_shape": None}
+                    for tensor in SCALE_TENSORS
+                },
+            },
+        )
+    )
+    exported = config.to_dict()
+    exported_scale = exported["training"]["quantization"][0]["scale"]
+    assert {
+        tensor: exported_scale[tensor]["block_shape"] for tensor in SCALE_TENSORS
+    } == {tensor: expected_shape for tensor in SCALE_TENSORS}
+
+    for serialized, deserialize in (
+        (json.dumps(exported), json.loads),
+        (yaml.safe_dump(exported), yaml.safe_load),
+    ):
+        decoded = deserialize(serialized)
+        assert {
+            tensor: decoded["training"]["quantization"][0]["scale"][tensor][
+                "block_shape"
+            ]
+            for tensor in SCALE_TENSORS
+        } == {tensor: list(expected_shape) for tensor in SCALE_TENSORS}
+        restored = TrainConfig(training=TrainingConfig(**decoded["training"]))
+        assert {
+            tensor: _only_rule(restored.training).scale[tensor]["block_shape"]
+            for tensor in SCALE_TENSORS
+        } == {tensor: expected_shape for tensor in SCALE_TENSORS}
 
 
 @pytest.mark.parametrize(
@@ -276,7 +359,11 @@ def test_config_to_dict_rotation_roundtrip():
             mixed_precision="no",
             quantization={
                 "enabled": True,
-                "dtype": {"recipe": "fp8"},
+                "dtype": {
+                    "weight": "fp8_e4m3",
+                    "act": "fp8_e4m3",
+                    "grad_out": "fp8_e5m2",
+                },
                 "rotation": {
                     "rotation_cls": "hadamard",
                     "rotation_kwargs": {
@@ -1190,17 +1277,11 @@ def test_quant_disabled_rule_dtype_stays_empty():
     assert r.dtype == {}
 
 
-def test_quant_dtype_is_mixable():
+def test_quant_dtype_resolves_explicit_tensors():
     q = QuantizationConfig(
         enabled=True,
-        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "bf16"},
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
     )
-    assert q.dtype["weight"]["fwd"] == "fp8_e4m3"
-    assert q.dtype["grad_out"]["wgrad"] == "bf16"
-
-
-def test_quant_dtype_recipe_fp8():
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8"})
     assert q.dtype == {
         "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
         "act": {"fwd": "fp8_e4m3", "wgrad": "fp8_e4m3"},
@@ -1208,29 +1289,26 @@ def test_quant_dtype_recipe_fp8():
     }
 
 
-def test_quant_dtype_recipe_respects_an_explicit_tensor():
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8", "grad_out": "bf16"})
-    assert q.dtype["weight"]["fwd"] == "fp8_e4m3"
-    assert q.dtype["grad_out"] == {"dgrad": "bf16", "wgrad": "bf16"}
-
-
-def test_quant_dtype_recipe_fills_the_gemms_a_scope_leaves_unset():
-    # the *_with_gw_hp cell: wgrad opts out, dgrad still follows the recipe
+def test_quant_dtype_scoped_gemm_is_explicit():
     q = QuantizationConfig(
-        enabled=True, dtype={"recipe": "fp8", "grad_out": {"wgrad": "bf16"}}
+        enabled=True,
+        dtype={
+            "weight": "fp8_e4m3",
+            "act": "fp8_e4m3",
+            "grad_out": {"dgrad": "fp8_e5m2", "wgrad": "bf16"},
+        },
     )
     assert q.dtype["grad_out"] == {"dgrad": "fp8_e5m2", "wgrad": "bf16"}
-
-
-def test_quant_unknown_recipe_raises():
-    with pytest.raises(ValueError, match="dtype recipe"):
-        QuantizationConfig(enabled=True, dtype={"recipe": "fp3"})
 
 
 def test_quant_include_defaults_empty():
     q = QuantizationConfig()
     assert q.include == [] and q.exclude == ["lm_head", "*mlp.router.gate"]
-    q2 = QuantizationConfig(enabled=True, dtype={"recipe": "fp8"}, include=["*.mlp.*"])
+    q2 = QuantizationConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        include=["*.mlp.*"],
+    )
     assert q2.include == ["*.mlp.*"]
 
 
@@ -1246,41 +1324,66 @@ def test_quant_rejects_unknown_format():
 
 def test_quant_accepts_rowwise_granularity():
     q = QuantizationConfig(
-        enabled=True, dtype={"recipe": "fp8"}, scale={"granularity": "rowwise"}
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        scale={"weight": {"granularity": "rowwise"}},
     )
-    assert q.scale["granularity"] == "rowwise"
+    assert q.scale["weight"]["granularity"] == "rowwise"
+    assert q.scale["act"]["granularity"] == "tensorwise"
 
 
-def test_quant_default_granularity_is_tensorwise():
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8"})
-    assert q.scale["granularity"] == "tensorwise"
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        {"weight": "fp4_e2m1", "act": "fp4_e2m1", "grad_out": "fp4_e2m1"},
+        {"weight": "int8", "act": "bf16", "grad_out": "bf16"},
+    ],
+)
+def test_quant_default_scale_is_independent_of_dtype(dtype):
+    q = QuantizationConfig(
+        enabled=True,
+        dtype=dtype,
+    )
+    assert q.scale == _scale_config(
+        scale_dtype=torch.float32, enable_global_scale=False
+    )
 
 
 @pytest.mark.parametrize("granularity", ["tensorwise", "rowwise"])
 @pytest.mark.parametrize("block_shape", OFF_BLOCKWISE_SHAPES)
-def test_quant_block_shape_normalized_to_sentinel_off_blockwise(
-    granularity, block_shape
-):
-    # block_shape only means anything blockwise, so a stale one is zeroed here rather
-    # than re-checked against the granularity at every consumer.
+def test_quant_block_shape_normalized_off_blockwise(granularity, block_shape):
     q = QuantizationConfig(
         enabled=True,
-        dtype={"recipe": "fp8"},
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         scale={
-            "granularity": granularity,
-            "block_shape": block_shape,
+            tensor: {
+                "granularity": granularity,
+                "block_shape": (
+                    block_shape[tensor]
+                    if isinstance(block_shape, dict)
+                    else block_shape
+                ),
+            }
+            for tensor in SCALE_TENSORS
         },
     )
-    assert q.scale["block_shape"] == {
-        "weight": (0, 0),
-        "act": (0, 0),
-        "grad_out": (0, 0),
+    assert {tensor: q.scale[tensor]["block_shape"] for tensor in SCALE_TENSORS} == {
+        tensor: (0, 0) if granularity == "tensorwise" else (1, 0)
+        for tensor in SCALE_TENSORS
     }
 
 
-def test_quant_recipe_sets_both_backward_grad_slots():
+def test_quant_explicit_dtype_sets_both_backward_grad_slots():
     r = TrainingConfig(
-        quantization={"enabled": True, "dtype": {"recipe": "fp8"}}
+        quantization={
+            "enabled": True,
+            "dtype": {
+                "weight": "fp8_e4m3",
+                "act": "fp8_e4m3",
+                "grad_out": "fp8_e5m2",
+            },
+        }
     ).quantization[0]
     assert r.dtype["grad_out"]["dgrad"] == r.dtype["grad_out"]["wgrad"] == "fp8_e5m2"
 
@@ -1288,7 +1391,12 @@ def test_quant_recipe_sets_both_backward_grad_slots():
 def test_quant_wgrad_hp_override():
     # keep only the weight-gradient GEMM in bf16
     q = QuantizationConfig(
-        enabled=True, dtype={"recipe": "fp8", "grad_out": {"wgrad": "bf16"}}
+        enabled=True,
+        dtype={
+            "weight": "fp8_e4m3",
+            "act": "fp8_e4m3",
+            "grad_out": {"dgrad": "fp8_e5m2", "wgrad": "bf16"},
+        },
     )
     assert q.dtype["grad_out"] == {"dgrad": "fp8_e5m2", "wgrad": "bf16"}
 
@@ -1296,14 +1404,20 @@ def test_quant_wgrad_hp_override():
 def test_quant_dgrad_hp_override():
     # keep only the input-gradient GEMM in bf16
     q = QuantizationConfig(
-        enabled=True, dtype={"recipe": "fp8", "grad_out": {"dgrad": "bf16"}}
+        enabled=True,
+        dtype={
+            "weight": "fp8_e4m3",
+            "act": "fp8_e4m3",
+            "grad_out": {"dgrad": "bf16", "wgrad": "fp8_e5m2"},
+        },
     )
     assert q.dtype["grad_out"] == {"dgrad": "bf16", "wgrad": "fp8_e5m2"}
 
 
-def test_quant_rejects_unknown_dtype_key():
-    with pytest.raises(ValueError, match="dtype key"):
-        QuantizationConfig(enabled=True, dtype={"bogus_grad": "bf16"})
+@pytest.mark.parametrize("dtype_key", ["bogus_grad", "recipe"])
+def test_quant_rejects_unknown_dtype_key(dtype_key):
+    with pytest.raises(ValueError):
+        QuantizationConfig(enabled=True, dtype={dtype_key: "bf16"})
 
 
 @pytest.mark.parametrize("retired", ["grad_input", "grad_weight", "dx", "dw"])
@@ -1314,14 +1428,21 @@ def test_quant_rejects_retired_dtype_keys(retired):
 
 
 def test_quant_rejects_unsupported_granularity():
-    with pytest.raises(ValueError, match="granularity"):
+    with pytest.raises(ValueError):
         QuantizationConfig(
-            enabled=True, dtype={"recipe": "fp8"}, scale={"granularity": "row"}
+            enabled=True,
+            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+            scale={"weight": {"granularity": "row"}},
         )
 
 
 def test_training_config_normalizes_single_rule_to_list():
-    tc = TrainingConfig(quantization={"enabled": True, "dtype": {"recipe": "fp8"}})
+    tc = TrainingConfig(
+        quantization={
+            "enabled": True,
+            "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        }
+    )
     assert isinstance(tc.quantization, list) and len(tc.quantization) == 1
     assert tc.quantization[0].dtype["weight"]["fwd"] == "fp8_e4m3"
 
@@ -1330,7 +1451,15 @@ def test_training_config_accepts_list_of_rules():
     tc = TrainingConfig(
         mixed_precision="bf16",
         quantization=[
-            {"enabled": True, "dtype": {"recipe": "fp8"}, "include": ["*.mlp.*"]},
+            {
+                "enabled": True,
+                "dtype": {
+                    "weight": "fp8_e4m3",
+                    "act": "fp8_e4m3",
+                    "grad_out": "fp8_e5m2",
+                },
+                "include": ["*.mlp.*"],
+            },
             {"enabled": True, "dtype": {"weight": "fp8_e4m3"}, "include": ["*.attn.*"]},
         ],
     )
@@ -1351,83 +1480,63 @@ def test_quant_disabled_stays_disabled():
 # ---- mxfp8 / blockwise scaling (Option B: element format ⟂ scale scheme) ----
 
 
-def test_quant_mxfp8_recipe_expands_dtype_and_scale():
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "mxfp8"})
-    # mxfp8 is e4m3 on every slot (incl. grads): the MX GEMM only does
-    # e4m3 x e4m3, and per-block rescaling gives e4m3 enough range for grads.
+def test_quant_explicit_e8m0_config():
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"},
+        scale=_scale_config(
+            "blockwise",
+            {tensor: (1, 32) for tensor in SCALE_TENSORS},
+            scale_dtype="fp8_e8m0",
+        ),
+    )
     assert q.dtype == {
         "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
         "act": {"fwd": "fp8_e4m3", "wgrad": "fp8_e4m3"},
         "grad_out": {"dgrad": "fp8_e4m3", "wgrad": "fp8_e4m3"},
     }
-    assert q.scale == {
-        "granularity": "blockwise",
-        "block_shape": {
-            "weight": (1, 32),
-            "act": (1, 32),
-            "grad_out": (1, 32),
-        },
-        "scale_dtype": torch.float8_e8m0fnu,
-        "enable_global_scale": False,
-    }
+    assert q.scale == _scale_config(
+        "blockwise",
+        {tensor: (1, 32) for tensor in SCALE_TENSORS},
+        scale_dtype=torch.float8_e8m0fnu,
+        enable_global_scale=False,
+    )
 
 
-@pytest.mark.parametrize("block_shape", NON_DICT_BLOCK_SHAPES)
-def test_quant_mxfp8_scale_recipe_expands(block_shape):
+def test_quant_explicit_nvfp4_scale():
     q = QuantizationConfig(
         enabled=True,
-        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3"},
-        scale={"recipe": "mxfp8", "block_shape": block_shape},
+        dtype={"weight": "fp4_e2m1", "act": "fp4_e2m1", "grad_out": "fp4_e2m1"},
+        scale=_scale_config(
+            "blockwise",
+            {"weight": (16, 16), "act": (1, 16), "grad_out": (1, 16)},
+            scale_dtype="fp8_e4m3",
+            enable_global_scale=True,
+        ),
     )
-    assert q.scale["granularity"] == "blockwise"
-    assert q.scale["block_shape"] == {
-        "weight": (1, 32),
-        "act": (1, 32),
-        "grad_out": (1, 32),
+    assert {tensor: q.scale[tensor]["granularity"] for tensor in SCALE_TENSORS} == {
+        tensor: "blockwise" for tensor in SCALE_TENSORS
     }
-    assert q.scale["scale_dtype"] is torch.float8_e8m0fnu
-    assert "recipe" not in q.scale  # recipe key is consumed on expansion
-
-
-@pytest.mark.parametrize("block_shape", NON_DICT_BLOCK_SHAPES)
-def test_quant_nvfp4_scale_recipe_expands(block_shape):
-    q = QuantizationConfig(
-        enabled=True,
-        dtype={"weight": "int4", "act": "int4"},
-        scale={"recipe": "nvfp4", "block_shape": block_shape},
-    )
-    assert q.scale["granularity"] == "blockwise"
-    assert q.scale["block_shape"] == {
+    assert {tensor: q.scale[tensor]["block_shape"] for tensor in SCALE_TENSORS} == {
         "weight": (16, 16),
         "act": (1, 16),
         "grad_out": (1, 16),
     }
     assert q.scale["scale_dtype"] is torch.float8_e4m3fn
     assert q.scale["enable_global_scale"] is True
-    assert "recipe" not in q.scale  # recipe key is consumed on expansion
 
 
 BLOCK_SHAPE_ERRORS = [
-    {"granularity": "blockwise", "block_shape": (1, 16)},
-    {"granularity": "blockwise", "block_shape": [1, 16]},
-    {"granularity": "blockwise", "block_shape": {"weight": (1, 16)}},
+    {"weight": {"granularity": "blockwise", "block_shape": 16}},
+    {"weight": {"granularity": "blockwise", "block_shape": None}},
+    {"weight": {"granularity": "blockwise"}},
     {
-        "granularity": "blockwise",
-        "block_shape": {
-            "weight": (1, 16, 16),
-            "act": (1, 16),
-            "grad_out": (1, 16),
-        },
+        "weight": {"granularity": "blockwise", "block_shape": (1, 16, 16)},
     },
     {
-        "granularity": "blockwise",
-        "block_shape": {
-            "weight": (1, 16),
-            "act": (1, 16),
-            "grad_out": (1, 32),
-        },
+        "weight": {"granularity": "blockwise", "block_shape": (1, 16)},
+        "act": {"granularity": "blockwise", "block_shape": (1, 32)},
     },
-    {"block_shape": {"weight": (1, 16), "unknown": (1, 16)}},
 ]
 
 
@@ -1437,42 +1546,73 @@ def test_quant_block_shape_raise_error(scale):
         QuantizationConfig(enabled=True, dtype={"weight": "int8"}, scale=scale)
 
 
-def test_quant_nvfp4_recipe_expands_dtype_and_scale():
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "nvfp4"})
-    assert q.dtype == {
-        "weight": {"fwd": "fp4_e2m1", "dgrad": "fp4_e2m1"},
-        "act": {"fwd": "fp4_e2m1", "wgrad": "fp4_e2m1"},
-        "grad_out": {"dgrad": "fp4_e2m1", "wgrad": "fp4_e2m1"},
-    }
-    assert q.scale == {
-        "granularity": "blockwise",
-        "block_shape": {
-            "weight": (16, 16),
-            "act": (1, 16),
-            "grad_out": (1, 16),
+UNKNOWN_SCALE_CONFIGS = [
+    {"granularity": "rowwise"},
+    {"block_shape": {"weight": (1, 16)}},
+    {"recipe": "tensorwise"},
+    {"unknown": "value"},
+    {"weight": {"granularity": "rowwise", "unknown": "value"}},
+    {"act": {"granularity": "rowwise", "unknown": "value"}},
+    {"grad_out": {"granularity": "rowwise", "unknown": "value"}},
+]
+
+
+@pytest.mark.parametrize("unknown_scale", UNKNOWN_SCALE_CONFIGS)
+def test_quant_ignores_unknown_scale_keys(unknown_scale):
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        scale={
+            "weight": {"granularity": "rowwise"},
+            "act": {"granularity": "rowwise"},
+            "grad_out": {"granularity": "rowwise"},
+            **unknown_scale,
         },
-        "scale_dtype": torch.float8_e4m3fn,
-        "enable_global_scale": True,
+    )
+    assert q.scale == _scale_config(
+        "rowwise", scale_dtype=torch.float32, enable_global_scale=False
+    )
+
+
+def test_quant_scale_mixed_granularities_roundtrip():
+    config = TrainConfig(
+        training=TrainingConfig(
+            mixed_precision="no",
+            quantization={
+                "enabled": True,
+                "dtype": {
+                    "weight": "fp8_e4m3",
+                    "act": "fp8_e4m3",
+                    "grad_out": "fp8_e5m2",
+                },
+                "scale": {
+                    "weight": {"granularity": "blockwise", "block_shape": (1, 32)},
+                    "act": {"granularity": "rowwise"},
+                },
+            },
+        )
+    )
+    exported = config.to_dict()
+    restored = TrainConfig(training=TrainingConfig(**exported["training"]))
+    assert _only_rule(restored.training).scale == _scale_config(
+        "tensorwise",
+        scale_dtype=torch.float32,
+        enable_global_scale=False,
+    ) | {
+        "weight": {"granularity": "blockwise", "block_shape": (1, 32)},
+        "act": {"granularity": "rowwise", "block_shape": (1, 0)},
     }
 
 
 # Full arithmetic scale dtypes absorb a global factor, leaving it nothing to do.
 GLOBAL_SCALE_DEGENERATE_SCALES = [
-    {
-        "granularity": granularity,
-        "scale_dtype": "fp32",
-        **(
-            {
-                "block_shape": {
-                    "weight": (1, 16),
-                    "act": (1, 16),
-                    "grad_out": (1, 16),
-                }
-            }
-            if granularity == "blockwise"
-            else {}
-        ),
-    }
+    _scale_config(
+        granularity,
+        {tensor: (1, 16) for tensor in SCALE_TENSORS}
+        if granularity == "blockwise"
+        else None,
+        scale_dtype="fp32",
+    )
     for granularity in ("tensorwise", "rowwise", "blockwise")
 ] + [{}, {"scale_dtype": None}]
 
@@ -1494,26 +1634,17 @@ def test_quant_global_scale_kept_for_narrow_scale_dtype():
     for granularity, extra in (
         ("tensorwise", {}),
         ("rowwise", {}),
-        (
-            "blockwise",
-            {
-                "block_shape": {
-                    "weight": (1, 16),
-                    "act": (1, 16),
-                    "grad_out": (1, 16),
-                }
-            },
-        ),
+        ("blockwise", {tensor: (1, 16) for tensor in SCALE_TENSORS}),
     ):
         q = QuantizationConfig(
             enabled=True,
             dtype={"weight": "int4", "act": "int4"},
-            scale={
-                "granularity": granularity,
-                "scale_dtype": "fp8_e4m3",
-                "enable_global_scale": True,
-                **extra,
-            },
+            scale=_scale_config(
+                granularity,
+                extra if granularity == "blockwise" else None,
+                scale_dtype="fp8_e4m3",
+                enable_global_scale=True,
+            ),
         )
         assert q.scale["enable_global_scale"] is True, granularity
 
@@ -1522,79 +1653,86 @@ def test_quant_global_scale_disabled_for_e8m0_scale_dtype():
     q = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3"},
-        scale={
-            "granularity": "blockwise",
-            "block_shape": {
-                "weight": (1, 32),
-                "act": (1, 32),
-                "grad_out": (1, 32),
-            },
-            "scale_dtype": "fp8_e8m0",
-            "enable_global_scale": True,
-        },
+        scale=_scale_config(
+            "blockwise",
+            {tensor: (1, 32) for tensor in SCALE_TENSORS},
+            scale_dtype="fp8_e8m0",
+            enable_global_scale=True,
+        ),
     )
     assert q.scale["enable_global_scale"] is False
 
 
 def test_quant_global_scale_raise_error():
-    with pytest.raises(ValueError, match="enable_global_scale"):
+    with pytest.raises(ValueError):
         QuantizationConfig(
             enabled=True,
             dtype={"weight": "int4"},
-            scale={"granularity": "rowwise", "enable_global_scale": "yes"},
+            scale={"weight": {"granularity": "rowwise"}, "enable_global_scale": "yes"},
         )
 
 
-def test_quant_mxfp8_scale_recipe_explicit_keys_win():
+def test_quant_explicit_scale_input_is_not_mutated():
+    scale = _scale_config(
+        "blockwise",
+        {tensor: (1, 64) for tensor in SCALE_TENSORS},
+        scale_dtype="fp8_e8m0",
+    )
     q = QuantizationConfig(
         enabled=True,
-        dtype={"weight": "fp8_e4m3"},
-        scale={
-            "recipe": "mxfp8",
-            "block_shape": {
-                "weight": (1, 64),
-                "act": (1, 64),
-                "grad_out": (1, 64),
-            },
-        },
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"},
+        scale=scale,
     )
-    assert q.scale["block_shape"] == {
+    assert {tensor: q.scale[tensor]["block_shape"] for tensor in SCALE_TENSORS} == {
         "weight": (1, 64),
         "act": (1, 64),
         "grad_out": (1, 64),
-    }  # explicit overrides recipe default
-
-
-@pytest.mark.parametrize("recipe", ["nope", "blockwise"])
-def test_quantization_config_scale_recipe_raise_error(recipe):
-    with pytest.raises(ValueError):
-        QuantizationConfig(
-            enabled=True, dtype={"weight": "fp8_e4m3"}, scale={"recipe": recipe}
-        )
+    }
+    assert scale == _scale_config(
+        "blockwise",
+        {tensor: (1, 64) for tensor in SCALE_TENSORS},
+        scale_dtype="fp8_e8m0",
+    )
 
 
 def test_quant_e8m0_requires_blockwise():
-    with pytest.raises(ValueError, match="fp8_e8m0"):
+    with pytest.raises(ValueError):
         QuantizationConfig(
             enabled=True,
             dtype={"weight": "fp8_e4m3"},
-            scale={"granularity": "rowwise", "scale_dtype": "fp8_e8m0"},
+            scale={"weight": {"granularity": "rowwise"}, "scale_dtype": "fp8_e8m0"},
         )
 
 
 def test_quant_blockwise_requires_block_size():
-    with pytest.raises(ValueError, match="block_shape"):
+    with pytest.raises(ValueError):
         QuantizationConfig(
             enabled=True,
             dtype={"weight": "fp8_e4m3"},
-            scale={"granularity": "blockwise"},
+            scale={"weight": {"granularity": "blockwise"}},
         )
 
 
-def test_quant_mxfp8_rejects_int_element():
-    with pytest.raises(ValueError, match="fp8"):
+def test_quant_e8m0_rejects_int_element():
+    with pytest.raises(ValueError):
         QuantizationConfig(
-            enabled=True, dtype={"weight": "int8"}, scale={"recipe": "mxfp8"}
+            enabled=True,
+            dtype={"weight": "int8", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"},
+            scale=_scale_config(
+                "blockwise",
+                {tensor: (1, 32) for tensor in SCALE_TENSORS},
+                scale_dtype="fp8_e8m0",
+            ),
+        )
+
+
+@pytest.mark.parametrize("scale", [None, []])
+def test_quant_scale_raise_error(scale):
+    with pytest.raises(ValueError):
+        QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"},
+            scale=scale,
         )
 
 
@@ -1604,17 +1742,29 @@ def test_quant_rowwise_defaults_scale_dtype_to_fp32(scale_dtype):
     q = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3"},
-        scale={"granularity": "rowwise", **scale_dtype},
+        scale={"weight": {"granularity": "rowwise"}, **scale_dtype},
     )
-    assert q.scale["granularity"] == "rowwise"
+    assert q.scale["weight"]["granularity"] == "rowwise"
     assert q.scale["scale_dtype"] is torch.float32
 
 
-def test_quant_mxfp8_normalizes_through_training_config():
+def test_quant_explicit_e8m0_normalizes_through_training_config():
     r = _only_rule(
         TrainingConfig(
             mixed_precision="bf16",
-            quantization={"dtype": {"recipe": "mxfp8"}, "enabled": True},
+            quantization={
+                "dtype": {
+                    "weight": "fp8_e4m3",
+                    "act": "fp8_e4m3",
+                    "grad_out": "fp8_e4m3",
+                },
+                "scale": _scale_config(
+                    "blockwise",
+                    {tensor: (1, 32) for tensor in SCALE_TENSORS},
+                    scale_dtype="fp8_e8m0",
+                ),
+                "enabled": True,
+            },
         )
     )
     assert r.scale["scale_dtype"] is torch.float8_e8m0fnu
@@ -1836,14 +1986,14 @@ def test_configs_model_key_order_d_model_n_layers_vocab_size_attn_mlp_first():
         assert keys[3] == "attn" and keys[4] == "mlp", (p, keys)
 
 
-# ==================== Scaling recipes (tensorwise, rowwise) ====================
+# ==================== Scaling configuration ====================
 
 
 def test_quantization_config_rotation_defaults():
     """Config canonicalization applies defaults without storing runtime state."""
     q = QuantizationConfig(
         enabled=True,
-        dtype={"recipe": "fp8"},
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         rotation={"rotation_cls": "hadamard"},
     )
     assert q.rotation["rotation_cls"] == "hadamard"
@@ -1864,7 +2014,11 @@ def test_quantization_config_rotation_defaults():
     ],
 )
 def test_quantization_config_rotation_requires_rotation_cls(rotation):
-    q = QuantizationConfig(enabled=True, dtype={"recipe": "fp8"}, rotation=rotation)
+    q = QuantizationConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        rotation=rotation,
+    )
     assert q.rotation is None
 
 
@@ -1872,7 +2026,7 @@ def test_quantization_config_rotation_requires_rotation_cls(rotation):
 def test_quantization_config_rotation(block_size):
     q = QuantizationConfig(
         enabled=True,
-        dtype={"recipe": "fp8"},
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         rotation={
             "rotation_cls": "hadamard",
             "rotation_kwargs": {"block_size": block_size},
@@ -1893,7 +2047,7 @@ def test_quantization_config_rotation(block_size):
 def test_quantization_config_rotation_gemms(gemms, expected):
     q = QuantizationConfig(
         enabled=True,
-        dtype={"recipe": "fp8"},
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         rotation={"rotation_cls": "hadamard", "gemms": gemms},
     )
     assert q.rotation["gemms"] == expected
@@ -1916,7 +2070,7 @@ def test_quantization_config_rotation_raise_error(rotation):
     with pytest.raises(ValueError, match="rotation"):
         QuantizationConfig(
             enabled=True,
-            dtype={"recipe": "fp8"},
+            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
             rotation=rotation,
         )
 
@@ -1928,7 +2082,7 @@ def test_training_config_keeps_per_rule_rotations():
         quantization=[
             {
                 "enabled": True,
-                "dtype": {"recipe": "int8"},
+                "dtype": {"weight": "int8", "act": "bf16", "grad_out": "bf16"},
                 "include": ["*attn*"],
                 "exclude": [],
                 "rotation": {
@@ -1938,7 +2092,7 @@ def test_training_config_keeps_per_rule_rotations():
             },
             {
                 "enabled": True,
-                "dtype": {"recipe": "int8"},
+                "dtype": {"weight": "int8", "act": "bf16", "grad_out": "bf16"},
                 "include": ["*mlp*"],
                 "exclude": [],
                 "rotation": {
@@ -1962,7 +2116,7 @@ def test_quantization_config_rotation_kwargs_raise_error():
     with pytest.raises(ValueError, match="rotation"):
         QuantizationConfig(
             enabled=True,
-            dtype={"recipe": "fp8"},
+            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
             rotation={
                 "rotation_cls": "hadamard",
                 "rotation_kwargs": {"sign_vector": torch.ones(4)},
@@ -1984,7 +2138,7 @@ def test_training_config_hadamard_rotation_seed(rotation_kwargs, expected_seed):
         seed=23,
         quantization={
             "enabled": True,
-            "dtype": {"recipe": "int8"},
+            "dtype": {"weight": "int8", "act": "bf16", "grad_out": "bf16"},
             "rotation": {
                 "rotation_cls": "hadamard",
                 "rotation_kwargs": rotation_kwargs,
@@ -1998,18 +2152,15 @@ def test_training_config_hadamard_rotation_seed(rotation_kwargs, expected_seed):
 def test_quantization_config_blockwise():
     q = QuantizationConfig(
         enabled=True,
-        dtype={"recipe": "fp8"},
-        scale={
-            "granularity": "blockwise",
-            "block_shape": {
-                "weight": (1, 128),
-                "act": (1, 128),
-                "grad_out": (1, 128),
-            },
-        },
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        scale=_scale_config(
+            "blockwise", {tensor: (1, 128) for tensor in SCALE_TENSORS}
+        ),
     )
-    assert q.scale["granularity"] == "blockwise"
-    assert q.scale["block_shape"] == {
+    assert {tensor: q.scale[tensor]["granularity"] for tensor in SCALE_TENSORS} == {
+        tensor: "blockwise" for tensor in SCALE_TENSORS
+    }
+    assert {tensor: q.scale[tensor]["block_shape"] for tensor in SCALE_TENSORS} == {
         "weight": (1, 128),
         "act": (1, 128),
         "grad_out": (1, 128),
@@ -2017,11 +2168,15 @@ def test_quantization_config_blockwise():
     assert q.scale["scale_dtype"] is torch.float32
 
 
-def test_quant_rowwise_recipe_expands():
+def test_quant_explicit_rowwise_scale():
     q = QuantizationConfig(
-        enabled=True, dtype={"recipe": "fp8"}, scale={"recipe": "rowwise"}
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        scale=_scale_config("rowwise"),
     )
-    assert q.scale["granularity"] == "rowwise"
+    assert {tensor: q.scale[tensor]["granularity"] for tensor in SCALE_TENSORS} == {
+        tensor: "rowwise" for tensor in SCALE_TENSORS
+    }
 
 
 def test_quant_blockwise_block_size_must_be_multiple_of_16():
@@ -2029,14 +2184,9 @@ def test_quant_blockwise_block_size_must_be_multiple_of_16():
         QuantizationConfig(
             enabled=True,
             dtype={"weight": "fp8_e4m3"},
-            scale={
-                "granularity": "blockwise",
-                "block_shape": {
-                    "weight": (1, 24),
-                    "act": (1, 24),
-                    "grad_out": (1, 24),
-                },
-            },
+            scale=_scale_config(
+                "blockwise", {tensor: (1, 24) for tensor in SCALE_TENSORS}
+            ),
         )
 
 
@@ -2045,14 +2195,9 @@ def test_quant_blockwise_block_size_must_be_positive():
         QuantizationConfig(
             enabled=True,
             dtype={"weight": "fp8_e4m3"},
-            scale={
-                "granularity": "blockwise",
-                "block_shape": {
-                    "weight": (1, -16),
-                    "act": (1, -16),
-                    "grad_out": (1, -16),
-                },
-            },
+            scale=_scale_config(
+                "blockwise", {tensor: (1, -16) for tensor in SCALE_TENSORS}
+            ),
         )
 
 
@@ -2061,15 +2206,11 @@ def test_quant_rejects_unknown_scale_dtype():
         QuantizationConfig(
             enabled=True,
             dtype={"weight": "fp8_e4m3"},
-            scale={
-                "granularity": "blockwise",
-                "block_shape": {
-                    "weight": (1, 32),
-                    "act": (1, 32),
-                    "grad_out": (1, 32),
-                },
-                "scale_dtype": "e3m4",
-            },
+            scale=_scale_config(
+                "blockwise",
+                {tensor: (1, 32) for tensor in SCALE_TENSORS},
+                scale_dtype="e3m4",
+            ),
         )
 
 
@@ -2077,15 +2218,11 @@ def test_quant_blockwise_fp32_scale_dtype_ok():
     q = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3"},
-        scale={
-            "granularity": "blockwise",
-            "block_shape": {
-                "weight": (1, 64),
-                "act": (1, 64),
-                "grad_out": (1, 64),
-            },
-            "scale_dtype": "fp32",
-        },
+        scale=_scale_config(
+            "blockwise",
+            {tensor: (1, 64) for tensor in SCALE_TENSORS},
+            scale_dtype="fp32",
+        ),
     )
     assert q.scale["scale_dtype"] is torch.float32
 
@@ -2101,18 +2238,14 @@ def test_monitoring_flags_default_true():
 def test_quant_block_shape_accepts_square(tile):
     q = QuantizationConfig(
         enabled=True,
-        dtype={"recipe": "fp8"},
-        scale={
-            "granularity": "blockwise",
-            "block_shape": {
-                "weight": (tile, tile),
-                "act": (tile, tile),
-                "grad_out": (tile, tile),
-            },
-            "scale_dtype": "fp32",
-        },
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        scale=_scale_config(
+            "blockwise",
+            {tensor: (tile, tile) for tensor in SCALE_TENSORS},
+            scale_dtype="fp32",
+        ),
     )
-    assert q.scale["block_shape"] == {
+    assert {tensor: q.scale[tensor]["block_shape"] for tensor in SCALE_TENSORS} == {
         "weight": (tile, tile),
         "act": (tile, tile),
         "grad_out": (tile, tile),
@@ -2123,16 +2256,12 @@ def test_quant_block_shape_rejects_non_square():
     with pytest.raises(ValueError):
         QuantizationConfig(
             enabled=True,
-            dtype={"recipe": "fp8"},
-            scale={
-                "granularity": "blockwise",
-                "block_shape": {
-                    "weight": (16, 128),
-                    "act": (16, 128),
-                    "grad_out": (16, 128),
-                },
-                "scale_dtype": "fp32",
-            },
+            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+            scale=_scale_config(
+                "blockwise",
+                {tensor: (16, 128) for tensor in SCALE_TENSORS},
+                scale_dtype="fp32",
+            ),
         )
 
 
@@ -2140,14 +2269,10 @@ def test_quant_e8m0_requires_contract_extent_multiple_of_32():
     with pytest.raises(ValueError):
         QuantizationConfig(
             enabled=True,
-            dtype={"recipe": "mxfp8"},
-            scale={
-                "granularity": "blockwise",
-                "block_shape": {
-                    "weight": (16, 16),
-                    "act": (16, 16),
-                    "grad_out": (16, 16),
-                },
-                "scale_dtype": "fp8_e8m0",
-            },
+            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"},
+            scale=_scale_config(
+                "blockwise",
+                {tensor: (16, 16) for tensor in SCALE_TENSORS},
+                scale_dtype="fp8_e8m0",
+            ),
         )

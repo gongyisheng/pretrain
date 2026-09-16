@@ -44,6 +44,8 @@ def quantized_grouped_mm(
         a_scale["scale_dtype"],
         a_scale["block_shape"],
     )
+    if block_size != b_scale["block_shape"][1]:
+        op = None
     ragged_k = a.ndim == 2 and b.ndim == 2
 
     # Map the operand containing the ragged axis.

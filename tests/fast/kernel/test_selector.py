@@ -138,6 +138,31 @@ def test_dispatch_pass(monkeypatch, op, backend, device, args, kwargs, expected)
     assert dispatch(op, args, kwargs, backend, device=device) == expected
 
 
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_dispatch_compiled_backward(monkeypatch, warm_cache):
+    _register_for_dispatch_ops(monkeypatch)
+    if warm_cache:
+        dispatch(ADD_OP, (1, 1), {}, device=CPU_DEVICE)
+
+    class Double(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            return x * 2
+
+        @staticmethod
+        def backward(ctx, grad):
+            return dispatch(ADD_OP, (grad, grad), {}, device=grad.device)
+
+    x = torch.ones(3, device="cpu", requires_grad=True)
+    try:
+        result = torch.compile(Double.apply, backend="eager", fullgraph=True)(x)
+        result.sum().backward()
+        torch.testing.assert_close(result, x * 2, atol=0, rtol=0)
+        torch.testing.assert_close(x.grad, torch.full_like(x, 2), atol=0, rtol=0)
+    finally:
+        torch.compiler.reset()
+
+
 @pytest.mark.parametrize("op,backend", DISPATCH_ERROR_CASES)
 def test_dispatch_raise_error(monkeypatch, op, backend):
     _register_for_dispatch_ops(monkeypatch)

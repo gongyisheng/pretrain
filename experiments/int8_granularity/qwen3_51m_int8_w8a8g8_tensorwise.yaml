@@ -38,7 +38,17 @@ training:
       act: int8
       grad_out: int8
     scale:
-      granularity: tensorwise
+      weight:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      act:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      grad_out:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      scale_dtype: fp32
+      enable_global_scale: false
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int8_granularity/qwen3_51m_int8_w8a8g8_tensorwise/

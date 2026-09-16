@@ -281,7 +281,7 @@ QUANTIZE_ERROR_CASES = [
             "fmt": E4M3,
             "scale_cfg": {
                 "granularity": "rowwise",
-                "block_shape": (0, 0),
+                "block_shape": (1, 0),
                 "enable_global_scale": False,
             },
         },

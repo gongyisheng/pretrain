@@ -5,8 +5,6 @@ import torch
 
 QUANT_PASSTHROUGH = frozenset({"fp32", "fp16", "bf16"})
 
-# "fp8" is a dtype recipe, not an element format: QUANT_DTYPE_RECIPES expands it
-# to fp8_e4m3/fp8_e5m2 per operand, so it must never appear as an operand's dtype.
 QUANT_FORMATS = QUANT_PASSTHROUGH | frozenset(
     {
         "fp8_e4m3",
@@ -26,40 +24,6 @@ QUANT_GRANULARITY = frozenset({"tensorwise", "rowwise", "blockwise"})
 # "RNE" is round-to-nearest-even.
 # "SR" is stochastic rounding.
 QUANT_ROUNDING = frozenset({"RNE", "SR"})
-
-QUANT_SCALE_RECIPES = {
-    "tensorwise": {"granularity": "tensorwise"},
-    "rowwise": {"granularity": "rowwise"},
-    "mxfp8": {
-        "granularity": "blockwise",
-        "block_shape": {
-            "weight": (1, 32),
-            "act": (1, 32),
-            "grad_out": (1, 32),
-        },
-        "scale_dtype": "fp8_e8m0",
-    },
-    "nvfp4": {
-        "granularity": "blockwise",
-        "block_shape": {
-            "weight": (16, 16),
-            "act": (1, 16),
-            "grad_out": (1, 16),
-        },
-        "scale_dtype": "fp8_e4m3",
-        "enable_global_scale": True,
-    },
-}
-
-QUANT_DTYPE_RECIPES = {
-    "fp8": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-    "mxfp8": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e4m3"},
-    "nvfp4": {"weight": "fp4_e2m1", "act": "fp4_e2m1", "grad_out": "fp4_e2m1"},
-    **{
-        fmt: {"weight": fmt, "act": "bf16", "grad_out": "bf16"}
-        for fmt in ("int8", "int7", "int6", "int5", "int4")
-    },
-}
 
 # The three GEMM operations and tensors held by a differentiable linear.
 GEMM_OPS = ("fwd", "dgrad", "wgrad")

@@ -19,6 +19,7 @@ from tests.fast.quant.helper import (
     SCALE_PAIRS,
     SCALE_TRIPLES,
     TENSORWISE,
+    ROWWISE,
     BLOCKWISE1D_128,
     BLOCKWISE2D_128,
     mm_ref,
@@ -54,6 +55,7 @@ MM_PRECISION_DEVICES = ["cpu", "cuda"]
 MM_PRECISION_BIASES = [False, True]
 MM_PRECISION_ROTATIONS = [None, ROTATION_CFG]
 COMPILE_SCALE_TRIPLES = scale_combinations([BLOCKWISE1D_128, BLOCKWISE2D_128], 3)
+COMPILE_SCALE_TRIPLES.append((TENSORWISE, BLOCKWISE1D_128, ROWWISE))
 
 
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
@@ -197,7 +199,9 @@ def test_quantized_linear_from_module(bias, eval_mode):
     source = nn.Linear(64, 32, bias=bias)
     if eval_mode:
         source.eval()
-    q = QuantizedLinear.from_module(source, rule({"recipe": "fp8"}))
+    q = QuantizedLinear.from_module(
+        source, rule({"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"})
+    )
     assert torch.equal(q.weight, source.weight) and q.weight.requires_grad
     assert q.training is not eval_mode  # preserve the source mode
     if bias:
@@ -234,12 +238,9 @@ def test_quantized_linear_forward_precision(
     cfg = rule(
         dtype,
         {
-            **act_scale,
-            "block_shape": {
-                "weight": weight_scale["block_shape"],
-                "act": act_scale["block_shape"],
-                "grad_out": act_scale["block_shape"],
-            },
+            "weight": weight_scale,
+            "act": act_scale,
+            "grad_out": act_scale,
         },
         rotation=rotation_cfg,
     )
@@ -343,12 +344,9 @@ def test_quantized_linear_backward_precision(
     cfg = rule(
         dtype,
         {
-            **act_scale,
-            "block_shape": {
-                "weight": weight_scale["block_shape"],
-                "act": act_scale["block_shape"],
-                "grad_out": grad_out_scale["block_shape"],
-            },
+            "weight": weight_scale,
+            "act": act_scale,
+            "grad_out": grad_out_scale,
         },
         rotation=rotation,
     )
@@ -464,7 +462,9 @@ def test_quantized_linear_stochastic_rounding(tensor, gemms, enable_sr):
 def test_quantized_linear_autocast():
     torch.manual_seed(0)
     lin = nn.Linear(128, 96, bias=False).cuda().to(torch.float32)  # fp32 master
-    q = QuantizedLinear.from_module(lin, rule({"recipe": "fp8"}))
+    q = QuantizedLinear.from_module(
+        lin, rule({"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"})
+    )
     x = torch.randn(64, 128, device="cuda", dtype=torch.float32, requires_grad=True)
 
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -487,14 +487,11 @@ def test_quantized_linear_compiles_fullgraph(
     torch.manual_seed(0)
     lin = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
     cfg = rule(
-        {"recipe": "fp8"},
+        {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         {
-            **act_scale,
-            "block_shape": {
-                "weight": weight_scale["block_shape"],
-                "act": act_scale["block_shape"],
-                "grad_out": grad_out_scale["block_shape"],
-            },
+            "weight": weight_scale,
+            "act": act_scale,
+            "grad_out": grad_out_scale,
         },
         rotation=rotation_cfg,
     )
@@ -536,7 +533,14 @@ def test_quantized_linear_trains_a_full_model():
         ),
         training=TrainingConfig(
             mixed_precision="bf16",
-            quantization={"enabled": True, "dtype": {"recipe": "fp8"}},
+            quantization={
+                "enabled": True,
+                "dtype": {
+                    "weight": "fp8_e4m3",
+                    "act": "fp8_e4m3",
+                    "grad_out": "fp8_e5m2",
+                },
+            },
         ),
     )
     model = build_model(config)

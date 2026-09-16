@@ -42,7 +42,17 @@ training:
       weight: fp8_e4m3
       act: fp8_e4m3
     scale:
-      granularity: tensorwise
+      weight:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      act:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      grad_out:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      scale_dtype: fp32
+      enable_global_scale: false
     include: [lm_head]
     exclude: []
   grad_clip: 1.0

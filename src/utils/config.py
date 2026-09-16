@@ -12,12 +12,10 @@ from src.layers.pos_emb import POS_EMB_REGISTRY
 from src.quant.constants import (
     QUANT_FORMATS,
     QUANT_GRANULARITY,
-    QUANT_DTYPE_RECIPES,
     QUANT_PASSTHROUGH,
     GEMM_OPS_BY_TENSOR,
     GEMM_TENSORS,
     QUANT_ROUNDING,
-    QUANT_SCALE_RECIPES,
     GEMM_OPS,
 )
 from src.quant.rotation import ROTATION_REGISTRY
@@ -333,7 +331,7 @@ class QuantizationConfig:
     enabled: bool = False
     # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
     dtype: dict = field(default_factory=dict)
-    # {granularity, block_shape: {tensor: (outer, contract)}, scale_dtype, enable_global_scale}
+    # {tensor: {granularity, block_shape}, scale_dtype, enable_global_scale}
     scale: dict = field(default_factory=dict)
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
     rotation: Optional[dict] = None
@@ -343,14 +341,15 @@ class QuantizationConfig:
     def __post_init__(self):
         if not self.enabled:
             return
+        if not isinstance(self.scale, dict):
+            raise ValueError(f"quant scale must be a dict, got {self.scale!r}")
         self._post_init_dtype()
         self._post_init_scale()
         self._post_init_rounding()
         self._post_init_rotation()
 
     def _post_init_dtype(self):
-        """Expand {tensor: fmt} to {tensor: {gemm: fmt}}, then apply the recipe."""
-        recipe = self.dtype.pop("recipe", None)
+        """Expand {tensor: fmt} to {tensor: {gemm: fmt}}."""
         for tensor, value in self.dtype.items():
             _check_one_of("quant dtype key", tensor, GEMM_OPS_BY_TENSOR)
             gemms = GEMM_OPS_BY_TENSOR[tensor]
@@ -366,74 +365,40 @@ class QuantizationConfig:
                 _check_one_of(f"quant fmt for {tensor}.{gemm}", fmt, QUANT_FORMATS)
             self.dtype[tensor] = per_gemm
 
-        # A dtype recipe fills the slots left open, the way a scale recipe fills
-        # scale. It is applied after the expansion so that a tensor scoped to one
-        # GEMM still takes the recipe's format in the other.
-        if recipe is None:
-            return
-        _check_one_of("quant dtype recipe", recipe, QUANT_DTYPE_RECIPES)
-        for tensor, fmt in QUANT_DTYPE_RECIPES[recipe].items():
-            for gemm in GEMM_OPS_BY_TENSOR[tensor]:
-                self.dtype.setdefault(tensor, {}).setdefault(gemm, fmt)
-        if recipe in {"mxfp8", "nvfp4"}:
-            # Element recipes seed their scale scheme; explicit keys win.
-            self.scale.setdefault("recipe", recipe)
-
     def _post_init_scale(self):
-        """Apply the scale recipe, then resolve granularity, block shape and dtype."""
-        if "block_shape" in self.scale:
-            if not isinstance(self.scale["block_shape"], dict):
-                self.scale.pop("block_shape")
-        recipe = self.scale.pop("recipe", None)
-        if recipe is not None:
-            _check_one_of("quant scale recipe", recipe, QUANT_SCALE_RECIPES)
-            for key, recepie_val in QUANT_SCALE_RECIPES[recipe].items():
-                if key != "block_shape":
-                    self.scale.setdefault(key, recepie_val)  # explicit scale keys win
-                    continue
-                if "block_shape" not in self.scale:
-                    self.scale["block_shape"] = dict(recepie_val)
-                elif isinstance(self.scale["block_shape"], dict):
-                    self.scale["block_shape"] = {
-                        **recepie_val,
-                        **self.scale["block_shape"],
-                    }
-
-        granularity = self.scale.setdefault("granularity", "tensorwise")
-        _check_one_of("quant granularity", granularity, QUANT_GRANULARITY)
-
-        if self.scale.get("scale_dtype") is None:
-            self.scale["scale_dtype"] = "fp32"
-        scale_dtype = self.scale["scale_dtype"]
+        """Resolve each tensor's scale layout."""
+        scale_dtype = self.scale.get("scale_dtype")
+        if scale_dtype is None:
+            scale_dtype = "fp32"
         _check_one_of("quant scale_dtype", scale_dtype, _SCALE_DTYPES)
-        if scale_dtype == "fp8_e8m0" and granularity != "blockwise":
-            raise ValueError(
-                "quant scale_dtype 'fp8_e8m0' requires granularity 'blockwise'"
-            )
-        block_shape = self.scale.get("block_shape", {})
-        block_shape = dict(block_shape)
-        for tensor in block_shape:
-            _check_one_of("quant block_shape key", tensor, GEMM_OPS_BY_TENSOR)
 
-        if granularity != "blockwise":
-            self.scale["block_shape"] = dict.fromkeys(GEMM_TENSORS, (0, 0))
-        else:
-            missing = set(GEMM_TENSORS) - set(block_shape)
-            if missing:
-                raise ValueError(
-                    "quant granularity 'blockwise' requires block_shape entries for "
-                    f"{sorted(missing)}"
+        resolved_scale = {}
+        for tensor in GEMM_TENSORS:
+            scale = self.scale.get(tensor, {})
+            if not isinstance(scale, dict):
+                raise ValueError(f"quant scale.{tensor} must be a dict, got {scale!r}")
+            tensor_scale = {
+                "granularity": scale.get("granularity", "tensorwise"),
+                "block_shape": scale.get("block_shape"),
+            }
+            granularity = tensor_scale["granularity"]
+            _check_one_of(
+                f"quant granularity for {tensor}", granularity, QUANT_GRANULARITY
+            )
+            if granularity != "blockwise":
+                tensor_scale["block_shape"] = (
+                    (0, 0) if granularity == "tensorwise" else (1, 0)
                 )
-            resolved_shapes = {}
-            for tensor in GEMM_TENSORS:
-                shape = block_shape[tensor]
+            else:
+                shape = tensor_scale["block_shape"]
                 if (
                     not isinstance(shape, (list, tuple))
                     or len(shape) != 2
-                    or not all(isinstance(v, int) for v in shape)
+                    or not all(isinstance(value, int) for value in shape)
                 ):
                     raise ValueError(
-                        f"quant block_shape.{tensor} must be a pair of ints, got {shape!r}"
+                        f"quant scale.{tensor}.block_shape must be a pair of ints, "
+                        f"got {shape!r}"
                     )
                 outer, contract = shape
                 if outer != 1 and outer != contract:
@@ -451,19 +416,35 @@ class QuantizationConfig:
                         "quant scale_dtype 'fp8_e8m0' needs a contract extent that "
                         f"is a multiple of 32, the mx scale vector, got {contract}"
                     )
-                resolved_shapes[tensor] = (outer, contract)
-            contract_extents = {shape[1] for shape in resolved_shapes.values()}
-            if len(contract_extents) != 1:
+                tensor_scale["block_shape"] = (outer, contract)
+            resolved_scale[tensor] = tensor_scale
+
+        if scale_dtype == "fp8_e8m0":
+            non_blockwise = [
+                tensor
+                for tensor, tensor_scale in resolved_scale.items()
+                if tensor_scale["granularity"] != "blockwise"
+            ]
+            if non_blockwise:
                 raise ValueError(
-                    "quant block_shape contract extents must match across weight, "
-                    "act, and grad_out"
+                    "quant scale_dtype 'fp8_e8m0' requires granularity 'blockwise' "
+                    f"for {non_blockwise}"
                 )
-            self.scale["block_shape"] = resolved_shapes
+
+        blockwise_contracts = {
+            tensor_scale["block_shape"][1]
+            for tensor_scale in resolved_scale.values()
+            if tensor_scale["granularity"] == "blockwise"
+        }
+        if len(blockwise_contracts) > 1:
+            raise ValueError(
+                "quant block_shape contract extents must match across blockwise tensors"
+            )
 
         # The e8m0 shared exponent only has fp8 kernels, so mxfp8 + int8 (or any
         # other non-fp8 element) is rejected here. Pass-through formats are exempt:
         # they are unquantized and carry no scale.
-        if granularity == "blockwise" and scale_dtype == "fp8_e8m0":
+        if scale_dtype == "fp8_e8m0":
             for tensor, per_gemm in self.dtype.items():
                 for gemm, fmt in per_gemm.items():
                     if fmt not in QUANT_PASSTHROUGH and not fmt.startswith("fp8"):
@@ -472,7 +453,7 @@ class QuantizationConfig:
                             f"{tensor}.{gemm}, got {fmt!r}"
                         )
 
-        enable_global_scale = self.scale.setdefault("enable_global_scale", False)
+        enable_global_scale = self.scale.get("enable_global_scale", False)
         if not isinstance(enable_global_scale, bool):
             raise ValueError(
                 "quant scale 'enable_global_scale' must be a bool, got "
@@ -484,9 +465,13 @@ class QuantizationConfig:
             scale_dtype in QUANT_PASSTHROUGH or scale_dtype == "fp8_e8m0"
         ):
             print(f"quant: disabled enable_global_scale for {scale_dtype!r} scales")
-            self.scale["enable_global_scale"] = False
+            enable_global_scale = False
 
-        self.scale["scale_dtype"] = _SCALE_DTYPES[scale_dtype]
+        self.scale = {
+            **resolved_scale,
+            "scale_dtype": _SCALE_DTYPES[scale_dtype],
+            "enable_global_scale": enable_global_scale,
+        }
 
     def _post_init_rounding(self):
         """Validate the named rounding modes and default the rest to RNE."""
