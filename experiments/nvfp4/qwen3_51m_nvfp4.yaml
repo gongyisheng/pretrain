@@ -40,11 +40,21 @@ training:
   quantization:
     enabled: true
     dtype:
-      recipe: nvfp4
+      weight: fp4_e2m1
+      act: fp4_e2m1
+      grad_out: fp4_e2m1
     scale:
-      recipe: nvfp4
-      block_shape:
-        weight: [16, 16]
+      weight:
+        granularity: blockwise
+        block_shape: [16, 16]
+      act:
+        granularity: blockwise
+        block_shape: [1, 16]
+      grad_out:
+        granularity: blockwise
+        block_shape: [1, 16]
+      scale_dtype: fp8_e4m3
+      enable_global_scale: true
     rounding:
       weight: RNE
       act: RNE

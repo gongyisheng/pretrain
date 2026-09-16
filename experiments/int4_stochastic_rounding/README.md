@@ -33,7 +33,7 @@ Both quantized arms carry 6.00 effective bits per weight (4-bit code plus a 2-bi
 
 All runs use 8 layers, `d_model=512`, GQA with 8 query / 4 KV heads, QK norm, `intermediate_size=1536`, OpenWebText with `tokenizers/custom_bpe_50k` and a 1% validation split. Sequence length 1024, batch size 16, gradient accumulation 16 (effective batch 256, 262,144 tokens/step), 50K steps, seed 42, bf16 mixed precision, Muon with `match_rms_adamw`, lr=5e-4, weight decay=0.1, cosine schedule (1500 warmup, min lr=5e-5), `checkpoint_every: 5000`, `eval_every: 100`, `eval_steps: 100`.
 
-`lm_head` is excluded from quantization; embeddings, norms, attention, residuals, loss, and optimizer state stay bf16/fp32. `act` and `grad_out` are bf16 passthrough, so their `block_shape` entries are required by the config but unused, and their `rounding` entries default to RNE and never apply. Every GEMM runs the one-sided fake-quantization fallback with a bf16 operand, and only the weight carries scales and a rounding mode.
+`lm_head` is excluded from quantization; embeddings, norms, attention, residuals, loss, and optimizer state stay bf16/fp32. `act` and `grad_out` are bf16 passthrough, so their scale layouts are unused, and their `rounding` entries default to RNE and never apply. Every GEMM runs the one-sided fake-quantization fallback with a bf16 operand, and only the weight carries scales and a rounding mode.
 
 W&B run names are `qwen3-51m-bf16`, `qwen3-51m-int4-w4a16-rne`, and `qwen3-51m-int4-w4a16-sr`; checkpoints go to `checkpoints/int4_stochastic_rounding/<config_name>/`.
 

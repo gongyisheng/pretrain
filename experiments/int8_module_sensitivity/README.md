@@ -32,7 +32,7 @@ All runs share the model, data, schedule, and optimizer; the only independent va
 | qwen3_455m_int8_w8a16_lm_head | output head | `[lm_head]` | 1 |
 
 - Model: d_model=1024, 28 layers, gqa 16/8, qk_norm, intermediate_size=3072, rope θ=10000, `tie_word_embeddings: false` (~455M).
-- int8: `dtype: {weight: int8, act: bf16, grad_out: bf16}` (**W8A16, weight-only**), `scale.granularity: tensorwise`, `exclude: []`. Only the weight operand is quantized on the fly; activations and gradients stay bf16, and hp master weights are preserved. The forward GEMM dequantizes the int8 weight against a bf16 activation.
+- int8: `dtype: {weight: int8, act: bf16, grad_out: bf16}` (**W8A16, weight-only**), tensorwise scales with `block_shape: [0, 0]` for every operand, `exclude: []`. Only the weight operand is quantized on the fly; activations and gradients stay bf16, and hp master weights are preserved. The forward GEMM dequantizes the int8 weight against a bf16 activation.
 - Optimizer: **Muon** (`MuonAdamWOptimizer`) on all runs — 2D hidden weights → Muon, embeddings/`lm_head`/1D → AdamW, `adjust_lr_fn=match_rms_adamw` (reuses AdamW-tuned lr/wd). `momentum=0.95`, `nesterov=true`.
 - All runs: seq_len=1024, batch=32, grad_accum=8 (eff. batch=256, ~262K tok/step), 50K steps (~13B tokens), bf16 mixed precision, lr=2e-4, cosine with 1500 warmup, min_lr=2e-5, seed=42, OpenWebText. lr and min_lr match `configs/qwen3_404m.yaml`; the 32×8 split (vs that config's 8×32) keeps the same effective batch while using the larger per-step batch an H200 (144GiB) affords.
 - `eval_every=100`, `eval_steps=100`, `checkpoint_every=5000`.

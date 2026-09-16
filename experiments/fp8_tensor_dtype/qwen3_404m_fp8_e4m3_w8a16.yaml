@@ -38,7 +38,17 @@ training:
       act: bf16
       grad_out: bf16
     scale:
-      granularity: tensorwise
+      weight:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      act:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      grad_out:
+        granularity: tensorwise
+        block_shape: [0, 0]
+      scale_dtype: fp32
+      enable_global_scale: false
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_tensor_dtype/qwen3_404m_fp8_e4m3_w8a16/

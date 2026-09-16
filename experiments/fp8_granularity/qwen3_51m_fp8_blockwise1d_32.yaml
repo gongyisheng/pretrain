@@ -38,11 +38,15 @@ training:
       act: fp8_e4m3
       grad_out: fp8_e5m2
     scale:
-      granularity: blockwise
-      block_shape:
-        weight: [1, 32]
-        act: [1, 32]
-        grad_out: [1, 32]
+      weight:
+        granularity: blockwise
+        block_shape: [1, 32]
+      act:
+        granularity: blockwise
+        block_shape: [1, 32]
+      grad_out:
+        granularity: blockwise
+        block_shape: [1, 32]
     exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_granularity/qwen3_51m_fp8_blockwise1d_32/
