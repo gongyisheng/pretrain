@@ -191,6 +191,10 @@ def scale_of(
     scale_dtype=torch.float32,
     enable_global_scale=False,
 ):
+    if granularity == "tensorwise":
+        block_shape = (0, 0)
+    elif granularity == "rowwise":
+        block_shape = (1, 0)
     return {
         "granularity": granularity,
         "block_shape": block_shape,
@@ -341,9 +345,19 @@ def scale_combinations(scales, n_operands):
     ]
 
 
-# Only outer extents vary: GEMMs share scale dtype, global scaling, and K width.
-SCALE_PAIRS = scale_combinations(BASE_SCALES, 2)
-SCALE_TRIPLES = scale_combinations(BASE_SCALES, 3)
+MIXED_SCALES = [TENSORWISE, ROWWISE, BLOCKWISE1D_16]
+MIXED_SCALE_PAIRS = [
+    operands
+    for operands in product(MIXED_SCALES, repeat=2)
+    if len({scale["granularity"] for scale in operands}) > 1
+]
+MIXED_SCALE_TRIPLES = [
+    operands
+    for operands in product(MIXED_SCALES, repeat=3)
+    if len({scale["granularity"] for scale in operands}) > 1
+]
+SCALE_PAIRS = scale_combinations(BASE_SCALES, 2) + MIXED_SCALE_PAIRS
+SCALE_TRIPLES = scale_combinations(BASE_SCALES, 3) + MIXED_SCALE_TRIPLES
 
 
 SCALES_COARSE_TO_FINE = [
@@ -395,7 +409,11 @@ def mm_ref(a, b, a_fmt, b_fmt, a_scale, b_scale, rotation=None):
     Fused GEMMs accumulate in fp32. The fallback first restores operand dtype, then
     accumulates in fp32. Return fp32 so callers add bias and cast only once.
     """
-    dtype = torch.float32 if fused_op_exists(a_fmt, b_fmt, a_scale) else a.dtype
+    fused = (
+        fused_op_exists(a_fmt, b_fmt, a_scale)
+        and a_scale["block_shape"][1] == b_scale["block_shape"][1]
+    )
+    dtype = torch.float32 if fused else a.dtype
     return (
         roundtrip(a, -1, a_fmt, a_scale, rotation=rotation).to(dtype).float()
         @ roundtrip(b, -2, b_fmt, b_scale, rotation=rotation).to(dtype).float()
@@ -450,18 +468,22 @@ def rule(dtype, scale_cfg=None, rounding=None, rotation=None):
     """
     spec = {"enabled": True, "dtype": dict(dtype)}
     if scale_cfg is not None:
+        per_tensor = (
+            scale_cfg
+            if "act" in scale_cfg
+            else dict.fromkeys(("weight", "act", "grad_out"), scale_cfg)
+        )
         spec["scale"] = {
-            **scale_cfg,
-            "block_shape": (
-                dict(scale_cfg["block_shape"])
-                if isinstance(scale_cfg["block_shape"], dict)
-                else {
-                    tensor: scale_cfg["block_shape"]
-                    for tensor in ("weight", "act", "grad_out")
-                }
-            ),
-            "scale_dtype": SCALE_DTYPE_NAMES[scale_cfg["scale_dtype"]],
+            tensor: {
+                "granularity": value["granularity"],
+                "block_shape": value["block_shape"],
+            }
+            for tensor, value in per_tensor.items()
         }
+        spec["scale"]["scale_dtype"] = SCALE_DTYPE_NAMES[
+            per_tensor["act"]["scale_dtype"]
+        ]
+        spec["scale"]["enable_global_scale"] = per_tensor["act"]["enable_global_scale"]
     if rounding is not None:
         spec["rounding"] = dict(rounding)
     if rotation is not None:

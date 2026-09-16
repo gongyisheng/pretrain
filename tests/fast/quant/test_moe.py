@@ -1,3 +1,5 @@
+import copy
+
 import pytest
 import torch
 import torch.nn as nn
@@ -67,12 +69,9 @@ def _cfg(scale_cfg=ROWWISE, dtype=None):
 
 def _per_tensor_scale(act_scale, weight_scale, grad_out_scale):
     return {
-        **act_scale,
-        "block_shape": {
-            "act": act_scale["block_shape"],
-            "weight": weight_scale["block_shape"],
-            "grad_out": grad_out_scale["block_shape"],
-        },
+        "weight": weight_scale,
+        "act": act_scale,
+        "grad_out": grad_out_scale,
     }
 
 
@@ -672,7 +671,38 @@ def test_quantized_sparse_moe_block_autocast():
 
 # Block 16 divides both expert contractions below (64 and 48); wgrad reaches the
 # ragged contraction, so it is the case segment padding has to carry.
-E2E_RECIPES = ["fp8", "nvfp4"]
+E2E_QUANTIZATION = [
+    {
+        "enabled": True,
+        "dtype": {
+            "weight": "fp8_e4m3",
+            "act": "fp8_e4m3",
+            "grad_out": "fp8_e5m2",
+        },
+        "scale": {
+            "weight": {"granularity": "rowwise", "block_shape": (1, 0)},
+            "act": {"granularity": "rowwise", "block_shape": (1, 0)},
+            "grad_out": {"granularity": "rowwise", "block_shape": (1, 0)},
+            "scale_dtype": "fp32",
+            "enable_global_scale": False,
+        },
+    },
+    {
+        "enabled": True,
+        "dtype": {
+            "weight": "fp4_e2m1",
+            "act": "fp4_e2m1",
+            "grad_out": "fp4_e2m1",
+        },
+        "scale": {
+            "weight": {"granularity": "blockwise", "block_shape": [16, 16]},
+            "act": {"granularity": "blockwise", "block_shape": [1, 16]},
+            "grad_out": {"granularity": "blockwise", "block_shape": [1, 16]},
+            "scale_dtype": "fp8_e4m3",
+            "enable_global_scale": True,
+        },
+    },
+]
 E2E_ROTATIONS = [
     None,
     {
@@ -685,12 +715,14 @@ E2E_ROTATIONS = [
 
 
 @cuda_sm89_or_newer
-@pytest.mark.parametrize("recipe", E2E_RECIPES)
+@pytest.mark.parametrize("quantization", E2E_QUANTIZATION)
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("rotation", E2E_ROTATIONS)
-def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation, recipe):
+def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation, quantization):
     """Check one converted MoE step and fused per-expert bias gradients."""
-    if recipe == "nvfp4" and not cuda_capability_at_least((10, 0)):
+    if is_fp4(quantization["dtype"]["weight"]) and not cuda_capability_at_least(
+        (10, 0)
+    ):
         pytest.skip("fused FP4 requires CUDA SM100 or newer")
     config = TrainConfig(
         max_seq_len=64,
@@ -719,9 +751,7 @@ def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation, recipe):
         training=TrainingConfig(
             mixed_precision="bf16",
             quantization={
-                "enabled": True,
-                "dtype": {"recipe": recipe},
-                "scale": {"recipe": "rowwise"} if recipe == "fp8" else {},
+                **copy.deepcopy(quantization),
                 "rotation": rotation,
             },
         ),

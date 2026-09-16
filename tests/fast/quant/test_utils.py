@@ -84,7 +84,7 @@ def test_is_fp4(fmt):
 def _rule(include=(), exclude=(), enabled=True):
     return QuantizationConfig(
         enabled=enabled,
-        dtype={"recipe": "fp8"},
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         include=list(include),
         exclude=list(exclude),
     )

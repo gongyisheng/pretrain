@@ -156,7 +156,7 @@ _FMT = {E4M3: "fp8_e4m3", E5M2: "fp8_e5m2"}
 def _scale(gran, bs=0, scale_dtype=torch.float32):
     return {
         "granularity": gran,
-        "block_shape": (1, bs) if bs else (0, 0),
+        "block_shape": (0, 0) if gran == "tensorwise" else (1, bs),
         "scale_dtype": scale_dtype,
     }
 

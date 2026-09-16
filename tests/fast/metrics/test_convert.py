@@ -149,7 +149,6 @@ def _quantized_linear(dtype):
             quantization={
                 "enabled": True,
                 "dtype": dtype,
-                "scale": {"granularity": "tensorwise"},
             },
         ),
     )

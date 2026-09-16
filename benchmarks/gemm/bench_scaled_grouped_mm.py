@@ -53,7 +53,7 @@ def _fmt(scheme):
 
 _ROWWISE = {
     "granularity": "rowwise",
-    "block_shape": (0, 0),
+    "block_shape": (1, 0),
     "scale_dtype": torch.float32,
 }
 

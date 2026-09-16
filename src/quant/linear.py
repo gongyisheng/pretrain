@@ -43,6 +43,8 @@ def quantized_mm(
         a_scale["scale_dtype"],
         a_scale["block_shape"],
     )
+    if a_scale["block_shape"][1] != b_scale["block_shape"][1]:
+        op = None
     aq = sa = gsa = bq = sb = gsb = None
     if is_quantized(a_fmt):
         aq, sa, gsa = quantize_operand(

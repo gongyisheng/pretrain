@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 
 from src.layers.mlp import SparseMoEBlock
-from src.quant.constants import _INT8_FORMATS
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
@@ -18,15 +17,47 @@ from src.utils.config import (
     TrainingConfig,
 )
 
-INT_FORMATS = sorted(_INT8_FORMATS)
+from tests.fast.quant.helper import (
+    FP8_E4M3_W8A8_E5M2_G8_DTYPES,
+    FP8_E4M3_W8A8G8_DTYPES,
+    INT8_W8A16_DTYPES,
+    INT7_W8A16_DTYPES,
+    INT6_W8A16_DTYPES,
+    INT5_W8A16_DTYPES,
+    INT4_W8A16_DTYPES,
+)
+
+INT_DTYPES = [
+    INT8_W8A16_DTYPES,
+    INT7_W8A16_DTYPES,
+    INT6_W8A16_DTYPES,
+    INT5_W8A16_DTYPES,
+    INT4_W8A16_DTYPES,
+]
+ROWWISE_SCALE = {
+    "weight": {"granularity": "rowwise", "block_shape": (1, 0)},
+    "act": {"granularity": "rowwise", "block_shape": (1, 0)},
+    "grad_out": {"granularity": "rowwise", "block_shape": (1, 0)},
+    "scale_dtype": "fp32",
+    "enable_global_scale": False,
+}
 
 
-def _spec(recipe="fp8", scale=None, **overrides):
-    """A fresh quantization rule dict. Never share one: QuantizationConfig resolves
-    recipes by popping them out of the nested dict it is handed."""
-    spec = {"enabled": True, "dtype": {"recipe": recipe}, **overrides}
+def _spec(dtype=None, scale=None, include=None, exclude=None, rotation=None):
+    spec = {
+        "enabled": True,
+        "dtype": copy.deepcopy(
+            FP8_E4M3_W8A8_E5M2_G8_DTYPES if dtype is None else dtype
+        ),
+    }
     if scale is not None:
-        spec["scale"] = {"recipe": scale}
+        spec["scale"] = copy.deepcopy(scale)
+    if include is not None:
+        spec["include"] = include
+    if exclude is not None:
+        spec["exclude"] = exclude
+    if rotation is not None:
+        spec["rotation"] = rotation
     return spec
 
 
@@ -55,8 +86,6 @@ class _MoE(nn.Module):
 
 
 def _cfg(quantization):
-    # QuantizationConfig resolves recipes by popping them out of the dict it is
-    # handed, so a case table entry must not be the dict it consumes.
     quantization = copy.deepcopy(quantization)
     return TrainConfig(
         model=ModelConfig(
@@ -74,8 +103,25 @@ APPLY_CASES = [
     ({"enabled": False}, (), ("attn.q_proj", "mlp.down_proj")),
     # fp8 and mxfp8 both swap with no hardware preflight, and lm_head is excluded
     # by default while the embedding is never a candidate at all.
-    (_spec("fp8"), ("attn.q_proj", "mlp.down_proj"), ("lm_head", "token_emb")),
-    (_spec("mxfp8"), ("attn.q_proj", "mlp.down_proj"), ("lm_head", "token_emb")),
+    (
+        _spec(FP8_E4M3_W8A8_E5M2_G8_DTYPES),
+        ("attn.q_proj", "mlp.down_proj"),
+        ("lm_head", "token_emb"),
+    ),
+    (
+        _spec(
+            FP8_E4M3_W8A8G8_DTYPES,
+            scale={
+                "weight": {"granularity": "blockwise", "block_shape": [1, 32]},
+                "act": {"granularity": "blockwise", "block_shape": [1, 32]},
+                "grad_out": {"granularity": "blockwise", "block_shape": [1, 32]},
+                "scale_dtype": "fp8_e8m0",
+                "enable_global_scale": False,
+            },
+        ),
+        ("attn.q_proj", "mlp.down_proj"),
+        ("lm_head", "token_emb"),
+    ),
     # an include allowlist restricts the scope
     (
         _spec(include=["*attn*"], exclude=[]),
@@ -92,7 +138,7 @@ APPLY_CASES = [
         ("lm_head",),
     ),
     # the int8 series is weight-only but still swaps the module
-    *[(_spec(fmt), ("attn.q_proj",), ("lm_head",)) for fmt in INT_FORMATS],
+    *[(_spec(dtype), ("attn.q_proj",), ("lm_head",)) for dtype in INT_DTYPES],
 ]
 
 
@@ -116,8 +162,8 @@ def test_apply_quantization_skips_a_tied_lm_head(capsys):
 
 
 MOE_CASES = [
-    (_spec(scale="rowwise"), QuantizedSparseMoEBlock, False),
-    (_spec(scale="rowwise", exclude=["mlp"]), SparseMoEBlock, True),
+    (_spec(scale=ROWWISE_SCALE), QuantizedSparseMoEBlock, False),
+    (_spec(scale=ROWWISE_SCALE, exclude=["mlp"]), SparseMoEBlock, True),
 ]
 
 
@@ -133,7 +179,7 @@ def test_apply_quantization_moe(quantization, seam_owner, gate_swapped):
 
 def test_apply_quantization_attaches_no_metric_state():
     model = _Dense()
-    apply_quantization(model, _cfg(_spec("fp8")))
+    apply_quantization(model, _cfg(_spec(FP8_E4M3_W8A8_E5M2_G8_DTYPES)))
     swapped = [m for m in model.modules() if isinstance(m, QuantizedLinear)]
     assert swapped and all(not hasattr(m, "quantization_probe") for m in swapped)
 
@@ -142,7 +188,9 @@ def test_apply_quantization_accepts_a_bare_config_namespace():
     # the converter only reads config.training.quantization, so a plain namespace of
     # already-built rules is enough — nothing else on TrainConfig is consulted
     model = nn.Sequential(nn.Linear(64, 64))
-    rule = QuantizationConfig(enabled=True, dtype={"recipe": "int8"}, include=["0"])
+    rule = QuantizationConfig(
+        enabled=True, dtype=dict(INT8_W8A16_DTYPES), include=["0"]
+    )
     config = SimpleNamespace(training=SimpleNamespace(quantization=[rule]))
     apply_quantization(model, config)
     assert isinstance(model[0], QuantizedLinear)
@@ -153,7 +201,7 @@ def test_apply_quantization_owns_rotation_once_at_model_root():
     model = _Dense()
     config = _cfg(
         _spec(
-            "int8",
+            INT8_W8A16_DTYPES,
             rotation={
                 "rotation_cls": "hadamard",
                 "rotation_kwargs": {"block_size": 16, "random_sign": True},
@@ -181,7 +229,7 @@ def test_apply_quantization_gives_each_rule_its_own_rotation():
     config = _cfg(
         [
             _spec(
-                "int8",
+                INT8_W8A16_DTYPES,
                 include=["*attn*"],
                 exclude=[],
                 rotation={
@@ -191,7 +239,7 @@ def test_apply_quantization_gives_each_rule_its_own_rotation():
                 },
             ),
             _spec(
-                "int8",
+                INT8_W8A16_DTYPES,
                 include=["*mlp*"],
                 exclude=[],
                 rotation={
@@ -226,7 +274,7 @@ def test_apply_quantization_without_rotation_leaves_state_dict_clean():
     """A non-rotating run must not gain a rotation registry."""
     model = _Dense()
 
-    apply_quantization(model, _cfg(_spec("int8")))
+    apply_quantization(model, _cfg(_spec(INT8_W8A16_DTYPES)))
 
     assert not hasattr(model, "quant_rotations")
     assert not any("sign_vector" in k for k in model.state_dict())
