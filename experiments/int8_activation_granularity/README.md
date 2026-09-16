@@ -8,15 +8,15 @@ With a 32-element contraction extent, a 1D block shares a scale over 32 values w
 
 ## Setup
 
-Five runs: three W8A8 activation granularities, one BF16 baseline, and one W8A16 weight-only control. All quantized runs use fixed rowwise INT8 weights, FP32 scales, round-to-nearest-even, BF16 `grad_out`, and exclude `lm_head`. No activation clipping or Hadamard rotation is enabled.
+Five runs: three W8A8 activation granularities, one BF16 baseline, and one W8A16 weight-only control. All quantized runs use fixed 32×32 blockwise INT8 weights, FP32 scales, round-to-nearest-even, BF16 `grad_out`, and exclude `lm_head`. No activation clipping or Hadamard rotation is enabled.
 
 | Config (`.yaml`) | Weight | Activation block | Forward values per activation scale |
 |---|---|---|---|
 | `qwen3_51m_bf16` | BF16 | BF16 | — |
-| `qwen3_51m_int8_w8a16` | INT8 rowwise | BF16 | — |
-| `qwen3_51m_int8_w8a8_act_rowwise` | INT8 rowwise | rowwise | 512 / 1,536 (projection-dependent) |
-| `qwen3_51m_int8_w8a8_act_blockwise1d_32` | INT8 rowwise | (1, 32) | 32 |
-| `qwen3_51m_int8_w8a8_act_blockwise2d_32` | INT8 rowwise | (32, 32) | 1,024 |
+| `qwen3_51m_int8_w8a16` | INT8 (32, 32) | BF16 | — |
+| `qwen3_51m_int8_w8a8_act_rowwise` | INT8 (32, 32) | rowwise | 512 / 1,536 (projection-dependent) |
+| `qwen3_51m_int8_w8a8_act_blockwise1d_32` | INT8 (32, 32) | (1, 32) | 32 |
+| `qwen3_51m_int8_w8a8_act_blockwise2d_32` | INT8 (32, 32) | (32, 32) | 1,024 |
 
 | Shared parameter | Value |
 |---|---|
@@ -62,8 +62,8 @@ Report `loss(2D, 32) - loss(1D, 32)`; positive values favor 1D. Compare each W8A
 ## Notes
 
 - Validation bypasses quantization in `QuantizedLinear.eval()`. Validation loss therefore measures the effect of quantized training on the learned model, evaluated in BF16; it does not measure quantized inference loss.
-- **Arithmetic paths:** rowwise W8A8 has rowwise operands on both sides of the contraction and uses the fused INT8 forward path. The blockwise W8A8 runs have rowwise weights and blockwise activations with mismatched contraction extents, so they quantize/dequantize the operands and use BF16 matmul rather than the fused INT8 forward GEMM. Do not use this experiment for pure timing or scale-only numerical comparisons across rowwise and blockwise runs.
-- Rowwise weights avoid the config requirement that all blockwise operands share the same contraction extent. This keeps the weight policy fixed across all three activation granularities. Learned weights and their quantization errors can still diverge across runs.
+- **Arithmetic paths:** the blockwise W8A8 runs have matching 32-value contraction extents and use the fused INT8 forward path. Rowwise W8A8 activations have a rowwise extent while weights use 32, so they quantize/dequantize and use BF16 matmul. W8A16 also uses BF16 matmul because its activations are unquantized. Do not use this experiment for pure timing or scale-only numerical comparisons across runs.
+- Fixed 32×32 weight blocks give both blockwise W8A8 runs the same 32-value contraction extent. Learned weights and their quantization errors can still diverge across runs.
 - In forward, activations are flattened to `(batch × sequence, channels)`: 1D groups 32 channels of one token; 2D groups 32 tokens × 32 channels. In weight-gradient computation, the contraction axis is tokens, so 1D groups 32 tokens of one channel. The sweep affects activation quantization in both forward and weight-gradient computation; it does not isolate forward-only sensitivity.
 - Rowwise activation quantization shares a forward scale across a projection's full input channel dimension (512 or 1,536 values) and a weight-gradient scale across all flattened tokens. The 2D block shares each scale across 32 times more values than the 1D block. This compares practical granularity choices, not geometry at equal scale count. Logical FP32 scale overhead is 1 bit per activation for 1D and 0.03125 bits per activation for 2D; this is not measured memory usage, because the implementation can expand scales and retains other training tensors.
 - Seed 42 is a screening sweep. Before claiming a small difference, repeat all three W8A8 configurations and both controls with seeds 43 and 44, using `--training.seed`, `--training.checkpoint_dir`, and `--logging.wandb_run_name` overrides with distinct paths and names. Report paired loss differences and spread across seeds; ten evaluations within one run are not independent replicates.

@@ -40,10 +40,9 @@ training:
       grad_out: bf16
     scale:
       weight:
-        granularity: rowwise
+        granularity: blockwise
+        block_shape: [32, 32]
       act:
-        granularity: tensorwise
-      grad_out:
         granularity: tensorwise
       scale_dtype: fp32
     rounding:
