@@ -488,4 +488,4 @@ def rule(dtype, scale_cfg=None, rounding=None, rotation=None):
         spec["rounding"] = dict(rounding)
     if rotation is not None:
         spec["rotation"] = dict(rotation)
-    return TrainingConfig(mixed_precision="no", quantization=spec).quantization[0]
+    return TrainingConfig(mixed_precision="no", quantization=spec).quantization

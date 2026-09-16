@@ -1,10 +1,11 @@
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
 from src.model import build_model
-from src.quant.convert import apply_quantization
+from src.quant.convert import apply_quantization, enable_quantization
 from src.quant.linear import QuantizedLinear, quantized_mm
 from src.quant.rotation import build_rotation
 from src.quant.utils import is_fp4
@@ -203,11 +204,54 @@ def test_quantized_linear_from_module(bias, eval_mode):
         source, rule({"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"})
     )
     assert torch.equal(q.weight, source.weight) and q.weight.requires_grad
+    assert not q.quantization_enabled
     assert q.training is not eval_mode  # preserve the source mode
     if bias:
         assert torch.equal(q.bias, source.bias)
     else:
         assert q.bias is None
+
+
+ENABLED_AFTER_STEPS = [0, 2]
+QUANTIZATION_ENABLED = [False, True]
+
+
+@pytest.mark.parametrize("enabled_after_steps", ENABLED_AFTER_STEPS)
+@pytest.mark.parametrize("enabled", QUANTIZATION_ENABLED)
+def test_quantized_linear_forward_enabled_after_steps(enabled_after_steps, enabled):
+    torch.manual_seed(0)
+    cfg = TrainingConfig(
+        mixed_precision="no",
+        quantization={
+            "enabled": True,
+            "enabled_after_steps": enabled_after_steps,
+            "dtype": INT4_W8A16_DTYPES,
+        },
+    ).quantization
+    q = QuantizedLinear.from_module(nn.Linear(4, 3), cfg)
+    if enabled:
+        enable_quantization(q)
+    assert q.quantization_enabled is enabled
+
+    x = torch.randn(2, 4, requires_grad=True)
+    q.eval()
+    assert torch.equal(q(x), F.linear(x, q.weight, q.bias))
+    q.train()
+    out = q(x)
+    out.square().sum().backward()
+    if enabled:
+        assert not torch.equal(out, F.linear(x, q.weight, q.bias))
+        return
+
+    ref_x = x.detach().clone().requires_grad_()
+    ref_weight = q.weight.detach().clone().requires_grad_()
+    ref_bias = q.bias.detach().clone().requires_grad_()
+    ref = F.linear(ref_x, ref_weight, ref_bias)
+    ref.square().sum().backward()
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, ref_x.grad, rtol=0, atol=0)
+    torch.testing.assert_close(q.weight.grad, ref_weight.grad, rtol=0, atol=0)
+    torch.testing.assert_close(q.bias.grad, ref_bias.grad, rtol=0, atol=0)
 
 
 @cuda_sm89_or_newer
@@ -246,6 +290,7 @@ def test_quantized_linear_forward_precision(
     )
     rotation = build_rotation(rotation_cfg)
     q = QuantizedLinear.from_module(lin, cfg, rotation=rotation)
+    enable_quantization(q)
     x = torch.randn(2, 128, 256, device="cuda", dtype=torch.bfloat16)
 
     out = q(x)
@@ -352,6 +397,7 @@ def test_quantized_linear_backward_precision(
     )
     rotation = build_rotation(rotation)
     q = QuantizedLinear.from_module(lin, cfg, rotation=rotation)
+    enable_quantization(q)
 
     x = torch.randn(
         2, n_tokens // 2, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
@@ -406,19 +452,6 @@ def test_quantized_linear_backward_precision(
         )
 
 
-def test_quantized_linear_only_quantizes_during_training():
-    """Training quantizes; evaluation matches the unquantized linear exactly."""
-    torch.manual_seed(0)
-    q = QuantizedLinear.from_module(nn.Linear(4, 3), rule(INT4_W8A16_DTYPES))
-    x = torch.randn(2, 4)
-    plain = nn.functional.linear(x, q.weight, q.bias)
-
-    q.train()
-    assert not torch.equal(q(x), plain)
-    q.eval()
-    assert torch.equal(q(x), plain)
-
-
 # Stochastic-rounding targets and consuming GEMMs.
 SR_CASES = [
     ("weight", ("fwd", "dgrad")),
@@ -438,6 +471,7 @@ def test_quantized_linear_stochastic_rounding(tensor, gemms, enable_sr):
         FP8_E4M3_W8A8_E5M2_G8_DTYPES, None, {tensor: "SR" if enable_sr else "RNE"}
     )
     q = QuantizedLinear.from_module(lin, cfg)
+    enable_quantization(q)
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     g = torch.randn(64, 96, device="cuda", dtype=torch.bfloat16)
 
@@ -465,6 +499,7 @@ def test_quantized_linear_autocast():
     q = QuantizedLinear.from_module(
         lin, rule({"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"})
     )
+    enable_quantization(q)
     x = torch.randn(64, 128, device="cuda", dtype=torch.float32, requires_grad=True)
 
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -496,6 +531,7 @@ def test_quantized_linear_compiles_fullgraph(
         rotation=rotation_cfg,
     )
     q = QuantizedLinear.from_module(lin, cfg, rotation=build_rotation(rotation_cfg))
+    enable_quantization(q)
     x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     torch.compiler.reset()
@@ -545,6 +581,7 @@ def test_quantized_linear_trains_a_full_model():
     )
     model = build_model(config)
     apply_quantization(model, config)
+    enable_quantization(model)
     model.cuda().to(torch.bfloat16)
     assert any(isinstance(m, QuantizedLinear) for m in model.modules())
 

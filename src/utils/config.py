@@ -329,6 +329,7 @@ class TokenizerTrainingConfig:
 @dataclass
 class QuantizationConfig:
     enabled: bool = False
+    enabled_after_steps: int = 0
     # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
     dtype: dict = field(default_factory=dict)
     # {tensor: {granularity, block_shape}, scale_dtype, enable_global_scale}
@@ -341,6 +342,12 @@ class QuantizationConfig:
     def __post_init__(self):
         if not self.enabled:
             return
+        if (
+            not isinstance(self.enabled_after_steps, int)
+            or isinstance(self.enabled_after_steps, bool)
+            or self.enabled_after_steps < 0
+        ):
+            raise ValueError("quant enabled_after_steps must be a nonnegative integer")
         if not isinstance(self.scale, dict):
             raise ValueError(f"quant scale must be a dict, got {self.scale!r}")
         self._post_init_dtype()
@@ -558,7 +565,7 @@ class TrainingConfig:
     eval_train: bool = False  # for SFT
     eval_generate: bool = False
     intra_doc_masking: bool = True
-    quantization: Union[QuantizationConfig, dict, list] = field(
+    quantization: Union[QuantizationConfig, dict] = field(
         default_factory=QuantizationConfig
     )
 
@@ -566,24 +573,24 @@ class TrainingConfig:
         _check_one_of("device", self.device, _DEVICES)
         _check_one_of("mixed_precision", self.mixed_precision, _MIXED_PRECISION)
         _check_one_of("loss_fn", self.loss_fn, LOSS_REGISTRY)
-        rules = (
-            self.quantization
-            if isinstance(self.quantization, list)
-            else [self.quantization]
-        )
+        if isinstance(self.quantization, dict):
+            self.quantization = QuantizationConfig(**self.quantization)
+        if not isinstance(self.quantization, QuantizationConfig):
+            raise ValueError("quantization must be a dict or QuantizationConfig")
         amp_dtype = "fp32" if self.mixed_precision == "no" else self.mixed_precision
-        normalized = []
-        for rule in rules:
-            if isinstance(rule, dict):
-                rule = QuantizationConfig(**rule)
-            if rule.enabled:
-                for tensor, gemms in GEMM_OPS_BY_TENSOR.items():
-                    for gemm in gemms:
-                        rule.dtype.setdefault(tensor, {}).setdefault(gemm, amp_dtype)
-                if rule.rotation and rule.rotation["rotation_cls"] == "hadamard":
-                    rule.rotation["rotation_kwargs"].setdefault("seed", self.seed)
-            normalized.append(rule)
-        self.quantization = normalized
+        if self.quantization.enabled:
+            for tensor, gemms in GEMM_OPS_BY_TENSOR.items():
+                for gemm in gemms:
+                    self.quantization.dtype.setdefault(tensor, {}).setdefault(
+                        gemm, amp_dtype
+                    )
+            if (
+                self.quantization.rotation
+                and self.quantization.rotation["rotation_cls"] == "hadamard"
+            ):
+                self.quantization.rotation["rotation_kwargs"].setdefault(
+                    "seed", self.seed
+                )
 
 
 @dataclass
@@ -667,12 +674,12 @@ class TrainConfig:
 
     def to_dict(self):
         config = asdict(self)
-        for rule in config["training"]["quantization"]:
-            scale_dtype = rule["scale"].get("scale_dtype")
-            for name, dtype in _SCALE_DTYPES.items():
-                if scale_dtype is dtype:
-                    rule["scale"]["scale_dtype"] = name
-                    break
+        scale = config["training"]["quantization"]["scale"]
+        scale_dtype = scale.get("scale_dtype")
+        for name, dtype in _SCALE_DTYPES.items():
+            if scale_dtype is dtype:
+                scale["scale_dtype"] = name
+                break
         return config
 
 
@@ -772,15 +779,13 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         config.model.residual_kwargs,
         config.tokenizer_training.method_kwargs,
         config.optimizer.optimizer_kwargs,
+        config.training.quantization.scale,
     ):
         _coerce_kwargs(kw)
     for item in config.model.attn:
         _coerce_kwargs(item["attn_kwargs"])
     for item in config.model.mlp:
         _coerce_kwargs(item["mlp_kwargs"])
-    for rule in config.training.quantization:
-        _coerce_kwargs(rule.scale)
-
     if overrides:
         _apply_overrides(config, overrides)
 

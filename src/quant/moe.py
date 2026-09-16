@@ -289,6 +289,7 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
+        q.quantization_enabled = False
         object.__setattr__(q, "rotation", rotation)
         # Monitoring populates this; empty disables statistics.
         q.quant_stats = {}
@@ -296,7 +297,7 @@ class QuantizedSparseMoEBlock(SparseMoEBlock):
 
     def expert_mm(self, a, b, offs, bias=None, projection=None):
         """Quantize training expert GEMMs; use the base block in eval."""
-        if not self.training:
+        if not self.training or not self.quantization_enabled:
             return super().expert_mm(a, b, offs, bias=bias, projection=projection)
         return ScaledGroupedGemmFn.apply(
             a,

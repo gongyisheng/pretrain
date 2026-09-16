@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from src.layers.mlp import SparseMoEBlock
-from src.quant.convert import apply_quantization
+from src.quant.convert import apply_quantization, enable_quantization
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
 from src.quant.rotation import build_rotation_key
@@ -43,13 +43,22 @@ ROWWISE_SCALE = {
 }
 
 
-def _spec(dtype=None, scale=None, include=None, exclude=None, rotation=None):
+def _spec(
+    dtype=None,
+    scale=None,
+    include=None,
+    exclude=None,
+    rotation=None,
+    enabled_after_steps=0,
+):
     spec = {
         "enabled": True,
         "dtype": copy.deepcopy(
             FP8_E4M3_W8A8_E5M2_G8_DTYPES if dtype is None else dtype
         ),
     }
+    if enabled_after_steps:
+        spec["enabled_after_steps"] = enabled_after_steps
     if scale is not None:
         spec["scale"] = copy.deepcopy(scale)
     if include is not None:
@@ -128,14 +137,16 @@ APPLY_CASES = [
         ("attn.q_proj",),
         ("mlp.down_proj",),
     ),
-    # a list of rules: each fqn takes the first rule that claims it
+    # multiple include patterns share the same quantization config
     (
-        [
-            _spec(include=["*attn*"], exclude=[]),
-            _spec(include=["*mlp*"], exclude=[]),
-        ],
+        _spec(include=["*attn*", "*mlp*"], exclude=[]),
         ("attn.q_proj", "mlp.down_proj"),
         ("lm_head",),
+    ),
+    (
+        _spec({"weight": "bf16", "act": "bf16", "grad_out": "bf16"}),
+        (),
+        ("attn.q_proj", "mlp.down_proj"),
     ),
     # the int8 series is weight-only but still swaps the module
     *[(_spec(dtype), ("attn.q_proj",), ("lm_head",)) for dtype in INT_DTYPES],
@@ -184,14 +195,79 @@ def test_apply_quantization_attaches_no_metric_state():
     assert swapped and all(not hasattr(m, "quantization_probe") for m in swapped)
 
 
+ENABLE_CASES = [
+    ("dense", "attn.q_proj", "mlp.down_proj"),
+    ("moe", "mlp", "mlp.router.gate"),
+]
+
+
+@pytest.mark.parametrize("model_kind,first_name,second_name", ENABLE_CASES)
+def test_enable_quantization(model_kind, first_name, second_name):
+    model = _Dense() if model_kind == "dense" else _MoE()
+    config = _cfg(
+        _spec(
+            INT8_W8A16_DTYPES,
+            include=[first_name, second_name],
+            exclude=[],
+            enabled_after_steps=2,
+            rotation={
+                "rotation_cls": "hadamard",
+                "rotation_kwargs": {"block_size": 16, "seed": 1},
+                "gemms": ["fwd"],
+            },
+        )
+    )
+    apply_quantization(model, config)
+    first = model.get_submodule(first_name)
+    second = model.get_submodule(second_name)
+    assert not first.quantization_enabled
+    assert not second.quantization_enabled
+    parameters = tuple(model.parameters())
+    rotation = first.rotation
+    sign_vector = rotation.sign_vector.detach().clone()
+    optimizer = torch.optim.AdamW(parameters)
+    sum(parameter.square().sum() for parameter in parameters).backward()
+    optimizer.step()
+    parameter_values = {
+        parameter: parameter.detach().clone() for parameter in parameters
+    }
+    state = {
+        parameter: {
+            name: value.detach().clone() if isinstance(value, torch.Tensor) else value
+            for name, value in optimizer.state[parameter].items()
+        }
+        for parameter in parameters
+    }
+
+    enable_quantization(model)
+    enable_quantization(model)
+    assert first.quantization_enabled
+    assert second.quantization_enabled
+    assert first.rotation is rotation
+    torch.testing.assert_close(rotation.sign_vector, sign_vector, rtol=0, atol=0)
+    assert tuple(id(parameter) for parameter in model.parameters()) == tuple(
+        id(parameter) for parameter in parameters
+    )
+    for parameter in parameters:
+        torch.testing.assert_close(
+            parameter, parameter_values[parameter], rtol=0, atol=0
+        )
+        for name, value in state[parameter].items():
+            current = optimizer.state[parameter][name]
+            if isinstance(value, torch.Tensor):
+                torch.testing.assert_close(current, value, rtol=0, atol=0)
+            else:
+                assert current == value
+
+
 def test_apply_quantization_accepts_a_bare_config_namespace():
     # the converter only reads config.training.quantization, so a plain namespace of
-    # already-built rules is enough — nothing else on TrainConfig is consulted
+    # an already-built config is enough — nothing else on TrainConfig is consulted
     model = nn.Sequential(nn.Linear(64, 64))
     rule = QuantizationConfig(
         enabled=True, dtype=dict(INT8_W8A16_DTYPES), include=["0"]
     )
-    config = SimpleNamespace(training=SimpleNamespace(quantization=[rule]))
+    config = SimpleNamespace(training=SimpleNamespace(quantization=rule))
     apply_quantization(model, config)
     assert isinstance(model[0], QuantizedLinear)
 
@@ -209,7 +285,7 @@ def test_apply_quantization_owns_rotation_once_at_model_root():
             },
         )
     )
-    cfg = config.training.quantization[0]
+    cfg = config.training.quantization
     key = build_rotation_key(cfg.rotation, cfg.include, cfg.exclude)
 
     apply_quantization(model, config)
@@ -221,53 +297,6 @@ def test_apply_quantization_owns_rotation_once_at_model_root():
     assert model.mlp["down_proj"].rotation is root_rotation
     rotation_state = [k for k in model.state_dict() if "sign_vector" in k]
     assert rotation_state == [f"quant_rotations.{key}.sign_vector"]
-
-
-def test_apply_quantization_gives_each_rule_its_own_rotation():
-    """Catch one rule's rotation leaking into the modules claimed by another."""
-    model = _Dense()
-    config = _cfg(
-        [
-            _spec(
-                INT8_W8A16_DTYPES,
-                include=["*attn*"],
-                exclude=[],
-                rotation={
-                    "rotation_cls": "hadamard",
-                    "rotation_kwargs": {"block_size": 16, "seed": 1},
-                    "gemms": ["fwd"],
-                },
-            ),
-            _spec(
-                INT8_W8A16_DTYPES,
-                include=["*mlp*"],
-                exclude=[],
-                rotation={
-                    "rotation_cls": "hadamard",
-                    "rotation_kwargs": {"block_size": 32, "seed": 2},
-                    "gemms": ["wgrad"],
-                },
-            ),
-        ]
-    )
-    attn_cfg, mlp_cfg = config.training.quantization
-    attn_key = build_rotation_key(attn_cfg.rotation, attn_cfg.include, attn_cfg.exclude)
-    mlp_key = build_rotation_key(mlp_cfg.rotation, mlp_cfg.include, mlp_cfg.exclude)
-
-    apply_quantization(model, config)
-
-    assert attn_key != mlp_key
-    assert sorted(model.quant_rotations) == sorted([attn_key, mlp_key])
-    assert model.attn["q_proj"].rotation is model.quant_rotations[attn_key]
-    assert model.mlp["down_proj"].rotation is model.quant_rotations[mlp_key]
-    assert model.attn["q_proj"].rotation.block_size == 16
-    assert model.mlp["down_proj"].rotation.block_size == 32
-    assert sorted(k for k in model.state_dict() if "sign_vector" in k) == sorted(
-        [
-            f"quant_rotations.{attn_key}.sign_vector",
-            f"quant_rotations.{mlp_key}.sign_vector",
-        ]
-    )
 
 
 def test_apply_quantization_without_rotation_leaves_state_dict_clean():
