@@ -2,6 +2,7 @@ from functools import partial
 
 import torch
 
+from src.kernel.backends.eager.quantize import unpack_e2m1 as _unpack_e2m1
 from src.kernel.registry import register_kernel
 
 
@@ -87,15 +88,6 @@ def _dequant_b(q, scale, block_size):
     width = block_size or q.shape[-2]
     expanded = scale.float().repeat_interleave(width, dim=-2)[..., : q.shape[-2], :]
     return q.float() * expanded
-
-
-def _unpack_e2m1(q: torch.Tensor, dim: int) -> torch.Tensor:
-    """Decode low-nibble-first packed E2M1 along `dim`."""
-    axis = dim % q.ndim
-    codes = torch.stack((q & 0xF, q >> 4), dim=axis + 1).flatten(axis, axis + 1)
-    magnitude = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=q.device)
-    values = magnitude[codes.long() & 0x7]
-    return torch.where(codes & 0x8 != 0, -values, values)
 
 
 @register_kernel(

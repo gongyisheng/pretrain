@@ -1,17 +1,3 @@
-#!/usr/bin/env python3
-"""Reserve an idle GPU, then run a command pinned to it.
-
-    gpu_lock_exec.py -- pytest tests/fast/layers
-
-Polls until a GPU is free, then runs the command with `CUDA_VISIBLE_DEVICES`
-set to it and exits with the child's status. "Free" means two things, because
-they catch different squatters: an flock excludes other CI jobs, including in
-the seconds before their memory reaches `nvidia-smi`, and the nvidia-smi
-thresholds exclude training runs started outside CI.
-
-Waits indefinitely; the workflow's `timeout-minutes` bounds the wait.
-"""
-
 import fcntl
 import os
 import subprocess
@@ -21,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 POLL_INTERVAL_S = 30
-LOCK_DIR = Path(os.environ.get("GPU_LOCK_DIR", "/tmp/pretrain-gpu-locks"))
+LOCK_DIR = Path(os.environ.get("GPU_LOCK_DIR", "/tmp"))
 
 
 @dataclass(frozen=True)
@@ -77,7 +63,7 @@ def reserve(
     """
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
     for gpu in gpus:
-        fd = os.open(LOCK_DIR / f"{gpu.index}.lock", os.O_CREAT | os.O_RDWR, 0o666)
+        fd = os.open(LOCK_DIR / f"gpu{gpu.index}.lock", os.O_CREAT | os.O_RDWR, 0o666)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

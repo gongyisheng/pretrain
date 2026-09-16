@@ -1,6 +1,7 @@
 import torch
 
-from src.quant.quantize import unpack_e2m1, dequantize_operand
+from src.kernel.ops import unpack_e2m1
+from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.rotation import Rotation
 
 
@@ -24,16 +25,56 @@ class QuantizationStats(torch.nn.Module):
         # module path, so nothing can re-derive it.
         self.key = key
         self.grouped = n_groups > 1
-        for name in self.FIELDS:
-            self.register_buffer(
-                name,
-                torch.zeros(n_groups, dtype=torch.float32, device=device),
-                persistent=False,
-            )
+        self.register_buffer(
+            "quantization_stats",
+            torch.zeros(
+                (n_groups, len(self.FIELDS)), dtype=torch.float32, device=device
+            ),
+            persistent=False,
+        )
 
     def reset(self) -> None:
-        for name in self.FIELDS:
-            getattr(self, name).zero_()
+        self.quantization_stats.zero_()
+
+    @property
+    def src_sq(self) -> torch.Tensor:
+        return self.quantization_stats[:, 0]
+
+    @src_sq.setter
+    def src_sq(self, value: torch.Tensor) -> None:
+        self.quantization_stats[:, 0].copy_(value)
+
+    @property
+    def err_sq(self) -> torch.Tensor:
+        return self.quantization_stats[:, 1]
+
+    @err_sq.setter
+    def err_sq(self, value: torch.Tensor) -> None:
+        self.quantization_stats[:, 1].copy_(value)
+
+    @property
+    def under(self) -> torch.Tensor:
+        return self.quantization_stats[:, 2]
+
+    @under.setter
+    def under(self, value: torch.Tensor) -> None:
+        self.quantization_stats[:, 2].copy_(value)
+
+    @property
+    def numel(self) -> torch.Tensor:
+        return self.quantization_stats[:, 3]
+
+    @numel.setter
+    def numel(self, value: torch.Tensor) -> None:
+        self.quantization_stats[:, 3].copy_(value)
+
+    @property
+    def nonzero(self) -> torch.Tensor:
+        return self.quantization_stats[:, 4]
+
+    @nonzero.setter
+    def nonzero(self, value: torch.Tensor) -> None:
+        self.quantization_stats[:, 4].copy_(value)
 
 
 def accumulate_quantization_sums(
@@ -154,8 +195,51 @@ def record_operand(
         contract_dim=contract_dim,
         rotated_source=rotated_source,
     )
-    for name, value in zip(stats.FIELDS, sums):
-        getattr(stats, name).add_(value)
+    stats.quantization_stats.add_(torch.stack(sums, dim=-1))
+
+
+def quantize_and_record(
+    stats: QuantizationStats | None,
+    source: torch.Tensor,
+    contract_dim: int,
+    fmt: str,
+    scale_cfg: dict,
+    stochastic_rounding: bool = False,
+    rotation: Rotation | None = None,
+    output_layout: str = "row_major",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Quantize an operand and record fused statistics when the backend supplies them."""
+    collect = (
+        stats is not None and _RECORDING[0] and rotation is None and source.ndim == 2
+    )
+    result = quantize_operand(
+        source,
+        contract_dim,
+        fmt,
+        scale_cfg,
+        stochastic_rounding=stochastic_rounding,
+        rotation=rotation,
+        return_quantization_stats=collect,
+        output_layout=output_layout,
+    )
+    if collect:
+        codes, scale, global_scale, quantization_stats = result
+        if quantization_stats is not None:
+            stats.quantization_stats.add_(quantization_stats)
+            return codes, scale, global_scale
+    else:
+        codes, scale, global_scale = result
+    record_operand(
+        stats,
+        source,
+        codes,
+        scale,
+        contract_dim,
+        scale_cfg,
+        rotation=rotation,
+        global_scale=global_scale,
+    )
+    return codes, scale, global_scale
 
 
 def set_quantization_monitoring_status(enabled: bool) -> None:

@@ -2,10 +2,12 @@ import pytest
 import torch
 import torch.nn as nn
 
+import src.quant.linear as quant_linear
 from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
 from src.model import build_model
 from src.quant.convert import apply_quantization
 from src.quant.linear import QuantizedLinear, quantized_mm
+from src.quant.quantize import quantize_operand
 from src.quant.rotation import build_rotation
 from src.quant.utils import is_fp4
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
@@ -14,6 +16,9 @@ from tests.fast.quant.helper import (
     ALL_FORMATS,
     FORWARD_DTYPES,
     BACKWARD_DTYPES,
+    BLOCKWISE1D_32_E8M0,
+    FP8_E4M3_W8A16_DTYPES,
+    FP8_E4M3_W8A8G8_DTYPES,
     INT4_W8A16_DTYPES,
     FP8_E4M3_W8A8_E5M2_G8_DTYPES,
     SCALE_PAIRS,
@@ -81,6 +86,51 @@ def test_quantized_mm_raise_error():
 
     with pytest.raises(ValueError):
         quantized_mm(a, b, "bf16", "fp16", torch.bfloat16, TENSORWISE, TENSORWISE)
+
+
+def test_quantized_mm_output_layout(monkeypatch):
+    codes = []
+
+    def quantize(
+        stats,
+        source,
+        contract_dim,
+        fmt,
+        scale_cfg,
+        stochastic_rounding=False,
+        rotation=None,
+        output_layout="row_major",
+    ):
+        del stats
+        result = quantize_operand(
+            source,
+            contract_dim,
+            fmt,
+            scale_cfg,
+            stochastic_rounding=stochastic_rounding,
+            rotation=rotation,
+            output_layout=output_layout,
+        )
+        codes.append(result[0])
+        return result
+
+    monkeypatch.setattr("src.quant.linear.quantize_and_record", quantize)
+    monkeypatch.setitem(
+        quant_linear.SCALED_MM_OPS,
+        "gemm.mxfp8_scaled_mm",
+        lambda a, b, sa, sb, dtype, block, bias, gsa, gsb: torch.empty(2, 3),
+    )
+    quantized_mm(
+        torch.ones(2, 4),
+        torch.ones(4, 3),
+        "fp8_e4m3",
+        "fp8_e4m3",
+        torch.float32,
+        BLOCKWISE1D_32_E8M0,
+        BLOCKWISE1D_32_E8M0,
+    )
+    assert codes[0].is_contiguous()
+    assert codes[1].stride(-2) == 1
 
 
 @pytest.mark.parametrize("device", MM_PRECISION_DEVICES)
@@ -511,6 +561,31 @@ def test_quantized_linear_compiles_fullgraph(
     assert out.shape == (64, 128) and torch.isfinite(out).all()
     assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
     assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+@cuda_sm89_or_newer
+@pytest.mark.parametrize("dtype", [FP8_E4M3_W8A16_DTYPES, FP8_E4M3_W8A8G8_DTYPES])
+def test_quantized_linear_e8m0_compiles_fullgraph(dtype):
+    """Compiled E8M0 agrees with eager forward and backward."""
+    torch.manual_seed(0)
+    linear = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
+    cfg = rule(dtype, BLOCKWISE1D_32_E8M0)
+    eager = QuantizedLinear.from_module(linear, cfg)
+    compiled = QuantizedLinear.from_module(linear, cfg)
+    eager_x = torch.randn(
+        64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    compiled_x = eager_x.detach().clone().requires_grad_()
+    grad_out = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+    eager_out = eager(eager_x)
+    eager_out.backward(grad_out)
+    compiled_out = torch.compile(compiled, fullgraph=True)(compiled_x)
+    compiled_out.backward(grad_out)
+
+    torch.testing.assert_close(compiled_out, eager_out, atol=0, rtol=0)
+    torch.testing.assert_close(compiled.weight.grad, eager.weight.grad, atol=0, rtol=0)
+    torch.testing.assert_close(compiled_x.grad, eager_x.grad, atol=0, rtol=0)
 
 
 @cuda_sm89_or_newer

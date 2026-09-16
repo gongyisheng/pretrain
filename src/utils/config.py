@@ -446,10 +446,10 @@ class QuantizationConfig:
                         "quant block_shape contract extent must be a positive "
                         f"multiple of 16, got {contract}"
                     )
-                if scale_dtype == "fp8_e8m0" and contract % 32 != 0:
+                if scale_dtype == "fp8_e8m0" and contract != 16 and contract % 32 != 0:
                     raise ValueError(
-                        "quant scale_dtype 'fp8_e8m0' needs a contract extent that "
-                        f"is a multiple of 32, the mx scale vector, got {contract}"
+                        "quant scale_dtype 'fp8_e8m0' needs a contract extent of "
+                        f"16 or a multiple of 32, got {contract}"
                     )
                 resolved_shapes[tensor] = (outer, contract)
             contract_extents = {shape[1] for shape in resolved_shapes.values()}
@@ -460,15 +460,13 @@ class QuantizationConfig:
                 )
             self.scale["block_shape"] = resolved_shapes
 
-        # The e8m0 shared exponent only has fp8 kernels, so mxfp8 + int8 (or any
-        # other non-fp8 element) is rejected here. Pass-through formats are exempt:
-        # they are unquantized and carry no scale.
+        # Pass-through formats carry no scale.
         if granularity == "blockwise" and scale_dtype == "fp8_e8m0":
             for tensor, per_gemm in self.dtype.items():
                 for gemm, fmt in per_gemm.items():
-                    if fmt not in QUANT_PASSTHROUGH and not fmt.startswith("fp8"):
+                    if fmt not in QUANT_PASSTHROUGH and fmt != "fp8_e4m3":
                         raise ValueError(
-                            f"mxfp8 scale requires an fp8 element for "
+                            f"mxfp8 scale requires fp8_e4m3 for "
                             f"{tensor}.{gemm}, got {fmt!r}"
                         )
 
