@@ -1,0 +1,70 @@
+# INT8 Activation Granularity
+
+Compare rowwise, 1D, and square 2D activation granularities during W8A8 pretraining, holding weight quantization fixed. Unlike the joint weight/activation sweeps, only `training.quantization.scale.act` changes across the W8A8 configs.
+
+## Hypothesis
+
+With a 32-element contraction extent, a 1D block shares a scale over 32 values while a 2D block shares it over 1,024 values. We expect 1D blocks to reduce activation quantization error and validation loss by containing outliers more locally. Rowwise activations use one scale across a projection's full channel dimension, which is coarser along channels than 1D blocks but does not couple tokens; there is no strict expected ordering between rowwise and 2D blocks.
+
+## Setup
+
+Five runs: three W8A8 activation granularities, one BF16 baseline, and one W8A16 weight-only control. All quantized runs use fixed rowwise INT8 weights, FP32 scales, round-to-nearest-even, BF16 `grad_out`, and exclude `lm_head`. No activation clipping or Hadamard rotation is enabled.
+
+| Config (`.yaml`) | Weight | Activation block | Forward values per activation scale |
+|---|---|---|---|
+| `qwen3_51m_bf16` | BF16 | BF16 | — |
+| `qwen3_51m_int8_w8a16` | INT8 rowwise | BF16 | — |
+| `qwen3_51m_int8_w8a8_act_rowwise` | INT8 rowwise | rowwise | 512 / 1,536 (projection-dependent) |
+| `qwen3_51m_int8_w8a8_act_blockwise1d_32` | INT8 rowwise | (1, 32) | 32 |
+| `qwen3_51m_int8_w8a8_act_blockwise2d_32` | INT8 rowwise | (32, 32) | 1,024 |
+
+| Shared parameter | Value |
+|---|---|
+| Model | Qwen3-style dense Transformer, 50,931,200 parameters (approximately 51M) |
+| Dimensions | `d_model=512`, 8 layers, 8 Q / 4 KV heads, QK norm, SwiGLU intermediate size 1,536 |
+| Data | OpenWebText, `tokenizers/custom_bpe_50k`, validation split 0.01 |
+| Sequence / batch | 1,024 tokens, batch 16, accumulation 16; 262,144 tokens per optimizer step |
+| Budget | 50,000 steps; 13.1072B training tokens per run |
+| Optimizer | Muon, momentum 0.95, Nesterov, `match_rms_adamw`, weight decay 0.1 |
+| Learning rate | 5e-4, cosine decay to 5e-5, 1,500 warmup steps |
+| Precision / clipping | BF16 mixed precision, gradient norm clip 1.0 |
+| Seed | 42 for initialization and data ordering |
+| Evaluation | Every 100 steps, 100 batches, evaluation batch size 16 |
+| Checkpoints / logging | Every 5,000 / 10 steps; quantization metrics enabled |
+
+## Run
+
+From the repository root, inspect GPU usage and select a free device. Prepare the tokenizer and OpenWebText data as described in the repository README.
+
+```bash
+nvidia-smi
+export CUDA_VISIBLE_DEVICES=0  # Replace 0 with a free GPU from the output above.
+mkdir -p logs
+nohup bash experiments/int8_activation_granularity/run.sh > logs/int8_activation_granularity.log 2>&1 &
+```
+
+The launcher runs all five configurations sequentially on the selected device. W&B project: `pretrain-int8-activation-granularity`. Checkpoints: `checkpoints/int8_activation_granularity/<config>/`.
+
+## Results
+
+Primary metric: mean `val/loss` over the final ten scheduled evaluations, at steps 49,100–50,000. Compare runs at equal training tokens. Record validation BPB, per-module activation SQNR and underflow, and any nonfinite loss or divergence step. Current activation statistics pool forward and weight-gradient observations. Results are pending.
+
+| Config suffix | Mean val loss | Δ vs BF16 | Δ vs W8A16 | Val BPB | Status |
+|---|---|---|---|---|---|
+| `bf16` | — | 0 | — | — | Pending |
+| `int8_w8a16` | — | — | 0 | — | Pending |
+| `int8_w8a8_act_rowwise` | — | — | — | — | Pending |
+| `int8_w8a8_act_blockwise1d_32` | — | — | — | — | Pending |
+| `int8_w8a8_act_blockwise2d_32` | — | — | — | — | Pending |
+
+Report `loss(2D, 32) - loss(1D, 32)`; positive values favor 1D. Compare each W8A8 run with W8A16 to measure the added activation-quantization cost under the fixed weight policy. These trained-model differences include changes in optimization trajectories.
+
+## Notes
+
+- Validation bypasses quantization in `QuantizedLinear.eval()`. Validation loss therefore measures the effect of quantized training on the learned model, evaluated in BF16; it does not measure quantized inference loss.
+- **Arithmetic paths:** rowwise W8A8 has rowwise operands on both sides of the contraction and uses the fused INT8 forward path. The blockwise W8A8 runs have rowwise weights and blockwise activations with mismatched contraction extents, so they quantize/dequantize the operands and use BF16 matmul rather than the fused INT8 forward GEMM. Do not use this experiment for pure timing or scale-only numerical comparisons across rowwise and blockwise runs.
+- Rowwise weights avoid the config requirement that all blockwise operands share the same contraction extent. This keeps the weight policy fixed across all three activation granularities. Learned weights and their quantization errors can still diverge across runs.
+- In forward, activations are flattened to `(batch × sequence, channels)`: 1D groups 32 channels of one token; 2D groups 32 tokens × 32 channels. In weight-gradient computation, the contraction axis is tokens, so 1D groups 32 tokens of one channel. The sweep affects activation quantization in both forward and weight-gradient computation; it does not isolate forward-only sensitivity.
+- Rowwise activation quantization shares a forward scale across a projection's full input channel dimension (512 or 1,536 values) and a weight-gradient scale across all flattened tokens. The 2D block shares each scale across 32 times more values than the 1D block. This compares practical granularity choices, not geometry at equal scale count. Logical FP32 scale overhead is 1 bit per activation for 1D and 0.03125 bits per activation for 2D; this is not measured memory usage, because the implementation can expand scales and retains other training tensors.
+- Seed 42 is a screening sweep. Before claiming a small difference, repeat all three W8A8 configurations and both controls with seeds 43 and 44, using `--training.seed`, `--training.checkpoint_dir`, and `--logging.wandb_run_name` overrides with distinct paths and names. Report paired loss differences and spread across seeds; ten evaluations within one run are not independent replicates.
+- Do not reuse older experiment baselines with different microbatch sizes or quantization policies. Check each run reaches 50,000 steps: `scripts/train.py` currently catches training exceptions without returning a failing exit status, so launcher completion alone does not prove successful training.
