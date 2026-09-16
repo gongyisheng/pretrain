@@ -2,9 +2,7 @@
 # Select a free GPU with nvidia-smi, then set CUDA_VISIBLE_DEVICES before running.
 # Usage: nohup bash experiments/int8_activation_granularity/run.sh > logs/int8_activation_granularity.log 2>&1 &
 
-set -euo pipefail
-: "${CUDA_VISIBLE_DEVICES:?Set CUDA_VISIBLE_DEVICES to a free GPU selected with nvidia-smi.}"
-
+set -e
 cd "$(dirname "$0")/../.."
 
 configs=(qwen3_51m_bf16 qwen3_51m_int8_w8a16 qwen3_51m_int8_w8a8_act_rowwise)
