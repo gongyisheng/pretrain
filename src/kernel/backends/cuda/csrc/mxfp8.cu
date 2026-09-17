@@ -26,6 +26,18 @@ struct Layout {
   int64_t scale_batch_stride, scale_slow_stride, scale_fast_stride;
 };
 
+__device__ __forceinline__ int64_t local_offset(
+    int32_t slow, int32_t fast, int64_t slow_stride, int64_t fast_stride,
+    bool narrow_offsets
+) {
+  if (narrow_offsets) {
+    return slow * static_cast<int32_t>(slow_stride) +
+           fast * static_cast<int32_t>(fast_stride);
+  }
+  return static_cast<int64_t>(slow) * slow_stride +
+         static_cast<int64_t>(fast) * fast_stride;
+}
+
 __device__ __forceinline__ uint8_t encode_e8m0(float maximum) {
   if (isnan(maximum)) return 255;
   const float exponent = ceilf(log2f(maximum / 448.0f));
@@ -118,8 +130,8 @@ struct ScaleShape {
   static constexpr int inner = inner_size;
 };
 
-template <typename scale_shape, bool contract_fast,
-          bool transpose_output>
+template <typename input_t, typename scale_shape, bool contract_fast,
+          bool transpose_output, bool stochastic_rounding, bool collect_stats>
 struct Tile {
   // Streaming groups use wide tiles; transposes need both tile axes populated.
   static constexpr int fast =
@@ -132,7 +144,13 @@ struct Tile {
           : (contract_fast ? (transpose_output ? 32 : 2) : scale_shape::inner);
   static constexpr bool vector = contract_fast && scale_shape::outer == 1;
   static constexpr bool stream = vector && !transpose_output;
-  static constexpr int threads = vector ? fast * slow / 16 : 256;
+  static constexpr int threads =
+      vector ? fast * slow / 16
+             : (scale_shape::outer == 32 && scale_shape::inner == 32 &&
+                        sizeof(input_t) == 2 &&
+                        !stochastic_rounding && !collect_stats
+                    ? 64
+                    : 256);
   static constexpr int values = fast * slow / threads;
 };
 
@@ -146,31 +164,54 @@ __global__ void quantize_mxfp8_kernel(
     Layout layout,
     int64_t fast_tiles,
     int64_t slow_tiles,
+    int64_t first_fast_tile,
+    int64_t first_slow_tile,
+    int64_t first_batch,
+    bool narrow_offsets,
     at::PhiloxCudaState philox,
     float* stats_partials
 ) {
   constexpr bool contract_fast =
       contract_dim == (input_column_major ? -2 : -1);
-  using tile = Tile<scale_shape, contract_fast, transpose_output>;
-  const int64_t tile_index = static_cast<int64_t>(blockIdx.x) +
-                             static_cast<int64_t>(blockIdx.y) * gridDim.x;
-  if (tile_index >= layout.batches * slow_tiles * fast_tiles) return;
-  int64_t fast_start, slow_start, batch;
+  using tile = Tile<input_t, scale_shape, contract_fast, transpose_output,
+                    stochastic_rounding, collect_stats>;
+  const int64_t fast_tile = first_fast_tile + blockIdx.x;
+  const int64_t slow_tile = first_slow_tile + blockIdx.y;
+  const int64_t batch = first_batch + blockIdx.z;
+  const int64_t tile_index =
+      fast_tile + fast_tiles * (slow_tile + slow_tiles * batch);
+  int64_t fast_origin, slow_origin;
   if constexpr (tile::stream) {
-    // Pack complete scale groups across rows, including narrow matrices.
     const int64_t padded_fast =
-        (layout.fast_size + scale_shape::inner - 1) / scale_shape::inner *
+        ((layout.fast_size - 1) / scale_shape::inner + 1) *
         scale_shape::inner;
-    const int64_t first = (tile_index % fast_tiles) * tile::fast * tile::slow +
-                          threadIdx.x * tile::values;
-    slow_start = first / padded_fast;
-    fast_start = first % padded_fast;
-    batch = tile_index / fast_tiles;
+    const int64_t first = fast_tile * tile::fast * tile::slow +
+                          static_cast<int64_t>(threadIdx.x) * tile::values;
+    slow_origin = first / padded_fast;
+    fast_origin = first % padded_fast;
   } else {
-    fast_start = (tile_index % fast_tiles) * tile::fast;
-    const int64_t remaining = tile_index / fast_tiles;
-    slow_start = (remaining % slow_tiles) * tile::slow;
-    batch = remaining / slow_tiles;
+    fast_origin = fast_tile * tile::fast;
+    slow_origin = slow_tile * tile::slow;
+  }
+
+  const int32_t slow_size = static_cast<int32_t>(
+      min(max(layout.slow_size - slow_origin, int64_t{0}),
+          int64_t{tile::stream ? 1 : tile::slow}));
+  const int32_t fast_size = static_cast<int32_t>(
+      min(max(layout.fast_size - fast_origin, int64_t{0}),
+          int64_t{tile::stream ? tile::values : tile::fast}));
+  if (slow_size != 0 && fast_size != 0) {
+    input += batch * layout.input_batch_stride +
+             slow_origin * layout.input_slow_stride +
+             fast_origin * layout.input_fast_stride;
+    codes += batch * layout.code_batch_stride +
+             slow_origin * layout.code_slow_stride +
+             fast_origin * layout.code_fast_stride;
+    scales += batch * layout.scale_batch_stride +
+              (contract_fast ? slow_origin : slow_origin / scale_shape::inner) *
+                  layout.scale_slow_stride +
+              (contract_fast ? fast_origin / scale_shape::inner : fast_origin) *
+                  layout.scale_fast_stride;
   }
 
   const int lane = threadIdx.x % 32;
@@ -180,12 +221,13 @@ __global__ void quantize_mxfp8_kernel(
 
   if constexpr (tile::vector) {
     const int first = tile::stream ? 0 : threadIdx.x * tile::values;
-    const int64_t slow = slow_start + first / tile::fast;
-    const int64_t fast = fast_start + first % tile::fast;
-    const input_t* source = input + batch * layout.input_batch_stride +
-                            slow * layout.input_slow_stride +
-                            fast * layout.input_fast_stride;
-    if (slow < layout.slow_size && fast + tile::values <= layout.fast_size &&
+    const int32_t slow = first / tile::fast;
+    const int32_t fast = first % tile::fast;
+    const input_t* source = slow < slow_size && fast < fast_size
+        ? input + local_offset(slow, fast, layout.input_slow_stride,
+                              layout.input_fast_stride, narrow_offsets)
+        : nullptr;
+    if (slow < slow_size && fast + tile::values <= fast_size &&
         layout.input_fast_stride == 1 &&
         reinterpret_cast<uintptr_t>(source) % alignof(uint4) == 0) {
       if constexpr (std::is_same_v<input_t, float>) {
@@ -219,9 +261,9 @@ __global__ void quantize_mxfp8_kernel(
     } else {
 #pragma unroll
       for (int index = 0; index < tile::values; ++index) {
-        if (slow < layout.slow_size && fast + index < layout.fast_size) {
-          values[index] =
-              static_cast<float>(source[index * layout.input_fast_stride]);
+        if (slow < slow_size && fast + index < fast_size) {
+          values[index] = static_cast<float>(source[local_offset(
+              0, index, 0, layout.input_fast_stride, narrow_offsets)]);
         }
       }
     }
@@ -229,13 +271,12 @@ __global__ void quantize_mxfp8_kernel(
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
       const int position = threadIdx.x + index * tile::threads;
-      const int64_t slow = slow_start + position / tile::fast;
-      const int64_t fast = fast_start + position % tile::fast;
-      if (slow < layout.slow_size && fast < layout.fast_size) {
-        values[index] =
-            static_cast<float>(input[batch * layout.input_batch_stride +
-                                     slow * layout.input_slow_stride +
-                                     fast * layout.input_fast_stride]);
+      const int32_t slow = position / tile::fast;
+      const int32_t fast = position % tile::fast;
+      if (slow < slow_size && fast < fast_size) {
+        values[index] = static_cast<float>(input[local_offset(
+            slow, fast, layout.input_slow_stride, layout.input_fast_stride,
+            narrow_offsets)]);
       }
     }
   }
@@ -270,12 +311,12 @@ __global__ void quantize_mxfp8_kernel(
     scale = static_cast<uint8_t>(
         __shfl_sync(mask, static_cast<int>(scale), 0, group_lanes));
     const int first = tile::stream ? 0 : threadIdx.x * tile::values;
-    const int64_t slow = slow_start + first / tile::fast;
-    const int64_t fast = fast_start + first % tile::fast;
-    if (group_lane == 0 && slow < layout.slow_size && fast < layout.fast_size) {
-      scales[batch * layout.scale_batch_stride +
-             slow * layout.scale_slow_stride +
-             (fast / scale_shape::inner) * layout.scale_fast_stride] = scale;
+    const int32_t slow = first / tile::fast;
+    const int32_t fast = first % tile::fast;
+    if (group_lane == 0 && slow < slow_size && fast < fast_size) {
+      scales[local_offset(slow, fast / scale_shape::inner,
+                          layout.scale_slow_stride, layout.scale_fast_stride,
+                          narrow_offsets)] = scale;
     }
   } else if constexpr (scale_shape::outer == 1) {
     __shared__ float partial_maximum[tile::threads / 32][32];
@@ -291,10 +332,9 @@ __global__ void quantize_mxfp8_kernel(
         has_nan |= partial_nan[other][lane];
       }
       group_scales[lane] = encode_e8m0(has_nan ? nanf("") : maximum);
-      if (fast_start + lane < layout.fast_size) {
-        scales[batch * layout.scale_batch_stride +
-               (slow_start / scale_shape::inner) * layout.scale_slow_stride +
-               (fast_start + lane) * layout.scale_fast_stride] =
+      if (lane < fast_size) {
+        scales[local_offset(0, lane, layout.scale_slow_stride,
+                            layout.scale_fast_stride, narrow_offsets)] =
             group_scales[lane];
       }
     }
@@ -325,14 +365,13 @@ __global__ void quantize_mxfp8_kernel(
     __syncthreads();
     scale = tile_scale;
     if (threadIdx.x < scale_shape::outer) {
-      const int64_t slow = slow_start + (contract_fast ? threadIdx.x : 0);
-      const int64_t fast = fast_start + (contract_fast ? 0 : threadIdx.x);
-      if (slow < layout.slow_size && fast < layout.fast_size) {
-        scales[batch * layout.scale_batch_stride +
-               (contract_fast ? slow : slow / scale_shape::inner) *
-                   layout.scale_slow_stride +
-               (contract_fast ? fast / scale_shape::inner : fast) *
-                   layout.scale_fast_stride] = scale;
+      const int32_t slow = contract_fast ? threadIdx.x : 0;
+      const int32_t fast = contract_fast ? 0 : threadIdx.x;
+      if (slow < slow_size && fast < fast_size) {
+        scales[local_offset(contract_fast ? slow : slow / scale_shape::inner,
+                            contract_fast ? fast / scale_shape::inner : fast,
+                            layout.scale_slow_stride, layout.scale_fast_stride,
+                            narrow_offsets)] = scale;
       }
     }
   }
@@ -389,24 +428,23 @@ __global__ void quantize_mxfp8_kernel(
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
       const int position = threadIdx.x + index * tile::threads;
-      const int local_slow = position % tile::slow;
-      const int local_fast = position / tile::slow;
-      const int64_t slow = slow_start + local_slow;
-      const int64_t fast = fast_start + local_fast;
-      if (slow < layout.slow_size && fast < layout.fast_size) {
-        codes[batch * layout.code_batch_stride +
-              slow * layout.code_slow_stride + fast * layout.code_fast_stride] =
-            transposed[local_slow][local_fast];
+      const int32_t slow = position % tile::slow;
+      const int32_t fast = position / tile::slow;
+      if (slow < slow_size && fast < fast_size) {
+        codes[local_offset(slow, fast, layout.code_slow_stride,
+                           layout.code_fast_stride, narrow_offsets)] =
+            transposed[slow][fast];
       }
     }
   } else if constexpr (tile::vector) {
     const int first = tile::stream ? 0 : threadIdx.x * tile::values;
-    const int64_t slow = slow_start + first / tile::fast;
-    const int64_t fast = fast_start + first % tile::fast;
-    uint8_t* destination = codes + batch * layout.code_batch_stride +
-                           slow * layout.code_slow_stride +
-                           fast * layout.code_fast_stride;
-    if (slow < layout.slow_size && fast + tile::values <= layout.fast_size &&
+    const int32_t slow = first / tile::fast;
+    const int32_t fast = first % tile::fast;
+    uint8_t* destination = slow < slow_size && fast < fast_size
+        ? codes + local_offset(slow, fast, layout.code_slow_stride,
+                              layout.code_fast_stride, narrow_offsets)
+        : nullptr;
+    if (slow < slow_size && fast + tile::values <= fast_size &&
         reinterpret_cast<uintptr_t>(destination) % alignof(uint4) == 0) {
       uint32_t words[4] = {};
 #pragma unroll
@@ -419,8 +457,9 @@ __global__ void quantize_mxfp8_kernel(
     } else {
 #pragma unroll
       for (int index = 0; index < tile::values; ++index) {
-        if (slow < layout.slow_size && fast + index < layout.fast_size) {
-          destination[index * layout.code_fast_stride] = encoded[index];
+        if (slow < slow_size && fast + index < fast_size) {
+          destination[local_offset(0, index, 0, layout.code_fast_stride,
+                                   narrow_offsets)] = encoded[index];
         }
       }
     }
@@ -428,11 +467,11 @@ __global__ void quantize_mxfp8_kernel(
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
       const int position = threadIdx.x + index * tile::threads;
-      const int64_t slow = slow_start + position / tile::fast;
-      const int64_t fast = fast_start + position % tile::fast;
-      if (slow < layout.slow_size && fast < layout.fast_size) {
-        codes[batch * layout.code_batch_stride +
-              slow * layout.code_slow_stride + fast * layout.code_fast_stride] =
+      const int32_t slow = position / tile::fast;
+      const int32_t fast = position % tile::fast;
+      if (slow < slow_size && fast < fast_size) {
+        codes[local_offset(slow, fast, layout.code_slow_stride,
+                           layout.code_fast_stride, narrow_offsets)] =
             encoded[index];
       }
     }
@@ -442,17 +481,17 @@ __global__ void quantize_mxfp8_kernel(
     float src_sq = 0.0f, err_sq = 0.0f, under = 0.0f, nonzero = 0.0f;
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
-      int64_t slow, fast;
+      int32_t slow, fast;
       if constexpr (tile::vector) {
         const int first = tile::stream ? 0 : threadIdx.x * tile::values;
-        slow = slow_start + first / tile::fast;
-        fast = fast_start + first % tile::fast + index;
+        slow = first / tile::fast;
+        fast = first % tile::fast + index;
       } else {
         const int position = threadIdx.x + index * tile::threads;
-        slow = slow_start + position / tile::fast;
-        fast = fast_start + position % tile::fast;
+        slow = position / tile::fast;
+        fast = position % tile::fast;
       }
-      if (slow < layout.slow_size && fast < layout.fast_size) {
+      if (slow < slow_size && fast < fast_size) {
         const float source = source_values[index];
         const float reconstructed = decode_e4m3(encoded[index]) /
                                     decode_e8m0(scale);
@@ -503,35 +542,86 @@ void launch_quantize_mxfp8(
 ) {
   constexpr bool contract_fast =
       contract_dim == (input_column_major ? -2 : -1);
-  using tile = Tile<scale_shape, contract_fast, transpose_output>;
-  const int64_t padded_fast =
-      (layout.fast_size + scale_shape::inner - 1) / scale_shape::inner *
-      scale_shape::inner;
-  const int64_t fast_tiles =
-      tile::stream
-          ? (padded_fast * layout.slow_size + tile::fast * tile::slow - 1) /
-                (tile::fast * tile::slow)
-          : (layout.fast_size + tile::fast - 1) / tile::fast;
+  using tile = Tile<input_t, scale_shape, contract_fast, transpose_output,
+                    stochastic_rounding, collect_stats>;
+  const int64_t limit = std::numeric_limits<int64_t>::max();
+  int64_t fast_tiles;
+  if constexpr (tile::stream) {
+    const int64_t fast_groups = (layout.fast_size - 1) / scale_shape::inner + 1;
+    TORCH_CHECK(fast_groups <= limit / scale_shape::inner,
+                "MXFP8 padded row size exceeds int64 range");
+    const int64_t padded_fast = fast_groups * scale_shape::inner;
+    TORCH_CHECK(layout.slow_size <= limit / padded_fast,
+                "MXFP8 padded input size exceeds int64 range");
+    constexpr int tile_elements = tile::fast * tile::slow;
+    fast_tiles = (padded_fast * layout.slow_size - 1) / tile_elements + 1;
+    TORCH_CHECK(fast_tiles <= limit / tile_elements,
+                "MXFP8 padded tile positions exceed int64 range");
+  } else {
+    fast_tiles = (layout.fast_size - 1) / tile::fast + 1;
+  }
   const int64_t slow_tiles =
-      tile::stream ? 1 : (layout.slow_size + tile::slow - 1) / tile::slow;
+      tile::stream ? 1 : (layout.slow_size - 1) / tile::slow + 1;
+  TORCH_CHECK(fast_tiles <= limit / slow_tiles &&
+                  layout.batches <= limit / (slow_tiles * fast_tiles),
+              "MXFP8 tile count exceeds int64 range");
   const int64_t count = layout.batches * slow_tiles * fast_tiles;
-  const int64_t grid_x = std::min(
-      count, static_cast<int64_t>(std::numeric_limits<int32_t>::max()));
-  const int64_t grid_y = (count + grid_x - 1) / grid_x;
-  TORCH_CHECK(grid_y <= 65535, "quantize_mxfp8 tensor is too large to launch");
+  TORCH_CHECK(count <= limit / tile::threads,
+              "MXFP8 logical thread count exceeds int64 range");
+
+  const auto fits_int32 = [](int64_t slow_size, int64_t fast_size,
+                             int64_t slow_stride, int64_t fast_stride) {
+    const int64_t limit = std::numeric_limits<int32_t>::max();
+    if (slow_stride > limit || fast_stride > limit) return false;
+    const int64_t slow_offset = (slow_size - 1) * slow_stride;
+    return slow_offset <= limit &&
+           (fast_size - 1) * fast_stride <= limit - slow_offset;
+  };
+  constexpr int local_slow = tile::stream ? 1 : tile::slow;
+  constexpr int local_fast = tile::stream ? tile::values : tile::fast;
+  constexpr int scale_slow = contract_fast
+      ? local_slow : (local_slow + scale_shape::inner - 1) / scale_shape::inner;
+  constexpr int scale_fast = contract_fast
+      ? (local_fast + scale_shape::inner - 1) / scale_shape::inner : local_fast;
+  // Global bases stay 64-bit; narrow only offsets within a tile.
+  const bool narrow_offsets =
+      fits_int32(local_slow, local_fast,
+                 layout.input_slow_stride, layout.input_fast_stride) &&
+      fits_int32(local_slow, local_fast,
+                 layout.code_slow_stride, layout.code_fast_stride) &&
+      fits_int32(scale_slow, scale_fast,
+                 layout.scale_slow_stride, layout.scale_fast_stride);
   at::Tensor partials;
   float* stats_partials = nullptr;
   if constexpr (collect_stats) {
     partials = at::empty({count, 4}, input.options().dtype(at::kFloat));
     stats_partials = partials.data_ptr<float>();
   }
-  quantize_mxfp8_kernel<input_t, scale_shape, contract_dim, input_column_major,
-                        transpose_output, stochastic_rounding, collect_stats>
-      <<<dim3(grid_x, grid_y), tile::threads, 0, stream>>>(
-          input.const_data_ptr<input_t>(),
-          reinterpret_cast<uint8_t*>(codes.data_ptr()),
-          reinterpret_cast<uint8_t*>(scales.data_ptr()), layout, fast_tiles,
-          slow_tiles, philox, stats_partials);
+  const auto* device = at::cuda::getCurrentDeviceProperties();
+  for (int64_t first_batch = 0; first_batch < layout.batches;) {
+    const int64_t batch_chunk =
+        std::min(layout.batches - first_batch, int64_t{device->maxGridSize[2]});
+    for (int64_t first_slow = 0; first_slow < slow_tiles;) {
+      const int64_t slow_chunk =
+          std::min(slow_tiles - first_slow, int64_t{device->maxGridSize[1]});
+      for (int64_t first_fast = 0; first_fast < fast_tiles;) {
+        const int64_t fast_chunk =
+            std::min(fast_tiles - first_fast, int64_t{device->maxGridSize[0]});
+        const dim3 grid(fast_chunk, slow_chunk, batch_chunk);
+        quantize_mxfp8_kernel<input_t, scale_shape, contract_dim, input_column_major,
+                              transpose_output, stochastic_rounding, collect_stats>
+            <<<grid, tile::threads, 0, stream>>>(
+                input.const_data_ptr<input_t>(),
+                reinterpret_cast<uint8_t*>(codes.data_ptr()),
+                reinterpret_cast<uint8_t*>(scales.data_ptr()), layout, fast_tiles,
+                slow_tiles, first_fast, first_slow, first_batch, narrow_offsets,
+                philox, stats_partials);
+        first_fast += fast_chunk;
+      }
+      first_slow += slow_chunk;
+    }
+    first_batch += batch_chunk;
+  }
   if constexpr (collect_stats) {
     finalize_stats_kernel<<<1, 256, 0, stream>>>(
         stats_partials, count, input.numel(), stats->data_ptr<float>());

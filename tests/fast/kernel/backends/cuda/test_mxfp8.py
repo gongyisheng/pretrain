@@ -24,7 +24,7 @@ BLOCK_SHAPES = (
 TAIL_SHAPES = ((130, 259), (2, 130, 259))
 CONTIGUOUS_B32_SHAPES = ((33, 64), (2, 33, 64))
 ALIGNED_SQUARE32_SHAPES = ((64, 96), (2, 64, 96))
-LARGE_BATCH_SQUARE32_SHAPES = ((65536, 1, 1),)
+LARGE_BATCH_SQUARE32_SHAPES = ((65536, 1, 2),)
 SHAPES = TAIL_SHAPES + CONTIGUOUS_B32_SHAPES + ALIGNED_SQUARE32_SHAPES
 NARROW_SHAPES = ((3, 17), (2, 3, 17))
 LAYOUTS = ("dense", "strided", "transposed", "offset")
@@ -155,7 +155,7 @@ def test_quantize_mxfp8_precision(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("block_shape", BLOCK_SHAPES)
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", SHAPES + LARGE_BATCH_SQUARE32_SHAPES)
 @pytest.mark.parametrize("output_layout", OUTPUT_LAYOUTS)
 def test_quantize_mxfp8_stochastic_rounding(
     dtype, block_shape, contract_dim, shape, output_layout
@@ -164,6 +164,12 @@ def test_quantize_mxfp8_stochastic_rounding(
         block_shape != (1, 32) or contract_dim != -1
     ):
         pytest.skip("contiguous B32 coverage targets the K-major API contract")
+    if shape in LARGE_BATCH_SQUARE32_SHAPES and (
+        dtype is not torch.bfloat16
+        or block_shape != (32, 32)
+        or output_layout != "row_major"
+    ):
+        pytest.skip("large-batch square32 coverage uses the smallest stochastic grid")
     if shape in TAIL_SHAPES and dtype is not torch.float32:
         pytest.skip("tail stochastic-rounding coverage uses FP32")
     qmax = torch.finfo(torch.float8_e4m3fn).max
