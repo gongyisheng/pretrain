@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from src.quant.constants import EPS
-from src.quant.quantize import dequantize_operand, quantize_operand
+from src.quant.quantize import dequantize_operand, quantize_operand, unpack_e2m1
 from src.quant.rotation import build_rotation
 from src.quant.utils import is_fp4, is_int8s, str_to_dtype, str_to_qmax, str_to_qmin
 from tests.fast.helper import cuda_sm89_or_newer
@@ -55,6 +55,18 @@ ROTATION_BLOCK32_CFG = {
 def _offs(counts):
     """Return cumulative group-end offsets as int32."""
     return torch.tensor(counts).cumsum(0).to(torch.int32)
+
+
+RETURN_STATS_FORMATS = ["int8", E4M3, "fp4_e2m1"]
+RETURN_STATS_SCALES = [TENSORWISE, ROWWISE, BLOCKWISE1D_16_E2M1]
+RETURN_STATS_GEOMETRIES = [
+    "dense",
+    "stacked",
+    "ragged_outer",
+    "ragged_contract",
+    "ragged_tail",
+]
+RETURN_STATS_ROTATIONS = [None, ROTATION_BLOCK4_CFG]
 
 
 def _make(init_method, shape, dtype=torch.float32):
@@ -429,6 +441,145 @@ def test_quantize_operand_raise_error(case, compiled):
         torch.set_default_device(previous_device)
 
 
+@pytest.mark.parametrize("stochastic_rounding", STOCHASTIC_ROUNDING)
+@pytest.mark.parametrize("dtype", INPUT_DTYPES)
+@pytest.mark.parametrize("geometry", RETURN_STATS_GEOMETRIES)
+@pytest.mark.parametrize("scale_cfg", RETURN_STATS_SCALES)
+@pytest.mark.parametrize("fmt", RETURN_STATS_FORMATS)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("rotation_cfg", RETURN_STATS_ROTATIONS)
+def test_quantize_operand_return_quantization_stats(
+    rotation_cfg, contract_dim, fmt, scale_cfg, geometry, dtype, stochastic_rounding
+):
+    skip_unsupported_fmt_scale(fmt, scale_cfg)
+    shape = (3, 16, 16) if geometry == "stacked" else (16, 16)
+    source = _make("normal", shape, dtype)
+    source[..., 0, 0] = 0
+    offs = None
+    ragged_dim = None
+    if geometry == "ragged_outer":
+        offs = _offs([0, 8, 0, 8, 0]).to(source.device)
+        ragged_dim = -1 if contract_dim == -2 else -2
+    elif geometry == "ragged_contract":
+        offs = _offs([0, 8, 0, 8, 0]).to(source.device)
+        ragged_dim = contract_dim
+    elif geometry == "ragged_tail":
+        if is_fp4(fmt):
+            pytest.skip("FP4 requires offsets to cover the full contraction axis")
+        offs = _offs([0, 4, 0, 8, 0]).to(source.device)
+        ragged_dim = contract_dim
+        source.narrow(contract_dim, 12, 4).zero_()
+    source.requires_grad_()
+    rotation = build_rotation(rotation_cfg) if rotation_cfg is not None else None
+
+    torch.manual_seed(42)
+    plain = quantize_operand(
+        source,
+        contract_dim,
+        fmt,
+        scale_cfg,
+        offs=offs,
+        ragged_dim=ragged_dim,
+        stochastic_rounding=stochastic_rounding,
+        rotation=rotation,
+    )
+    plain_rng = _rng_state(source)
+    plain_codes, plain_scale, plain_global_scale, plain_stats = plain
+    assert plain_stats is None
+    torch.manual_seed(42)
+    codes, scale, global_scale, stats = quantize_operand(
+        source,
+        contract_dim,
+        fmt,
+        scale_cfg,
+        offs=offs,
+        ragged_dim=ragged_dim,
+        stochastic_rounding=stochastic_rounding,
+        rotation=rotation,
+        return_quantization_stats=True,
+    )
+    stats_rng = _rng_state(source)
+    for plain_value, stats_value in zip(
+        (plain_codes, plain_scale, plain_global_scale), (codes, scale, global_scale)
+    ):
+        if plain_value is None:
+            assert stats_value is None
+        else:
+            assert torch.equal(_bits(plain_value), _bits(stats_value))
+    assert torch.equal(plain_rng, stats_rng)
+    dequantized = dequantize_operand(
+        codes,
+        scale,
+        contract_dim,
+        scale_cfg,
+        offs=offs,
+        ragged_dim=ragged_dim,
+        rotation=rotation,
+        global_scale=global_scale,
+    )
+    code_values = (
+        unpack_e2m1(codes, contract_dim)
+        if codes.dtype is torch.uint8
+        else codes.float()
+    )
+    mask_source = (
+        source.float()
+        if rotation is None
+        else rotation(source, contract_dim, torch.float32)
+    )
+    fields = (
+        source.float().square(),
+        (source.float() - dequantized.float()).square(),
+        ((mask_source != 0) & (code_values == 0)).float(),
+        (mask_source != 0).float(),
+    )
+    if source.ndim == 3:
+        expected_fields = [field.flatten(1).sum(1) for field in fields]
+        expected_numel = torch.full_like(
+            expected_fields[0], source.shape[-2] * source.shape[-1]
+        )
+    elif offs is None:
+        expected_fields = [field.sum().reshape(1) for field in fields]
+        expected_numel = torch.full_like(expected_fields[0], source.numel())
+    else:
+        starts = [0, *offs.tolist()]
+        dense_dim = -1 if ragged_dim == -2 else -2
+        expected_fields = [
+            torch.stack(
+                [
+                    field.narrow(ragged_dim, start, stop - start).sum()
+                    for start, stop in zip(starts[:-1], starts[1:])
+                ]
+            )
+            for field in fields
+        ]
+        expected_numel = torch.tensor(
+            [
+                (stop - start) * source.shape[dense_dim]
+                for start, stop in zip(starts[:-1], starts[1:])
+            ],
+            device=source.device,
+            dtype=torch.float32,
+        )
+    expected = torch.stack(
+        (
+            expected_fields[0],
+            expected_fields[1],
+            expected_fields[2],
+            expected_numel,
+            expected_fields[3],
+        ),
+        dim=-1,
+    )
+    assert stats.dtype is torch.float32 and not stats.requires_grad
+    assert stats.shape == (expected.shape[0], 5)
+    # Ragged reduction orders differ; the CPU grid peaks at 0.001953125 (3.74x).
+    torch.testing.assert_close(
+        stats[:, :2], expected[:, :2], rtol=0, atol=0.0073 if offs is not None else 0
+    )
+    assert torch.equal(stats[:, 2:], expected[:, 2:])
+
+
 @pytest.mark.parametrize("init_method", INIT_METHODS)
 @pytest.mark.parametrize("dtype", INPUT_DTYPES)
 @pytest.mark.parametrize("geometry", GEOMETRY_CASES)
@@ -473,9 +624,10 @@ def test_quantize_operand_precision(
 
     source_bits = x.contiguous().view(torch.uint8).clone()
     rng = _rng_state(x)
-    codes, scale, global_scale = quantize_operand(
+    codes, scale, global_scale, quantization_stats = quantize_operand(
         x, contract_dim, fmt, scale_cfg, offs=offs, ragged_dim=ragged_dim
     )
+    assert quantization_stats is None
 
     expected_codes_shape = list(shape)
     if is_fp4(fmt):
@@ -528,7 +680,7 @@ def test_quantize_operand_precision(
     current_rng = _rng_state(x)
     assert torch.equal(current_rng, rng)
     assert torch.equal(x.contiguous().view(torch.uint8), source_bits)
-    again, _, _ = quantize_operand(
+    again, _, _, _ = quantize_operand(
         x, contract_dim, fmt, scale_cfg, offs=offs, ragged_dim=ragged_dim
     )
     assert torch.equal(_bits(again), _bits(codes))
@@ -542,7 +694,7 @@ def test_quantize_operand_precision(
             offs=offs,
             ragged_dim=ragged_dim,
         )
-        contiguous_codes, contiguous_scale, contiguous_global = contiguous
+        contiguous_codes, contiguous_scale, contiguous_global, _ = contiguous
         assert torch.equal(_bits(codes), _bits(contiguous_codes))
         assert torch.equal(_bits(scale), _bits(contiguous_scale))
         assert (global_scale is None) == (contiguous_global is None)
@@ -554,13 +706,15 @@ def test_quantize_operand_precision(
             quantize_operand(expert, contract_dim, fmt, scale_cfg) for expert in x
         ]
         assert torch.equal(
-            _bits(codes), _bits(torch.stack([q for q, _, _ in per_expert]))
+            _bits(codes), _bits(torch.stack([q for q, _, _, _ in per_expert]))
         )
         assert torch.equal(
-            _bits(scale), _bits(torch.stack([s for _, s, _ in per_expert]))
+            _bits(scale), _bits(torch.stack([s for _, s, _, _ in per_expert]))
         )
         if global_scale is not None:
-            assert torch.equal(global_scale, torch.cat([g for _, _, g in per_expert]))
+            assert torch.equal(
+                global_scale, torch.cat([g for _, _, g, _ in per_expert])
+            )
 
     qmax = str_to_qmax(fmt)
     # Every block peak is in range, so code clamping is inactive.
@@ -630,7 +784,7 @@ def test_quantize_operand_narrow_scale_clamps(contract_dim, case, device, fmt):
         pytest.skip("an e8m0 scale is defined only over fp8 elements")
     scale_cfg = scale_of("blockwise", (1, 16), scale_dtype)
     x = torch.full((16, 16), magnitude, device=device)
-    codes, scale, global_scale = quantize_operand(x, contract_dim, fmt, scale_cfg)
+    codes, scale, global_scale, _ = quantize_operand(x, contract_dim, fmt, scale_cfg)
     assert global_scale is None
     assert torch.equal(scale.float(), torch.full_like(scale.float(), expected_scale))
     assert torch.isfinite(codes.float()).all()
@@ -694,7 +848,7 @@ def test_quantize_operand_global_scale_is_per_group():
     offs = _offs([32, 32])
 
     def quiet_error(offs, ragged_dim):
-        codes, scale, g = quantize_operand(
+        codes, scale, g, _ = quantize_operand(
             x, -1, "int4", BLOCKWISE1D_16_E2M1, offs=offs, ragged_dim=ragged_dim
         )
         deq = dequantize_operand(
@@ -815,7 +969,7 @@ def test_quantize_operand_fp4_e2m1_precision(contract_dim, dtype, boundary, scal
             expected_codes = expected_codes[:, None].repeat(1, 2)
     expected = expected.to(device=source.device, dtype=torch.float32)
 
-    codes, scale, global_scale = quantize_operand(
+    codes, scale, global_scale, _ = quantize_operand(
         source, contract_dim, "fp4_e2m1", scale_cfg
     )
     assert codes.dtype is torch.uint8
@@ -857,7 +1011,7 @@ def test_quantize_operand_stochastic_rounding(fmt, enable_sr, device):
         )
     probe = probe.reshape(1, -1)
     rng = _rng_state(probe)
-    codes, scale, _ = quantize_operand(
+    codes, scale, _, _ = quantize_operand(
         probe, -1, fmt, TENSORWISE, stochastic_rounding=enable_sr
     )
     if not enable_sr:
@@ -877,7 +1031,7 @@ def test_quantize_operand_stochastic_rounding(fmt, enable_sr, device):
     ends_source = torch.tensor([[1.0, 0.0, -0.0, -1.0]], device=device)
     if is_fp4(fmt):
         ends_source = torch.cat([ends_source, ends_source.new_zeros(1, 12)], dim=-1)
-    ends, end_scale, _ = quantize_operand(
+    ends, end_scale, _, _ = quantize_operand(
         ends_source,
         -1,
         fmt,
@@ -893,10 +1047,10 @@ def test_quantize_operand_stochastic_rounding(fmt, enable_sr, device):
     x = torch.cat(
         [torch.ones(1, device=device), torch.full((9999,), 0.3, device=device)]
     ).reshape(1, -1)
-    draws, scale, _ = quantize_operand(
+    draws, scale, _, _ = quantize_operand(
         x, -1, fmt, TENSORWISE, stochastic_rounding=enable_sr
     )
-    again, _, _ = quantize_operand(
+    again, _, _, _ = quantize_operand(
         x, -1, fmt, TENSORWISE, stochastic_rounding=enable_sr
     )
     draw_values = dequantize_operand(draws, scale, -1, TENSORWISE)
@@ -1048,7 +1202,7 @@ def test_quantize_operand_rotation(
             },
         }
     )
-    codes, scale, global_scale = quantize_operand(
+    codes, scale, global_scale, _ = quantize_operand(
         x,
         contract_dim,
         "int8",
@@ -1067,7 +1221,7 @@ def test_quantize_operand_rotation(
         rotation=rotation,
         global_scale=global_scale,
     )
-    baseline_codes, baseline_scale, baseline_global = quantize_operand(
+    baseline_codes, baseline_scale, baseline_global, _ = quantize_operand(
         x,
         contract_dim,
         "int8",
@@ -1104,7 +1258,8 @@ def test_quantize_operand_rotation(
 @cuda_sm89_or_newer
 @pytest.mark.parametrize("fmt", COMPILED_FORMATS)
 @pytest.mark.parametrize("scale_cfg", COMPILED_SCALES)
-def test_quantize_operand_compiles_fullgraph(scale_cfg, fmt):
+@pytest.mark.parametrize("return_quantization_stats", [False, True])
+def test_quantize_operand_compiles_fullgraph(scale_cfg, fmt, return_quantization_stats):
     """Rotated quantization must have identical eager and compiled bits.
 
     The nvfp4 case also pins that a global scale stays a tensor: reading it back
@@ -1115,18 +1270,33 @@ def test_quantize_operand_compiles_fullgraph(scale_cfg, fmt):
     rotation = build_rotation(ROTATION_BLOCK32_CFG).cuda()
 
     def quantize(x):
-        return quantize_operand(x, -1, fmt, scale_cfg, rotation=rotation)
+        return quantize_operand(
+            x,
+            -1,
+            fmt,
+            scale_cfg,
+            rotation=rotation,
+            return_quantization_stats=return_quantization_stats,
+        )
 
-    eager_codes, eager_scale, eager_global = quantize(x)
-    compiled_codes, compiled_scale, compiled_global = torch.compile(
-        quantize, fullgraph=True
-    )(x)
+    eager = quantize(x)
+    compiled = torch.compile(quantize, fullgraph=True)(x)
+    eager_codes, eager_scale, eager_global, eager_stats = eager
+    compiled_codes, compiled_scale, compiled_global, compiled_stats = compiled
 
     assert torch.equal(compiled_codes, eager_codes)
     assert torch.equal(compiled_scale, eager_scale)
     assert (eager_global is None) == (compiled_global is None)
     if eager_global is not None:
         assert torch.equal(compiled_global, eager_global)
+    if return_quantization_stats:
+        # Compiled reduction errors peak at 7.63e-6 across this grid (4.06x).
+        torch.testing.assert_close(
+            compiled_stats[:, :2], eager_stats[:, :2], rtol=0, atol=3.1e-5
+        )
+        assert torch.equal(compiled_stats[:, 2:], eager_stats[:, 2:])
+    else:
+        assert eager_stats is None and compiled_stats is None
 
     def dequantize(codes, scale, global_scale):
         return dequantize_operand(
@@ -1161,7 +1331,10 @@ def test_quantize_operand_fp4_e2m1_stochastic_rounding_compiles_fullgraph():
             stochastic_rounding=True,
         )
 
-    codes, scale, global_scale = torch.compile(quantize, fullgraph=True)(source)
+    codes, scale, global_scale, quantization_stats = torch.compile(
+        quantize, fullgraph=True
+    )(source)
+    assert quantization_stats is None
     dequantized = dequantize_operand(
         codes, scale, -1, BLOCKWISE1D_16, global_scale=global_scale
     )
@@ -1220,7 +1393,7 @@ def test_quantize_operand_fp4_e2m1_stochastic_rounding_precision(
         return random_bits
 
     monkeypatch.setattr(torch, "randint", fixed_random_bits)
-    codes, scale, global_scale = quantize_operand(
+    codes, scale, global_scale, _ = quantize_operand(
         source,
         contract_dim,
         "fp4_e2m1",

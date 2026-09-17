@@ -222,7 +222,7 @@ GROUPED_STATS_CONFIGS = [
     ("fp4_e2m1_4over6", "fp4_e2m1_4over6", True, True, True),
 ]
 # fmt: on
-GROUPED_STATS_LAYOUTS = ["ragged_m", "ragged_k"]
+GROUPED_STATS_LAYOUTS = ["ragged_m", "ragged_k", "ragged_n"]
 GROUPED_STATS_DEVICES = ["cpu", "cuda"]
 
 
@@ -254,9 +254,11 @@ def test_quantized_grouped_mm_records_stats(device, layout, config, a_scale, b_s
         a, b, offs = _make(COUNTS, K=64, N=48)
     if layout == "ragged_m":
         src_a, src_b = a, b
-    else:
+    elif layout == "ragged_k":
         src_a = a.mT
         src_b = torch.randn(a.shape[0], b.shape[-1], device=a.device, dtype=a.dtype)
+    else:
+        src_a, src_b = b.mT, a.mT
     # Allocate one stats slot per expert to catch cold experts.
     experts = len(offs)
     a_stats = QuantizationStats("act/x", experts, a.device) if with_stats else None
@@ -292,8 +294,8 @@ def test_quantized_grouped_mm_records_stats(device, layout, config, a_scale, b_s
         expected = []
         start = 0
         for group, stop in enumerate(offs.tolist()):
-            aq, sa, gsa = quantize_operand(a[start:stop], -1, a_fmt, a_scale)
-            bq, sb, gsb = quantize_operand(b[group], -2, b_fmt, b_scale)
+            aq, sa, gsa, _ = quantize_operand(a[start:stop], -1, a_fmt, a_scale)
+            bq, sb, gsb, _ = quantize_operand(b[group], -2, b_fmt, b_scale)
             expected.append(
                 dequantize_operand(aq, sa, -1, a_scale, global_scale=gsa)
                 @ dequantize_operand(bq, sb, -2, b_scale, global_scale=gsb)
@@ -308,6 +310,8 @@ def test_quantized_grouped_mm_records_stats(device, layout, config, a_scale, b_s
         assert a_stats.numel.shape == (experts,)
         assert a_stats.numel.sum().item() == (src_a.numel() if a_folded else 0)
         assert b_stats.numel.sum().item() == (src_b.numel() if b_folded else 0)
+        if layout == "ragged_n" and a_folded:
+            assert torch.equal(a_stats.src_sq, src_a.float().square().flatten(1).sum(1))
 
 
 # 168 rows over four experts: one empty, one shorter than a rotation block, and one

@@ -319,8 +319,8 @@ def make_scaled_mm_inputs(
             "scale_dtype": scale_dtype,
             "enable_global_scale": False,
         }
-        aq, sa, _ = quantize_operand(a, -1, format.a_format, scale_config)
-        bq, sb, _ = quantize_operand(b, -2, format.b_format, scale_config)
+        aq, sa, _, _ = quantize_operand(a, -1, format.a_format, scale_config)
+        bq, sb, _, _ = quantize_operand(b, -2, format.b_format, scale_config)
         block_size = scale.block_size
     bias = _make_random_tensor((case.n,), device, out_dtype) if with_bias else None
     gsa = torch.tensor([0.5], device=device) if with_global_scale else None
@@ -412,7 +412,7 @@ def make_scaled_grouped_mm_inputs(
         result = aq, bq, sa, sb
 
     elif layout == "ragged_m":
-        aq, sa, _ = quantize_operand(
+        aq, sa, _, _ = quantize_operand(
             _make_random_tensor((rows, case.k), device, out_dtype),
             -1,
             format.a_format,
@@ -424,11 +424,11 @@ def make_scaled_grouped_mm_inputs(
                 for _ in range(expert_count)
             ]
         )
-        bq, sb, _ = quantize_operand(b, -2, format.b_format, scale_config)
+        bq, sb, _, _ = quantize_operand(b, -2, format.b_format, scale_config)
         result = aq, bq, sa, sb
 
     elif layout == "ragged_k":
-        aq, sa, _ = quantize_operand(
+        aq, sa, _, _ = quantize_operand(
             _make_random_tensor((rows, case.m), device, out_dtype),
             -2,
             format.a_format,
@@ -436,7 +436,7 @@ def make_scaled_grouped_mm_inputs(
             offs=offs,
             ragged_dim=-2,
         )
-        bq, sb, _ = quantize_operand(
+        bq, sb, _, _ = quantize_operand(
             _make_random_tensor((rows, case.n), device, out_dtype),
             -2,
             format.b_format,
@@ -453,8 +453,8 @@ def make_scaled_grouped_mm_inputs(
                 for _ in range(expert_count)
             ]
         )
-        aq, sa, _ = quantize_operand(a, -1, format.a_format, scale_config)
-        bqT, sbT, _ = quantize_operand(
+        aq, sa, _, _ = quantize_operand(a, -1, format.a_format, scale_config)
+        bqT, sbT, _, _ = quantize_operand(
             _make_random_tensor((rows, case.k), device, out_dtype),
             -1,
             format.b_format,
@@ -465,13 +465,13 @@ def make_scaled_grouped_mm_inputs(
         result = aq, bqT.mT, sa, sbT.mT
 
     elif not packed_e2m1 and layout == "3d_x_3d":
-        aq, sa, _ = quantize_operand(
+        aq, sa, _, _ = quantize_operand(
             _make_random_tensor((expert_count, case.m, case.k), device, out_dtype),
             -1,
             format.a_format,
             scale_config,
         )
-        bq, sb, _ = quantize_operand(
+        bq, sb, _, _ = quantize_operand(
             _make_random_tensor((expert_count, case.k, case.n), device, out_dtype),
             -2,
             format.b_format,
