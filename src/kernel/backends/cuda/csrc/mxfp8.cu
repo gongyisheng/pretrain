@@ -64,16 +64,6 @@ __device__ __forceinline__ float decode_e8m0(uint8_t code) {
   return __int_as_float(static_cast<int>(bits));
 }
 
-__device__ __forceinline__ float decode_e4m3(uint8_t code) {
-  const float magnitude = (code & 0x7f) < 8
-      ? static_cast<float>(code & 7) * 0x1p-9f
-      : ((code & 0x7f) == 0x7f
-             ? nanf("")
-             : ldexpf(1.0f + static_cast<float>(code & 7) * 0.125f,
-                       static_cast<int>((code >> 3) & 0xf) - 7));
-  return code & 0x80 ? -magnitude : magnitude;
-}
-
 __global__ void finalize_stats_kernel(
     const float* partials,
     int64_t count,
@@ -196,15 +186,16 @@ __global__ void quantize_mxfp8_kernel(
   uint8_t* codes = nullptr;
   uint8_t* scales = nullptr;
   if (valid_tile) {
-    input = params.input_data<input_t>() + batch * params.input_batch_stride +
-        row_origin * params.input_row_stride + col_origin * params.input_col_stride;
-    codes = params.code_data<uint8_t>() + batch * params.code_batch_stride +
-        row_origin * params.code_row_stride + col_origin * params.code_col_stride;
-    scales = params.scale_data<uint8_t>() + batch * params.scale_batch_stride +
-        (contract_dim == -1 ? row_origin : row_origin / scale_shape::inner) *
-            params.scale_row_stride +
-        (contract_dim == -1 ? col_origin / scale_shape::inner : col_origin) *
-            params.scale_col_stride;
+    input = params.input_data<input_t>() +
+        input_offset(params, batch, row_origin, col_origin);
+    codes = params.code_data<uint8_t>() +
+        output_offset(params, batch, row_origin, col_origin);
+    const int64_t scale_row =
+        contract_dim == -1 ? row_origin : row_origin / scale_shape::inner;
+    const int64_t scale_col =
+        contract_dim == -1 ? col_origin / scale_shape::inner : col_origin;
+    scales = params.scale_data<uint8_t>() +
+        scale_offset(params, batch, scale_row, scale_col);
   }
   const int lane = threadIdx.x % 32;
   const int warp = threadIdx.x / 32;
@@ -409,7 +400,7 @@ __global__ void quantize_mxfp8_kernel(
       for (int element = 0; element < 4 && index + element < tile::values;
            ++element) {
         encoded[index + element] =
-            fp8_stochastic<false>(values[index + element], words[element]);
+            encode_fp8_stochastic<false>(values[index + element], words[element]);
       }
     }
   } else if constexpr (tile::values % 2 == 0) {
@@ -422,7 +413,7 @@ __global__ void quantize_mxfp8_kernel(
       encoded[index + 1] = static_cast<uint8_t>(packed >> 8);
     }
   } else {
-    encoded[0] = fp8_rne<false>(values[0]);
+    encoded[0] = encode_fp8_rne<false>(values[0]);
   }
 
   if constexpr (transpose_output) {
@@ -504,7 +495,7 @@ __global__ void quantize_mxfp8_kernel(
   }
 
   if constexpr (collect_stats) {
-    float src_sq = 0.0f, err_sq = 0.0f, under = 0.0f, nonzero = 0.0f;
+    QuantizationStatistics statistics;
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
       const int position = tile::vector
@@ -516,18 +507,19 @@ __global__ void quantize_mxfp8_kernel(
           position, tile::rows, tile::cols);
       if (row < row_size && col < col_size) {
         const float source = source_values[index];
-        const float reconstructed = decode_e4m3(encoded[index]) /
+        const float reconstructed = decode_fp8<false>(encoded[index]) /
                                     decode_e8m0(scale);
-        src_sq += source * source;
-        const float error = source - reconstructed;
-        err_sq += error * error;
-        const bool source_nonzero = source != 0.0f;
-        under += source_nonzero && (encoded[index] & 0x7f) == 0;
-        nonzero += source_nonzero;
+        accumulate_quantization_statistics(
+            &statistics, source, reconstructed, (encoded[index] & 0x7f) == 0);
       }
     }
     __shared__ float stats_warp_sums[4][8];
-    float stat_values[4] = {src_sq, err_sq, under, nonzero};
+    float stat_values[4] = {
+        statistics.src_sq,
+        statistics.err_sq,
+        statistics.under,
+        statistics.nonzero,
+    };
 #pragma unroll
     for (int value = 0; value < 4; ++value) {
 #pragma unroll

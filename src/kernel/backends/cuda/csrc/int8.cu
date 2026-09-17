@@ -22,62 +22,14 @@ namespace {
 
 constexpr int kThreads = 256;
 constexpr int kValuesPerThread = 8;
-constexpr float kMinScale = 1.0e-30f;
 
-struct LaunchGrid {
-  dim3 grid;
-  int64_t blocks_per_row;
-};
-
-LaunchGrid make_launch_grid(int64_t blocks) {
+dim3 make_launch_grid(int64_t blocks) {
   constexpr int64_t kMaxGridX = std::numeric_limits<int32_t>::max();
   constexpr int64_t kMaxGridY = 65535;
-  const int64_t blocks_per_row = std::min(blocks, kMaxGridX);
-  const int64_t rows = (blocks + blocks_per_row - 1) / blocks_per_row;
-  TORCH_CHECK(rows <= kMaxGridY, "quantize_int8 tensor is too large to launch");
-  return {dim3(blocks_per_row, rows), blocks_per_row};
-}
-
-__device__ __forceinline__ int64_t grid_index(int64_t blocks_per_row) {
-  return static_cast<int64_t>(blockIdx.x) +
-      static_cast<int64_t>(blockIdx.y) * blocks_per_row;
-}
-
-__device__ __forceinline__ float max_with_nan(float lhs, float rhs) {
-  return isnan(lhs) || isnan(rhs) ? nanf("") : fmaxf(lhs, rhs);
-}
-
-__device__ __forceinline__ float scale_from_amax(float amax, float qmax) {
-  return isnan(amax) ? nanf("") : fmaxf(amax * (1.0f / qmax), kMinScale);
-}
-
-template <typename index_t>
-__device__ __forceinline__ int64_t input_offset(
-    const QuantizeParams& params, int64_t batch, int64_t row, int64_t col) {
-  const index_t local_offset = static_cast<index_t>(row) *
-          static_cast<index_t>(params.input_row_stride) +
-      static_cast<index_t>(col) * static_cast<index_t>(params.input_col_stride);
-  return batch * params.input_batch_stride + static_cast<int64_t>(local_offset);
-}
-
-template <typename index_t>
-__device__ __forceinline__ int64_t output_offset(
-    const QuantizeParams& params, int64_t batch, int64_t row, int64_t col) {
-  const index_t local_offset = static_cast<index_t>(row) *
-          static_cast<index_t>(params.code_row_stride) +
-      static_cast<index_t>(col) * static_cast<index_t>(params.code_col_stride);
-  return batch * params.code_batch_stride + static_cast<int64_t>(local_offset);
-}
-
-template <typename index_t>
-__device__ __forceinline__ int64_t scale_offset(
-    const QuantizeParams& params, int64_t batch, int64_t outer, int64_t contract) {
-  const int64_t row = params.contract_dim == -1 ? outer : contract;
-  const int64_t col = params.contract_dim == -1 ? contract : outer;
-  const index_t local_offset = static_cast<index_t>(row) *
-          static_cast<index_t>(params.scale_row_stride) +
-      static_cast<index_t>(col) * static_cast<index_t>(params.scale_col_stride);
-  return batch * params.scale_batch_stride + static_cast<int64_t>(local_offset);
+  const int64_t grid_x = std::min(blocks, kMaxGridX);
+  const int64_t grid_y = (blocks + grid_x - 1) / grid_x;
+  TORCH_CHECK(grid_y <= kMaxGridY, "quantize_int8 tensor is too large to launch");
+  return dim3(grid_x, grid_y);
 }
 
 template <typename input_t, typename index_t>
@@ -207,8 +159,7 @@ template <typename input_t, typename index_t, bool kStochastic, bool kStatistics
 __global__ void quantize_tile_kernel(
     QuantizeParams params,
     float qmax,
-    at::PhiloxCudaState philox,
-    int64_t blocks_per_row) {
+    at::PhiloxCudaState philox) {
   const int64_t outer_groups =
       params.contract_dim == -1 ? params.row_block_count : params.col_block_count;
   const int64_t contract_groups =
@@ -217,7 +168,7 @@ __global__ void quantize_tile_kernel(
       params.contract_dim == -1 ? params.rows_per_block : params.cols_per_block;
   const int64_t block_contract =
       params.contract_dim == -1 ? params.cols_per_block : params.rows_per_block;
-  const int64_t tile = grid_index(blocks_per_row);
+  const int64_t tile = grid_index();
   const int64_t tile_count =
       params.batches * outer_groups * contract_groups;
   if (tile >= tile_count) {
@@ -243,7 +194,7 @@ __global__ void quantize_tile_kernel(
          contract += blockDim.x) {
       const int64_t row = params.contract_dim == -1 ? outer : contract;
       const int64_t col = params.contract_dim == -1 ? contract : outer;
-      maximum = max_with_nan(
+      maximum = strict_max(
           maximum, fabsf(load_value<input_t, index_t>(params, batch, row, col)));
     }
   }
@@ -252,17 +203,19 @@ __global__ void quantize_tile_kernel(
   __syncthreads();
   for (int width = kThreads / 2; width > 0; width >>= 1) {
     if (threadIdx.x < width) {
-      shared_maximum[threadIdx.x] = max_with_nan(
+      shared_maximum[threadIdx.x] = strict_max(
           shared_maximum[threadIdx.x], shared_maximum[threadIdx.x + width]);
     }
     __syncthreads();
   }
   __shared__ float shared_scale;
   if (threadIdx.x == 0) {
-    shared_scale = scale_from_amax(shared_maximum[0], qmax);
+    shared_scale = compute_scale(shared_maximum[0], qmax);
     for (int64_t outer = outer_start; outer < outer_end; ++outer) {
+      const int64_t row = params.contract_dim == -1 ? outer : contract_group;
+      const int64_t col = params.contract_dim == -1 ? contract_group : outer;
       params.scale_data<float>()[scale_offset<index_t>(
-          params, batch, outer, contract_group)] = shared_scale;
+          params, batch, row, col)] = shared_scale;
     }
   }
   __syncthreads();
@@ -291,15 +244,14 @@ __global__ void quantize_tile_kernel(
     }
   }
   reduce_statistics<kStatistics>(statistics, params.statistics_partials,
-                                 grid_index(blocks_per_row));
+                                 grid_index());
 }
 
 template <typename input_t, typename index_t, bool kStochastic, bool kStatistics>
 __global__ void quantize_blockwise_1d_kernel(
     QuantizeParams params,
     float qmax,
-    at::PhiloxCudaState philox,
-    int64_t blocks_per_row) {
+    at::PhiloxCudaState philox) {
   const int64_t outer_groups =
       params.contract_dim == -1 ? params.row_block_count : params.col_block_count;
   const int64_t contract_groups =
@@ -309,7 +261,7 @@ __global__ void quantize_blockwise_1d_kernel(
   constexpr int kWarps = kThreads / 32;
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
-  const int64_t tile = grid_index(blocks_per_row) * kWarps + warp;
+  const int64_t tile = grid_index() * kWarps + warp;
   const int64_t tile_count = params.batches * outer_groups * contract_groups;
   const bool valid_tile = tile < tile_count;
   if (!valid_tile) {
@@ -330,16 +282,18 @@ __global__ void quantize_blockwise_1d_kernel(
        contract += 32) {
     const int64_t row = params.contract_dim == -1 ? outer : contract;
     const int64_t col = params.contract_dim == -1 ? contract : outer;
-    maximum = max_with_nan(
+    maximum = strict_max(
         maximum, fabsf(load_value<input_t, index_t>(params, batch, row, col)));
   }
   for (int width = 16; width > 0; width >>= 1) {
-    maximum = max_with_nan(maximum, __shfl_down_sync(0xffffffff, maximum, width));
+    maximum = strict_max(maximum, __shfl_down_sync(0xffffffff, maximum, width));
   }
-  const float scale = __shfl_sync(0xffffffff, scale_from_amax(maximum, qmax), 0);
+  const float scale = __shfl_sync(0xffffffff, compute_scale(maximum, qmax), 0);
   if (valid_tile && lane == 0) {
+    const int64_t row = params.contract_dim == -1 ? outer : contract_group;
+    const int64_t col = params.contract_dim == -1 ? contract_group : outer;
     params.scale_data<float>()[scale_offset<index_t>(
-        params, batch, outer, contract_group)] = scale;
+        params, batch, row, col)] = scale;
   }
   curandStatePhilox4_32_10_t random_state;
   StatisticsPartial statistics;
@@ -361,16 +315,15 @@ __global__ void quantize_blockwise_1d_kernel(
     accumulate_statistics<kStatistics>(&statistics, value, code, scale);
   }
   reduce_statistics<kStatistics>(statistics, params.statistics_partials,
-                                 grid_index(blocks_per_row));
+                                 grid_index());
 }
 
 template <typename input_t, typename index_t>
 __global__ void tensorwise_partial_amax_kernel(
     QuantizeParams params,
     float* partials,
-    int64_t partials_per_batch,
-    int64_t blocks_per_row) {
-  const int64_t tile = grid_index(blocks_per_row);
+    int64_t partials_per_batch) {
+  const int64_t tile = grid_index();
   if (tile >= params.batches * partials_per_batch) {
     return;
   }
@@ -394,14 +347,14 @@ __global__ void tensorwise_partial_amax_kernel(
         start_col, position, params.cols, params.input_row_stride,
         params.input_col_stride);
     const float value = static_cast<float>(params.input_data<input_t>()[input_offset]);
-    maximum = max_with_nan(maximum, fabsf(value));
+    maximum = strict_max(maximum, fabsf(value));
   }
   __shared__ float shared_maximum[kThreads];
   shared_maximum[threadIdx.x] = maximum;
   __syncthreads();
   for (int width = kThreads / 2; width > 0; width >>= 1) {
     if (threadIdx.x < width) {
-      shared_maximum[threadIdx.x] = max_with_nan(
+      shared_maximum[threadIdx.x] = strict_max(
           shared_maximum[threadIdx.x], shared_maximum[threadIdx.x + width]);
     }
     __syncthreads();
@@ -416,20 +369,20 @@ __global__ void tensorwise_scale_kernel(
   float maximum = 0.0f;
   for (int64_t partial = threadIdx.x; partial < partials_per_batch;
        partial += blockDim.x) {
-    maximum = max_with_nan(maximum, partials[blockIdx.x * partials_per_batch + partial]);
+    maximum = strict_max(maximum, partials[blockIdx.x * partials_per_batch + partial]);
   }
   __shared__ float shared_maximum[kThreads];
   shared_maximum[threadIdx.x] = maximum;
   __syncthreads();
   for (int width = kThreads / 2; width > 0; width >>= 1) {
     if (threadIdx.x < width) {
-      shared_maximum[threadIdx.x] = max_with_nan(
+      shared_maximum[threadIdx.x] = strict_max(
           shared_maximum[threadIdx.x], shared_maximum[threadIdx.x + width]);
     }
     __syncthreads();
   }
   if (threadIdx.x == 0) {
-    scales[blockIdx.x] = scale_from_amax(shared_maximum[0], qmax);
+    scales[blockIdx.x] = compute_scale(shared_maximum[0], qmax);
   }
 }
 
@@ -439,9 +392,8 @@ __global__ void tensorwise_encode_kernel(
     const float* scales,
     float qmax,
     at::PhiloxCudaState philox,
-    int64_t blocks_per_row,
     int64_t blocks_per_batch) {
-  const int64_t tile = grid_index(blocks_per_row);
+  const int64_t tile = grid_index();
   if (tile >= params.batches * blocks_per_batch) {
     return;
   }
@@ -487,7 +439,7 @@ __global__ void tensorwise_encode_kernel(
     accumulate_statistics<kStatistics>(&statistics, value, code, scales[batch]);
   }
   reduce_statistics<kStatistics>(statistics, params.statistics_partials,
-                                 grid_index(blocks_per_row));
+                                 grid_index());
 }
 
 std::vector<int64_t> scale_shape(
@@ -586,15 +538,13 @@ void launch_quantize(
         (elements + kThreads * kValuesPerThread - 1) / (kThreads * kValuesPerThread);
     const auto partial_grid = make_launch_grid(params.batches * partials_per_batch);
     tensorwise_partial_amax_kernel<input_t, index_t><<<
-        partial_grid.grid, kThreads, 0, stream>>>(
-        params, partials.data_ptr<float>(), partials_per_batch,
-        partial_grid.blocks_per_row);
+        partial_grid, kThreads, 0, stream>>>(
+        params, partials.data_ptr<float>(), partials_per_batch);
     tensorwise_scale_kernel<<<params.batches, kThreads, 0, stream>>>(
         partials.data_ptr<float>(), scales.data_ptr<float>(), partials_per_batch, qmax);
     tensorwise_encode_kernel<input_t, index_t, kStochastic, kStatistics><<<
-        partial_grid.grid, kThreads, 0, stream>>>(
-        params, scales.data_ptr<float>(), qmax, philox, partial_grid.blocks_per_row,
-        partials_per_batch);
+        partial_grid, kThreads, 0, stream>>>(
+        params, scales.data_ptr<float>(), qmax, philox, partials_per_batch);
     if constexpr (kStatistics) {
       finalize_statistics_kernel<<<1, kThreads, 0, stream>>>(
           params.statistics_partials, params.statistics, statistics_partial_count,
@@ -607,7 +557,7 @@ void launch_quantize(
     constexpr int kWarps = kThreads / 32;
     const auto grid = make_launch_grid((tiles + kWarps - 1) / kWarps);
     quantize_blockwise_1d_kernel<input_t, index_t, kStochastic, kStatistics><<<
-        grid.grid, kThreads, 0, stream>>>(params, qmax, philox, grid.blocks_per_row);
+        grid, kThreads, 0, stream>>>(params, qmax, philox);
     if constexpr (kStatistics) {
       finalize_statistics_kernel<<<1, kThreads, 0, stream>>>(
           params.statistics_partials, params.statistics, statistics_partial_count,
@@ -617,7 +567,7 @@ void launch_quantize(
   }
   const auto grid = make_launch_grid(tiles);
   quantize_tile_kernel<input_t, index_t, kStochastic, kStatistics><<<
-      grid.grid, kThreads, 0, stream>>>(params, qmax, philox, grid.blocks_per_row);
+      grid, kThreads, 0, stream>>>(params, qmax, philox);
   if constexpr (kStatistics) {
     finalize_statistics_kernel<<<1, kThreads, 0, stream>>>(
         params.statistics_partials, params.statistics, statistics_partial_count,

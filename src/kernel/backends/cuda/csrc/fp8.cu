@@ -25,7 +25,6 @@ namespace {
 constexpr int kThreads = 256;
 constexpr int kRowwiseSplit = 256;
 constexpr int kTensorwiseValues = 8;
-constexpr float kMinScale = 1.0e-30f;
 
 dim3 make_launch_grid(int64_t blocks) {
   constexpr int64_t kMaxGridX = std::numeric_limits<int32_t>::max();
@@ -36,48 +35,15 @@ dim3 make_launch_grid(int64_t blocks) {
   return dim3(grid_x, grid_y);
 }
 
-__device__ __forceinline__ int64_t grid_index() {
-  return static_cast<int64_t>(blockIdx.x) +
-      static_cast<int64_t>(blockIdx.y) * static_cast<int64_t>(gridDim.x);
-}
-
-__device__ __forceinline__ float max_with_nan(float lhs, float rhs) {
-  return isnan(lhs) || isnan(rhs) ? nanf("") : fmaxf(lhs, rhs);
-}
-
-__device__ __forceinline__ float scale_from_amax(float amax, float qmax) {
-  return isnan(amax) ? nanf("") : fmaxf(amax * (1.0f / qmax), kMinScale);
-}
-
-template <bool kE5m2>
-__device__ __forceinline__ float decode_fp8(uint8_t code) {
-  const __half_raw raw = __nv_cvt_fp8_to_halfraw(
-      static_cast<__nv_fp8_storage_t>(code), kE5m2 ? __NV_E5M2 : __NV_E4M3);
-  __half value;
-  value = raw;
-  return __half2float(value);
-}
-
-struct StatisticsPartial {
-  float src_sq = 0.0f;
-  float err_sq = 0.0f;
-  float under = 0.0f;
-  float nonzero = 0.0f;
-};
-
 template <bool kE5m2>
 __device__ __forceinline__ void accumulate_statistics(
-    StatisticsPartial* partial, float source, uint8_t code, float scale) {
-  const bool source_nonzero = source != 0.0f;
-  partial->src_sq += source * source;
-  const float error = source - decode_fp8<kE5m2>(code) * scale;
-  partial->err_sq += error * error;
-  partial->under += source_nonzero && (code & 0x7f) == 0 ? 1.0f : 0.0f;
-  partial->nonzero += source_nonzero ? 1.0f : 0.0f;
+    QuantizationStatistics* partial, float source, uint8_t code, float scale) {
+  accumulate_quantization_statistics(
+      partial, source, decode_fp8<kE5m2>(code) * scale, (code & 0x7f) == 0);
 }
 
 __device__ __forceinline__ void reduce_statistics(
-    StatisticsPartial partial, float* statistics, int64_t numel) {
+    QuantizationStatistics partial, float* statistics, int64_t numel) {
   if (statistics == nullptr) return;
   __shared__ float values[4][kThreads];
   values[0][threadIdx.x] = partial.src_sq;
@@ -131,6 +97,7 @@ __global__ void finalize_statistics_kernel(
   }
 }
 
+// this is for compute codes
 template <bool kE5m2>
 __device__ __forceinline__ float normalize_fp8_rne(
     float value, float scale, float inverse_scale) {
@@ -160,26 +127,6 @@ __device__ __forceinline__ float normalize_fp8_rne(
     }
   }
   return normalized;
-}
-
-__device__ __forceinline__ int64_t input_offset(
-    const QuantizeParams& params, int64_t batch, int64_t row, int64_t col) {
-  return batch * params.input_batch_stride + row * params.input_row_stride +
-      col * params.input_col_stride;
-}
-
-__device__ __forceinline__ int64_t output_offset(
-    const QuantizeParams& params, int64_t batch, int64_t row, int64_t col) {
-  return batch * params.code_batch_stride + row * params.code_row_stride +
-      col * params.code_col_stride;
-}
-
-__device__ __forceinline__ int64_t scale_offset(
-    const QuantizeParams& params, int64_t batch, int64_t outer, int64_t contract) {
-  const int64_t row = params.contract_dim == -1 ? outer : contract;
-  const int64_t col = params.contract_dim == -1 ? contract : outer;
-  return batch * params.scale_batch_stride + row * params.scale_row_stride +
-      col * params.scale_col_stride;
 }
 
 template <typename input_t, bool kE5m2, bool kStochastic>
@@ -223,7 +170,7 @@ __global__ void quantize_tiled_kernel(
       const int64_t col = params.contract_dim == -1 ? contract : outer;
       const float value = static_cast<float>(
           params.input_data<input_t>()[input_offset(params, batch, row, col)]);
-      maximum = max_with_nan(maximum, fabsf(value));
+      maximum = strict_max(maximum, fabsf(value));
     }
   }
   __shared__ float shared_maximum[kThreads];
@@ -232,23 +179,24 @@ __global__ void quantize_tiled_kernel(
   for (int width = kThreads / 2; width > 0; width >>= 1) {
     if (threadIdx.x < width) {
       shared_maximum[threadIdx.x] =
-          max_with_nan(shared_maximum[threadIdx.x], shared_maximum[threadIdx.x + width]);
+          strict_max(shared_maximum[threadIdx.x], shared_maximum[threadIdx.x + width]);
     }
     __syncthreads();
   }
   __shared__ float shared_scale;
   if (threadIdx.x == 0) {
-    shared_scale = scale_from_amax(
+    shared_scale = compute_scale(
         shared_maximum[0], kE5m2 ? 57344.0f : 448.0f);
     for (int64_t outer = outer_start; outer < outer_end; ++outer) {
-      params.scale_data<float>()[scale_offset(
-          params, batch, outer, contract_group)] = shared_scale;
+      const int64_t row = params.contract_dim == -1 ? outer : contract_group;
+      const int64_t col = params.contract_dim == -1 ? contract_group : outer;
+      params.scale_data<float>()[scale_offset(params, batch, row, col)] = shared_scale;
     }
   }
   __syncthreads();
 
   curandStatePhilox4_32_10_t random_state;
-  StatisticsPartial statistics;
+  QuantizationStatistics statistics;
   if constexpr (kStochastic) {
     const auto seeds = at::cuda::philox::unpack(philox);
     curand_init(
@@ -271,9 +219,9 @@ __global__ void quantize_tiled_kernel(
       }
       const int64_t code_offset = output_offset(params, batch, row, col);
       uint8_t code;
-      if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(
+      if constexpr (kStochastic) code = encode_fp8_stochastic<kE5m2>(
             value, isnan(value) ? 0u : curand(&random_state));
-      else code = fp8_rne<kE5m2>(value);
+      else code = encode_fp8_rne<kE5m2>(value);
       params.code_data<uint8_t>()[code_offset] = code;
       if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics,
           static_cast<float>(params.input_data<input_t>()[
@@ -310,7 +258,7 @@ __global__ void quantize_blockwise_1d_packed_kernel(
   constexpr int kValuesPerLane = (kBlockContract + 31) / 32;
   const int64_t contract_start = contract_group * kBlockContract;
   float maximum = 0.0f;
-  StatisticsPartial statistics;
+  QuantizationStatistics statistics;
   float values[kValuesPerLane];
   #pragma unroll
   for (int value_index = 0; value_index < kValuesPerLane; ++value_index) {
@@ -320,18 +268,19 @@ __global__ void quantize_blockwise_1d_packed_kernel(
       const int64_t col = params.contract_dim == -1 ? contract : outer;
       values[value_index] = static_cast<float>(params.input_data<input_t>()[
           input_offset(params, batch, row, col)]);
-      maximum = max_with_nan(maximum, fabsf(values[value_index]));
+      maximum = strict_max(maximum, fabsf(values[value_index]));
     }
   }
   constexpr unsigned int kWarpMask = 0xffffffff;
   for (int offset = 16; offset > 0; offset >>= 1) {
-    maximum = max_with_nan(maximum, __shfl_down_sync(kWarpMask, maximum, offset));
+    maximum = strict_max(maximum, __shfl_down_sync(kWarpMask, maximum, offset));
   }
   maximum = __shfl_sync(kWarpMask, maximum, 0);
-  const float scale = scale_from_amax(maximum, kE5m2 ? 57344.0f : 448.0f);
+  const float scale = compute_scale(maximum, kE5m2 ? 57344.0f : 448.0f);
   if (lane == 0) {
-    params.scale_data<float>()[scale_offset(
-        params, batch, outer, contract_group)] = scale;
+    const int64_t row = params.contract_dim == -1 ? outer : contract_group;
+    const int64_t col = params.contract_dim == -1 ? contract_group : outer;
+    params.scale_data<float>()[scale_offset(params, batch, row, col)] = scale;
   }
   if constexpr (kStochastic) {
     const auto seeds = at::cuda::philox::unpack(philox);
@@ -352,7 +301,7 @@ __global__ void quantize_blockwise_1d_packed_kernel(
         }
         const int64_t row = params.contract_dim == -1 ? outer : contract;
         const int64_t col = params.contract_dim == -1 ? contract : outer;
-        const uint8_t code = fp8_stochastic<kE5m2>(
+        const uint8_t code = encode_fp8_stochastic<kE5m2>(
             value, isnan(value) ? 0u : curand(&random_state));
         params.code_data<uint8_t>()[output_offset(params, batch, row, col)] = code;
         if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, values[value_index], code, scale);
@@ -370,7 +319,7 @@ __global__ void quantize_blockwise_1d_packed_kernel(
         }
         const int64_t row = params.contract_dim == -1 ? outer : contract;
         const int64_t col = params.contract_dim == -1 ? contract : outer;
-        const uint8_t code = fp8_rne<kE5m2>(value);
+        const uint8_t code = encode_fp8_rne<kE5m2>(value);
         params.code_data<uint8_t>()[output_offset(params, batch, row, col)] = code;
         if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, values[value_index], code, scale);
       }
@@ -480,7 +429,7 @@ __global__ void quantize_blockwise_1d_contiguous_kernel(
       : 0;
 
   float values[kValuesPerLane];
-  StatisticsPartial partial;
+  QuantizationStatistics partial;
   float maximum = 0.0f;
   if (valid_tile) {
     #pragma unroll
@@ -490,20 +439,20 @@ __global__ void quantize_blockwise_1d_contiguous_kernel(
     }
     #pragma unroll
     for (int value_index = 0; value_index < kValuesPerLane; ++value_index) {
-      maximum = max_with_nan(maximum, fabsf(values[value_index]));
+      maximum = strict_max(maximum, fabsf(values[value_index]));
     }
   }
   constexpr unsigned int kWarpMask = 0xffffffff;
   #pragma unroll
   for (int reduction_offset = kLanesPerTile / 2; reduction_offset > 0;
        reduction_offset >>= 1) {
-    maximum = max_with_nan(
+    maximum = strict_max(
         maximum,
         __shfl_down_sync(kWarpMask, maximum, reduction_offset, kLanesPerTile));
   }
   const float scale = __shfl_sync(
       kWarpMask,
-      scale_from_amax(maximum, kE5m2 ? 57344.0f : 448.0f),
+      compute_scale(maximum, kE5m2 ? 57344.0f : 448.0f),
       tile_in_warp * kLanesPerTile,
       kLanesPerTile);
   if (valid_tile && lane_in_tile == 0) {
@@ -532,7 +481,7 @@ __global__ void quantize_blockwise_1d_contiguous_kernel(
         if (!isnan(value)) {
           value = fminf(fmaxf(value, -qmax), qmax);
         }
-        const uint8_t code = fp8_stochastic<kE5m2>(
+        const uint8_t code = encode_fp8_stochastic<kE5m2>(
             value, isnan(value) ? 0u : curand(&random_state));
         packed |= static_cast<uint32_t>(code) << (element * 8);
         if (statistics != nullptr) {
@@ -599,7 +548,7 @@ __global__ void quantize_blockwise_1d_transposed_rne_kernel(
   const int outer_start = outer_tile * kOuterTile;
   const int contract_start = contract_group * kBlockContract;
   const int valid_outers = min(kOuterTile, rows - outer_start);
-  StatisticsPartial partial;
+  QuantizationStatistics partial;
 
   __shared__ float shared_values[kOuterTile * (kBlockContract + 1)];
   for (int flat = threadIdx.x; flat < kOuterTile * kBlockContract;
@@ -629,20 +578,20 @@ __global__ void quantize_blockwise_1d_transposed_rne_kernel(
               value_index % 4;
       const float value = shared_values[
           outer * (kBlockContract + 1) + value_offset];
-      maximum = max_with_nan(maximum, fabsf(value));
+      maximum = strict_max(maximum, fabsf(value));
     }
   }
   constexpr unsigned int kWarpMask = 0xffffffff;
   #pragma unroll
   for (int reduction_offset = kThreadsPerOuter / 2; reduction_offset > 0;
        reduction_offset >>= 1) {
-    maximum = max_with_nan(
+    maximum = strict_max(
         maximum,
         __shfl_down_sync(kWarpMask, maximum, reduction_offset, kThreadsPerOuter));
   }
   const float scale = __shfl_sync(
       kWarpMask,
-      scale_from_amax(maximum, kE5m2 ? 57344.0f : 448.0f),
+      compute_scale(maximum, kE5m2 ? 57344.0f : 448.0f),
       outer_in_warp * kThreadsPerOuter,
       kThreadsPerOuter);
   if (valid_outer && segment == 0) {
@@ -736,7 +685,7 @@ __global__ void quantize_blockwise_1d_tiled_column_rne_kernel(
   const int outer_start = outer_tile * kOuterTile;
   const int contract_start = contract_group * kBlockContract;
   const int valid_outers = min(kOuterTile, cols - outer_start);
-  StatisticsPartial partial;
+  QuantizationStatistics partial;
 
   __shared__ float shared_values[kOuterTile * (kBlockContract + 1)];
   __shared__ float shared_scales[kOuterTile];
@@ -764,7 +713,7 @@ __global__ void quantize_blockwise_1d_tiled_column_rne_kernel(
           ? segment * 2 + value_index
           : segment * 4 + (value_index / 4) * kThreadsPerOuter * 4 +
               value_index % 4;
-      maximum = max_with_nan(
+      maximum = strict_max(
           maximum,
           fabsf(shared_values[outer * (kBlockContract + 1) + value_offset]));
     }
@@ -773,12 +722,12 @@ __global__ void quantize_blockwise_1d_tiled_column_rne_kernel(
   #pragma unroll
   for (int reduction_offset = kThreadsPerOuter / 2; reduction_offset > 0;
        reduction_offset >>= 1) {
-    maximum = max_with_nan(
+    maximum = strict_max(
         maximum,
         __shfl_down_sync(kWarpMask, maximum, reduction_offset, kThreadsPerOuter));
   }
   if (valid_outer && segment == 0) {
-    const float scale = scale_from_amax(maximum, kE5m2 ? 57344.0f : 448.0f);
+    const float scale = compute_scale(maximum, kE5m2 ? 57344.0f : 448.0f);
     shared_scales[outer] = scale;
     scales[(batch * contract_groups + contract_group) * cols + outer_start + outer] =
         scale;
@@ -829,7 +778,7 @@ __global__ void quantize_blockwise_1d_tiled_column_rne_kernel(
               static_cast<uint8_t>(packed >> 8), shared_scales[output_outer + 1]);
         }
       } else {
-        const uint8_t code = fp8_rne<kE5m2>(first);
+        const uint8_t code = encode_fp8_rne<kE5m2>(first);
         codes[output_offset] = code;
         if (statistics != nullptr) {
           const int input_offset = batch * rows * cols +
@@ -883,13 +832,13 @@ __global__ void quantize_rows_coalesced_kernel(
   for (int64_t contract = contract_start; contract < contract_end; ++contract) {
     const float value = static_cast<float>(params.input_data<input_t>()[
         input_offset(params, batch, contract, outer)]);
-    maximum = max_with_nan(maximum, fabsf(value));
+    maximum = strict_max(maximum, fabsf(value));
   }
-  const float scale = scale_from_amax(maximum, kE5m2 ? 57344.0f : 448.0f);
+  const float scale = compute_scale(maximum, kE5m2 ? 57344.0f : 448.0f);
   params.scale_data<float>()[scale_offset(
-      params, batch, outer, contract_group)] = scale;
+      params, batch, contract_group, outer)] = scale;
   curandStatePhilox4_32_10_t random_state;
-  StatisticsPartial statistics;
+  QuantizationStatistics statistics;
   if constexpr (kStochastic) {
     const auto seeds = at::cuda::philox::unpack(philox);
     curand_init(
@@ -909,9 +858,9 @@ __global__ void quantize_rows_coalesced_kernel(
     }
     const int64_t code_offset = output_offset(params, batch, contract, outer);
     uint8_t code;
-    if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(
+    if constexpr (kStochastic) code = encode_fp8_stochastic<kE5m2>(
             value, isnan(value) ? 0u : curand(&random_state));
-    else code = fp8_rne<kE5m2>(value);
+    else code = encode_fp8_rne<kE5m2>(value);
     params.code_data<uint8_t>()[code_offset] = code;
     if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
   }
@@ -956,7 +905,7 @@ __global__ void rowwise_partial_amax_kernel(
   for (int64_t contract = contract_start; contract < contract_end; ++contract) {
     const float value = static_cast<float>(params.input_data<input_t>()[
         input_offset(params, batch, contract, outer)]);
-    maximum = max_with_nan(maximum, fabsf(value));
+    maximum = strict_max(maximum, fabsf(value));
   }
   partials[(batch * split_count + split) * outer_size + outer] = maximum;
 }
@@ -975,10 +924,10 @@ __global__ void rowwise_scale_kernel(
   }
   float maximum = 0.0f;
   for (int64_t split = 0; split < split_count; ++split) {
-    maximum = max_with_nan(
+    maximum = strict_max(
         maximum, partials[(batch * split_count + split) * outer_size + outer]);
   }
-  params.scale_data<float>()[scale_offset(params, batch, outer, 0)] = scale_from_amax(
+  params.scale_data<float>()[scale_offset(params, batch, 0, outer)] = compute_scale(
       maximum, kE5m2 ? 57344.0f : 448.0f);
 }
 
@@ -1009,11 +958,11 @@ __global__ void rowwise_encode_kernel(
     return;
   }
   const float scale = params.scale_data<float>()[scale_offset(
-      params, batch, outer, 0)];
+      params, batch, 0, outer)];
   const int64_t contract_start = split * kRowwiseSplit;
   const int64_t contract_end = min(contract_start + kRowwiseSplit, contract_size);
   curandStatePhilox4_32_10_t random_state;
-  StatisticsPartial statistics;
+  QuantizationStatistics statistics;
   if constexpr (kStochastic) {
     const auto seeds = at::cuda::philox::unpack(philox);
     curand_init(
@@ -1033,9 +982,9 @@ __global__ void rowwise_encode_kernel(
     }
     const int64_t code_offset = output_offset(params, batch, contract, outer);
     uint8_t code;
-    if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(
+    if constexpr (kStochastic) code = encode_fp8_stochastic<kE5m2>(
             value, isnan(value) ? 0u : curand(&random_state));
-    else code = fp8_rne<kE5m2>(value);
+    else code = encode_fp8_rne<kE5m2>(value);
     params.code_data<uint8_t>()[code_offset] = code;
     if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
   }
@@ -1064,7 +1013,7 @@ __global__ void tensorwise_partial_amax_kernel(
     if (index < elements) {
       const float value = static_cast<float>(params.input_data<input_t>()[
           input_offset(params, batch, row, col)]);
-      maximum = max_with_nan(maximum, fabsf(value));
+      maximum = strict_max(maximum, fabsf(value));
       ++col;
       if (col == params.cols) {
         col = 0;
@@ -1075,7 +1024,7 @@ __global__ void tensorwise_partial_amax_kernel(
   }
   constexpr unsigned int kWarpMask = 0xffffffff;
   for (int offset = 16; offset > 0; offset >>= 1) {
-    maximum = max_with_nan(maximum, __shfl_down_sync(kWarpMask, maximum, offset));
+    maximum = strict_max(maximum, __shfl_down_sync(kWarpMask, maximum, offset));
   }
   __shared__ float warp_maximum[kThreads / 32];
   const int warp = threadIdx.x / 32;
@@ -1087,7 +1036,7 @@ __global__ void tensorwise_partial_amax_kernel(
   if (warp == 0) {
     maximum = lane < kThreads / 32 ? warp_maximum[lane] : 0.0f;
     for (int offset = 16; offset > 0; offset >>= 1) {
-      maximum = max_with_nan(
+      maximum = strict_max(
           maximum, __shfl_down_sync(kWarpMask, maximum, offset));
     }
     if (lane == 0) {
@@ -1113,12 +1062,12 @@ __global__ void tensorwise_partial_amax_dense_kernel(
         input + batch * static_cast<int64_t>(elements), index + 4, values + 4);
     #pragma unroll
     for (int value_index = 0; value_index < kTensorwiseValues; ++value_index) {
-      maximum = max_with_nan(maximum, fabsf(values[value_index]));
+      maximum = strict_max(maximum, fabsf(values[value_index]));
     }
   }
   constexpr unsigned int kWarpMask = 0xffffffff;
   for (int offset = 16; offset > 0; offset >>= 1) {
-    maximum = max_with_nan(maximum, __shfl_down_sync(kWarpMask, maximum, offset));
+    maximum = strict_max(maximum, __shfl_down_sync(kWarpMask, maximum, offset));
   }
   __shared__ float warp_maximum[kThreads / 32];
   const int warp = threadIdx.x / 32;
@@ -1130,7 +1079,7 @@ __global__ void tensorwise_partial_amax_dense_kernel(
   if (warp == 0) {
     maximum = lane < kThreads / 32 ? warp_maximum[lane] : 0.0f;
     for (int offset = 16; offset > 0; offset >>= 1) {
-      maximum = max_with_nan(
+      maximum = strict_max(
           maximum, __shfl_down_sync(kWarpMask, maximum, offset));
     }
     if (lane == 0) {
@@ -1147,11 +1096,11 @@ __global__ void tensorwise_scale_kernel(
   const int64_t batch = blockIdx.x;
   float maximum = 0.0f;
   for (int64_t index = threadIdx.x; index < partials_per_batch; index += blockDim.x) {
-    maximum = max_with_nan(maximum, partials[batch * partials_per_batch + index]);
+    maximum = strict_max(maximum, partials[batch * partials_per_batch + index]);
   }
   constexpr unsigned int kWarpMask = 0xffffffff;
   for (int offset = 16; offset > 0; offset >>= 1) {
-    maximum = max_with_nan(maximum, __shfl_down_sync(kWarpMask, maximum, offset));
+    maximum = strict_max(maximum, __shfl_down_sync(kWarpMask, maximum, offset));
   }
   __shared__ float warp_maximum[kThreads / 32];
   const int warp = threadIdx.x / 32;
@@ -1163,11 +1112,11 @@ __global__ void tensorwise_scale_kernel(
   if (warp == 0) {
     maximum = lane < kThreads / 32 ? warp_maximum[lane] : 0.0f;
     for (int offset = 16; offset > 0; offset >>= 1) {
-      maximum = max_with_nan(
+      maximum = strict_max(
           maximum, __shfl_down_sync(kWarpMask, maximum, offset));
     }
     if (lane == 0) {
-      matrix_scales[batch] = scale_from_amax(
+      matrix_scales[batch] = compute_scale(
           maximum, kE5m2 ? 57344.0f : 448.0f);
     }
   }
@@ -1187,7 +1136,7 @@ __global__ void tensorwise_encode_kernel(
   constexpr float qmax = kE5m2 ? 57344.0f : 448.0f;
   const float scale = matrix_scales[batch];
   curandStatePhilox4_32_10_t random_state;
-  StatisticsPartial statistics;
+  QuantizationStatistics statistics;
   if constexpr (kStochastic) {
     const auto seeds = at::cuda::philox::unpack(philox);
     curand_init(
@@ -1210,9 +1159,9 @@ __global__ void tensorwise_encode_kernel(
       }
       const int64_t code_offset = output_offset(params, batch, row, col);
       uint8_t code;
-      if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(
+      if constexpr (kStochastic) code = encode_fp8_stochastic<kE5m2>(
             value, isnan(value) ? 0u : curand(&random_state));
-      else code = fp8_rne<kE5m2>(value);
+      else code = encode_fp8_rne<kE5m2>(value);
       params.code_data<uint8_t>()[code_offset] = code;
       if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
       ++col;
@@ -1238,7 +1187,7 @@ __global__ void tensorwise_encode_dense_kernel(
     int64_t numel) {
   const int64_t batch = blockIdx.y;
   const int index = (blockIdx.x * blockDim.x + threadIdx.x) * kTensorwiseValues;
-  StatisticsPartial partial;
+  QuantizationStatistics partial;
   if (index < elements) {
     float values[kTensorwiseValues];
     const input_t* input_batch = input + batch * static_cast<int64_t>(elements);
@@ -1262,7 +1211,7 @@ __global__ void tensorwise_encode_dense_kernel(
       if (!isnan(value)) {
         value = fminf(fmaxf(value, -qmax), qmax);
       }
-      const uint8_t code = fp8_stochastic<kE5m2>(
+      const uint8_t code = encode_fp8_stochastic<kE5m2>(
             value, isnan(value) ? 0u : curand(&random_state));
       codes[batch * static_cast<int64_t>(elements) + index + value_index] = code;
       if (statistics != nullptr) {

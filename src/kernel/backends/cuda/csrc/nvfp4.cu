@@ -219,8 +219,9 @@ __global__ void quantize_kernel(
   int64_t row_origin = kContractLast ? outer_origin : contract_origin;
   int64_t col_origin = kContractLast ? contract_origin : outer_origin;
   int64_t outer = outer_origin + local_outer;
-  const int64_t input_base = tile_valid ? batch * params.input_batch_stride +
-      row_origin * params.input_row_stride + col_origin * params.input_col_stride : 0;
+  const int64_t input_base = tile_valid
+      ? input_offset(params, batch, row_origin, col_origin)
+      : 0;
   const index_t input_outer_stride = kContractLast ? params.input_row_stride : params.input_col_stride;
   const index_t input_contract_stride = kContractLast ? params.input_col_stride : params.input_row_stride;
   const index_t code_outer_stride = kContractLast ? params.code_row_stride : params.code_col_stride;
@@ -256,15 +257,18 @@ __global__ void quantize_kernel(
   float scale = decode_e4m3(scale_code);
   int64_t scale_outer = outer_origin + lane;
   if (tile_valid && lane < kOuterBlock && scale_outer < outer_size) {
-    int64_t scale_index = batch * params.scale_batch_stride +
-        (kContractLast ? scale_outer : contract_group) * params.scale_row_stride +
-        (kContractLast ? contract_group : scale_outer) * params.scale_col_stride;
+    const int64_t scale_row = kContractLast ? scale_outer : contract_group;
+    const int64_t scale_col = kContractLast ? contract_group : scale_outer;
+    const int64_t scale_index =
+        scale_offset(params, batch, scale_row, scale_col);
     scales[scale_index] = scale_code;
   }
   if (!valid && !kCollectStats) return;
-  const int64_t code_base = tile_valid ? batch * params.code_batch_stride +
-      (kContractLast ? row_origin : row_origin / 2) * params.code_row_stride +
-      (kContractLast ? col_origin / 2 : col_origin) * params.code_col_stride : 0;
+  const int64_t code_row = kContractLast ? row_origin : row_origin / 2;
+  const int64_t code_col = kContractLast ? col_origin / 2 : col_origin;
+  const int64_t code_base = tile_valid
+      ? output_offset(params, batch, code_row, code_col)
+      : 0;
   const int64_t code_index = valid ? code_base + local_outer * code_outer_stride +
       (local_contract / 2) * code_contract_stride : 0;
   curandStatePhilox4_32_10_t rng;
