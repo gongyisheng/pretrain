@@ -1394,7 +1394,7 @@ def test_quantize_operand_compiles_fullgraph(scale_cfg, fmt):
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 @pytest.mark.parametrize("layout", COMPILED_LAYOUTS)
 def test_quantize_operand_e8m0_compiles_fullgraph(contract_dim, layout):
-    """Compiled E8M0 quantization preserves scale bytes and NaN propagation."""
+    """Compiled E8M0 quantization preserves bytes after an exact producer."""
     torch.manual_seed(0)
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     if layout == "transposed":
@@ -1402,7 +1402,7 @@ def test_quantize_operand_e8m0_compiles_fullgraph(contract_dim, layout):
     x[0, 0] = float("nan")
 
     def quantize(source):
-        return quantize_operand(source, contract_dim, E4M3, BLOCKWISE1D_32_E8M0)
+        return quantize_operand(source * 2.0, contract_dim, E4M3, BLOCKWISE1D_32_E8M0)
 
     eager_codes, eager_scale, eager_global = quantize(x)
     compiled_codes, compiled_scale, compiled_global = torch.compile(
@@ -1411,6 +1411,10 @@ def test_quantize_operand_e8m0_compiles_fullgraph(contract_dim, layout):
     assert torch.equal(_bits(compiled_codes), _bits(eager_codes))
     assert torch.equal(_bits(compiled_scale), _bits(eager_scale))
     assert compiled_global is None and eager_global is None
+    assert compiled_codes.is_contiguous()
+    assert compiled_scale.is_contiguous()
+    assert compiled_codes.stride() == eager_codes.stride()
+    assert compiled_scale.stride() == eager_scale.stride()
 
     def dequantize(codes, scale):
         return dequantize_operand(codes, scale, contract_dim, BLOCKWISE1D_32_E8M0)

@@ -23,7 +23,9 @@ BLOCK_SHAPES = (
 )
 TAIL_SHAPES = ((130, 259), (2, 130, 259))
 CONTIGUOUS_B32_SHAPES = ((33, 64), (2, 33, 64))
-SHAPES = TAIL_SHAPES + CONTIGUOUS_B32_SHAPES
+ALIGNED_SQUARE32_SHAPES = ((64, 96), (2, 64, 96))
+LARGE_BATCH_SQUARE32_SHAPES = ((65536, 1, 1),)
+SHAPES = TAIL_SHAPES + CONTIGUOUS_B32_SHAPES + ALIGNED_SQUARE32_SHAPES
 NARROW_SHAPES = ((3, 17), (2, 3, 17))
 LAYOUTS = ("dense", "strided", "transposed", "offset")
 STAT_SHAPES = ((35, 65), (3, 17), (0, 32), (32, 0))
@@ -56,7 +58,7 @@ FP32_INPUT_CASES = (
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 @pytest.mark.parametrize("block_shape", BLOCK_SHAPES)
-@pytest.mark.parametrize("shape", SHAPES + NARROW_SHAPES)
+@pytest.mark.parametrize("shape", SHAPES + NARROW_SHAPES + LARGE_BATCH_SQUARE32_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("input_case", INPUT_CASES)
 @pytest.mark.parametrize("output_layout", OUTPUT_LAYOUTS)
@@ -67,6 +69,16 @@ def test_quantize_mxfp8_precision(
         pytest.skip("narrow shapes cover indexing across partial scale groups")
     if shape in CONTIGUOUS_B32_SHAPES and block_shape != (1, 32):
         pytest.skip("aligned B32 coverage targets 1D block-32 quantization")
+    if shape in ALIGNED_SQUARE32_SHAPES and block_shape != (32, 32):
+        pytest.skip("aligned square32 coverage targets 2D block-32 quantization")
+    if shape in LARGE_BATCH_SQUARE32_SHAPES and (
+        dtype is not torch.bfloat16
+        or block_shape != (32, 32)
+        or layout != "dense"
+        or input_case != "normal"
+        or output_layout != "row_major"
+    ):
+        pytest.skip("large-batch square32 coverage uses the smallest API grid")
     if shape in TAIL_SHAPES and layout == "offset":
         pytest.skip("offset coverage uses aligned B32 shapes")
     if (

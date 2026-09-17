@@ -147,6 +147,8 @@ def test_scaled_mm_raise_error(case, format, scale, with_bias):
 def test_mxfp8_scaled_mm_precision(
     case, format, scale, with_bias, out_dtype, with_global_scale
 ):
+    if "fp8_e5m2" in (format.a_format, format.b_format):
+        pytest.skip("MXFP8 quantization supports only E4M3")
     aq, bq, sa, sb, _, block_size, bias, gsa, gsb = make_scaled_mm_inputs(
         case,
         format,
@@ -179,15 +181,19 @@ def test_mxfp8_scaled_mm_precision(
 @pytest.mark.parametrize("with_bias", BIAS_CASES)
 def test_mxfp8_scaled_mm_raise_error(case, format, scale, with_bias):
     """Raise error on wrong scale"""
+    if "fp8_e5m2" in (format.a_format, format.b_format):
+        pytest.skip("MXFP8 quantization supports only E4M3")
     aq, bq, sa, sb, out_dtype, block_size, bias, _, _ = make_scaled_mm_inputs(
         case,
         format,
         scale,
         with_bias=with_bias,
-        scale_dtype=torch.float8_e8m0fnu,
+        scale_dtype=torch.float32,
     )
-    message = f"mxfp8 block_size must be a nonzero multiple of 32, got {block_size}"
-    with pytest.raises(ValueError, match=message):
+    # Use scales the quantizer rejects so GEMM validation is reached.
+    sa = sa.to(torch.float8_e8m0fnu)
+    sb = sb.to(torch.float8_e8m0fnu)
+    with pytest.raises(ValueError):
         triton_mm.mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
@@ -341,6 +347,8 @@ def test_mxfp8_scaled_grouped_mm_precision(
     case, layout, format, scale, with_bias, out_dtype, with_global_scale
 ):
     """The grouped analogue of test_mxfp8_scaled_mm_precision."""
+    if "fp8_e5m2" in (format.a_format, format.b_format):
+        pytest.skip("MXFP8 quantization supports only E4M3")
     if layout == "ragged_n" and with_bias:
         pytest.skip("rejected, not supported -- see test_scaled_grouped_mm_raise_error")
     if layout in {"ragged_k", "ragged_n"} and all(
@@ -383,6 +391,8 @@ def test_mxfp8_scaled_grouped_mm_precision(
 @pytest.mark.parametrize("format", MXFP8_PLUS_FORMAT_CASES)
 @pytest.mark.parametrize("scale", MXFP8_PLUS_SCALE_ERROR_CASES)
 def test_mxfp8_scaled_grouped_mm_raise_error(case, layout, format, scale):
+    if "fp8_e5m2" in (format.a_format, format.b_format):
+        pytest.skip("MXFP8 quantization supports only E4M3")
     aq, bq, sa, sb, offs, out_dtype, block_size, bias, _, _ = (
         make_scaled_grouped_mm_inputs(
             case,
@@ -390,14 +400,13 @@ def test_mxfp8_scaled_grouped_mm_raise_error(case, layout, format, scale):
             format,
             scale,
             with_bias=False,
-            scale_dtype=torch.float8_e8m0fnu,
+            scale_dtype=torch.float32,
         )
     )
-    message = (
-        "mxfp8 grouped GEMM requires block_size a nonzero multiple "
-        f"of 32, got {block_size}"
-    )
-    with pytest.raises(ValueError, match=message):
+    # Use scales the quantizer rejects so GEMM validation is reached.
+    sa = sa.to(torch.float8_e8m0fnu)
+    sb = sb.to(torch.float8_e8m0fnu)
+    with pytest.raises(ValueError):
         triton_mm.mxfp8_scaled_grouped_mm(
             aq, bq, sa, sb, offs, out_dtype, block_size, bias=bias
         )

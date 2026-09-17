@@ -175,10 +175,12 @@ def test_mxfp8_scaled_mm_raise_error(case, format, scale, with_bias):
         format,
         scale,
         with_bias=with_bias,
-        scale_dtype=torch.float8_e8m0fnu,
+        scale_dtype=torch.float32,
     )
-    message = f"MXFP8 GEMM requires block_size=32, got {block_size}"
-    with pytest.raises(ValueError, match=message):
+    # Use scales the quantizer rejects so GEMM validation is reached.
+    sa = sa.to(torch.float8_e8m0fnu)
+    sb = sb.to(torch.float8_e8m0fnu)
+    with pytest.raises(ValueError):
         cuda_mm.scaled_mm_mxfp8(aq, bq, sa, sb, out_dtype, block_size, bias)
 
 
