@@ -29,7 +29,10 @@ BLOCK_SHAPES = (
     (1, 64),
     (1, 128),
     (1, 256),
+    (1, 513),
+    (7, 7),
     (32, 32),
+    (64, 64),
 )
 SHAPES = ((2, 35, 65), (2, 1057, 33), (2, 256, 512))
 LAYOUTS = ("dense", "strided", "transposed", "broadcast", "offset")
