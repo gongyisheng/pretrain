@@ -5,6 +5,10 @@ import torch
 
 from src.kernel.ops import dequantize_dense, quantize_nvfp4, unpack_e2m1
 from src.quant.quantize import dequantize_operand
+from tests.fast.kernel.backends.cuda._quantize_test_utils import (
+    LARGE_OFFSET_CASES,
+    large_offset_source,
+)
 from tests.fast.helper import cuda_only, cuda_sm100_or_newer
 
 
@@ -35,6 +39,15 @@ SPECIAL_VALUES = (
     "zero",
     "subnormal",
     "large",
+)
+INDEX_STRIDE_CASES = (
+    ((1, 64), (((1 << 31) - 1) // 31, 1), -1),
+    ((1, 64), (((1 << 31) - 1) // 31 + 1, 1), -1),
+    ((1, 64), ((1 << 31) - 1, 1), -1),
+    ((1, 64), (1 << 31, 1), -1),
+    ((1, 64), ((1 << 60) + 1, 1), -1),
+    ((64, 1), (1, (1 << 60) + 1), -2),
+    ((1, 1, 64), ((1 << 60) + 1, 1 << 31, 1), -1),
 )
 
 
@@ -127,6 +140,75 @@ def test_quantize_nvfp4_precision(
         source, contract_dim, block_shape, enable_global_scale, qmax
     )
     assert torch.equal(source, original)
+
+
+@cuda_only
+@cuda_sm100_or_newer
+@pytest.mark.parametrize("stochastic_rounding", (False, True))
+@pytest.mark.parametrize("index_case", INDEX_STRIDE_CASES)
+def test_quantize_nvfp4_large_strides(stochastic_rounding, index_case):
+    shape, strides, contract_dim = index_case
+    values = torch.full((64,), 1.25, device="cuda", dtype=torch.bfloat16)
+    values[0] = 6.0
+    source = values.as_strided(shape, strides)
+    compact = values.reshape(1, 64).mT if shape[-1] == 1 else values.reshape(shape)
+
+    torch.manual_seed(17)
+    before = torch.cuda.get_rng_state()
+    actual_codes, actual_scales, actual_global_scale = quantize_nvfp4(
+        source,
+        contract_dim,
+        (1, 16),
+        stochastic_rounding=stochastic_rounding,
+        backend="cuda",
+        output_layout="column_major",
+    )
+    actual_state = torch.cuda.get_rng_state()
+    torch.manual_seed(17)
+    expected_codes, expected_scales, expected_global_scale = quantize_nvfp4(
+        compact,
+        contract_dim,
+        (1, 16),
+        stochastic_rounding=stochastic_rounding,
+        backend="cuda",
+        output_layout="column_major",
+    )
+    expected_state = torch.cuda.get_rng_state()
+
+    assert torch.equal(actual_codes, expected_codes)
+    assert torch.equal(
+        actual_scales.contiguous().view(torch.uint8),
+        expected_scales.contiguous().view(torch.uint8),
+    )
+    assert torch.equal(actual_global_scale, expected_global_scale)
+    assert torch.equal(actual_state, expected_state)
+    if not stochastic_rounding:
+        assert torch.equal(actual_state, before)
+
+
+@cuda_only
+@cuda_sm100_or_newer
+@pytest.mark.parametrize("index_case", LARGE_OFFSET_CASES)
+def test_quantize_nvfp4_large_offsets(index_case):
+    shape, strides = index_case
+    with large_offset_source(shape, strides) as source:
+        source.fill_(1.25)
+        source[..., 0] = 6.0
+        compact = source.clone()
+        before = torch.cuda.get_rng_state()
+        actual_codes, actual_scales, actual_global_scale = quantize_nvfp4(
+            source, -1, (1, 16), backend="cuda", output_layout="column_major"
+        )
+        assert torch.equal(torch.cuda.get_rng_state(), before)
+        expected_codes, expected_scales, expected_global_scale = quantize_nvfp4(
+            compact, -1, (1, 16), backend="cuda", output_layout="column_major"
+        )
+        assert torch.equal(actual_codes, expected_codes)
+        assert torch.equal(
+            actual_scales.contiguous().view(torch.uint8),
+            expected_scales.contiguous().view(torch.uint8),
+        )
+        assert torch.equal(actual_global_scale, expected_global_scale)
 
 
 @cuda_only
@@ -496,12 +578,25 @@ def test_quantize_nvfp4_quantization_stats(
 @pytest.mark.parametrize("enable_global_scale", GLOBAL_SCALES)
 @pytest.mark.parametrize("output_layout", ("row_major", "column_major"))
 @pytest.mark.parametrize("stochastic_rounding", (False, True))
+@pytest.mark.parametrize("wide_stride", (False, True))
 def test_quantize_nvfp4_quantization_stats_compile(
-    qmax, contract_dim, enable_global_scale, output_layout, stochastic_rounding
+    qmax,
+    contract_dim,
+    enable_global_scale,
+    output_layout,
+    stochastic_rounding,
+    wide_stride,
 ):
     torch.compiler.reset()
     source = _make_source((17, 64), torch.bfloat16, "strided")
-    if contract_dim == -2:
+    if wide_stride:
+        values = torch.randn(64, device="cuda", dtype=torch.bfloat16)
+        source = (
+            values.as_strided((1, 64), ((1 << 60) + 1, 1))
+            if contract_dim == -1
+            else values.as_strided((64, 1), (1, (1 << 60) + 1))
+        )
+    elif contract_dim == -2:
         source = source.mT
     block_shape = (1, 16)
     quantize = torch.compile(

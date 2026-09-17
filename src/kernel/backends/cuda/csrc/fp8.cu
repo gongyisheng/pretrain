@@ -1,3 +1,5 @@
+#include "quantize.cuh"
+
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -25,27 +27,6 @@ constexpr int kRowwiseSplit = 256;
 constexpr int kTensorwiseValues = 8;
 constexpr float kMinScale = 1.0e-30f;
 
-struct QuantizeParams {
-  const void* input;
-  uint8_t* codes;
-  float* scales;
-  float* statistics;
-  int64_t batches;
-  int64_t rows;
-  int64_t cols;
-  int64_t input_batch_stride;
-  int64_t input_row_stride;
-  int64_t input_col_stride;
-  int64_t code_batch_stride;
-  int64_t code_row_stride;
-  int64_t code_col_stride;
-  int64_t rows_per_block;
-  int64_t cols_per_block;
-  int64_t row_block_count;
-  int64_t col_block_count;
-  int contract_dim;
-};
-
 dim3 make_launch_grid(int64_t blocks) {
   constexpr int64_t kMaxGridX = std::numeric_limits<int32_t>::max();
   constexpr int64_t kMaxGridY = 65535;
@@ -66,12 +47,6 @@ __device__ __forceinline__ float max_with_nan(float lhs, float rhs) {
 
 __device__ __forceinline__ float scale_from_amax(float amax, float qmax) {
   return isnan(amax) ? nanf("") : fmaxf(amax * (1.0f / qmax), kMinScale);
-}
-
-template <bool kE5m2>
-__device__ __forceinline__ uint8_t fp8_rne(float value) {
-  return __nv_cvt_float_to_fp8(
-      value, __NV_SATFINITE, kE5m2 ? __NV_E5M2 : __NV_E4M3);
 }
 
 template <bool kE5m2>
@@ -187,24 +162,6 @@ __device__ __forceinline__ float normalize_fp8_rne(
   return normalized;
 }
 
-template <bool kE5m2>
-__device__ __forceinline__ uint8_t fp8_stochastic(
-    float value,
-    curandStatePhilox4_32_10_t* state) {
-  if (isnan(value)) {
-    return fp8_rne<kE5m2>(value);
-  }
-  constexpr int kMantissaBits = kE5m2 ? 2 : 3;
-  constexpr int kMinUlpExponent = kE5m2 ? -16 : -9;
-  const int exponent = ((__float_as_int(value) >> 23) & 0xff) - kMantissaBits;
-  const int ulp_exponent = max(exponent, 127 + kMinUlpExponent);
-  const float ulp = __int_as_float(ulp_exponent << 23);
-  const float lower = floorf(value / ulp) * ulp;
-  const float probability = (value - lower) / ulp;
-  const float random = static_cast<float>(curand(state)) * 0x1.0p-32f;
-  return fp8_rne<kE5m2>(random < probability ? lower + ulp : lower);
-}
-
 __device__ __forceinline__ int64_t input_offset(
     const QuantizeParams& params, int64_t batch, int64_t row, int64_t col) {
   return batch * params.input_batch_stride + row * params.input_row_stride +
@@ -218,15 +175,11 @@ __device__ __forceinline__ int64_t output_offset(
 }
 
 __device__ __forceinline__ int64_t scale_offset(
-    const QuantizeParams& params,
-    int64_t batch,
-    int64_t outer,
-    int64_t contract,
-    int64_t contract_groups) {
-  if (params.contract_dim == -1) {
-    return (batch * params.rows + outer) * contract_groups + contract;
-  }
-  return (batch * contract_groups + contract) * params.cols + outer;
+    const QuantizeParams& params, int64_t batch, int64_t outer, int64_t contract) {
+  const int64_t row = params.contract_dim == -1 ? outer : contract;
+  const int64_t col = params.contract_dim == -1 ? contract : outer;
+  return batch * params.scale_batch_stride + row * params.scale_row_stride +
+      col * params.scale_col_stride;
 }
 
 template <typename input_t, bool kE5m2, bool kStochastic>
@@ -269,7 +222,7 @@ __global__ void quantize_tiled_kernel(
       const int64_t row = params.contract_dim == -1 ? outer : contract;
       const int64_t col = params.contract_dim == -1 ? contract : outer;
       const float value = static_cast<float>(
-          static_cast<const input_t*>(params.input)[input_offset(params, batch, row, col)]);
+          params.input_data<input_t>()[input_offset(params, batch, row, col)]);
       maximum = max_with_nan(maximum, fabsf(value));
     }
   }
@@ -288,8 +241,8 @@ __global__ void quantize_tiled_kernel(
     shared_scale = scale_from_amax(
         shared_maximum[0], kE5m2 ? 57344.0f : 448.0f);
     for (int64_t outer = outer_start; outer < outer_end; ++outer) {
-      params.scales[scale_offset(
-          params, batch, outer, contract_group, contract_groups)] = shared_scale;
+      params.scale_data<float>()[scale_offset(
+          params, batch, outer, contract_group)] = shared_scale;
     }
   }
   __syncthreads();
@@ -311,22 +264,23 @@ __global__ void quantize_tiled_kernel(
       const int64_t row = params.contract_dim == -1 ? outer : contract;
       const int64_t col = params.contract_dim == -1 ? contract : outer;
       float value = static_cast<float>(
-          static_cast<const input_t*>(params.input)[input_offset(params, batch, row, col)]);
+          params.input_data<input_t>()[input_offset(params, batch, row, col)]);
       value /= shared_scale;
       if (!isnan(value)) {
         value = fminf(fmaxf(value, -qmax), qmax);
       }
       const int64_t code_offset = output_offset(params, batch, row, col);
       uint8_t code;
-      if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(value, &random_state);
+      if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(
+            value, isnan(value) ? 0u : curand(&random_state));
       else code = fp8_rne<kE5m2>(value);
-      params.codes[code_offset] = code;
-      if (params.statistics != nullptr) accumulate_statistics<kE5m2>(&statistics,
-          static_cast<float>(static_cast<const input_t*>(params.input)[
+      params.code_data<uint8_t>()[code_offset] = code;
+      if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics,
+          static_cast<float>(params.input_data<input_t>()[
               input_offset(params, batch, row, col)]), code, shared_scale);
     }
   }
-  reduce_statistics(statistics, params.statistics,
+  reduce_statistics(statistics, params.statistics_partials,
                     params.batches * params.rows * params.cols);
 }
 
@@ -364,7 +318,7 @@ __global__ void quantize_blockwise_1d_packed_kernel(
     if (contract < contract_size && value_index * 32 + lane < kBlockContract) {
       const int64_t row = params.contract_dim == -1 ? outer : contract;
       const int64_t col = params.contract_dim == -1 ? contract : outer;
-      values[value_index] = static_cast<float>(static_cast<const input_t*>(params.input)[
+      values[value_index] = static_cast<float>(params.input_data<input_t>()[
           input_offset(params, batch, row, col)]);
       maximum = max_with_nan(maximum, fabsf(values[value_index]));
     }
@@ -376,8 +330,8 @@ __global__ void quantize_blockwise_1d_packed_kernel(
   maximum = __shfl_sync(kWarpMask, maximum, 0);
   const float scale = scale_from_amax(maximum, kE5m2 ? 57344.0f : 448.0f);
   if (lane == 0) {
-    params.scales[scale_offset(
-        params, batch, outer, contract_group, contract_groups)] = scale;
+    params.scale_data<float>()[scale_offset(
+        params, batch, outer, contract_group)] = scale;
   }
   if constexpr (kStochastic) {
     const auto seeds = at::cuda::philox::unpack(philox);
@@ -398,9 +352,10 @@ __global__ void quantize_blockwise_1d_packed_kernel(
         }
         const int64_t row = params.contract_dim == -1 ? outer : contract;
         const int64_t col = params.contract_dim == -1 ? contract : outer;
-        const uint8_t code = fp8_stochastic<kE5m2>(value, &random_state);
-        params.codes[output_offset(params, batch, row, col)] = code;
-        if (params.statistics != nullptr) accumulate_statistics<kE5m2>(&statistics, values[value_index], code, scale);
+        const uint8_t code = fp8_stochastic<kE5m2>(
+            value, isnan(value) ? 0u : curand(&random_state));
+        params.code_data<uint8_t>()[output_offset(params, batch, row, col)] = code;
+        if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, values[value_index], code, scale);
       }
     }
   } else {
@@ -416,17 +371,17 @@ __global__ void quantize_blockwise_1d_packed_kernel(
         const int64_t row = params.contract_dim == -1 ? outer : contract;
         const int64_t col = params.contract_dim == -1 ? contract : outer;
         const uint8_t code = fp8_rne<kE5m2>(value);
-        params.codes[output_offset(params, batch, row, col)] = code;
-        if (params.statistics != nullptr) accumulate_statistics<kE5m2>(&statistics, values[value_index], code, scale);
+        params.code_data<uint8_t>()[output_offset(params, batch, row, col)] = code;
+        if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, values[value_index], code, scale);
       }
     }
   }
-  if (params.statistics != nullptr) {
+  if (params.statistics_partials != nullptr) {
     const int64_t offset = (static_cast<int64_t>(blockIdx.y) * gridDim.x + blockIdx.x) * 4;
-    atomicAdd(params.statistics + offset, statistics.src_sq);
-    atomicAdd(params.statistics + offset + 1, statistics.err_sq);
-    atomicAdd(params.statistics + offset + 2, statistics.under);
-    atomicAdd(params.statistics + offset + 3, statistics.nonzero);
+    atomicAdd(params.statistics_partials + offset, statistics.src_sq);
+    atomicAdd(params.statistics_partials + offset + 1, statistics.err_sq);
+    atomicAdd(params.statistics_partials + offset + 2, statistics.under);
+    atomicAdd(params.statistics_partials + offset + 3, statistics.nonzero);
   }
 }
 
@@ -577,7 +532,8 @@ __global__ void quantize_blockwise_1d_contiguous_kernel(
         if (!isnan(value)) {
           value = fminf(fmaxf(value, -qmax), qmax);
         }
-        const uint8_t code = fp8_stochastic<kE5m2>(value, &random_state);
+        const uint8_t code = fp8_stochastic<kE5m2>(
+            value, isnan(value) ? 0u : curand(&random_state));
         packed |= static_cast<uint32_t>(code) << (element * 8);
         if (statistics != nullptr) {
           const float source = static_cast<float>(input[offset + value_offset + element]);
@@ -925,13 +881,13 @@ __global__ void quantize_rows_coalesced_kernel(
       min(contract_start + contract_block_size, contract_size);
   float maximum = 0.0f;
   for (int64_t contract = contract_start; contract < contract_end; ++contract) {
-    const float value = static_cast<float>(static_cast<const input_t*>(params.input)[
+    const float value = static_cast<float>(params.input_data<input_t>()[
         input_offset(params, batch, contract, outer)]);
     maximum = max_with_nan(maximum, fabsf(value));
   }
   const float scale = scale_from_amax(maximum, kE5m2 ? 57344.0f : 448.0f);
-  params.scales[scale_offset(
-      params, batch, outer, contract_group, contract_groups)] = scale;
+  params.scale_data<float>()[scale_offset(
+      params, batch, outer, contract_group)] = scale;
   curandStatePhilox4_32_10_t random_state;
   StatisticsPartial statistics;
   if constexpr (kStochastic) {
@@ -944,7 +900,7 @@ __global__ void quantize_rows_coalesced_kernel(
   }
   constexpr float qmax = kE5m2 ? 57344.0f : 448.0f;
   for (int64_t contract = contract_start; contract < contract_end; ++contract) {
-    const float source = static_cast<float>(static_cast<const input_t*>(params.input)[
+    const float source = static_cast<float>(params.input_data<input_t>()[
         input_offset(params, batch, contract, outer)]);
     float value = source;
     value /= scale;
@@ -953,17 +909,18 @@ __global__ void quantize_rows_coalesced_kernel(
     }
     const int64_t code_offset = output_offset(params, batch, contract, outer);
     uint8_t code;
-    if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(value, &random_state);
+    if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(
+            value, isnan(value) ? 0u : curand(&random_state));
     else code = fp8_rne<kE5m2>(value);
-    params.codes[code_offset] = code;
-    if (params.statistics != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
+    params.code_data<uint8_t>()[code_offset] = code;
+    if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
   }
-  if (params.statistics != nullptr) {
+  if (params.statistics_partials != nullptr) {
     const int64_t offset = (static_cast<int64_t>(blockIdx.y) * gridDim.x + blockIdx.x) * 4;
-    atomicAdd(params.statistics + offset, statistics.src_sq);
-    atomicAdd(params.statistics + offset + 1, statistics.err_sq);
-    atomicAdd(params.statistics + offset + 2, statistics.under);
-    atomicAdd(params.statistics + offset + 3, statistics.nonzero);
+    atomicAdd(params.statistics_partials + offset, statistics.src_sq);
+    atomicAdd(params.statistics_partials + offset + 1, statistics.err_sq);
+    atomicAdd(params.statistics_partials + offset + 2, statistics.under);
+    atomicAdd(params.statistics_partials + offset + 3, statistics.nonzero);
   }
 }
 
@@ -997,7 +954,7 @@ __global__ void rowwise_partial_amax_kernel(
   const int64_t contract_end = min(contract_start + kRowwiseSplit, contract_size);
   float maximum = 0.0f;
   for (int64_t contract = contract_start; contract < contract_end; ++contract) {
-    const float value = static_cast<float>(static_cast<const input_t*>(params.input)[
+    const float value = static_cast<float>(params.input_data<input_t>()[
         input_offset(params, batch, contract, outer)]);
     maximum = max_with_nan(maximum, fabsf(value));
   }
@@ -1011,9 +968,6 @@ __global__ void rowwise_scale_kernel(
     int64_t split_count) {
   const int64_t outer_size =
       params.contract_dim == -1 ? params.rows : params.cols;
-  const int64_t contract_groups = params.contract_dim == -1
-      ? params.col_block_count
-      : params.row_block_count;
   const int64_t outer = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const int64_t batch = blockIdx.y;
   if (outer >= outer_size) {
@@ -1024,7 +978,7 @@ __global__ void rowwise_scale_kernel(
     maximum = max_with_nan(
         maximum, partials[(batch * split_count + split) * outer_size + outer]);
   }
-  params.scales[scale_offset(params, batch, outer, 0, contract_groups)] = scale_from_amax(
+  params.scale_data<float>()[scale_offset(params, batch, outer, 0)] = scale_from_amax(
       maximum, kE5m2 ? 57344.0f : 448.0f);
 }
 
@@ -1037,9 +991,6 @@ __global__ void rowwise_encode_kernel(
       params.contract_dim == -1 ? params.rows : params.cols;
   const int64_t contract_size =
       params.contract_dim == -1 ? params.cols : params.rows;
-  const int64_t contract_groups = params.contract_dim == -1
-      ? params.col_block_count
-      : params.row_block_count;
   constexpr int kWarps = kThreads / 32;
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
@@ -1057,8 +1008,8 @@ __global__ void rowwise_encode_kernel(
   if (outer >= outer_size) {
     return;
   }
-  const float scale = params.scales[scale_offset(
-      params, batch, outer, 0, contract_groups)];
+  const float scale = params.scale_data<float>()[scale_offset(
+      params, batch, outer, 0)];
   const int64_t contract_start = split * kRowwiseSplit;
   const int64_t contract_end = min(contract_start + kRowwiseSplit, contract_size);
   curandStatePhilox4_32_10_t random_state;
@@ -1073,7 +1024,7 @@ __global__ void rowwise_encode_kernel(
   }
   constexpr float qmax = kE5m2 ? 57344.0f : 448.0f;
   for (int64_t contract = contract_start; contract < contract_end; ++contract) {
-    const float source = static_cast<float>(static_cast<const input_t*>(params.input)[
+    const float source = static_cast<float>(params.input_data<input_t>()[
         input_offset(params, batch, contract, outer)]);
     float value = source;
     value /= scale;
@@ -1082,17 +1033,18 @@ __global__ void rowwise_encode_kernel(
     }
     const int64_t code_offset = output_offset(params, batch, contract, outer);
     uint8_t code;
-    if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(value, &random_state);
+    if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(
+            value, isnan(value) ? 0u : curand(&random_state));
     else code = fp8_rne<kE5m2>(value);
-    params.codes[code_offset] = code;
-    if (params.statistics != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
+    params.code_data<uint8_t>()[code_offset] = code;
+    if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
   }
-  if (params.statistics != nullptr) {
+  if (params.statistics_partials != nullptr) {
     const int64_t offset = (static_cast<int64_t>(blockIdx.y) * gridDim.x + blockIdx.x) * 4;
-    atomicAdd(params.statistics + offset, statistics.src_sq);
-    atomicAdd(params.statistics + offset + 1, statistics.err_sq);
-    atomicAdd(params.statistics + offset + 2, statistics.under);
-    atomicAdd(params.statistics + offset + 3, statistics.nonzero);
+    atomicAdd(params.statistics_partials + offset, statistics.src_sq);
+    atomicAdd(params.statistics_partials + offset + 1, statistics.err_sq);
+    atomicAdd(params.statistics_partials + offset + 2, statistics.under);
+    atomicAdd(params.statistics_partials + offset + 3, statistics.nonzero);
   }
 }
 
@@ -1110,7 +1062,7 @@ __global__ void tensorwise_partial_amax_kernel(
   #pragma unroll
   for (int value_index = 0; value_index < kTensorwiseValues; ++value_index) {
     if (index < elements) {
-      const float value = static_cast<float>(static_cast<const input_t*>(params.input)[
+      const float value = static_cast<float>(params.input_data<input_t>()[
           input_offset(params, batch, row, col)]);
       maximum = max_with_nan(maximum, fabsf(value));
       ++col;
@@ -1249,7 +1201,7 @@ __global__ void tensorwise_encode_kernel(
   #pragma unroll
   for (int value_index = 0; value_index < kTensorwiseValues; ++value_index) {
     if (index < elements) {
-      const float source = static_cast<float>(static_cast<const input_t*>(params.input)[
+      const float source = static_cast<float>(params.input_data<input_t>()[
           input_offset(params, batch, row, col)]);
       float value = source;
       value /= scale;
@@ -1258,10 +1210,11 @@ __global__ void tensorwise_encode_kernel(
       }
       const int64_t code_offset = output_offset(params, batch, row, col);
       uint8_t code;
-      if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(value, &random_state);
+      if constexpr (kStochastic) code = fp8_stochastic<kE5m2>(
+            value, isnan(value) ? 0u : curand(&random_state));
       else code = fp8_rne<kE5m2>(value);
-      params.codes[code_offset] = code;
-      if (params.statistics != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
+      params.code_data<uint8_t>()[code_offset] = code;
+      if (params.statistics_partials != nullptr) accumulate_statistics<kE5m2>(&statistics, source, code, scale);
       ++col;
       if (col == params.cols) {
         col = 0;
@@ -1270,7 +1223,7 @@ __global__ void tensorwise_encode_kernel(
       ++index;
     }
   }
-  reduce_statistics(statistics, params.statistics,
+  reduce_statistics(statistics, params.statistics_partials,
                     params.batches * params.rows * params.cols);
 }
 
@@ -1309,7 +1262,8 @@ __global__ void tensorwise_encode_dense_kernel(
       if (!isnan(value)) {
         value = fminf(fmaxf(value, -qmax), qmax);
       }
-      const uint8_t code = fp8_stochastic<kE5m2>(value, &random_state);
+      const uint8_t code = fp8_stochastic<kE5m2>(
+            value, isnan(value) ? 0u : curand(&random_state));
       codes[batch * static_cast<int64_t>(elements) + index + value_index] = code;
       if (statistics != nullptr) {
         accumulate_statistics<kE5m2>(&partial, values[value_index], code, scale);
@@ -1443,11 +1397,11 @@ void launch_tensorwise(
       reinterpret_cast<uintptr_t>(params.input) %
               (sizeof(input_t) == sizeof(float) ? alignof(float4) : alignof(uint2)) ==
           0 &&
-      reinterpret_cast<uintptr_t>(params.codes) % alignof(uint32_t) == 0;
+      reinterpret_cast<uintptr_t>(params.code_data<uint8_t>()) % alignof(uint32_t) == 0;
   if (dense) {
     tensorwise_partial_amax_dense_kernel<input_t>
         <<<dim3(partials_per_batch, params.batches), kThreads, 0, stream>>>(
-            static_cast<const input_t*>(params.input),
+            params.input_data<input_t>(),
             partials.data_ptr<float>(), static_cast<int>(elements_per_batch),
             partials_per_batch);
     tensorwise_scale_kernel<kE5m2><<<params.batches, kThreads, 0, stream>>>(
@@ -1457,9 +1411,9 @@ void launch_tensorwise(
         (kThreads * kTensorwiseValues);
     tensorwise_encode_dense_kernel<input_t, kE5m2, kStochastic>
         <<<dim3(code_blocks, params.batches), kThreads, 0, stream>>>(
-            static_cast<const input_t*>(params.input), params.codes,
+            params.input_data<input_t>(), params.code_data<uint8_t>(),
             scales.data_ptr<float>(), static_cast<int>(elements_per_batch), philox,
-            params.statistics, params.batches * elements_per_batch);
+            params.statistics_partials, params.batches * elements_per_batch);
     return;
   }
   tensorwise_partial_amax_kernel<input_t><<<dim3(partials_per_batch, params.batches),
@@ -1798,8 +1752,6 @@ void launch_blockwise2d(
 
 template <typename input_t, bool kE5m2, bool kStochastic>
 void launch_quantize_impl(
-    const at::Tensor& input,
-    const at::Tensor& codes,
     const at::Tensor& scales,
     const at::Tensor& partials,
     QuantizeParams params,
@@ -1807,9 +1759,6 @@ void launch_quantize_impl(
     cudaStream_t stream,
     bool tensorwise,
     bool rowwise) {
-  params.input = input.const_data_ptr<input_t>();
-  params.codes = reinterpret_cast<uint8_t*>(codes.data_ptr());
-  params.scales = scales.data_ptr<float>();
   const int64_t outer_block_size =
       params.contract_dim == -1 ? params.rows_per_block : params.cols_per_block;
   if (tensorwise) {
@@ -1826,8 +1775,6 @@ void launch_quantize_impl(
 
 template <typename input_t>
 void launch_quantize(
-    const at::Tensor& input,
-    const at::Tensor& codes,
     const at::Tensor& scales,
     const at::Tensor& partials,
     QuantizeParams params,
@@ -1840,17 +1787,17 @@ void launch_quantize(
   if (e5m2) {
     if (stochastic_rounding) {
       launch_quantize_impl<input_t, true, true>(
-          input, codes, scales, partials, params, philox, stream, tensorwise, rowwise);
+          scales, partials, params, philox, stream, tensorwise, rowwise);
     } else {
       launch_quantize_impl<input_t, true, false>(
-          input, codes, scales, partials, params, philox, stream, tensorwise, rowwise);
+          scales, partials, params, philox, stream, tensorwise, rowwise);
     }
   } else if (stochastic_rounding) {
     launch_quantize_impl<input_t, false, true>(
-        input, codes, scales, partials, params, philox, stream, tensorwise, rowwise);
+        scales, partials, params, philox, stream, tensorwise, rowwise);
   } else {
     launch_quantize_impl<input_t, false, false>(
-        input, codes, scales, partials, params, philox, stream, tensorwise, rowwise);
+        scales, partials, params, philox, stream, tensorwise, rowwise);
   }
 }
 
@@ -1923,25 +1870,31 @@ std::tuple<at::Tensor, at::Tensor> quantize_fp8_cuda_impl(
       (rows + rows_per_block - 1) / rows_per_block;
   const int64_t col_block_count =
       (cols + cols_per_block - 1) / cols_per_block;
-  QuantizeParams params{
-      nullptr,
-      nullptr,
-      nullptr,
-      statistics.defined() ? statistics.data_ptr<float>() : nullptr,
-      input.dim() == 3 ? input.size(0) : 1,
-      rows,
-      cols,
-      input.dim() == 3 ? input.stride(0) : 0,
-      input.stride(-2),
-      input.stride(-1),
-      input.dim() == 3 ? codes.stride(0) : 0,
-      codes.stride(-2),
-      codes.stride(-1),
-      rows_per_block,
-      cols_per_block,
-      row_block_count,
-      col_block_count,
-      static_cast<int>(contract_dim)};
+  QuantizeParams params;
+  params.input = input.const_data_ptr();
+  params.codes = codes.data_ptr();
+  params.scales = scales.data_ptr();
+  params.statistics_partials =
+      statistics.defined() ? statistics.data_ptr<float>() : nullptr;
+  params.batches = input.dim() == 3 ? input.size(0) : 1;
+  params.rows = rows;
+  params.cols = cols;
+  params.input_batch_stride = input.dim() == 3 ? input.stride(0) : 0;
+  params.input_row_stride = input.stride(-2);
+  params.input_col_stride = input.stride(-1);
+  params.code_batch_stride = codes.dim() == 3 ? codes.stride(0) : 0;
+  params.code_row_stride = codes.stride(-2);
+  params.code_col_stride = codes.stride(-1);
+  params.scale_batch_stride = scales.dim() == 3 ? scales.stride(0) : 0;
+  params.scale_row_stride = scales.stride(-2);
+  params.scale_col_stride = scales.stride(-1);
+  params.rows_per_block = rows_per_block;
+  params.cols_per_block = cols_per_block;
+  params.row_block_count =
+      row_block_count;
+  params.col_block_count =
+      col_block_count;
+  params.contract_dim = static_cast<int>(contract_dim);
   const int64_t tensorwise_partials = tensorwise
       ? (rows * cols + kThreads * kTensorwiseValues - 1) /
           (kThreads * kTensorwiseValues)
@@ -2004,18 +1957,18 @@ std::tuple<at::Tensor, at::Tensor> quantize_fp8_cuda_impl(
       if (fast_blockwise1d) {
         launch_blockwise1d_contiguous<float>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stochastic_rounding, philox, stream.stream(), params.statistics);
+            stochastic_rounding, philox, stream.stream(), params.statistics_partials);
       } else if (fast_transposed_blockwise1d_rne) {
         launch_blockwise1d_transposed_rne<float>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stream.stream(), params.statistics, input.numel());
+            stream.stream(), params.statistics_partials, input.numel());
       } else if (fast_transposed_column_blockwise1d_rne) {
         launch_blockwise1d_transposed_column_rne<float>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stream.stream(), params.statistics, input.numel());
+            stream.stream(), params.statistics_partials, input.numel());
       } else {
         launch_quantize<float>(
-            input, codes, scales, partials, params, e5m2, stochastic_rounding, philox,
+            scales, partials, params, e5m2, stochastic_rounding, philox,
             stream.stream(), tensorwise, rowwise);
       }
       break;
@@ -2023,18 +1976,18 @@ std::tuple<at::Tensor, at::Tensor> quantize_fp8_cuda_impl(
       if (fast_blockwise1d) {
         launch_blockwise1d_contiguous<at::Half>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stochastic_rounding, philox, stream.stream(), params.statistics);
+            stochastic_rounding, philox, stream.stream(), params.statistics_partials);
       } else if (fast_transposed_blockwise1d_rne) {
         launch_blockwise1d_transposed_rne<at::Half>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stream.stream(), params.statistics, input.numel());
+            stream.stream(), params.statistics_partials, input.numel());
       } else if (fast_transposed_column_blockwise1d_rne) {
         launch_blockwise1d_transposed_column_rne<at::Half>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stream.stream(), params.statistics, input.numel());
+            stream.stream(), params.statistics_partials, input.numel());
       } else {
         launch_quantize<at::Half>(
-            input, codes, scales, partials, params, e5m2, stochastic_rounding, philox,
+            scales, partials, params, e5m2, stochastic_rounding, philox,
             stream.stream(), tensorwise, rowwise);
       }
       break;
@@ -2042,18 +1995,18 @@ std::tuple<at::Tensor, at::Tensor> quantize_fp8_cuda_impl(
       if (fast_blockwise1d) {
         launch_blockwise1d_contiguous<at::BFloat16>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stochastic_rounding, philox, stream.stream(), params.statistics);
+            stochastic_rounding, philox, stream.stream(), params.statistics_partials);
       } else if (fast_transposed_blockwise1d_rne) {
         launch_blockwise1d_transposed_rne<at::BFloat16>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stream.stream(), params.statistics, input.numel());
+            stream.stream(), params.statistics_partials, input.numel());
       } else if (fast_transposed_column_blockwise1d_rne) {
         launch_blockwise1d_transposed_column_rne<at::BFloat16>(
             input, codes, scales, static_cast<int>(block_contract), e5m2,
-            stream.stream(), params.statistics, input.numel());
+            stream.stream(), params.statistics_partials, input.numel());
       } else {
         launch_quantize<at::BFloat16>(
-            input, codes, scales, partials, params, e5m2, stochastic_rounding, philox,
+            scales, partials, params, e5m2, stochastic_rounding, philox,
             stream.stream(), tensorwise, rowwise);
       }
       break;

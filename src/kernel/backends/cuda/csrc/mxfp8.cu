@@ -8,6 +8,7 @@
 #include <torch/extension.h>
 
 #include <ATen/cuda/PhiloxUtils.cuh>
+#include "quantize.cuh"
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -19,23 +20,28 @@
 
 namespace {
 
-struct Layout {
-  int64_t batches, slow_size, fast_size;
-  int64_t input_batch_stride, input_slow_stride, input_fast_stride;
-  int64_t code_batch_stride, code_slow_stride, code_fast_stride;
-  int64_t scale_batch_stride, scale_slow_stride, scale_fast_stride;
-};
-
 __device__ __forceinline__ int64_t local_offset(
-    int32_t slow, int32_t fast, int64_t slow_stride, int64_t fast_stride,
+    int32_t row, int32_t col, int64_t row_stride, int64_t col_stride,
     bool narrow_offsets
 ) {
   if (narrow_offsets) {
-    return slow * static_cast<int32_t>(slow_stride) +
-           fast * static_cast<int32_t>(fast_stride);
+    return row * static_cast<int32_t>(row_stride) +
+           col * static_cast<int32_t>(col_stride);
   }
-  return static_cast<int64_t>(slow) * slow_stride +
-         static_cast<int64_t>(fast) * fast_stride;
+  return static_cast<int64_t>(row) * row_stride +
+         static_cast<int64_t>(col) * col_stride;
+}
+
+template <bool kInputColumnMajor>
+__device__ __forceinline__ int32_t logical_row(
+    int32_t position, int32_t rows, int32_t cols) {
+  return kInputColumnMajor ? position % rows : position / cols;
+}
+
+template <bool kInputColumnMajor>
+__device__ __forceinline__ int32_t logical_col(
+    int32_t position, int32_t rows, int32_t cols) {
+  return kInputColumnMajor ? position / rows : position % cols;
 }
 
 __device__ __forceinline__ uint8_t encode_e8m0(float maximum) {
@@ -56,25 +62,6 @@ __device__ __forceinline__ float decode_e8m0(uint8_t code) {
     bits = static_cast<uint32_t>(254 - code) << 23;
   }
   return __int_as_float(static_cast<int>(bits));
-}
-
-__device__ __forceinline__ uint8_t encode_e4m3_round_to_near(float value) {
-  return __nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3);
-}
-
-__device__ __forceinline__ uint8_t encode_e4m3_stochastic(
-    float value,
-    uint32_t random
-) {
-  if (!isnan(value)) {
-    const int exponent = ((__float_as_int(value) >> 23) & 0xff) - 3;
-    const float ulp = __int_as_float(max(exponent, 118) << 23);
-    const float lower = floorf(value / ulp) * ulp;
-    value = static_cast<float>(random) * 0x1.0p-32f < (value - lower) / ulp
-                ? lower + ulp
-                : lower;
-  }
-  return encode_e4m3_round_to_near(value);
 }
 
 __device__ __forceinline__ float decode_e4m3(uint8_t code) {
@@ -130,90 +117,95 @@ struct ScaleShape {
   static constexpr int inner = inner_size;
 };
 
-template <typename input_t, typename scale_shape, bool contract_fast,
-          bool transpose_output, bool stochastic_rounding, bool collect_stats>
+template <typename input_t, typename scale_shape, bool contract_contiguous,
+          bool input_column_major, bool transpose_output, bool stochastic_rounding,
+          bool collect_stats>
 struct Tile {
-  // Streaming groups use wide tiles; transposes need both tile axes populated.
-  static constexpr int fast =
-      scale_shape::outer != 1
-          ? (contract_fast ? scale_shape::inner : scale_shape::outer)
-          : (contract_fast ? (transpose_output ? scale_shape::inner : 512) : 32);
-  static constexpr int slow =
-      scale_shape::outer != 1
-          ? (contract_fast ? scale_shape::outer : scale_shape::inner)
-          : (contract_fast ? (transpose_output ? 32 : 2) : scale_shape::inner);
-  static constexpr bool vector = contract_fast && scale_shape::outer == 1;
+  static constexpr int rows = scale_shape::outer != 1 ? scale_shape::inner
+      : input_column_major
+      ? (contract_contiguous ? (transpose_output ? scale_shape::inner : 512) : 32)
+      : (contract_contiguous ? (transpose_output ? 32 : 2) : scale_shape::inner);
+  static constexpr int cols = scale_shape::outer != 1 ? scale_shape::inner
+      : input_column_major
+      ? (contract_contiguous ? (transpose_output ? 32 : 2) : scale_shape::inner)
+      : (contract_contiguous ? (transpose_output ? scale_shape::inner : 512) : 32);
+  static constexpr bool vector = contract_contiguous && scale_shape::outer == 1;
   static constexpr bool stream = vector && !transpose_output;
   static constexpr int threads =
-      vector ? fast * slow / 16
+      vector ? rows * cols / 16
              : (scale_shape::outer == 32 && scale_shape::inner == 32 &&
                         sizeof(input_t) == 2 &&
                         !stochastic_rounding && !collect_stats
                     ? 64
                     : 256);
-  static constexpr int values = fast * slow / threads;
+  static constexpr int values = rows * cols / threads;
 };
 
 template <typename input_t, typename scale_shape, int contract_dim,
           bool input_column_major,
           bool transpose_output, bool stochastic_rounding, bool collect_stats>
 __global__ void quantize_mxfp8_kernel(
-    const input_t* input,
-    uint8_t* codes,
-    uint8_t* scales,
-    Layout layout,
-    int64_t fast_tiles,
-    int64_t slow_tiles,
-    int64_t first_fast_tile,
-    int64_t first_slow_tile,
+    QuantizeParams params,
+    int64_t row_tiles,
+    int64_t col_tiles,
+    int64_t first_row_tile,
+    int64_t first_col_tile,
     int64_t first_batch,
     bool narrow_offsets,
-    at::PhiloxCudaState philox,
-    float* stats_partials
+    at::PhiloxCudaState philox
 ) {
-  constexpr bool contract_fast =
+  constexpr bool contract_contiguous =
       contract_dim == (input_column_major ? -2 : -1);
-  using tile = Tile<input_t, scale_shape, contract_fast, transpose_output,
+  using tile = Tile<input_t, scale_shape, contract_contiguous, input_column_major,
+                    transpose_output,
                     stochastic_rounding, collect_stats>;
-  const int64_t fast_tile = first_fast_tile + blockIdx.x;
-  const int64_t slow_tile = first_slow_tile + blockIdx.y;
+  float* const stats_partials = params.statistics_partials;
+  const int64_t row_tile = first_row_tile +
+      (input_column_major ? blockIdx.x : blockIdx.y);
+  const int64_t col_tile = first_col_tile +
+      (input_column_major ? blockIdx.y : blockIdx.x);
   const int64_t batch = first_batch + blockIdx.z;
-  const int64_t tile_index =
-      fast_tile + fast_tiles * (slow_tile + slow_tiles * batch);
-  int64_t fast_origin, slow_origin;
+  const int64_t tile_index = input_column_major
+      ? row_tile + row_tiles * (col_tile + col_tiles * batch)
+      : col_tile + col_tiles * (row_tile + row_tiles * batch);
+  int64_t row_origin, col_origin;
   if constexpr (tile::stream) {
-    const int64_t padded_fast =
-        ((layout.fast_size - 1) / scale_shape::inner + 1) *
+    const int64_t contract_size = contract_dim == -1 ? params.cols : params.rows;
+    const int64_t padded_contract =
+        ((contract_size - 1) / scale_shape::inner + 1) *
         scale_shape::inner;
-    const int64_t first = fast_tile * tile::fast * tile::slow +
+    const int64_t first = (contract_dim == -1 ? col_tile : row_tile) *
+                          tile::rows * tile::cols +
                           static_cast<int64_t>(threadIdx.x) * tile::values;
-    slow_origin = first / padded_fast;
-    fast_origin = first % padded_fast;
+    const int64_t outer_origin = first / padded_contract;
+    const int64_t contract_origin = first % padded_contract;
+    row_origin = contract_dim == -1 ? outer_origin : contract_origin;
+    col_origin = contract_dim == -1 ? contract_origin : outer_origin;
   } else {
-    fast_origin = fast_tile * tile::fast;
-    slow_origin = slow_tile * tile::slow;
+    row_origin = row_tile * tile::rows;
+    col_origin = col_tile * tile::cols;
   }
-
-  const int32_t slow_size = static_cast<int32_t>(
-      min(max(layout.slow_size - slow_origin, int64_t{0}),
-          int64_t{tile::stream ? 1 : tile::slow}));
-  const int32_t fast_size = static_cast<int32_t>(
-      min(max(layout.fast_size - fast_origin, int64_t{0}),
-          int64_t{tile::stream ? tile::values : tile::fast}));
-  if (slow_size != 0 && fast_size != 0) {
-    input += batch * layout.input_batch_stride +
-             slow_origin * layout.input_slow_stride +
-             fast_origin * layout.input_fast_stride;
-    codes += batch * layout.code_batch_stride +
-             slow_origin * layout.code_slow_stride +
-             fast_origin * layout.code_fast_stride;
-    scales += batch * layout.scale_batch_stride +
-              (contract_fast ? slow_origin : slow_origin / scale_shape::inner) *
-                  layout.scale_slow_stride +
-              (contract_fast ? fast_origin / scale_shape::inner : fast_origin) *
-                  layout.scale_fast_stride;
+  const int32_t row_size = static_cast<int32_t>(min(
+      max(params.rows - row_origin, int64_t{0}),
+      int64_t{tile::stream ? (contract_dim == -2 ? tile::values : 1) : tile::rows}));
+  const int32_t col_size = static_cast<int32_t>(min(
+      max(params.cols - col_origin, int64_t{0}),
+      int64_t{tile::stream ? (contract_dim == -1 ? tile::values : 1) : tile::cols}));
+  const bool valid_tile = row_size != 0 && col_size != 0;
+  const input_t* input = nullptr;
+  uint8_t* codes = nullptr;
+  uint8_t* scales = nullptr;
+  if (valid_tile) {
+    input = params.input_data<input_t>() + batch * params.input_batch_stride +
+        row_origin * params.input_row_stride + col_origin * params.input_col_stride;
+    codes = params.code_data<uint8_t>() + batch * params.code_batch_stride +
+        row_origin * params.code_row_stride + col_origin * params.code_col_stride;
+    scales = params.scale_data<uint8_t>() + batch * params.scale_batch_stride +
+        (contract_dim == -1 ? row_origin : row_origin / scale_shape::inner) *
+            params.scale_row_stride +
+        (contract_dim == -1 ? col_origin / scale_shape::inner : col_origin) *
+            params.scale_col_stride;
   }
-
   const int lane = threadIdx.x % 32;
   const int warp = threadIdx.x / 32;
   float values[tile::values] = {};
@@ -221,14 +213,16 @@ __global__ void quantize_mxfp8_kernel(
 
   if constexpr (tile::vector) {
     const int first = tile::stream ? 0 : threadIdx.x * tile::values;
-    const int32_t slow = first / tile::fast;
-    const int32_t fast = first % tile::fast;
-    const input_t* source = slow < slow_size && fast < fast_size
-        ? input + local_offset(slow, fast, layout.input_slow_stride,
-                              layout.input_fast_stride, narrow_offsets)
+    const int32_t row = logical_row<input_column_major>(first, tile::rows, tile::cols);
+    const int32_t col = logical_col<input_column_major>(first, tile::rows, tile::cols);
+    const input_t* source = row < row_size && col < col_size
+        ? input + local_offset(row, col, params.input_row_stride,
+                              params.input_col_stride, narrow_offsets)
         : nullptr;
-    if (slow < slow_size && fast + tile::values <= fast_size &&
-        layout.input_fast_stride == 1 &&
+    if (row < row_size && col < col_size &&
+        (input_column_major ? row + tile::values <= row_size
+                            : col + tile::values <= col_size) &&
+        (input_column_major ? params.input_row_stride : params.input_col_stride) == 1 &&
         reinterpret_cast<uintptr_t>(source) % alignof(uint4) == 0) {
       if constexpr (std::is_same_v<input_t, float>) {
 #pragma unroll
@@ -261,9 +255,12 @@ __global__ void quantize_mxfp8_kernel(
     } else {
 #pragma unroll
       for (int index = 0; index < tile::values; ++index) {
-        if (slow < slow_size && fast + index < fast_size) {
-          values[index] = static_cast<float>(source[local_offset(
-              0, index, 0, layout.input_fast_stride, narrow_offsets)]);
+        const int32_t value_row = input_column_major ? row + index : row;
+        const int32_t value_col = input_column_major ? col : col + index;
+        if (value_row < row_size && value_col < col_size) {
+          values[index] = static_cast<float>(input[local_offset(
+              value_row, value_col, params.input_row_stride,
+              params.input_col_stride, narrow_offsets)]);
         }
       }
     }
@@ -271,11 +268,13 @@ __global__ void quantize_mxfp8_kernel(
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
       const int position = threadIdx.x + index * tile::threads;
-      const int32_t slow = position / tile::fast;
-      const int32_t fast = position % tile::fast;
-      if (slow < slow_size && fast < fast_size) {
+      const int32_t row = logical_row<input_column_major>(
+          position, tile::rows, tile::cols);
+      const int32_t col = logical_col<input_column_major>(
+          position, tile::rows, tile::cols);
+      if (row < row_size && col < col_size) {
         values[index] = static_cast<float>(input[local_offset(
-            slow, fast, layout.input_slow_stride, layout.input_fast_stride,
+            row, col, params.input_row_stride, params.input_col_stride,
             narrow_offsets)]);
       }
     }
@@ -311,12 +310,13 @@ __global__ void quantize_mxfp8_kernel(
     scale = static_cast<uint8_t>(
         __shfl_sync(mask, static_cast<int>(scale), 0, group_lanes));
     const int first = tile::stream ? 0 : threadIdx.x * tile::values;
-    const int32_t slow = first / tile::fast;
-    const int32_t fast = first % tile::fast;
-    if (group_lane == 0 && slow < slow_size && fast < fast_size) {
-      scales[local_offset(slow, fast / scale_shape::inner,
-                          layout.scale_slow_stride, layout.scale_fast_stride,
-                          narrow_offsets)] = scale;
+    const int32_t row = logical_row<input_column_major>(first, tile::rows, tile::cols);
+    const int32_t col = logical_col<input_column_major>(first, tile::rows, tile::cols);
+    if (group_lane == 0 && row < row_size && col < col_size) {
+      const int32_t scale_row = contract_dim == -1 ? row : row / scale_shape::inner;
+      const int32_t scale_col = contract_dim == -1 ? col / scale_shape::inner : col;
+      scales[local_offset(scale_row, scale_col, params.scale_row_stride,
+                          params.scale_col_stride, narrow_offsets)] = scale;
     }
   } else if constexpr (scale_shape::outer == 1) {
     __shared__ float partial_maximum[tile::threads / 32][32];
@@ -332,9 +332,17 @@ __global__ void quantize_mxfp8_kernel(
         has_nan |= partial_nan[other][lane];
       }
       group_scales[lane] = encode_e8m0(has_nan ? nanf("") : maximum);
-      if (lane < fast_size) {
-        scales[local_offset(0, lane, layout.scale_slow_stride,
-                            layout.scale_fast_stride, narrow_offsets)] =
+      const int32_t row = logical_row<input_column_major>(
+          lane, tile::rows, tile::cols);
+      const int32_t col = logical_col<input_column_major>(
+          lane, tile::rows, tile::cols);
+      if (row < row_size && col < col_size) {
+        const int32_t scale_row =
+            contract_dim == -1 ? row : row / scale_shape::inner;
+        const int32_t scale_col =
+            contract_dim == -1 ? col / scale_shape::inner : col;
+        scales[local_offset(scale_row, scale_col, params.scale_row_stride,
+                            params.scale_col_stride, narrow_offsets)] =
             group_scales[lane];
       }
     }
@@ -365,13 +373,15 @@ __global__ void quantize_mxfp8_kernel(
     __syncthreads();
     scale = tile_scale;
     if (threadIdx.x < scale_shape::outer) {
-      const int32_t slow = contract_fast ? threadIdx.x : 0;
-      const int32_t fast = contract_fast ? 0 : threadIdx.x;
-      if (slow < slow_size && fast < fast_size) {
-        scales[local_offset(contract_fast ? slow : slow / scale_shape::inner,
-                            contract_fast ? fast / scale_shape::inner : fast,
-                            layout.scale_slow_stride, layout.scale_fast_stride,
-                            narrow_offsets)] = scale;
+      const int32_t row = contract_dim == -1 ? threadIdx.x : 0;
+      const int32_t col = contract_dim == -1 ? 0 : threadIdx.x;
+      if (row < row_size && col < col_size) {
+        const int32_t scale_row =
+            contract_dim == -1 ? row : row / scale_shape::inner;
+        const int32_t scale_col =
+            contract_dim == -1 ? col / scale_shape::inner : col;
+        scales[local_offset(scale_row, scale_col, params.scale_row_stride,
+                            params.scale_col_stride, narrow_offsets)] = scale;
       }
     }
   }
@@ -399,7 +409,7 @@ __global__ void quantize_mxfp8_kernel(
       for (int element = 0; element < 4 && index + element < tile::values;
            ++element) {
         encoded[index + element] =
-            encode_e4m3_stochastic(values[index + element], words[element]);
+            fp8_stochastic<false>(values[index + element], words[element]);
       }
     }
   } else if constexpr (tile::values % 2 == 0) {
@@ -412,39 +422,51 @@ __global__ void quantize_mxfp8_kernel(
       encoded[index + 1] = static_cast<uint8_t>(packed >> 8);
     }
   } else {
-    encoded[0] = encode_e4m3_round_to_near(values[0]);
+    encoded[0] = fp8_rne<false>(values[0]);
   }
 
   if constexpr (transpose_output) {
-    // Four-byte padding avoids bank conflicts when reading the other tile axis.
-    __shared__ uint8_t transposed[tile::slow][tile::fast + 4];
+    // Padding preserves coalesced stores without shared-memory bank conflicts.
+    __shared__ uint8_t transposed[input_column_major ? tile::cols : tile::rows]
+                                [(input_column_major ? tile::rows : tile::cols) + 4];
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
-      const int position = tile::vector ? threadIdx.x * tile::values + index
-                                        : threadIdx.x + index * tile::threads;
-      transposed[position / tile::fast][position % tile::fast] = encoded[index];
+      const int position = tile::vector
+          ? threadIdx.x * tile::values + index
+          : threadIdx.x + index * tile::threads;
+      const int32_t row = logical_row<input_column_major>(
+          position, tile::rows, tile::cols);
+      const int32_t col = logical_col<input_column_major>(
+          position, tile::rows, tile::cols);
+      transposed[input_column_major ? col : row]
+                [input_column_major ? row : col] = encoded[index];
     }
     __syncthreads();
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
       const int position = threadIdx.x + index * tile::threads;
-      const int32_t slow = position % tile::slow;
-      const int32_t fast = position / tile::slow;
-      if (slow < slow_size && fast < fast_size) {
-        codes[local_offset(slow, fast, layout.code_slow_stride,
-                           layout.code_fast_stride, narrow_offsets)] =
-            transposed[slow][fast];
+      const int32_t row = logical_row<!input_column_major>(
+          position, tile::rows, tile::cols);
+      const int32_t col = logical_col<!input_column_major>(
+          position, tile::rows, tile::cols);
+      if (row < row_size && col < col_size) {
+        codes[local_offset(row, col, params.code_row_stride,
+                           params.code_col_stride, narrow_offsets)] =
+            transposed[input_column_major ? col : row]
+                      [input_column_major ? row : col];
       }
     }
   } else if constexpr (tile::vector) {
     const int first = tile::stream ? 0 : threadIdx.x * tile::values;
-    const int32_t slow = first / tile::fast;
-    const int32_t fast = first % tile::fast;
-    uint8_t* destination = slow < slow_size && fast < fast_size
-        ? codes + local_offset(slow, fast, layout.code_slow_stride,
-                              layout.code_fast_stride, narrow_offsets)
+    const int32_t row = logical_row<input_column_major>(first, tile::rows, tile::cols);
+    const int32_t col = logical_col<input_column_major>(first, tile::rows, tile::cols);
+    uint8_t* destination = row < row_size && col < col_size
+        ? codes + local_offset(row, col, params.code_row_stride,
+                              params.code_col_stride, narrow_offsets)
         : nullptr;
-    if (slow < slow_size && fast + tile::values <= fast_size &&
+    if (row < row_size && col < col_size &&
+        (input_column_major ? row + tile::values <= row_size
+                            : col + tile::values <= col_size) &&
         reinterpret_cast<uintptr_t>(destination) % alignof(uint4) == 0) {
       uint32_t words[4] = {};
 #pragma unroll
@@ -457,9 +479,11 @@ __global__ void quantize_mxfp8_kernel(
     } else {
 #pragma unroll
       for (int index = 0; index < tile::values; ++index) {
-        if (slow < slow_size && fast + index < fast_size) {
-          destination[local_offset(0, index, 0, layout.code_fast_stride,
-                                   narrow_offsets)] = encoded[index];
+        const int32_t value_row = input_column_major ? row + index : row;
+        const int32_t value_col = input_column_major ? col : col + index;
+        if (value_row < row_size && value_col < col_size) {
+          codes[local_offset(value_row, value_col, params.code_row_stride,
+                             params.code_col_stride, narrow_offsets)] = encoded[index];
         }
       }
     }
@@ -467,11 +491,13 @@ __global__ void quantize_mxfp8_kernel(
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
       const int position = threadIdx.x + index * tile::threads;
-      const int32_t slow = position / tile::fast;
-      const int32_t fast = position % tile::fast;
-      if (slow < slow_size && fast < fast_size) {
-        codes[local_offset(slow, fast, layout.code_slow_stride,
-                           layout.code_fast_stride, narrow_offsets)] =
+      const int32_t row = logical_row<input_column_major>(
+          position, tile::rows, tile::cols);
+      const int32_t col = logical_col<input_column_major>(
+          position, tile::rows, tile::cols);
+      if (row < row_size && col < col_size) {
+        codes[local_offset(row, col, params.code_row_stride,
+                           params.code_col_stride, narrow_offsets)] =
             encoded[index];
       }
     }
@@ -481,17 +507,14 @@ __global__ void quantize_mxfp8_kernel(
     float src_sq = 0.0f, err_sq = 0.0f, under = 0.0f, nonzero = 0.0f;
 #pragma unroll
     for (int index = 0; index < tile::values; ++index) {
-      int32_t slow, fast;
-      if constexpr (tile::vector) {
-        const int first = tile::stream ? 0 : threadIdx.x * tile::values;
-        slow = first / tile::fast;
-        fast = first % tile::fast + index;
-      } else {
-        const int position = threadIdx.x + index * tile::threads;
-        slow = position / tile::fast;
-        fast = position % tile::fast;
-      }
-      if (slow < slow_size && fast < fast_size) {
+      const int position = tile::vector
+          ? (tile::stream ? index : threadIdx.x * tile::values + index)
+          : threadIdx.x + index * tile::threads;
+      const int32_t row = logical_row<input_column_major>(
+          position, tile::rows, tile::cols);
+      const int32_t col = logical_col<input_column_major>(
+          position, tile::rows, tile::cols);
+      if (row < row_size && col < col_size) {
         const float source = source_values[index];
         const float reconstructed = decode_e4m3(encoded[index]) /
                                     decode_e8m0(scale);
@@ -533,98 +556,101 @@ template <typename input_t, typename scale_shape, int contract_dim,
           bool transpose_output, bool stochastic_rounding, bool collect_stats>
 void launch_quantize_mxfp8(
     const at::Tensor& input,
-    const at::Tensor& codes,
-    const at::Tensor& scales,
-    Layout layout,
+    QuantizeParams params,
     at::PhiloxCudaState philox,
     cudaStream_t stream,
     at::Tensor* stats
 ) {
-  constexpr bool contract_fast =
+  constexpr bool contract_contiguous =
       contract_dim == (input_column_major ? -2 : -1);
-  using tile = Tile<input_t, scale_shape, contract_fast, transpose_output,
+  using tile = Tile<input_t, scale_shape, contract_contiguous, input_column_major,
+                    transpose_output,
                     stochastic_rounding, collect_stats>;
   const int64_t limit = std::numeric_limits<int64_t>::max();
-  int64_t fast_tiles;
+  int64_t row_tiles;
+  int64_t col_tiles;
   if constexpr (tile::stream) {
-    const int64_t fast_groups = (layout.fast_size - 1) / scale_shape::inner + 1;
-    TORCH_CHECK(fast_groups <= limit / scale_shape::inner,
+    const int64_t contract_size = contract_dim == -1 ? params.cols : params.rows;
+    const int64_t outer_size = contract_dim == -1 ? params.rows : params.cols;
+    const int64_t groups = (contract_size - 1) / scale_shape::inner + 1;
+    TORCH_CHECK(groups <= limit / scale_shape::inner,
                 "MXFP8 padded row size exceeds int64 range");
-    const int64_t padded_fast = fast_groups * scale_shape::inner;
-    TORCH_CHECK(layout.slow_size <= limit / padded_fast,
+    const int64_t padded_contract = groups * scale_shape::inner;
+    TORCH_CHECK(outer_size <= limit / padded_contract,
                 "MXFP8 padded input size exceeds int64 range");
-    constexpr int tile_elements = tile::fast * tile::slow;
-    fast_tiles = (padded_fast * layout.slow_size - 1) / tile_elements + 1;
-    TORCH_CHECK(fast_tiles <= limit / tile_elements,
+    constexpr int tile_elements = tile::rows * tile::cols;
+    const int64_t stream_tiles =
+        (padded_contract * outer_size - 1) / tile_elements + 1;
+    TORCH_CHECK(stream_tiles <= limit / tile_elements,
                 "MXFP8 padded tile positions exceed int64 range");
+    row_tiles = contract_dim == -1 ? 1 : stream_tiles;
+    col_tiles = contract_dim == -1 ? stream_tiles : 1;
   } else {
-    fast_tiles = (layout.fast_size - 1) / tile::fast + 1;
+    row_tiles = (params.rows - 1) / tile::rows + 1;
+    col_tiles = (params.cols - 1) / tile::cols + 1;
   }
-  const int64_t slow_tiles =
-      tile::stream ? 1 : (layout.slow_size - 1) / tile::slow + 1;
-  TORCH_CHECK(fast_tiles <= limit / slow_tiles &&
-                  layout.batches <= limit / (slow_tiles * fast_tiles),
+  TORCH_CHECK(row_tiles <= limit / col_tiles &&
+                  params.batches <= limit / (row_tiles * col_tiles),
               "MXFP8 tile count exceeds int64 range");
-  const int64_t count = layout.batches * slow_tiles * fast_tiles;
+  const int64_t count = params.batches * row_tiles * col_tiles;
   TORCH_CHECK(count <= limit / tile::threads,
               "MXFP8 logical thread count exceeds int64 range");
 
-  const auto fits_int32 = [](int64_t slow_size, int64_t fast_size,
-                             int64_t slow_stride, int64_t fast_stride) {
+  const auto fits_int32 = [](int64_t rows, int64_t cols,
+                             int64_t row_stride, int64_t col_stride) {
     const int64_t limit = std::numeric_limits<int32_t>::max();
-    if (slow_stride > limit || fast_stride > limit) return false;
-    const int64_t slow_offset = (slow_size - 1) * slow_stride;
-    return slow_offset <= limit &&
-           (fast_size - 1) * fast_stride <= limit - slow_offset;
+    if (row_stride > limit || col_stride > limit) return false;
+    const int64_t row_offset = (rows - 1) * row_stride;
+    return row_offset <= limit &&
+           (cols - 1) * col_stride <= limit - row_offset;
   };
-  constexpr int local_slow = tile::stream ? 1 : tile::slow;
-  constexpr int local_fast = tile::stream ? tile::values : tile::fast;
-  constexpr int scale_slow = contract_fast
-      ? local_slow : (local_slow + scale_shape::inner - 1) / scale_shape::inner;
-  constexpr int scale_fast = contract_fast
-      ? (local_fast + scale_shape::inner - 1) / scale_shape::inner : local_fast;
+  constexpr int local_rows = tile::stream
+      ? (contract_dim == -2 ? tile::values : 1) : tile::rows;
+  constexpr int local_cols = tile::stream
+      ? (contract_dim == -1 ? tile::values : 1) : tile::cols;
+  constexpr int scale_rows = contract_dim == -1
+      ? local_rows : (local_rows + scale_shape::inner - 1) / scale_shape::inner;
+  constexpr int scale_cols = contract_dim == -1
+      ? (local_cols + scale_shape::inner - 1) / scale_shape::inner : local_cols;
   // Global bases stay 64-bit; narrow only offsets within a tile.
   const bool narrow_offsets =
-      fits_int32(local_slow, local_fast,
-                 layout.input_slow_stride, layout.input_fast_stride) &&
-      fits_int32(local_slow, local_fast,
-                 layout.code_slow_stride, layout.code_fast_stride) &&
-      fits_int32(scale_slow, scale_fast,
-                 layout.scale_slow_stride, layout.scale_fast_stride);
+      fits_int32(local_rows, local_cols,
+                 params.input_row_stride, params.input_col_stride) &&
+      fits_int32(local_rows, local_cols,
+                 params.code_row_stride, params.code_col_stride) &&
+      fits_int32(scale_rows, scale_cols,
+                 params.scale_row_stride, params.scale_col_stride);
   at::Tensor partials;
-  float* stats_partials = nullptr;
   if constexpr (collect_stats) {
     partials = at::empty({count, 4}, input.options().dtype(at::kFloat));
-    stats_partials = partials.data_ptr<float>();
+    params.statistics_partials = partials.data_ptr<float>();
   }
   const auto* device = at::cuda::getCurrentDeviceProperties();
-  for (int64_t first_batch = 0; first_batch < layout.batches;) {
+  for (int64_t first_batch = 0; first_batch < params.batches;) {
     const int64_t batch_chunk =
-        std::min(layout.batches - first_batch, int64_t{device->maxGridSize[2]});
-    for (int64_t first_slow = 0; first_slow < slow_tiles;) {
-      const int64_t slow_chunk =
-          std::min(slow_tiles - first_slow, int64_t{device->maxGridSize[1]});
-      for (int64_t first_fast = 0; first_fast < fast_tiles;) {
-        const int64_t fast_chunk =
-            std::min(fast_tiles - first_fast, int64_t{device->maxGridSize[0]});
-        const dim3 grid(fast_chunk, slow_chunk, batch_chunk);
+        std::min(params.batches - first_batch, int64_t{device->maxGridSize[2]});
+    for (int64_t first_row = 0; first_row < row_tiles;) {
+      const int64_t row_chunk = std::min(
+          row_tiles - first_row, int64_t{device->maxGridSize[input_column_major ? 0 : 1]});
+      for (int64_t first_col = 0; first_col < col_tiles;) {
+        const int64_t col_chunk = std::min(
+            col_tiles - first_col, int64_t{device->maxGridSize[input_column_major ? 1 : 0]});
+        const dim3 grid(input_column_major ? row_chunk : col_chunk,
+                        input_column_major ? col_chunk : row_chunk, batch_chunk);
         quantize_mxfp8_kernel<input_t, scale_shape, contract_dim, input_column_major,
                               transpose_output, stochastic_rounding, collect_stats>
             <<<grid, tile::threads, 0, stream>>>(
-                input.const_data_ptr<input_t>(),
-                reinterpret_cast<uint8_t*>(codes.data_ptr()),
-                reinterpret_cast<uint8_t*>(scales.data_ptr()), layout, fast_tiles,
-                slow_tiles, first_fast, first_slow, first_batch, narrow_offsets,
-                philox, stats_partials);
-        first_fast += fast_chunk;
+                params, row_tiles, col_tiles, first_row, first_col, first_batch,
+                narrow_offsets, philox);
+        first_col += col_chunk;
       }
-      first_slow += slow_chunk;
+      first_row += row_chunk;
     }
     first_batch += batch_chunk;
   }
   if constexpr (collect_stats) {
     finalize_stats_kernel<<<1, 256, 0, stream>>>(
-        stats_partials, count, input.numel(), stats->data_ptr<float>());
+        params.statistics_partials, count, input.numel(), stats->data_ptr<float>());
   }
 }
 
@@ -641,9 +667,7 @@ void launch_quantize_mxfp8(
 template <typename input_t, typename scale_shape>
 void dispatch_layout(
     const at::Tensor& input,
-    const at::Tensor& codes,
-    const at::Tensor& scales,
-    Layout layout,
+    QuantizeParams params,
     int64_t contract_dim,
     bool input_column_major,
     bool transpose_output,
@@ -670,16 +694,14 @@ void dispatch_layout(
                           kTransposeOutput,
                           kStochasticRounding,
                           kCollectStats>(
-                          input, codes, scales, layout, philox, stream,
+                          input, params, philox, stream,
                           stats))))))
 }
 
 template <typename input_t>
 void dispatch_scale_shape(
     const at::Tensor& input,
-    const at::Tensor& codes,
-    const at::Tensor& scales,
-    Layout layout,
+    QuantizeParams params,
     int64_t block_size,
     int64_t block_outer,
     int64_t contract_dim,
@@ -694,7 +716,7 @@ void dispatch_scale_shape(
   BOOL_DISPATCH(                                                            \
       block_outer != 1, kSquare,                                           \
       dispatch_layout<input_t, ScaleShape<(kSquare ? SIZE : 1), SIZE>>(    \
-          input, codes, scales, layout, contract_dim, input_column_major,  \
+          input, params, contract_dim, input_column_major,                 \
           transpose_output, stochastic_rounding, philox, stream, stats))
   switch (block_size) {
     case 16:
@@ -777,20 +799,30 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_impl(
   if (input.numel() == 0) return {codes, scales};
 
   const bool input_column_major = input.stride(-2) < input.stride(-1);
-  const int slow_axis = input_column_major ? -1 : -2;
-  const int fast_axis = input_column_major ? -2 : -1;
-  const Layout layout = {input.dim() == 3 ? input.size(0) : 1,
-                         input.size(slow_axis),
-                         input.size(fast_axis),
-                         input.dim() == 3 ? input.stride(0) : 0,
-                         input.stride(slow_axis),
-                         input.stride(fast_axis),
-                         codes.dim() == 3 ? codes.stride(0) : 0,
-                         codes.stride(slow_axis),
-                         codes.stride(fast_axis),
-                         scales.dim() == 3 ? scales.stride(0) : 0,
-                         scales.stride(slow_axis),
-                         scales.stride(fast_axis)};
+  QuantizeParams params;
+  params.input = input.const_data_ptr();
+  params.codes = codes.data_ptr();
+  params.scales = scales.data_ptr();
+  params.statistics = stats != nullptr ? stats->data_ptr<float>() : nullptr;
+  params.batches = input.dim() == 3 ? input.size(0) : 1;
+  params.rows = input.size(-2);
+  params.cols = input.size(-1);
+  params.input_batch_stride = input.dim() == 3 ? input.stride(0) : 0;
+  params.input_row_stride = input.stride(-2);
+  params.input_col_stride = input.stride(-1);
+  params.code_batch_stride = codes.dim() == 3 ? codes.stride(0) : 0;
+  params.code_row_stride = codes.stride(-2);
+  params.code_col_stride = codes.stride(-1);
+  params.scale_batch_stride = scales.dim() == 3 ? scales.stride(0) : 0;
+  params.scale_row_stride = scales.stride(-2);
+  params.scale_col_stride = scales.stride(-1);
+  params.rows_per_block = contract_dim == -1 ? block_outer : block_size;
+  params.cols_per_block = contract_dim == -1 ? block_size : block_outer;
+  params.row_block_count = (params.rows + params.rows_per_block - 1) /
+      params.rows_per_block;
+  params.col_block_count = (params.cols + params.cols_per_block - 1) /
+      params.cols_per_block;
+  params.contract_dim = static_cast<int>(contract_dim);
   const bool transpose_output =
       input_column_major != (output_layout == "column_major");
   at::PhiloxCudaState philox;
@@ -804,7 +836,7 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_impl(
   }
   const auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
 #define LAUNCH_TYPE(TYPE)                                                      \
-  dispatch_scale_shape<TYPE>(input, codes, scales, layout, block_size,         \
+  dispatch_scale_shape<TYPE>(input, params, block_size,                         \
                              block_outer, contract_dim, input_column_major,     \
                              transpose_output, stochastic_rounding, philox,     \
                              stream.stream(), stats)

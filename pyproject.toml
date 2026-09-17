@@ -60,4 +60,5 @@ cache-keys = [
     { file = "src/data/bpe/**/*.h" },
     { file = "src/kernel/backends/cuda/csrc/**/*.cpp" },
     { file = "src/kernel/backends/cuda/csrc/**/*.cu" },
+    { file = "src/kernel/backends/cuda/csrc/**/*.cuh" },
 ]

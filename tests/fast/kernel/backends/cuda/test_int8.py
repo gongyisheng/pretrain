@@ -7,6 +7,10 @@ import torch
 
 from src.kernel.ops import dequantize_dense, quantize_int8
 from src.metrics.quant import accumulate_quantization_sums
+from tests.fast.kernel.backends.cuda._quantize_test_utils import (
+    LARGE_OFFSET_CASES,
+    large_offset_source,
+)
 from tests.fast.helper import cuda_only
 
 
@@ -32,6 +36,15 @@ SHAPES = ((35, 65), (2, 1057, 33), (2, 64, 256))
 LAYOUTS = ("dense", "strided", "transposed", "broadcast", "offset")
 INPUT_CASES = ("normal", "boundaries", "nonfinite", "tiny")
 COMPILE_BLOCK_SHAPES = ((0, 0), (1, 0), (1, 32), (32, 32))
+INDEX_STRIDE_CASES = (
+    ((1, 64), (((1 << 31) - 1) // 31, 1), -1),
+    ((1, 64), (((1 << 31) - 1) // 31 + 1, 1), -1),
+    ((1, 64), ((1 << 31) - 1, 1), -1),
+    ((1, 64), (1 << 31, 1), -1),
+    ((1, 64), ((1 << 60) + 1, 1), -1),
+    ((64, 1), (1, (1 << 60) + 1), -2),
+    ((1, 1, 64), ((1 << 60) + 1, 1 << 31, 1), -1),
+)
 
 
 @cuda_only
@@ -103,6 +116,73 @@ def test_quantize_int8_precision(
     assert torch.equal(
         source.contiguous().view(torch.uint8), original.contiguous().view(torch.uint8)
     )
+
+
+@cuda_only
+@pytest.mark.parametrize("stochastic_rounding", (False, True))
+@pytest.mark.parametrize("index_case", INDEX_STRIDE_CASES)
+def test_quantize_int8_large_strides(stochastic_rounding, index_case):
+    shape, strides, contract_dim = index_case
+    values = torch.full((64,), 1.25, device="cuda", dtype=torch.bfloat16)
+    values[0] = 127
+    source = values.as_strided(shape, strides)
+    compact = values.reshape(1, 64).mT if shape[-1] == 1 else values.reshape(shape)
+
+    torch.manual_seed(17)
+    before = torch.cuda.get_rng_state()
+    actual_codes, actual_scales, _ = quantize_int8(
+        source,
+        contract_dim,
+        (1, 16),
+        stochastic_rounding=stochastic_rounding,
+        backend="cuda",
+        output_layout="column_major",
+    )
+    actual_state = torch.cuda.get_rng_state()
+    torch.manual_seed(17)
+    expected_codes, expected_scales, _ = quantize_int8(
+        compact,
+        contract_dim,
+        (1, 16),
+        stochastic_rounding=stochastic_rounding,
+        backend="cuda",
+        output_layout="column_major",
+    )
+    expected_state = torch.cuda.get_rng_state()
+
+    assert torch.equal(actual_codes, expected_codes)
+    assert torch.equal(actual_scales, expected_scales)
+    assert torch.equal(actual_state, expected_state)
+    if not stochastic_rounding:
+        assert torch.equal(actual_state, before)
+
+
+@cuda_only
+@pytest.mark.parametrize("index_case", LARGE_OFFSET_CASES)
+def test_quantize_int8_large_offsets(index_case):
+    shape, strides = index_case
+    with large_offset_source(shape, strides) as source:
+        source.fill_(1.25)
+        source[..., 0] = 127
+        compact = source.clone()
+        before = torch.cuda.get_rng_state()
+        actual_codes, actual_scales, _ = quantize_int8(
+            source,
+            -1,
+            (1, 16),
+            backend="cuda",
+            output_layout="column_major",
+        )
+        assert torch.equal(torch.cuda.get_rng_state(), before)
+        expected_codes, expected_scales, _ = quantize_int8(
+            compact,
+            -1,
+            (1, 16),
+            backend="cuda",
+            output_layout="column_major",
+        )
+        assert torch.equal(actual_codes, expected_codes)
+        assert torch.equal(actual_scales, expected_scales)
 
 
 @cuda_only
@@ -290,10 +370,18 @@ def test_quantize_int8_statistics_precision(
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 @pytest.mark.parametrize("output_layout", OUTPUT_LAYOUTS)
 @pytest.mark.parametrize("stochastic_rounding", (False, True))
+@pytest.mark.parametrize("wide_stride", (False, True))
 def test_quantize_int8_statistics_compile(
-    contract_dim, output_layout, stochastic_rounding
+    contract_dim, output_layout, stochastic_rounding, wide_stride
 ):
     source = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16)
+    if wide_stride:
+        values = torch.randn(256, device="cuda", dtype=torch.bfloat16)
+        source = (
+            values.as_strided((1, 256), ((1 << 60) + 1, 1))
+            if contract_dim == -1
+            else values.as_strided((256, 1), (1, (1 << 60) + 1))
+        )
     bits = 8
     block_shape = (1, 128)
 

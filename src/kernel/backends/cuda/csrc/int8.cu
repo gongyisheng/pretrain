@@ -1,3 +1,5 @@
+#include "quantize.cuh"
+
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -21,28 +23,6 @@ namespace {
 constexpr int kThreads = 256;
 constexpr int kValuesPerThread = 8;
 constexpr float kMinScale = 1.0e-30f;
-
-struct Params {
-  const void* input;
-  int8_t* codes;
-  float* scales;
-  float* statistics;
-  float* statistics_partials;
-  int64_t batches;
-  int64_t rows;
-  int64_t cols;
-  int64_t batch_stride;
-  int64_t row_stride;
-  int64_t col_stride;
-  int64_t code_batch_stride;
-  int64_t code_row_stride;
-  int64_t code_col_stride;
-  int64_t block_outer;
-  int64_t block_contract;
-  int64_t outer_groups;
-  int64_t contract_groups;
-  bool contract_is_col;
-};
 
 struct LaunchGrid {
   dim3 grid;
@@ -71,31 +51,56 @@ __device__ __forceinline__ float scale_from_amax(float amax, float qmax) {
   return isnan(amax) ? nanf("") : fmaxf(amax * (1.0f / qmax), kMinScale);
 }
 
+template <typename index_t>
 __device__ __forceinline__ int64_t input_offset(
-    const Params& params, int64_t batch, int64_t row, int64_t col) {
-  return batch * params.batch_stride + row * params.row_stride +
-      col * params.col_stride;
+    const QuantizeParams& params, int64_t batch, int64_t row, int64_t col) {
+  const index_t local_offset = static_cast<index_t>(row) *
+          static_cast<index_t>(params.input_row_stride) +
+      static_cast<index_t>(col) * static_cast<index_t>(params.input_col_stride);
+  return batch * params.input_batch_stride + static_cast<int64_t>(local_offset);
 }
 
+template <typename index_t>
 __device__ __forceinline__ int64_t output_offset(
-    const Params& params, int64_t batch, int64_t row, int64_t col) {
-  return batch * params.code_batch_stride + row * params.code_row_stride +
-      col * params.code_col_stride;
+    const QuantizeParams& params, int64_t batch, int64_t row, int64_t col) {
+  const index_t local_offset = static_cast<index_t>(row) *
+          static_cast<index_t>(params.code_row_stride) +
+      static_cast<index_t>(col) * static_cast<index_t>(params.code_col_stride);
+  return batch * params.code_batch_stride + static_cast<int64_t>(local_offset);
 }
 
+template <typename index_t>
 __device__ __forceinline__ int64_t scale_offset(
-    const Params& params, int64_t batch, int64_t outer, int64_t contract_group) {
-  if (params.contract_is_col) {
-    return (batch * params.rows + outer) * params.contract_groups + contract_group;
-  }
-  return (batch * params.contract_groups + contract_group) * params.cols + outer;
+    const QuantizeParams& params, int64_t batch, int64_t outer, int64_t contract) {
+  const int64_t row = params.contract_dim == -1 ? outer : contract;
+  const int64_t col = params.contract_dim == -1 ? contract : outer;
+  const index_t local_offset = static_cast<index_t>(row) *
+          static_cast<index_t>(params.scale_row_stride) +
+      static_cast<index_t>(col) * static_cast<index_t>(params.scale_col_stride);
+  return batch * params.scale_batch_stride + static_cast<int64_t>(local_offset);
 }
 
-template <typename input_t>
+template <typename input_t, typename index_t>
 __device__ __forceinline__ float load_value(
-    const Params& params, int64_t batch, int64_t row, int64_t col) {
-  return static_cast<float>(static_cast<const input_t*>(params.input)[
-      input_offset(params, batch, row, col)]);
+    const QuantizeParams& params, int64_t batch, int64_t row, int64_t col) {
+  return static_cast<float>(params.input_data<input_t>()[
+      input_offset<index_t>(params, batch, row, col)]);
+}
+
+template <typename index_t>
+__device__ __forceinline__ int64_t tensorwise_local_offset(
+    index_t start_col,
+    index_t position,
+    int64_t cols,
+    int64_t row_stride,
+    int64_t col_stride) {
+  const index_t local_col = start_col + position;
+  const index_t row_delta = local_col / static_cast<index_t>(cols);
+  const index_t col_delta =
+      local_col - row_delta * static_cast<index_t>(cols) - start_col;
+  return static_cast<int64_t>(
+      row_delta * static_cast<index_t>(row_stride) +
+      col_delta * static_cast<index_t>(col_stride));
 }
 
 template <bool kStochastic>
@@ -198,37 +203,48 @@ __global__ void finalize_statistics_kernel(
   }
 }
 
-template <typename input_t, bool kStochastic, bool kStatistics>
+template <typename input_t, typename index_t, bool kStochastic, bool kStatistics>
 __global__ void quantize_tile_kernel(
-    Params params,
+    QuantizeParams params,
     float qmax,
     at::PhiloxCudaState philox,
     int64_t blocks_per_row) {
+  const int64_t outer_groups =
+      params.contract_dim == -1 ? params.row_block_count : params.col_block_count;
+  const int64_t contract_groups =
+      params.contract_dim == -1 ? params.col_block_count : params.row_block_count;
+  const int64_t block_outer =
+      params.contract_dim == -1 ? params.rows_per_block : params.cols_per_block;
+  const int64_t block_contract =
+      params.contract_dim == -1 ? params.cols_per_block : params.rows_per_block;
   const int64_t tile = grid_index(blocks_per_row);
   const int64_t tile_count =
-      params.batches * params.outer_groups * params.contract_groups;
+      params.batches * outer_groups * contract_groups;
   if (tile >= tile_count) {
     return;
   }
-  const int64_t contract_group = tile % params.contract_groups;
-  const int64_t remaining = tile / params.contract_groups;
-  const int64_t outer_group = remaining % params.outer_groups;
-  const int64_t batch = remaining / params.outer_groups;
-  const int64_t outer_size = params.contract_is_col ? params.rows : params.cols;
-  const int64_t contract_size = params.contract_is_col ? params.cols : params.rows;
-  const int64_t outer_start = outer_group * params.block_outer;
-  const int64_t contract_start = contract_group * params.block_contract;
-  const int64_t outer_end = min(outer_start + params.block_outer, outer_size);
+  const int64_t contract_group = tile % contract_groups;
+  const int64_t remaining = tile / contract_groups;
+  const int64_t outer_group = remaining % outer_groups;
+  const int64_t batch = remaining / outer_groups;
+  const int64_t outer_size =
+      params.contract_dim == -1 ? params.rows : params.cols;
+  const int64_t contract_size =
+      params.contract_dim == -1 ? params.cols : params.rows;
+  const int64_t outer_start = outer_group * block_outer;
+  const int64_t contract_start = contract_group * block_contract;
+  const int64_t outer_end = min(outer_start + block_outer, outer_size);
   const int64_t contract_end =
-      min(contract_start + params.block_contract, contract_size);
+      min(contract_start + block_contract, contract_size);
 
   float maximum = 0.0f;
   for (int64_t outer = outer_start; outer < outer_end; ++outer) {
     for (int64_t contract = contract_start + threadIdx.x; contract < contract_end;
          contract += blockDim.x) {
-      const int64_t row = params.contract_is_col ? outer : contract;
-      const int64_t col = params.contract_is_col ? contract : outer;
-      maximum = max_with_nan(maximum, fabsf(load_value<input_t>(params, batch, row, col)));
+      const int64_t row = params.contract_dim == -1 ? outer : contract;
+      const int64_t col = params.contract_dim == -1 ? contract : outer;
+      maximum = max_with_nan(
+          maximum, fabsf(load_value<input_t, index_t>(params, batch, row, col)));
     }
   }
   __shared__ float shared_maximum[kThreads];
@@ -245,7 +261,8 @@ __global__ void quantize_tile_kernel(
   if (threadIdx.x == 0) {
     shared_scale = scale_from_amax(shared_maximum[0], qmax);
     for (int64_t outer = outer_start; outer < outer_end; ++outer) {
-      params.scales[scale_offset(params, batch, outer, contract_group)] = shared_scale;
+      params.scale_data<float>()[scale_offset<index_t>(
+          params, batch, outer, contract_group)] = shared_scale;
     }
   }
   __syncthreads();
@@ -263,13 +280,13 @@ __global__ void quantize_tile_kernel(
   for (int64_t outer = outer_start; outer < outer_end; ++outer) {
     for (int64_t contract = contract_start + threadIdx.x; contract < contract_end;
          contract += blockDim.x) {
-      const int64_t row = params.contract_is_col ? outer : contract;
-      const int64_t col = params.contract_is_col ? contract : outer;
-      const int64_t code_offset = output_offset(params, batch, row, col);
-      const float value = load_value<input_t>(params, batch, row, col);
+      const int64_t row = params.contract_dim == -1 ? outer : contract;
+      const int64_t col = params.contract_dim == -1 ? contract : outer;
+      const int64_t code_offset = output_offset<index_t>(params, batch, row, col);
+      const float value = load_value<input_t, index_t>(params, batch, row, col);
       const int8_t code = quantize_value<kStochastic>(
           value, shared_scale, qmax, &random_state);
-      params.codes[code_offset] = code;
+      params.code_data<int8_t>()[code_offset] = code;
       accumulate_statistics<kStatistics>(&statistics, value, code, shared_scale);
     }
   }
@@ -277,43 +294,52 @@ __global__ void quantize_tile_kernel(
                                  grid_index(blocks_per_row));
 }
 
-template <typename input_t, bool kStochastic, bool kStatistics>
+template <typename input_t, typename index_t, bool kStochastic, bool kStatistics>
 __global__ void quantize_blockwise_1d_kernel(
-    Params params,
+    QuantizeParams params,
     float qmax,
     at::PhiloxCudaState philox,
     int64_t blocks_per_row) {
+  const int64_t outer_groups =
+      params.contract_dim == -1 ? params.row_block_count : params.col_block_count;
+  const int64_t contract_groups =
+      params.contract_dim == -1 ? params.col_block_count : params.row_block_count;
+  const int64_t block_contract =
+      params.contract_dim == -1 ? params.cols_per_block : params.rows_per_block;
   constexpr int kWarps = kThreads / 32;
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   const int64_t tile = grid_index(blocks_per_row) * kWarps + warp;
-  const int64_t tile_count = params.batches * params.outer_groups * params.contract_groups;
+  const int64_t tile_count = params.batches * outer_groups * contract_groups;
   const bool valid_tile = tile < tile_count;
   if (!valid_tile) {
     if constexpr (!kStatistics) return;
   }
-  const int64_t contract_group = tile % params.contract_groups;
-  const int64_t remaining = tile / params.contract_groups;
-  const int64_t outer = remaining % params.outer_groups;
-  const int64_t batch = remaining / params.outer_groups;
-  const int64_t contract_size = params.contract_is_col ? params.cols : params.rows;
-  const int64_t contract_start = contract_group * params.block_contract;
+  const int64_t contract_group = tile % contract_groups;
+  const int64_t remaining = tile / contract_groups;
+  const int64_t outer = remaining % outer_groups;
+  const int64_t batch = remaining / outer_groups;
+  const int64_t contract_size =
+      params.contract_dim == -1 ? params.cols : params.rows;
+  const int64_t contract_start = contract_group * block_contract;
   const int64_t contract_end = valid_tile
-      ? min(contract_start + params.block_contract, contract_size)
+      ? min(contract_start + block_contract, contract_size)
       : contract_start;
   float maximum = 0.0f;
   for (int64_t contract = contract_start + lane; contract < contract_end;
        contract += 32) {
-    const int64_t row = params.contract_is_col ? outer : contract;
-    const int64_t col = params.contract_is_col ? contract : outer;
-    maximum = max_with_nan(maximum, fabsf(load_value<input_t>(params, batch, row, col)));
+    const int64_t row = params.contract_dim == -1 ? outer : contract;
+    const int64_t col = params.contract_dim == -1 ? contract : outer;
+    maximum = max_with_nan(
+        maximum, fabsf(load_value<input_t, index_t>(params, batch, row, col)));
   }
   for (int width = 16; width > 0; width >>= 1) {
     maximum = max_with_nan(maximum, __shfl_down_sync(0xffffffff, maximum, width));
   }
   const float scale = __shfl_sync(0xffffffff, scale_from_amax(maximum, qmax), 0);
   if (valid_tile && lane == 0) {
-    params.scales[scale_offset(params, batch, outer, contract_group)] = scale;
+    params.scale_data<float>()[scale_offset<index_t>(
+        params, batch, outer, contract_group)] = scale;
   }
   curandStatePhilox4_32_10_t random_state;
   StatisticsPartial statistics;
@@ -327,20 +353,20 @@ __global__ void quantize_blockwise_1d_kernel(
   }
   for (int64_t contract = contract_start + lane; contract < contract_end;
        contract += 32) {
-    const int64_t row = params.contract_is_col ? outer : contract;
-    const int64_t col = params.contract_is_col ? contract : outer;
-    const float value = load_value<input_t>(params, batch, row, col);
+    const int64_t row = params.contract_dim == -1 ? outer : contract;
+    const int64_t col = params.contract_dim == -1 ? contract : outer;
+    const float value = load_value<input_t, index_t>(params, batch, row, col);
     const int8_t code = quantize_value<kStochastic>(value, scale, qmax, &random_state);
-    params.codes[output_offset(params, batch, row, col)] = code;
+    params.code_data<int8_t>()[output_offset<index_t>(params, batch, row, col)] = code;
     accumulate_statistics<kStatistics>(&statistics, value, code, scale);
   }
   reduce_statistics<kStatistics>(statistics, params.statistics_partials,
                                  grid_index(blocks_per_row));
 }
 
-template <typename input_t>
+template <typename input_t, typename index_t>
 __global__ void tensorwise_partial_amax_kernel(
-    Params params,
+    QuantizeParams params,
     float* partials,
     int64_t partials_per_batch,
     int64_t blocks_per_row) {
@@ -352,12 +378,23 @@ __global__ void tensorwise_partial_amax_kernel(
   const int64_t partial = tile % partials_per_batch;
   const int64_t elements = params.rows * params.cols;
   const int64_t start = partial * kThreads * kValuesPerThread;
-  const int64_t end = min(start + kThreads * kValuesPerThread, elements);
+  const int64_t start_row = start / params.cols;
+  const index_t start_col = static_cast<index_t>(start - start_row * params.cols);
+  const int64_t input_base = batch * params.input_batch_stride +
+      start_row * params.input_row_stride +
+      static_cast<int64_t>(start_col) * params.input_col_stride;
   float maximum = 0.0f;
-  for (int64_t linear = start + threadIdx.x; linear < end; linear += blockDim.x) {
-    const int64_t row = linear / params.cols;
-    const int64_t col = linear % params.cols;
-    maximum = max_with_nan(maximum, fabsf(load_value<input_t>(params, batch, row, col)));
+  for (index_t position = static_cast<index_t>(threadIdx.x);
+       position < kThreads * kValuesPerThread;
+       position += static_cast<index_t>(blockDim.x)) {
+    if (start + static_cast<int64_t>(position) >= elements) {
+      break;
+    }
+    const int64_t input_offset = input_base + tensorwise_local_offset(
+        start_col, position, params.cols, params.input_row_stride,
+        params.input_col_stride);
+    const float value = static_cast<float>(params.input_data<input_t>()[input_offset]);
+    maximum = max_with_nan(maximum, fabsf(value));
   }
   __shared__ float shared_maximum[kThreads];
   shared_maximum[threadIdx.x] = maximum;
@@ -396,9 +433,9 @@ __global__ void tensorwise_scale_kernel(
   }
 }
 
-template <typename input_t, bool kStochastic, bool kStatistics>
+template <typename input_t, typename index_t, bool kStochastic, bool kStatistics>
 __global__ void tensorwise_encode_kernel(
-    Params params,
+    QuantizeParams params,
     const float* scales,
     float qmax,
     at::PhiloxCudaState philox,
@@ -412,7 +449,14 @@ __global__ void tensorwise_encode_kernel(
   const int64_t block = tile % blocks_per_batch;
   const int64_t elements = params.rows * params.cols;
   const int64_t start = block * kThreads * kValuesPerThread;
-  const int64_t end = min(start + kThreads * kValuesPerThread, elements);
+  const int64_t start_row = start / params.cols;
+  const index_t start_col = static_cast<index_t>(start - start_row * params.cols);
+  const int64_t input_base = batch * params.input_batch_stride +
+      start_row * params.input_row_stride +
+      static_cast<int64_t>(start_col) * params.input_col_stride;
+  const int64_t output_base = batch * params.code_batch_stride +
+      start_row * params.code_row_stride +
+      static_cast<int64_t>(start_col) * params.code_col_stride;
   curandStatePhilox4_32_10_t random_state;
   StatisticsPartial statistics;
   if constexpr (kStochastic) {
@@ -424,13 +468,22 @@ __global__ void tensorwise_encode_kernel(
         static_cast<unsigned long long>(std::get<1>(seeds)),
         &random_state);
   }
-  for (int64_t linear = start + threadIdx.x; linear < end; linear += blockDim.x) {
-    const int64_t row = linear / params.cols;
-    const int64_t col = linear % params.cols;
-    const float value = load_value<input_t>(params, batch, row, col);
+  for (index_t position = static_cast<index_t>(threadIdx.x);
+       position < kThreads * kValuesPerThread;
+       position += static_cast<index_t>(blockDim.x)) {
+    if (start + static_cast<int64_t>(position) >= elements) {
+      break;
+    }
+    const int64_t input_offset = input_base + tensorwise_local_offset(
+        start_col, position, params.cols, params.input_row_stride,
+        params.input_col_stride);
+    const int64_t output_offset = output_base + tensorwise_local_offset(
+        start_col, position, params.cols, params.code_row_stride,
+        params.code_col_stride);
+    const float value = static_cast<float>(params.input_data<input_t>()[input_offset]);
     const int8_t code = quantize_value<kStochastic>(
         value, scales[batch], qmax, &random_state);
-    params.codes[output_offset(params, batch, row, col)] = code;
+    params.code_data<int8_t>()[output_offset] = code;
     accumulate_statistics<kStatistics>(&statistics, value, code, scales[batch]);
   }
   reduce_statistics<kStatistics>(statistics, params.statistics_partials,
@@ -509,27 +562,36 @@ void check_arguments(
               "quantize_int8 requires nonnegative strides");
 }
 
-template <typename input_t, bool kStochastic, bool kStatistics>
+template <typename input_t, typename index_t, bool kStochastic, bool kStatistics>
 void launch_quantize(
     const at::Tensor& scales,
     const at::Tensor& partials,
-    Params params,
+    QuantizeParams params,
     float qmax,
     bool tensorwise,
     at::PhiloxCudaState philox,
     int64_t statistics_partial_count,
     cudaStream_t stream) {
+  const int64_t outer_groups =
+      params.contract_dim == -1 ? params.row_block_count : params.col_block_count;
+  const int64_t contract_groups =
+      params.contract_dim == -1 ? params.col_block_count : params.row_block_count;
+  const int64_t block_outer =
+      params.contract_dim == -1 ? params.rows_per_block : params.cols_per_block;
+  const int64_t block_contract =
+      params.contract_dim == -1 ? params.cols_per_block : params.rows_per_block;
   if (tensorwise) {
     const int64_t elements = params.rows * params.cols;
     const int64_t partials_per_batch =
         (elements + kThreads * kValuesPerThread - 1) / (kThreads * kValuesPerThread);
     const auto partial_grid = make_launch_grid(params.batches * partials_per_batch);
-    tensorwise_partial_amax_kernel<input_t><<<partial_grid.grid, kThreads, 0, stream>>>(
+    tensorwise_partial_amax_kernel<input_t, index_t><<<
+        partial_grid.grid, kThreads, 0, stream>>>(
         params, partials.data_ptr<float>(), partials_per_batch,
         partial_grid.blocks_per_row);
     tensorwise_scale_kernel<<<params.batches, kThreads, 0, stream>>>(
         partials.data_ptr<float>(), scales.data_ptr<float>(), partials_per_batch, qmax);
-    tensorwise_encode_kernel<input_t, kStochastic, kStatistics><<<
+    tensorwise_encode_kernel<input_t, index_t, kStochastic, kStatistics><<<
         partial_grid.grid, kThreads, 0, stream>>>(
         params, scales.data_ptr<float>(), qmax, philox, partial_grid.blocks_per_row,
         partials_per_batch);
@@ -540,11 +602,11 @@ void launch_quantize(
     }
     return;
   }
-  const int64_t tiles = params.batches * params.outer_groups * params.contract_groups;
-  if (params.block_outer == 1 && params.block_contract > 0) {
+  const int64_t tiles = params.batches * outer_groups * contract_groups;
+  if (block_outer == 1 && block_contract > 0) {
     constexpr int kWarps = kThreads / 32;
     const auto grid = make_launch_grid((tiles + kWarps - 1) / kWarps);
-    quantize_blockwise_1d_kernel<input_t, kStochastic, kStatistics><<<
+    quantize_blockwise_1d_kernel<input_t, index_t, kStochastic, kStatistics><<<
         grid.grid, kThreads, 0, stream>>>(params, qmax, philox, grid.blocks_per_row);
     if constexpr (kStatistics) {
       finalize_statistics_kernel<<<1, kThreads, 0, stream>>>(
@@ -554,7 +616,7 @@ void launch_quantize(
     return;
   }
   const auto grid = make_launch_grid(tiles);
-  quantize_tile_kernel<input_t, kStochastic, kStatistics><<<
+  quantize_tile_kernel<input_t, index_t, kStochastic, kStatistics><<<
       grid.grid, kThreads, 0, stream>>>(params, qmax, philox, grid.blocks_per_row);
   if constexpr (kStatistics) {
     finalize_statistics_kernel<<<1, kThreads, 0, stream>>>(
@@ -580,7 +642,6 @@ std::tuple<at::Tensor, at::Tensor> quantize_int8_impl(
   const bool contract_is_col = contract_dim == -1;
   const int64_t rows = input.size(-2);
   const int64_t cols = input.size(-1);
-  const int64_t outer_size = contract_is_col ? rows : cols;
   const int64_t contract_size = contract_is_col ? cols : rows;
   const int64_t actual_block_outer = tensorwise ? 1 : block_outer;
   const int64_t actual_block_contract = tensorwise || block_contract == 0
@@ -594,28 +655,34 @@ std::tuple<at::Tensor, at::Tensor> quantize_int8_impl(
                   input.options().dtype(at::kFloat)).expand(output_shape)
       : at::empty(output_shape, input.options().dtype(at::kFloat));
   const int64_t batches = input.dim() == 3 ? input.size(0) : 1;
-  Params params{
-      input.const_data_ptr(),
-      codes.data_ptr<int8_t>(),
-      scales.data_ptr<float>(),
-      statistics,
-      statistics_partials.defined() ? statistics_partials.data_ptr<float>() : nullptr,
-      batches,
-      rows,
-      cols,
-      input.dim() == 3 ? input.stride(0) : 0,
-      input.stride(-2),
-      input.stride(-1),
-      input.dim() == 3 ? codes.stride(0) : 0,
-      codes.stride(-2),
-      codes.stride(-1),
-      actual_block_outer,
-      actual_block_contract,
-      tensorwise ? 1 : (outer_size + actual_block_outer - 1) / actual_block_outer,
-      tensorwise || block_contract == 0
-          ? 1
-          : (contract_size + actual_block_contract - 1) / actual_block_contract,
-      contract_is_col};
+  QuantizeParams params;
+  params.input = input.const_data_ptr();
+  params.codes = codes.data_ptr();
+  params.scales = scales.data_ptr();
+  params.statistics = statistics;
+  params.statistics_partials = statistics_partials.defined()
+      ? statistics_partials.data_ptr<float>() : nullptr;
+  params.batches = batches;
+  params.rows = rows;
+  params.cols = cols;
+  params.input_batch_stride = input.dim() == 3 ? input.stride(0) : 0;
+  params.input_row_stride = input.stride(-2);
+  params.input_col_stride = input.stride(-1);
+  params.code_batch_stride = codes.dim() == 3 ? codes.stride(0) : 0;
+  params.code_row_stride = codes.stride(-2);
+  params.code_col_stride = codes.stride(-1);
+  params.scale_batch_stride = scales.dim() == 3 ? scales.stride(0) : 0;
+  params.scale_row_stride = scales.stride(-2);
+  params.scale_col_stride = scales.stride(-1);
+  params.rows_per_block = tensorwise ? rows
+      : contract_is_col ? actual_block_outer : actual_block_contract;
+  params.cols_per_block = tensorwise ? cols
+      : contract_is_col ? actual_block_contract : actual_block_outer;
+  params.row_block_count =
+      (rows + params.rows_per_block - 1) / params.rows_per_block;
+  params.col_block_count =
+      (cols + params.cols_per_block - 1) / params.cols_per_block;
+  params.contract_dim = static_cast<int>(contract_dim);
   const at::Tensor partials = tensorwise
       ? at::empty(
             {batches, (rows * cols + kThreads * kValuesPerThread - 1) /
@@ -633,23 +700,30 @@ std::tuple<at::Tensor, at::Tensor> quantize_int8_impl(
   }
   const float qmax = static_cast<float>((1 << (bits - 1)) - 1);
   const auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
-#define LAUNCH(TYPE)                                                          \
+  const bool use_int32_indices = can_use_int32_indices(params);
+#define LAUNCH_INDEX(TYPE, INDEX)                                             \
   if (statistics != nullptr) {                                                \
     if (stochastic_rounding) {                                                \
-      launch_quantize<TYPE, true, true>(                                      \
+      launch_quantize<TYPE, INDEX, true, true>(                               \
           scales, partials, params, qmax, tensorwise, philox,                   \
           statistics_partials.numel() / 4, stream.stream());                    \
     } else {                                                                  \
-      launch_quantize<TYPE, false, true>(                                     \
+      launch_quantize<TYPE, INDEX, false, true>(                              \
           scales, partials, params, qmax, tensorwise, philox,                   \
           statistics_partials.numel() / 4, stream.stream());                    \
     }                                                                         \
   } else if (stochastic_rounding) {                                           \
-    launch_quantize<TYPE, true, false>(                                      \
+    launch_quantize<TYPE, INDEX, true, false>(                               \
         scales, partials, params, qmax, tensorwise, philox, 0, stream.stream()); \
   } else {                                                                    \
-    launch_quantize<TYPE, false, false>(                                     \
+    launch_quantize<TYPE, INDEX, false, false>(                              \
         scales, partials, params, qmax, tensorwise, philox, 0, stream.stream()); \
+  }
+#define LAUNCH(TYPE)                                                          \
+  if (use_int32_indices) {                                                    \
+    LAUNCH_INDEX(TYPE, int32_t);                                              \
+  } else {                                                                    \
+    LAUNCH_INDEX(TYPE, int64_t);                                              \
   }
   switch (input.scalar_type()) {
     case at::kFloat:
@@ -665,6 +739,7 @@ std::tuple<at::Tensor, at::Tensor> quantize_int8_impl(
       TORCH_CHECK(false, "quantize_int8 has an unsupported input dtype");
   }
 #undef LAUNCH
+#undef LAUNCH_INDEX
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {codes, scales};
 }

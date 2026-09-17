@@ -6,6 +6,10 @@ import pytest
 import torch
 
 from src.kernel.ops import dequantize_dense, quantize_mxfp8
+from tests.fast.kernel.backends.cuda._quantize_test_utils import (
+    LARGE_OFFSET_CASES,
+    large_offset_source,
+)
 from tests.fast.helper import cuda_only, cuda_sm89_or_newer
 
 
@@ -32,6 +36,15 @@ STAT_SHAPES = ((35, 65), (3, 17), (0, 32), (32, 0))
 OUTPUT_LAYOUTS = ("row_major", "column_major")
 CUDA_GRAPH_SHAPES = ((130, 256), (130, 259))
 COMPILE_SHAPES = ((130, 259), (33, 64))
+INDEX_STRIDE_CASES = (
+    ((1, 64), (((1 << 31) - 1) // 31, 1), -1),
+    ((1, 64), (((1 << 31) - 1) // 31 + 1, 1), -1),
+    ((1, 64), ((1 << 31) - 1, 1), -1),
+    ((1, 64), (1 << 31, 1), -1),
+    ((1, 64), ((1 << 60) + 1, 1), -1),
+    ((64, 1), (1, (1 << 60) + 1), -2),
+    ((1, 1, 64), ((1 << 60) + 1, 1 << 31, 1), -1),
+)
 INPUT_CASES = (
     "normal",
     "zero",
@@ -148,6 +161,73 @@ def test_quantize_mxfp8_precision(
     assert torch.equal(
         actual_scales.view(torch.uint8), expected_scales.view(torch.uint8)
     )
+
+
+@cuda_only
+@cuda_sm89_or_newer
+@pytest.mark.parametrize("stochastic_rounding", (False, True))
+@pytest.mark.parametrize("index_case", INDEX_STRIDE_CASES)
+def test_quantize_mxfp8_large_strides(stochastic_rounding, index_case):
+    shape, strides, contract_dim = index_case
+    values = torch.full((64,), 1.0625, device="cuda", dtype=torch.bfloat16)
+    values[0] = torch.finfo(torch.float8_e4m3fn).max
+    source = values.as_strided(shape, strides)
+    compact = values.reshape(1, 64).mT if shape[-1] == 1 else values.reshape(shape)
+
+    torch.manual_seed(17)
+    before = torch.cuda.get_rng_state()
+    actual_codes, actual_scales, _ = quantize_mxfp8(
+        source,
+        contract_dim,
+        (1, 16),
+        stochastic_rounding=stochastic_rounding,
+        backend="cuda",
+        output_layout="column_major",
+    )
+    actual_state = torch.cuda.get_rng_state()
+    torch.manual_seed(17)
+    expected_codes, expected_scales, _ = quantize_mxfp8(
+        compact,
+        contract_dim,
+        (1, 16),
+        stochastic_rounding=stochastic_rounding,
+        backend="cuda",
+        output_layout="column_major",
+    )
+    expected_state = torch.cuda.get_rng_state()
+
+    assert torch.equal(actual_codes.view(torch.uint8), expected_codes.view(torch.uint8))
+    assert torch.equal(
+        actual_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
+    assert torch.equal(actual_state, expected_state)
+    if not stochastic_rounding:
+        assert torch.equal(actual_state, before)
+
+
+@cuda_only
+@cuda_sm89_or_newer
+@pytest.mark.parametrize("index_case", LARGE_OFFSET_CASES)
+def test_quantize_mxfp8_large_offsets(index_case):
+    shape, strides = index_case
+    with large_offset_source(shape, strides) as source:
+        source.fill_(1.0625)
+        source[..., 0] = torch.finfo(torch.float8_e4m3fn).max
+        compact = source.clone()
+        before = torch.cuda.get_rng_state()
+        actual_codes, actual_scales, _ = quantize_mxfp8(
+            source, -1, (1, 16), backend="cuda", output_layout="column_major"
+        )
+        assert torch.equal(torch.cuda.get_rng_state(), before)
+        expected_codes, expected_scales, _ = quantize_mxfp8(
+            compact, -1, (1, 16), backend="cuda", output_layout="column_major"
+        )
+        assert torch.equal(
+            actual_codes.view(torch.uint8), expected_codes.view(torch.uint8)
+        )
+        assert torch.equal(
+            actual_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+        )
 
 
 @cuda_only
@@ -396,8 +476,12 @@ def test_quantize_mxfp8_quantization_stats(
 @cuda_only
 @cuda_sm89_or_newer
 @pytest.mark.parametrize("stochastic_rounding", (False, True))
-def test_quantize_mxfp8_quantization_stats_compile(stochastic_rounding):
+@pytest.mark.parametrize("wide_stride", (False, True))
+def test_quantize_mxfp8_quantization_stats_compile(stochastic_rounding, wide_stride):
     source = torch.randn((17, 35), device="cuda", dtype=torch.bfloat16)
+    if wide_stride:
+        values = torch.randn(35, device="cuda", dtype=torch.bfloat16)
+        source = values.as_strided((1, 35), ((1 << 60) + 1, 1))
     quantize = torch.compile(
         lambda values: quantize_mxfp8(
             values,
@@ -413,7 +497,7 @@ def test_quantize_mxfp8_quantization_stats_compile(stochastic_rounding):
     codes, scales, global_scale, stats = quantize(source)
     assert global_scale is None
     assert codes.stride(-2) == 1
-    assert scales.shape == (17, 3)
+    assert scales.shape == (source.shape[-2], 3)
     assert stats.shape == (5,)
 
     torch.cuda.synchronize()

@@ -1,3 +1,5 @@
+#include "quantize.cuh"
+
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -11,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <tuple>
 #include <vector>
@@ -20,18 +23,6 @@ namespace {
 constexpr int kContractBlock = 16;
 constexpr float kFp8Min = 0x1p-9f;
 constexpr float kFp8Max = 448.0f;
-
-struct MatrixLayout {
-  int64_t batch;
-  int64_t rows;
-  int64_t cols;
-  int64_t stride_batch;
-  int64_t stride_row;
-  int64_t stride_col;
-  int64_t code_stride_batch;
-  int64_t code_stride_row;
-  int64_t code_stride_col;
-};
 
 template <int kQmax>
 __device__ __forceinline__ float sanitize_magnitude(float value) {
@@ -131,27 +122,36 @@ __device__ __forceinline__ unsigned block_max(unsigned maximum) {
   return __shfl_sync(0xffffffff, maximum, 0);
 }
 
-template <typename scalar_t, int kQmax>
+template <typename scalar_t, typename index_t, int kQmax>
 __global__ void global_amax_kernel(
-    const scalar_t* input,
-    MatrixLayout layout,
+    QuantizeParams params,
     float* partials,
-    int partial_count) {
+    int64_t partial_count) {
+  const auto* input = params.input_data<scalar_t>();
   constexpr int kChunk = 2048;
-  int64_t matrix_size = layout.rows * layout.cols;
+  int64_t matrix_size = params.rows * params.cols;
   int64_t batch = blockIdx.y;
-  bool contiguous = (layout.stride_col == 1 && layout.stride_row == layout.cols) ||
-      (layout.stride_row == 1 && layout.stride_col == layout.rows);
+  bool contiguous = (params.input_col_stride == 1 && params.input_row_stride == params.cols) ||
+      (params.input_row_stride == 1 && params.input_col_stride == params.rows);
+  const int64_t chunk_start = static_cast<int64_t>(blockIdx.x) * kChunk;
+  const int64_t start_row = contiguous ? 0 : chunk_start / params.cols;
+  const index_t start_col = contiguous ? 0 : chunk_start % params.cols;
+  const int64_t input_base = batch * params.input_batch_stride +
+      (contiguous ? chunk_start : start_row * params.input_row_stride);
+  const index_t cols = params.cols;
+  const index_t row_stride = params.input_row_stride;
+  const index_t col_stride = params.input_col_stride;
   unsigned maximum = 0;
   for (int offset = threadIdx.x; offset < kChunk; offset += blockDim.x) {
-    int64_t linear = static_cast<int64_t>(blockIdx.x) * kChunk + offset;
+    int64_t linear = chunk_start + offset;
     if (linear < matrix_size) {
-      int64_t index = linear;
+      index_t index = offset;
       if (!contiguous) {
-        int64_t row = linear / layout.cols;
-        index = row * layout.stride_row + (linear - row * layout.cols) * layout.stride_col;
+        const index_t position = start_col + offset;
+        const index_t row = position / cols;
+        index = row * row_stride + (position - row * cols) * col_stride;
       }
-      float value = static_cast<float>(input[batch * layout.stride_batch + index]);
+      float value = static_cast<float>(input[input_base + index]);
       maximum = max(maximum, isnan(value) ? 0x7fffffffu : __float_as_uint(fabsf(value)));
     }
   }
@@ -164,9 +164,9 @@ __global__ void global_amax_kernel(
 }
 
 template <int kQmax>
-__global__ void global_scale_kernel(const float* partials, float* global_scale, int count) {
+__global__ void global_scale_kernel(const float* partials, float* global_scale, int64_t count) {
   unsigned maximum = 0;
-  for (int index = threadIdx.x; index < count; index += blockDim.x) {
+  for (int64_t index = threadIdx.x; index < count; index += blockDim.x) {
     maximum = max(maximum, __float_as_uint(partials[static_cast<int64_t>(blockIdx.x) * count + index]));
   }
   maximum = block_max(maximum);
@@ -177,41 +177,54 @@ __global__ void global_scale_kernel(const float* partials, float* global_scale, 
   }
 }
 
-template <typename scalar_t, int kQmax, int kOuterBlock, bool kContractLast,
+template <typename scalar_t, typename index_t, int kQmax, int kOuterBlock, bool kContractLast,
           bool kStochastic, bool kCollectStats>
 __global__ void quantize_kernel(
-    const scalar_t* input,
-    MatrixLayout layout,
-    const float* global_scale,
-    uint8_t* codes,
-    uint8_t* scales,
-    at::PhiloxCudaState philox_args,
-    float* stats_partials) {
+    QuantizeParams params,
+    at::PhiloxCudaState philox_args) {
+  const auto* input = params.input_data<scalar_t>();
+  auto* codes = params.code_data<uint8_t>();
+  auto* scales = params.scale_data<uint8_t>();
+  const float* global_scale = params.global_scale;
+  float* stats_partials = params.statistics_partials;
   constexpr int kValues = kOuterBlock == 1 ? 16 : 8;
   constexpr int kTileThreads = kOuterBlock == 1 ? 1 : 32;
   constexpr int kTilesPerCta = 128 / kTileThreads;
-  int contract_groups = (kContractLast ? layout.cols : layout.rows) / 16;
-  int outer_size = kContractLast ? layout.rows : layout.cols;
-  int outer_groups = (outer_size + kOuterBlock - 1) / kOuterBlock;
-  int tile = blockIdx.x * kTilesPerCta + threadIdx.x / kTileThreads;
+  int64_t contract_groups = (kContractLast ? params.cols : params.rows) / 16;
+  int64_t outer_size = kContractLast ? params.rows : params.cols;
+  int64_t outer_groups = (outer_size + kOuterBlock - 1) / kOuterBlock;
+  int64_t tile = static_cast<int64_t>(blockIdx.x) * kTilesPerCta + threadIdx.x / kTileThreads;
   const bool tile_valid =
       tile < static_cast<int64_t>(outer_groups) * contract_groups;
   if (!tile_valid && !kCollectStats) return;
   int64_t batch = blockIdx.y;
   bool contract_contiguous = kContractLast
-      ? layout.stride_col <= layout.stride_row : layout.stride_row <= layout.stride_col;
-  int outer_group = contract_contiguous ? tile / contract_groups : tile % outer_groups;
-  int contract_group = contract_contiguous ? tile % contract_groups : tile / outer_groups;
+      ? params.input_col_stride <= params.input_row_stride : params.input_row_stride <= params.input_col_stride;
+  const index_t matrix_tile = static_cast<index_t>(tile);
+  const index_t matrix_outer_groups = static_cast<index_t>(outer_groups);
+  const index_t matrix_contract_groups = static_cast<index_t>(contract_groups);
+  int64_t outer_group = contract_contiguous
+      ? matrix_tile / matrix_contract_groups : matrix_tile % matrix_outer_groups;
+  int64_t contract_group = contract_contiguous
+      ? matrix_tile % matrix_contract_groups : matrix_tile / matrix_outer_groups;
   int lane = threadIdx.x % kTileThreads;
-  int outer = outer_group * kOuterBlock;
-  int contraction = contract_group * 16;
+  int64_t outer_origin = outer_group * kOuterBlock;
+  int64_t contract_origin = contract_group * 16;
+  index_t local_outer = 0;
+  index_t local_contract = 0;
   if constexpr (kOuterBlock == 16) {
-    outer += contract_contiguous ? lane / 8 : lane % 16;
-    contraction += contract_contiguous ? (lane % 8) * 2 : (lane / 16) * 8;
+    local_outer = contract_contiguous ? lane / 8 : lane % 16;
+    local_contract = contract_contiguous ? (lane % 8) * 2 : (lane / 16) * 8;
   }
-  int64_t row = kContractLast ? outer : contraction;
-  int64_t col = kContractLast ? contraction : outer;
-  int64_t stride = kContractLast ? layout.stride_col : layout.stride_row;
+  int64_t row_origin = kContractLast ? outer_origin : contract_origin;
+  int64_t col_origin = kContractLast ? contract_origin : outer_origin;
+  int64_t outer = outer_origin + local_outer;
+  const int64_t input_base = tile_valid ? batch * params.input_batch_stride +
+      row_origin * params.input_row_stride + col_origin * params.input_col_stride : 0;
+  const index_t input_outer_stride = kContractLast ? params.input_row_stride : params.input_col_stride;
+  const index_t input_contract_stride = kContractLast ? params.input_col_stride : params.input_row_stride;
+  const index_t code_outer_stride = kContractLast ? params.code_row_stride : params.code_col_stride;
+  const index_t code_contract_stride = kContractLast ? params.code_col_stride : params.code_row_stride;
   bool valid = tile_valid && outer < outer_size;
   float values[kValues];
   float source_values[kValues];
@@ -221,11 +234,10 @@ __global__ void quantize_kernel(
   for (int index = 0; index < kValues; ++index) {
     int outer_offset = kOuterBlock == 16 && contract_contiguous ? (index / 2) * 4 : 0;
     int contract_offset = kOuterBlock == 16 && contract_contiguous ? index % 2 : index;
-    int64_t outer_stride = kContractLast ? layout.stride_row : layout.stride_col;
     bool value_valid = tile_valid && outer + outer_offset < outer_size;
-    float value = value_valid ? static_cast<float>(input[batch * layout.stride_batch +
-        row * layout.stride_row + col * layout.stride_col +
-        outer_offset * outer_stride + contract_offset * stride]) : 0.0f;
+    float value = value_valid ? static_cast<float>(input[input_base +
+        (local_outer + outer_offset) * input_outer_stride +
+        (local_contract + contract_offset) * input_contract_stride]) : 0.0f;
     source_values[index] = value;
     if (global_scale != nullptr && value_valid) {
       value /= global;
@@ -242,19 +254,19 @@ __global__ void quantize_kernel(
   uint8_t scale_code = encode_e4m3_ceil(
       __uint_as_float(maximum) * (1.0f / static_cast<float>(kQmax)));
   float scale = decode_e4m3(scale_code);
-  int scale_outer = outer_group * kOuterBlock + lane;
+  int64_t scale_outer = outer_origin + lane;
   if (tile_valid && lane < kOuterBlock && scale_outer < outer_size) {
-    int64_t scale_index = kContractLast
-        ? (batch * layout.rows + scale_outer) * contract_groups + contract_group
-        : (batch * contract_groups + contract_group) * layout.cols + scale_outer;
+    int64_t scale_index = batch * params.scale_batch_stride +
+        (kContractLast ? scale_outer : contract_group) * params.scale_row_stride +
+        (kContractLast ? contract_group : scale_outer) * params.scale_col_stride;
     scales[scale_index] = scale_code;
   }
   if (!valid && !kCollectStats) return;
-  int64_t code_index = kContractLast
-      ? batch * layout.code_stride_batch + row * layout.code_stride_row +
-            (col / 2) * layout.code_stride_col
-      : batch * layout.code_stride_batch + (row / 2) * layout.code_stride_row +
-            col * layout.code_stride_col;
+  const int64_t code_base = tile_valid ? batch * params.code_batch_stride +
+      (kContractLast ? row_origin : row_origin / 2) * params.code_row_stride +
+      (kContractLast ? col_origin / 2 : col_origin) * params.code_col_stride : 0;
+  const int64_t code_index = valid ? code_base + local_outer * code_outer_stride +
+      (local_contract / 2) * code_contract_stride : 0;
   curandStatePhilox4_32_10_t rng;
   float inverse_scale;
   if constexpr (kStochastic) {
@@ -284,13 +296,8 @@ __global__ void quantize_kernel(
     int outer_offset = kOuterBlock == 16 && contract_contiguous ? pair * 4 : 0;
     int contract_offset = kOuterBlock == 16 && contract_contiguous ? 0 : pair;
     if (outer + outer_offset < outer_size) {
-      const int64_t code_row = kContractLast ? row + outer_offset
-                                              : row + contract_offset * 2;
-      const int64_t code_col = kContractLast ? col + contract_offset * 2
-                                              : col + outer_offset;
-      codes[batch * layout.code_stride_batch +
-            (kContractLast ? code_row : code_row / 2) * layout.code_stride_row +
-            (kContractLast ? code_col / 2 : code_col) * layout.code_stride_col] =
+      codes[code_base + (local_outer + outer_offset) * code_outer_stride +
+            (local_contract / 2 + contract_offset) * code_contract_stride] =
           low | (high << 4);
     }
   }
@@ -302,9 +309,7 @@ __global__ void quantize_kernel(
     for (int index = 0; index < kValues; ++index) {
       const int outer_offset = kOuterBlock == 16 && contract_contiguous
           ? (index / 2) * 4 : 0;
-      const int contract_offset = kOuterBlock == 16 && contract_contiguous
-          ? index % 2 : index;
-      if (outer + outer_offset < outer_size) {
+      if (tile_valid && outer + outer_offset < outer_size) {
         const float source = source_values[index];
         float reconstructed = decode_e2m1(encoded[index]) * scale;
         if (global_scale != nullptr) reconstructed *= global;
@@ -438,34 +443,24 @@ at::Tensor allocate_codes(const at::Tensor& input, int64_t contract_dim,
   return at::empty_strided_symint(shape, strides, options);
 }
 
-template <typename scalar_t, int kQmax, bool kCollectStats>
+template <typename scalar_t, typename index_t, int kQmax, bool kCollectStats>
 void launch_quantize_impl(
-    const at::Tensor& input,
-    const MatrixLayout& layout,
-    const at::Tensor& codes,
-    const at::Tensor& scales,
-    const c10::optional<at::Tensor>& global_scale,
-    int64_t contract_dim,
-    int64_t outer_block,
+    QuantizeParams params,
     bool stochastic_rounding,
     at::PhiloxCudaState philox_args,
-    cudaStream_t stream,
-    float* stats_partials) {
-  int64_t contract_groups =
-      (contract_dim == -1 ? layout.cols : layout.rows) / kContractBlock;
-  int64_t outer_size = contract_dim == -1 ? layout.rows : layout.cols;
-  int64_t outer_groups = (outer_size + outer_block - 1) / outer_block;
-  int64_t tiles = outer_groups * contract_groups;
-  int tiles_per_cta = outer_block == 1 ? 128 : 4;
-  dim3 grid((tiles + tiles_per_cta - 1) / tiles_per_cta, layout.batch);
-  const float* global = global_scale ? global_scale->data_ptr<float>() : nullptr;
-  const auto* input_ptr = input.data_ptr<scalar_t>();
-  auto* code_ptr = codes.data_ptr<uint8_t>();
-  auto* scale_ptr = reinterpret_cast<uint8_t*>(scales.data_ptr());
+    cudaStream_t stream) {
+  const int64_t contract_dim = params.contract_dim;
+  const int64_t outer_block = contract_dim == -1
+      ? params.rows_per_block : params.cols_per_block;
+  const int64_t tiles = params.row_block_count * params.col_block_count;
+  const int tiles_per_cta = outer_block == 1 ? 128 : 4;
+  const int64_t blocks = (tiles + tiles_per_cta - 1) / tiles_per_cta;
+  TORCH_CHECK(blocks <= std::numeric_limits<int32_t>::max() && params.batches <= 65535,
+              "quantize_nvfp4 launch exceeds CUDA grid limits");
+  const dim3 grid(blocks, params.batches);
 #define LAUNCH_KERNEL(OUTER, CONTRACT, STOCHASTIC)                             \
-  quantize_kernel<scalar_t, kQmax, OUTER, CONTRACT, STOCHASTIC, kCollectStats><<< \
-      grid, 128, 0, stream>>>(input_ptr, layout, global, code_ptr, scale_ptr, \
-                               philox_args, stats_partials)
+  quantize_kernel<scalar_t, index_t, kQmax, OUTER, CONTRACT, STOCHASTIC, kCollectStats><<< \
+      grid, 128, 0, stream>>>(params, philox_args)
   if (contract_dim == -1) {
     if (outer_block == 1) {
       if (stochastic_rounding) {
@@ -495,25 +490,26 @@ void launch_quantize_impl(
 
 template <typename scalar_t, int kQmax>
 void launch_quantize(
-    const at::Tensor& input,
-    const MatrixLayout& layout,
-    const at::Tensor& codes,
-    const at::Tensor& scales,
-    const c10::optional<at::Tensor>& global_scale,
-    int64_t contract_dim,
-    int64_t outer_block,
+    QuantizeParams params,
     bool stochastic_rounding,
     at::PhiloxCudaState philox_args,
-    cudaStream_t stream,
-    float* stats_partials) {
-  if (stats_partials != nullptr) {
-    launch_quantize_impl<scalar_t, kQmax, true>(
-        input, layout, codes, scales, global_scale, contract_dim, outer_block,
-        stochastic_rounding, philox_args, stream, stats_partials);
+    cudaStream_t stream) {
+  if (params.statistics_partials != nullptr) {
+    if (can_use_int32_indices(params)) {
+      launch_quantize_impl<scalar_t, int32_t, kQmax, true>(
+          params, stochastic_rounding, philox_args, stream);
+    } else {
+      launch_quantize_impl<scalar_t, int64_t, kQmax, true>(
+          params, stochastic_rounding, philox_args, stream);
+    }
   } else {
-    launch_quantize_impl<scalar_t, kQmax, false>(
-        input, layout, codes, scales, global_scale, contract_dim, outer_block,
-        stochastic_rounding, philox_args, stream, nullptr);
+    if (can_use_int32_indices(params)) {
+      launch_quantize_impl<scalar_t, int32_t, kQmax, false>(
+          params, stochastic_rounding, philox_args, stream);
+    } else {
+      launch_quantize_impl<scalar_t, int64_t, kQmax, false>(
+          params, stochastic_rounding, philox_args, stream);
+    }
   }
 }
 
@@ -528,43 +524,66 @@ std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>> quantize_nvfp4_imp
     at::Tensor* stats) {
   check_arguments(input, contract_dim, block_shape, qmax, output_layout);
   c10::cuda::CUDAGuard device_guard(input.device());
-  MatrixLayout layout{
-      input.dim() == 3 ? input.size(0) : 1, input.size(-2), input.size(-1),
-      input.dim() == 3 ? input.stride(0) : 0, input.stride(-2), input.stride(-1),
-      0, 0, 0};
+  QuantizeParams params;
+  params.input = input.const_data_ptr();
+  params.batches = input.dim() == 3 ? input.size(0) : 1;
+  params.rows = input.size(-2);
+  params.cols = input.size(-1);
+  params.input_batch_stride = input.dim() == 3 ? input.stride(0) : 0;
+  params.input_row_stride = input.stride(-2);
+  params.input_col_stride = input.stride(-1);
+  params.rows_per_block = contract_dim == -1 ? block_shape[0] : kContractBlock;
+  params.cols_per_block = contract_dim == -1 ? kContractBlock : block_shape[0];
+  params.row_block_count =
+      (params.rows - 1) / params.rows_per_block + 1;
+  params.col_block_count =
+      (params.cols - 1) / params.cols_per_block + 1;
+  params.contract_dim = static_cast<int>(contract_dim);
   at::Tensor codes = allocate_codes(input, contract_dim, output_layout);
-  layout.code_stride_batch = codes.dim() == 3 ? codes.stride(0) : 0;
-  layout.code_stride_row = codes.stride(-2);
-  layout.code_stride_col = codes.stride(-1);
+  params.code_batch_stride = codes.dim() == 3 ? codes.stride(0) : 0;
+  params.code_row_stride = codes.stride(-2);
+  params.code_col_stride = codes.stride(-1);
   at::Tensor scales = at::empty_symint(scale_shape(input, contract_dim),
                                  input.options().dtype(at::kFloat8_e4m3fn));
+  params.codes = codes.data_ptr();
+  params.scales = scales.data_ptr();
+  params.scale_batch_stride = scales.dim() == 3 ? scales.stride(0) : 0;
+  params.scale_row_stride = scales.stride(-2);
+  params.scale_col_stride = scales.stride(-1);
   c10::optional<at::Tensor> global_scale;
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   if (enable_global_scale) {
-    global_scale = at::empty({layout.batch}, input.options().dtype(at::kFloat));
-    int blocks = static_cast<int>((layout.rows * layout.cols + 2047) / 2048);
+    global_scale = at::empty({params.batches}, input.options().dtype(at::kFloat));
+    const int64_t blocks = (params.rows * params.cols - 1) / 2048 + 1;
+    TORCH_CHECK(blocks <= std::numeric_limits<int32_t>::max() && params.batches <= 65535,
+                "quantize_nvfp4 launch exceeds CUDA grid limits");
     auto partials = blocks == 1 ? *global_scale :
-        at::empty({layout.batch, blocks}, input.options().dtype(at::kFloat));
-    if (qmax == 4.0) {
-      AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(),
-                                      "quantize_nvfp4_global_amax", [&] {
-        global_amax_kernel<scalar_t, 4><<<dim3(blocks, layout.batch), 256, 0, stream>>>(
-            input.data_ptr<scalar_t>(), layout, partials.data_ptr<float>(), blocks);
-      });
-    } else {
-      AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(),
-                                      "quantize_nvfp4_global_amax", [&] {
-        global_amax_kernel<scalar_t, 6><<<dim3(blocks, layout.batch), 256, 0, stream>>>(
-            input.data_ptr<scalar_t>(), layout, partials.data_ptr<float>(), blocks);
-      });
-    }
+        at::empty({params.batches, blocks}, input.options().dtype(at::kFloat));
+#define LAUNCH_AMAX(QMAX, INDEX) \
+      global_amax_kernel<scalar_t, INDEX, QMAX><<<dim3(blocks, params.batches), 256, 0, stream>>>( \
+          params, partials.data_ptr<float>(), blocks)
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(),
+                                    "quantize_nvfp4_global_amax", [&] {
+      if (qmax == 4.0) {
+        if (can_use_int32_indices(params)) {
+          LAUNCH_AMAX(4, int32_t);
+        } else {
+          LAUNCH_AMAX(4, int64_t);
+        }
+      } else if (can_use_int32_indices(params)) {
+        LAUNCH_AMAX(6, int32_t);
+      } else {
+        LAUNCH_AMAX(6, int64_t);
+      }
+    });
+#undef LAUNCH_AMAX
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     if (blocks > 1) {
       if (qmax == 4.0) {
-        global_scale_kernel<4><<<layout.batch, 256, 0, stream>>>(
+        global_scale_kernel<4><<<params.batches, 256, 0, stream>>>(
             partials.data_ptr<float>(), global_scale->data_ptr<float>(), blocks);
       } else {
-        global_scale_kernel<6><<<layout.batch, 256, 0, stream>>>(
+        global_scale_kernel<6><<<params.batches, 256, 0, stream>>>(
             partials.data_ptr<float>(), global_scale->data_ptr<float>(), blocks);
       }
       C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -584,28 +603,27 @@ std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>> quantize_nvfp4_imp
   if (stats != nullptr) {
     *stats = at::zeros({5}, input.options().dtype(at::kFloat));
     const int64_t contract_groups =
-        (contract_dim == -1 ? layout.cols : layout.rows) / kContractBlock;
-    const int64_t outer_size = contract_dim == -1 ? layout.rows : layout.cols;
+        (contract_dim == -1 ? params.cols : params.rows) / kContractBlock;
+    const int64_t outer_size = contract_dim == -1 ? params.rows : params.cols;
     const int64_t outer_groups = (outer_size + block_shape[0] - 1) / block_shape[0];
     const int64_t tiles = outer_groups * contract_groups;
     const int64_t tiles_per_cta = block_shape[0] == 1 ? 128 : 4;
-    const int64_t blocks = (tiles + tiles_per_cta - 1) / tiles_per_cta * layout.batch;
+    const int64_t blocks = (tiles + tiles_per_cta - 1) / tiles_per_cta * params.batches;
     partials = at::empty({blocks, 4}, input.options().dtype(at::kFloat));
     stats_partials = partials.data_ptr<float>();
   }
+  params.global_scale = global_scale ? global_scale->data_ptr<float>() : nullptr;
+  params.statistics = stats != nullptr ? stats->data_ptr<float>() : nullptr;
+  params.statistics_partials = stats_partials;
   if (qmax == 4.0) {
     AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(),
                                     "quantize_nvfp4", [&] {
-      launch_quantize<scalar_t, 4>(input, layout, codes, scales, global_scale,
-                                   contract_dim, block_shape[0], stochastic_rounding,
-                                   philox_args, stream, stats_partials);
+      launch_quantize<scalar_t, 4>(params, stochastic_rounding, philox_args, stream);
     });
   } else {
     AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(),
                                     "quantize_nvfp4", [&] {
-      launch_quantize<scalar_t, 6>(input, layout, codes, scales, global_scale,
-                                   contract_dim, block_shape[0], stochastic_rounding,
-                                   philox_args, stream, stats_partials);
+      launch_quantize<scalar_t, 6>(params, stochastic_rounding, philox_args, stream);
     });
   }
   if (stats != nullptr) {
