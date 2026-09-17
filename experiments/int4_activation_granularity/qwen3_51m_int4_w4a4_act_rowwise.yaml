@@ -51,7 +51,7 @@ training:
       grad_out: RNE
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int4_activation_granularity/qwen3_51m_int4_w8a8_act_rowwise/
+  checkpoint_dir: checkpoints/int4_activation_granularity/qwen3_51m_int4_w4a4_act_rowwise/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -73,5 +73,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-int4-activation-granularity
-  wandb_run_name: qwen3-51m-int4-w8a8-act-rowwise
+  wandb_run_name: qwen3-51m-int4-w4a4-act-rowwise
   log_every: 10
