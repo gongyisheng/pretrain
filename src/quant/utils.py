@@ -65,6 +65,14 @@ def should_quantize(fqn: str, cfg: QuantizationConfig) -> bool:
             fnmatch.fnmatch(fqn, p) or fnmatch.fnmatch(leaf, p) for p in patterns
         )
 
+    if cfg.layer_idx is not None:
+        matched_layer = False
+        for layer_idx in cfg.layer_idx:
+            if fqn.startswith(f"blocks.{layer_idx}."):
+                matched_layer = True
+                break
+        if not matched_layer:
+            return False
     if cfg.include and not matches(cfg.include):
         return False
     return not matches(cfg.exclude)

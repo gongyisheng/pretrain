@@ -80,29 +80,52 @@ def test_is_fp4(fmt):
 # --- module selection ---
 
 
-SHOULD_QUANTIZE_CASES = [
-    # (include, exclude, fqn, expected)
-    ((), ("lm_head", "*.router"), "lm_head", False),
-    ((), ("lm_head", "*.router"), "blocks.0.mlp.router", False),
-    ((), ("lm_head",), "blocks.0.attn.q_proj", True),
-    ((), (), "blocks.0.attn.q_proj", True),  # no patterns means everything
-    ((), ("q_proj",), "blocks.3.attn.q_proj", False),  # leaf name matches anywhere
-    ((), ("q_proj",), "blocks.3.attn.k_proj", True),
-    (("*.mlp.*",), (), "blocks.0.mlp.down_proj", True),  # allowlist restricts
-    (("*.mlp.*",), (), "blocks.0.attn.q_proj", False),
-    (("*.mlp.*",), ("*.mlp.gate",), "blocks.0.mlp.down_proj", True),
-    (("*.mlp.*",), ("*.mlp.gate",), "blocks.0.mlp.gate", False),  # exclude wins
+INCLUDE_CASES = [[], ["*.mlp.*"], ["q_proj"]]
+EXCLUDE_CASES = [
+    [],
+    ["lm_head", "*.router"],
+    ["lm_head"],
+    ["q_proj"],
+    ["*.mlp.gate"],
+    ["down_proj"],
+]
+LAYER_IDX_CASES = [None, [], [-1], [-1, 0, 0], [0], [1], [10], [2, 0]]
+MODULE_CASES = [
+    ("lm_head", None, {"lm_head"}),
+    ("blocks.0.mlp.router", 0, {"*.router", "*.mlp.*"}),
+    ("blocks.0.attn.q_proj", 0, {"q_proj"}),
+    ("blocks.3.attn.q_proj", 3, {"q_proj"}),
+    ("blocks.3.attn.k_proj", 3, set()),
+    ("blocks.0.mlp.down_proj", 0, {"*.mlp.*", "down_proj"}),
+    ("blocks.1.mlp.down_proj", 1, {"*.mlp.*", "down_proj"}),
+    ("blocks.0.mlp.gate", 0, {"*.mlp.*", "*.mlp.gate"}),
+    ("blocks.1.attn.q_proj", 1, {"q_proj"}),
+    ("blocks.10.attn.q_proj", 10, {"q_proj"}),
+    ("blocks.0.mlp", 0, set()),
+    ("blocks.2.mlp.shared_experts.up_proj", 2, {"*.mlp.*"}),
+    ("blocks.1.mlp.router.gate", 1, {"*.mlp.*"}),
+    ("attn.q_proj", None, {"q_proj"}),
+    ("other_blocks.0.attn.q_proj", None, {"q_proj"}),
 ]
 
 
-@pytest.mark.parametrize("include,exclude,fqn,expected", SHOULD_QUANTIZE_CASES)
-def test_should_quantize(include, exclude, fqn, expected):
+@pytest.mark.parametrize("include", INCLUDE_CASES)
+@pytest.mark.parametrize("exclude", EXCLUDE_CASES)
+@pytest.mark.parametrize("layer_idx", LAYER_IDX_CASES)
+@pytest.mark.parametrize("module_case", MODULE_CASES)
+def test_should_quantize(include, exclude, layer_idx, module_case):
+    fqn, block_idx, matching_patterns = module_case
     config = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        layer_idx=None if layer_idx is None else list(layer_idx),
         include=list(include),
         exclude=list(exclude),
     )
+    layer_allowed = layer_idx is None or block_idx in layer_idx
+    include_allowed = not include or bool(matching_patterns & set(include))
+    excluded = bool(matching_patterns & set(exclude))
+    expected = layer_allowed and include_allowed and not excluded
     assert should_quantize(fqn, config) is expected
 
 

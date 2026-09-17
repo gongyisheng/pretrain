@@ -1426,13 +1426,25 @@ def test_quant_rejects_unsupported_granularity():
 
 QUANTIZATION_INPUT_KINDS = ["dict", "config"]
 INVALID_QUANTIZATION_LISTS = [[], [{"enabled": True}]]
+QUANTIZATION_LAYER_CASES = [
+    (None, None),
+    ([], []),
+    ([0], [0]),
+    ([11, 0, 2], [11, 0, 2]),
+    ([-1, -2], []),
+    ([2, -1, 0, 2, -3, 0], [2, 0]),
+    ([12, 20], [12, 20]),
+    ([12, 0, -1, 12], [12, 0]),
+]
 
 
 @pytest.mark.parametrize("input_kind", QUANTIZATION_INPUT_KINDS)
-def test_training_config_quantization(input_kind):
+@pytest.mark.parametrize("layer_idx,expected_layers", QUANTIZATION_LAYER_CASES)
+def test_training_config_quantization(input_kind, layer_idx, expected_layers):
     quantization_data = {
         "enabled": True,
         "enabled_after_steps": 2,
+        "layer_idx": layer_idx,
         "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
     }
     quantization = (
@@ -1444,17 +1456,20 @@ def test_training_config_quantization(input_kind):
 
     assert isinstance(tc.quantization, QuantizationConfig)
     assert tc.quantization.dtype["weight"]["fwd"] == "fp8_e4m3"
+    assert tc.quantization.layer_idx == expected_layers
     if input_kind == "config":
         assert tc.quantization is quantization
 
     exported = TrainConfig(training=tc).to_dict()
     assert exported["training"]["quantization"]["enabled_after_steps"] == 2
+    assert exported["training"]["quantization"]["layer_idx"] == expected_layers
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "test.yaml")
         with open(path, "w") as f:
             yaml.safe_dump(exported, f)
         restored = load_config(path)
     assert restored.training.quantization.enabled_after_steps == 2
+    assert restored.training.quantization.layer_idx == expected_layers
 
 
 @pytest.mark.parametrize("quantization", INVALID_QUANTIZATION_LISTS)
@@ -1466,6 +1481,7 @@ def test_training_config_quantization_raise_error(quantization):
 def test_quant_disabled_stays_disabled():
     tc = TrainingConfig(quantization={"enabled": False})
     assert tc.quantization.enabled is False
+    assert tc.quantization.layer_idx is None
 
 
 @pytest.mark.parametrize("enabled_after_steps", [-1, 1.0, "1", True])

@@ -546,8 +546,12 @@ def test_quantized_linear_compiles_fullgraph(
     assert x.grad is not None and torch.isfinite(x.grad).all()
 
 
+MODEL_LAYER_INDICES = [None, [1]]
+
+
 @cuda_sm89_or_newer
-def test_quantized_linear_trains_a_full_model():
+@pytest.mark.parametrize("layer_idx", MODEL_LAYER_INDICES)
+def test_quantized_linear_trains_a_full_model(layer_idx):
     """Run a training step through a quantized TransformerLM."""
     config = TrainConfig(
         max_seq_len=64,
@@ -571,6 +575,7 @@ def test_quantized_linear_trains_a_full_model():
             mixed_precision="bf16",
             quantization={
                 "enabled": True,
+                "layer_idx": layer_idx,
                 "dtype": {
                     "weight": "fp8_e4m3",
                     "act": "fp8_e4m3",
@@ -583,7 +588,10 @@ def test_quantized_linear_trains_a_full_model():
     apply_quantization(model, config)
     enable_quantization(model)
     model.cuda().to(torch.bfloat16)
-    assert any(isinstance(m, QuantizedLinear) for m in model.modules())
+    for index, block in enumerate(model.blocks):
+        expected = layer_idx is None or index in layer_idx
+        assert isinstance(block.attn.q_proj, QuantizedLinear) is expected
+        assert isinstance(block.mlp.down_proj, QuantizedLinear) is expected
 
     ids = torch.randint(0, 128, (2, 64), device="cuda")
     position_ids = torch.arange(64, device="cuda").unsqueeze(0).expand(2, 64)

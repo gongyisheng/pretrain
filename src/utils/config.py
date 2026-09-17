@@ -336,6 +336,7 @@ class QuantizationConfig:
     scale: dict = field(default_factory=dict)
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
     rotation: Optional[dict] = None
+    layer_idx: Optional[List[int]] = None
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
@@ -348,6 +349,10 @@ class QuantizationConfig:
             or self.enabled_after_steps < 0
         ):
             raise ValueError("quant enabled_after_steps must be a nonnegative integer")
+        if self.layer_idx is not None:
+            self.layer_idx = list(
+                dict.fromkeys(layer for layer in self.layer_idx if layer >= 0)
+            )
         if not isinstance(self.scale, dict):
             raise ValueError(f"quant scale must be a dict, got {self.scale!r}")
         self._post_init_dtype()
