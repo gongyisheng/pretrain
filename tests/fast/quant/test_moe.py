@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
 from src.model import build_model
-from src.quant.convert import apply_quantization
+from src.quant.convert import apply_quantization, enable_quantization
 from src.quant.moe import (
     QuantizedSparseMoEBlock,
     ScaledGroupedGemmFn,
@@ -617,7 +617,15 @@ def test_scaled_grouped_gemm_fn_bias_grad_precision():
 # --- QuantizedSparseMoEBlock ---
 
 
-def test_quantized_sparse_moe_block_only_quantizes_during_training():
+ENABLED_AFTER_STEPS = [0, 2]
+QUANTIZATION_ENABLED = [False, True]
+
+
+@pytest.mark.parametrize("enabled_after_steps", ENABLED_AFTER_STEPS)
+@pytest.mark.parametrize("enabled", QUANTIZATION_ENABLED)
+def test_quantized_sparse_moe_block_only_quantizes_during_training(
+    enabled_after_steps, enabled
+):
     """Check quantized training and exact unquantized evaluation."""
     torch.manual_seed(0)
     source = SparseMoEBlock(
@@ -627,12 +635,27 @@ def test_quantized_sparse_moe_block_only_quantizes_during_training():
         n_routed_experts_per_token=1,
         aux_loss=False,
     )
-    block = QuantizedSparseMoEBlock.from_module(source, rule(INT4_W8A16_DTYPES))
+    cfg = TrainingConfig(
+        mixed_precision="no",
+        quantization={
+            "enabled": True,
+            "enabled_after_steps": enabled_after_steps,
+            "dtype": INT4_W8A16_DTYPES,
+        },
+    ).quantization
+    block = QuantizedSparseMoEBlock.from_module(source, cfg)
     args = (torch.randn(4, 4), torch.randn(2, 4, 8), torch.tensor([2, 4]))
     plain = SparseMoEBlock.expert_mm(block, *args, projection="gate")
 
     block.train()
-    assert not torch.equal(block.expert_mm(*args, projection="gate"), plain)
+    if enabled:
+        enable_quantization(block)
+    assert block.quantization_enabled is enabled
+    out = block.expert_mm(*args, projection="gate")
+    if enabled:
+        assert not torch.equal(out, plain)
+    else:
+        assert torch.equal(out, plain)
     block.eval()
     assert torch.equal(block.expert_mm(*args, projection="gate"), plain)
 
@@ -656,6 +679,7 @@ def test_quantized_sparse_moe_block_autocast():
     block = QuantizedSparseMoEBlock.from_module(
         source, rule(FP8_E4M3_W8A8_E5M2_G8_DTYPES, ROWWISE)
     )
+    enable_quantization(block)
     x = torch.randn(2, 8, 32, device="cuda", dtype=torch.float32, requires_grad=True)
 
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -758,6 +782,7 @@ def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation, quantiza
     )
     model = build_model(config)
     apply_quantization(model, config)
+    enable_quantization(model)
     model.cuda().to(torch.bfloat16)
     blocks = [m for m in model.modules() if isinstance(m, QuantizedSparseMoEBlock)]
     assert blocks  # Conversion installed the quantized seam.

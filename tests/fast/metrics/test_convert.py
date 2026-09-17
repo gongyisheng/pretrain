@@ -14,7 +14,7 @@ from src.metrics.convert import (
 )
 from src.metrics.functional import compute_activation_norm
 from src.metrics.quant import set_quantization_monitoring_status
-from src.quant.convert import apply_quantization
+from src.quant.convert import apply_quantization, enable_quantization
 from src.quant.moe import QuantizedSparseMoEBlock
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
 from tests.fast.layers.helper import make_attn_mask
@@ -153,6 +153,7 @@ def _quantized_linear(dtype):
         ),
     )
     apply_quantization(model, cfg)
+    enable_quantization(model)
     apply_quantization_monitoring(model)
     return model.proj
 

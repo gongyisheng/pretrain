@@ -1,16 +1,10 @@
-"""Unit tests for Trainer.
-
-I/O is mocked: np.memmap is patched so PretrainDataset reads from in-memory
-arrays instead of real .bin files, and tokenizer_path is empty so no BPE
-training happens. Checkpoint writes are kept real (that's what we're testing).
-"""
-
 import os
 import tempfile
 
 import numpy as np
 import pytest
 
+from src.quant.linear import QuantizedLinear
 from src.training.trainer import Trainer
 from src.utils.config import (
     DataConfig,
@@ -215,7 +209,7 @@ def test_quant_metrics_without_quantization(mock_memmap):
         )
 
 
-def _tiny_fp8_config(tmp_dir):
+def _tiny_fp8_config(tmp_dir, enabled_after_steps=0):
     """_tiny_config, but on cuda with a tensorwise fp8 quant rule (mirrors
     tests/fast/quant/test_converter.py's `_cfg`) and quant metrics on."""
     cfg = _tiny_config(tmp_dir)
@@ -233,6 +227,7 @@ def _tiny_fp8_config(tmp_dir):
         enable_torch_compile=False,
         quantization={
             "enabled": True,
+            "enabled_after_steps": enabled_after_steps,
             "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         },
     )
@@ -241,12 +236,16 @@ def _tiny_fp8_config(tmp_dir):
     return cfg
 
 
-def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
+QUANT_METRIC_DELAYS = [0, 1]
+
+
+@pytest.mark.parametrize("enabled_after_steps", QUANT_METRIC_DELAYS)
+def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap, enabled_after_steps):
     """log_quant_metrics=True with an FP8 quantization rule: at least one train-quant/
     key from the diagnostic pass reaches the logger."""
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
-        cfg = _tiny_fp8_config(tmp)
+        cfg = _tiny_fp8_config(tmp, enabled_after_steps)
 
         trainer = Trainer(cfg, wandb_enabled=False)
         logged = []
@@ -254,7 +253,66 @@ def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap):
             lambda step, metrics: logged.append(metrics)
         )
         trainer.train()
+        if enabled_after_steps:
+            assert not any(k.startswith("train-quant/") for k in logged[0])
         assert any(k.startswith("train-quant/") for metrics in logged for k in metrics)
+
+
+QUANTIZATION_DELAYS = [0, 1, 3]
+
+
+@pytest.mark.parametrize("enabled_after_steps", QUANTIZATION_DELAYS)
+def test_trainer_train_enabled_after_steps(mock_memmap, enabled_after_steps):
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        cfg = _tiny_fp8_config(tmp, enabled_after_steps=enabled_after_steps)
+        cfg.training.max_steps = 3
+        cfg.training.gradient_accumulation_steps = 2
+        trainer = Trainer(cfg, wandb_enabled=False)
+        modules = [
+            module
+            for module in trainer.eager_model.modules()
+            if isinstance(module, QuantizedLinear)
+        ]
+        assert modules and all(not module.quantization_enabled for module in modules)
+        phases = []
+        modules[0].register_forward_pre_hook(
+            lambda quantized_module, inputs: phases.append(
+                tuple(module.quantization_enabled for module in modules)
+            )
+        )
+        trainer.train()
+        assert phases == [(False,) * len(modules)] * (2 * enabled_after_steps) + [
+            (True,) * len(modules)
+        ] * (2 * (cfg.training.max_steps - enabled_after_steps))
+
+
+RESUME_PHASE_STEPS = [(2, False), (3, True), (4, True)]
+
+
+@pytest.mark.parametrize("step,enabled", RESUME_PHASE_STEPS)
+def test_trainer_resume_enabled_after_steps(mock_memmap, step, enabled):
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed_data(mock_memmap, tmp)
+        cfg = _tiny_fp8_config(tmp, enabled_after_steps=3)
+        cfg.training.max_steps = step + 1
+        cfg.training.early_stop = step
+        cfg.training.checkpoint_every = step
+        trainer = Trainer(cfg, wandb_enabled=False)
+        trainer.train()
+        checkpoint = os.path.join(cfg.training.checkpoint_dir, f"step_{step}.pt")
+        resumed = Trainer(cfg, wandb_enabled=False, resume_from=checkpoint)
+        modules = [
+            module
+            for module in resumed.eager_model.modules()
+            if isinstance(module, QuantizedLinear)
+        ]
+        assert modules and all(
+            module.quantization_enabled is enabled for module in modules
+        )
+        cfg.training.early_stop = step + 1
+        resumed.train()
+        assert resumed.step == step + 1
 
 
 def test_activation_norms_reach_both_train_and_val_keys(mock_memmap):

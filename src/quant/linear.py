@@ -204,13 +204,14 @@ class QuantizedLinear(nn.Linear):
         q = cls.__new__(cls)
         q.__dict__ = copy.deepcopy(module).__dict__
         q.quantization_config = quantization_config
+        q.quantization_enabled = False
         object.__setattr__(q, "rotation", rotation)
         # Monitoring attaches stats later; an empty dict disables recording.
         q.quant_stats = {}
         return q
 
     def forward(self, x):
-        if not self.training:
+        if not self.training or not self.quantization_enabled:
             return F.linear(x, self.weight, self.bias)
         return QuantizedLinearFn.apply(
             x,

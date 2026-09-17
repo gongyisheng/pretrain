@@ -16,7 +16,7 @@ from src.model import build_model
 from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
-from src.quant.convert import apply_quantization
+from src.quant.convert import apply_quantization, enable_quantization
 from src.metrics.collector import MetricsCollector, TokenizerMetricsCollector
 from src.metrics.convert import (
     apply_activation_monitoring,
@@ -236,6 +236,11 @@ class Trainer:
             total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True
         )
         while self.step < stop_at:
+            if (
+                cfg.quantization.enabled
+                and self.step == cfg.quantization.enabled_after_steps
+            ):
+                enable_quantization(self.eager_model)
             self.optimizer.zero_grad(set_to_none=True)
             self.metrics.train_step_begin(self.model, self.step)
 
@@ -568,6 +573,12 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.scaler.load_state_dict(checkpoint["grad_scaler"])
         self.step = checkpoint["step"]
+        cfg = self.config.training
+        if (
+            cfg.quantization.enabled
+            and self.step >= cfg.quantization.enabled_after_steps
+        ):
+            enable_quantization(self.eager_model)
         self.metrics.total_tokens = checkpoint.get(
             "total_tokens", self.step * self.metrics.tokens_per_step
         )

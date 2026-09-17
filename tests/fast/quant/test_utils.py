@@ -5,7 +5,6 @@ from src.quant.constants import _FP4_FORMATS, _FP8_FORMATS, _INT8_FORMATS
 from src.quant.utils import (
     is_fp4,
     is_fp8,
-    resolve_quantization_config,
     scaled_grouped_mm_op,
     scaled_mm_op,
     should_quantize,
@@ -81,15 +80,6 @@ def test_is_fp4(fmt):
 # --- module selection ---
 
 
-def _rule(include=(), exclude=(), enabled=True):
-    return QuantizationConfig(
-        enabled=enabled,
-        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-        include=list(include),
-        exclude=list(exclude),
-    )
-
-
 SHOULD_QUANTIZE_CASES = [
     # (include, exclude, fqn, expected)
     ((), ("lm_head", "*.router"), "lm_head", False),
@@ -107,24 +97,13 @@ SHOULD_QUANTIZE_CASES = [
 
 @pytest.mark.parametrize("include,exclude,fqn,expected", SHOULD_QUANTIZE_CASES)
 def test_should_quantize(include, exclude, fqn, expected):
-    assert should_quantize(fqn, _rule(include, exclude)) is expected
-
-
-RESOLVE_RULES = [_rule(include=["*.mlp.*"]), _rule(include=["*.attn.*"])]
-
-RESOLVE_CASES = [
-    # (rules, fqn, expected index into rules, or None)
-    (RESOLVE_RULES, "blocks.0.mlp.down_proj", 0),  # first match wins
-    (RESOLVE_RULES, "blocks.0.attn.q_proj", 1),
-    (RESOLVE_RULES, "lm_head", None),  # nothing includes it
-    ([_rule(include=["*"], enabled=False)], "blocks.0.mlp.down_proj", None),
-]
-
-
-@pytest.mark.parametrize("rules,fqn,expected", RESOLVE_CASES)
-def test_resolve_quantization_config(rules, fqn, expected):
-    got = resolve_quantization_config(fqn, rules)
-    assert got is (None if expected is None else rules[expected])
+    config = QuantizationConfig(
+        enabled=True,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        include=list(include),
+        exclude=list(exclude),
+    )
+    assert should_quantize(fqn, config) is expected
 
 
 # --- GEMM op routing ---

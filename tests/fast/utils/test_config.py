@@ -189,19 +189,15 @@ def test_config_to_dict_serializes_quant_scale_dtype(scale, scale_dtype):
 
     exported = config.to_dict()
 
-    assert (
-        exported["training"]["quantization"][0]["scale"]["scale_dtype"] == scale_dtype
-    )
+    assert exported["training"]["quantization"]["scale"]["scale_dtype"] == scale_dtype
     json_export = json.dumps(exported)
     yaml_export = yaml.safe_dump(exported)
     assert (
-        json.loads(json_export)["training"]["quantization"][0]["scale"]["scale_dtype"]
+        json.loads(json_export)["training"]["quantization"]["scale"]["scale_dtype"]
         == scale_dtype
     )
     assert (
-        yaml.safe_load(yaml_export)["training"]["quantization"][0]["scale"][
-            "scale_dtype"
-        ]
+        yaml.safe_load(yaml_export)["training"]["quantization"]["scale"]["scale_dtype"]
         == scale_dtype
     )
     with tempfile.TemporaryDirectory() as tmp:
@@ -209,7 +205,7 @@ def test_config_to_dict_serializes_quant_scale_dtype(scale, scale_dtype):
         with open(path, "w") as f:
             f.write(yaml_export)
         restored = load_config(path)
-    assert _only_rule(restored.training).scale["scale_dtype"] is getattr(
+    assert restored.training.quantization.scale["scale_dtype"] is getattr(
         torch, "float32" if scale_dtype == "fp32" else "float8_e8m0fnu"
     )
 
@@ -265,7 +261,7 @@ def test_config_to_dict_roundtrips_per_tensor_block_shape(tensor, block_shape):
             f.write(yaml_export)
         restored = load_config(path)
 
-    rule = _only_rule(restored.training)
+    rule = restored.training.quantization
     assert {
         resolved_tensor: rule.scale[resolved_tensor]["block_shape"]
         for resolved_tensor in SCALE_TENSORS
@@ -302,7 +298,7 @@ def test_config_to_dict_roundtrips_nonblock_scale_shape(granularity, expected_sh
         )
     )
     exported = config.to_dict()
-    exported_scale = exported["training"]["quantization"][0]["scale"]
+    exported_scale = exported["training"]["quantization"]["scale"]
     assert {
         tensor: exported_scale[tensor]["block_shape"] for tensor in SCALE_TENSORS
     } == {tensor: expected_shape for tensor in SCALE_TENSORS}
@@ -313,14 +309,12 @@ def test_config_to_dict_roundtrips_nonblock_scale_shape(granularity, expected_sh
     ):
         decoded = deserialize(serialized)
         assert {
-            tensor: decoded["training"]["quantization"][0]["scale"][tensor][
-                "block_shape"
-            ]
+            tensor: decoded["training"]["quantization"]["scale"][tensor]["block_shape"]
             for tensor in SCALE_TENSORS
         } == {tensor: list(expected_shape) for tensor in SCALE_TENSORS}
         restored = TrainConfig(training=TrainingConfig(**decoded["training"]))
         assert {
-            tensor: _only_rule(restored.training).scale[tensor]["block_shape"]
+            tensor: restored.training.quantization.scale[tensor]["block_shape"]
             for tensor in SCALE_TENSORS
         } == {tensor: expected_shape for tensor in SCALE_TENSORS}
 
@@ -346,9 +340,7 @@ def test_config_to_dict_serializes_disabled_quant_scale_dtype(
 
     exported = config.to_dict()
 
-    assert (
-        exported["training"]["quantization"][0]["scale"]["scale_dtype"] == scale_dtype
-    )
+    assert exported["training"]["quantization"]["scale"]["scale_dtype"] == scale_dtype
     json.dumps(exported)
     yaml.safe_dump(exported)
 
@@ -376,11 +368,11 @@ def test_config_to_dict_rotation_roundtrip():
             },
         )
     )
-    original_rule = _only_rule(config.training)
+    original_rule = config.training.quantization
     assert not hasattr(original_rule, "_rotation")
 
     exported = config.to_dict()
-    exported_rotation = exported["training"]["quantization"][0]["rotation"]
+    exported_rotation = exported["training"]["quantization"]["rotation"]
     assert set(exported_rotation) == {"rotation_cls", "rotation_kwargs", "gemms"}
     assert exported_rotation["rotation_kwargs"]["sign_vector"] == [
         1.0,
@@ -397,7 +389,7 @@ def test_config_to_dict_rotation_roundtrip():
             f.write(yaml_export)
         restored = load_config(path)
 
-    restored_rule = _only_rule(restored.training)
+    restored_rule = restored.training.quantization
     assert restored_rule.rotation == original_rule.rotation
 
 
@@ -421,12 +413,20 @@ def test_load_config_optimizer_section():
 
 def test_config_cli_overrides():
     with tempfile.TemporaryDirectory() as tmp:
-        path = _write_yaml(tmp, MINIMAL_CONFIG)
+        config_data = copy.deepcopy(MINIMAL_CONFIG)
+        config_data["training"]["quantization"] = {"enabled": True}
+        path = _write_yaml(tmp, config_data)
         config = load_config(
-            path, overrides=["optimizer.lr=3e-4", "training.batch_size=8"]
+            path,
+            overrides=[
+                "optimizer.lr=3e-4",
+                "training.batch_size=8",
+                "training.quantization.enabled_after_steps=2",
+            ],
         )
         assert config.optimizer.lr == 3e-4
         assert config.training.batch_size == 8
+        assert config.training.quantization.enabled_after_steps == 2
 
 
 def test_config_cli_override_nested_kwargs():
@@ -1156,12 +1156,6 @@ def test_dropless_moe_reduced_precision_ok(mixed_precision):
 # ==================== Quantization config ====================
 
 
-def _only_rule(tc):
-    # TrainingConfig normalizes quant to a list of rules; single-rule helper.
-    assert len(tc.quantization) == 1
-    return tc.quantization[0]
-
-
 def test_quant_defaults_disabled():
     q = QuantizationConfig()
     assert q.enabled is False
@@ -1172,7 +1166,7 @@ def test_quant_defaults_disabled():
 
 
 def test_quant_rounding_defaults_to_rne_everywhere():
-    q = _only_rule(TrainingConfig(quantization={"enabled": True}))
+    q = TrainingConfig(quantization={"enabled": True}).quantization
     assert q.rounding == {"weight": "RNE", "act": "RNE", "grad_out": "RNE"}
     assert not any(mode == "SR" for mode in q.rounding.values())
 
@@ -1184,24 +1178,22 @@ def test_quant_rounding_fills_unnamed_tensors_and_round_trips():
             quantization={"enabled": True, "rounding": {"grad_out": "SR"}},
         )
     )
-    q = _only_rule(config.training)
+    q = config.training.quantization
     assert q.rounding == {"weight": "RNE", "act": "RNE", "grad_out": "SR"}
-    assert config.to_dict()["training"]["quantization"][0]["rounding"] == q.rounding
+    assert config.to_dict()["training"]["quantization"]["rounding"] == q.rounding
 
 
 def test_quant_rounding_on_an_unquantized_tensor_is_inert():
     # act stays at the compute dtype here; a mode on it names no quantizer, and the
     # config takes it rather than second-guessing a dtype it may be swept against.
-    q = _only_rule(
-        TrainingConfig(
-            mixed_precision="bf16",
-            quantization={
-                "enabled": True,
-                "dtype": {"weight": "int8"},
-                "rounding": {"act": "SR"},
-            },
-        )
-    )
+    q = TrainingConfig(
+        mixed_precision="bf16",
+        quantization={
+            "enabled": True,
+            "dtype": {"weight": "int8"},
+            "rounding": {"act": "SR"},
+        },
+    ).quantization
     assert q.dtype["act"] == {"fwd": "bf16", "wgrad": "bf16"}
     assert q.rounding["act"] == "SR"
 
@@ -1216,28 +1208,26 @@ def test_quant_rounding_rejects_unknown_key_and_mode():
 
 
 def test_quant_tensor_defaults_follow_mixed_precision():
-    r = _only_rule(
-        TrainingConfig(mixed_precision="bf16", quantization={"enabled": True})
-    )
+    r = TrainingConfig(
+        mixed_precision="bf16", quantization={"enabled": True}
+    ).quantization
     # every slot defaults to the compute dtype
     assert r.dtype == {
         "weight": {"fwd": "bf16", "dgrad": "bf16"},
         "act": {"fwd": "bf16", "wgrad": "bf16"},
         "grad_out": {"dgrad": "bf16", "wgrad": "bf16"},
     }
-    r32 = _only_rule(
-        TrainingConfig(mixed_precision="no", quantization={"enabled": True})
-    )
+    r32 = TrainingConfig(
+        mixed_precision="no", quantization={"enabled": True}
+    ).quantization
     assert r32.dtype["weight"]["fwd"] == "fp32"
 
 
 def test_quant_dtype_scalar_applies_to_every_consuming_gemm():
-    r = _only_rule(
-        TrainingConfig(
-            mixed_precision="bf16",
-            quantization={"enabled": True, "dtype": {"weight": "fp8_e4m3"}},
-        )
-    )
+    r = TrainingConfig(
+        mixed_precision="bf16",
+        quantization={"enabled": True, "dtype": {"weight": "fp8_e4m3"}},
+    ).quantization
     assert r.dtype == {
         "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
         "act": {"fwd": "bf16", "wgrad": "bf16"},
@@ -1255,12 +1245,10 @@ def test_quant_dtype_scopes_a_tensor_per_gemm():
 
 
 def test_quant_scoped_dtype_leaves_unset_gemm_to_mixed_precision():
-    r = _only_rule(
-        TrainingConfig(
-            mixed_precision="bf16",
-            quantization={"enabled": True, "dtype": {"grad_out": {"dgrad": "int8"}}},
-        )
-    )
+    r = TrainingConfig(
+        mixed_precision="bf16",
+        quantization={"enabled": True, "dtype": {"grad_out": {"dgrad": "int8"}}},
+    ).quantization
     assert r.dtype["grad_out"] == {"dgrad": "int8", "wgrad": "bf16"}
 
 
@@ -1271,9 +1259,9 @@ def test_quant_rejects_a_gemm_that_does_not_consume_the_tensor():
 
 def test_quant_disabled_rule_dtype_stays_empty():
     # a disabled rule is inert: no operand-dtype fill
-    r = _only_rule(
-        TrainingConfig(mixed_precision="bf16", quantization={"enabled": False})
-    )
+    r = TrainingConfig(
+        mixed_precision="bf16", quantization={"enabled": False}
+    ).quantization
     assert r.dtype == {}
 
 
@@ -1384,7 +1372,7 @@ def test_quant_explicit_dtype_sets_both_backward_grad_slots():
                 "grad_out": "fp8_e5m2",
             },
         }
-    ).quantization[0]
+    ).quantization
     assert r.dtype["grad_out"]["dgrad"] == r.dtype["grad_out"]["wgrad"] == "fp8_e5m2"
 
 
@@ -1436,45 +1424,58 @@ def test_quant_rejects_unsupported_granularity():
         )
 
 
-def test_training_config_normalizes_single_rule_to_list():
-    tc = TrainingConfig(
-        quantization={
-            "enabled": True,
-            "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-        }
-    )
-    assert isinstance(tc.quantization, list) and len(tc.quantization) == 1
-    assert tc.quantization[0].dtype["weight"]["fwd"] == "fp8_e4m3"
+QUANTIZATION_INPUT_KINDS = ["dict", "config"]
+INVALID_QUANTIZATION_LISTS = [[], [{"enabled": True}]]
 
 
-def test_training_config_accepts_list_of_rules():
-    tc = TrainingConfig(
-        mixed_precision="bf16",
-        quantization=[
-            {
-                "enabled": True,
-                "dtype": {
-                    "weight": "fp8_e4m3",
-                    "act": "fp8_e4m3",
-                    "grad_out": "fp8_e5m2",
-                },
-                "include": ["*.mlp.*"],
-            },
-            {"enabled": True, "dtype": {"weight": "fp8_e4m3"}, "include": ["*.attn.*"]},
-        ],
-    )
-    assert len(tc.quantization) == 2
-    assert tc.quantization[0].include == ["*.mlp.*"]
-    assert tc.quantization[1].dtype == {
-        "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
-        "act": {"fwd": "bf16", "wgrad": "bf16"},
-        "grad_out": {"dgrad": "bf16", "wgrad": "bf16"},
+@pytest.mark.parametrize("input_kind", QUANTIZATION_INPUT_KINDS)
+def test_training_config_quantization(input_kind):
+    quantization_data = {
+        "enabled": True,
+        "enabled_after_steps": 2,
+        "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
     }
+    quantization = (
+        QuantizationConfig(**quantization_data)
+        if input_kind == "config"
+        else quantization_data
+    )
+    tc = TrainingConfig(quantization=quantization)
+
+    assert isinstance(tc.quantization, QuantizationConfig)
+    assert tc.quantization.dtype["weight"]["fwd"] == "fp8_e4m3"
+    if input_kind == "config":
+        assert tc.quantization is quantization
+
+    exported = TrainConfig(training=tc).to_dict()
+    assert exported["training"]["quantization"]["enabled_after_steps"] == 2
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "test.yaml")
+        with open(path, "w") as f:
+            yaml.safe_dump(exported, f)
+        restored = load_config(path)
+    assert restored.training.quantization.enabled_after_steps == 2
+
+
+@pytest.mark.parametrize("quantization", INVALID_QUANTIZATION_LISTS)
+def test_training_config_quantization_raise_error(quantization):
+    with pytest.raises(ValueError):
+        TrainingConfig(quantization=quantization)
 
 
 def test_quant_disabled_stays_disabled():
     tc = TrainingConfig(quantization={"enabled": False})
-    assert _only_rule(tc).enabled is False
+    assert tc.quantization.enabled is False
+
+
+@pytest.mark.parametrize("enabled_after_steps", [-1, 1.0, "1", True])
+def test_quantization_config_enabled_after_steps_raise_error(enabled_after_steps):
+    with pytest.raises(ValueError):
+        QuantizationConfig(enabled=True, enabled_after_steps=enabled_after_steps)
+
+
+def test_quantization_config_enabled_after_steps():
+    assert QuantizationConfig().enabled_after_steps == 0
 
 
 # ---- mxfp8 / blockwise scaling (Option B: element format ⟂ scale scheme) ----
@@ -1594,7 +1595,7 @@ def test_quant_scale_mixed_granularities_roundtrip():
     )
     exported = config.to_dict()
     restored = TrainConfig(training=TrainingConfig(**exported["training"]))
-    assert _only_rule(restored.training).scale == _scale_config(
+    assert restored.training.quantization.scale == _scale_config(
         "tensorwise",
         scale_dtype=torch.float32,
         enable_global_scale=False,
@@ -1749,24 +1750,22 @@ def test_quant_rowwise_defaults_scale_dtype_to_fp32(scale_dtype):
 
 
 def test_quant_explicit_e8m0_normalizes_through_training_config():
-    r = _only_rule(
-        TrainingConfig(
-            mixed_precision="bf16",
-            quantization={
-                "dtype": {
-                    "weight": "fp8_e4m3",
-                    "act": "fp8_e4m3",
-                    "grad_out": "fp8_e4m3",
-                },
-                "scale": _scale_config(
-                    "blockwise",
-                    {tensor: (1, 32) for tensor in SCALE_TENSORS},
-                    scale_dtype="fp8_e8m0",
-                ),
-                "enabled": True,
+    r = TrainingConfig(
+        mixed_precision="bf16",
+        quantization={
+            "dtype": {
+                "weight": "fp8_e4m3",
+                "act": "fp8_e4m3",
+                "grad_out": "fp8_e4m3",
             },
-        )
-    )
+            "scale": _scale_config(
+                "blockwise",
+                {tensor: (1, 32) for tensor in SCALE_TENSORS},
+                scale_dtype="fp8_e8m0",
+            ),
+            "enabled": True,
+        },
+    ).quantization
     assert r.scale["scale_dtype"] is torch.float8_e8m0fnu
     assert r.dtype["weight"]["fwd"] == "fp8_e4m3"
 
@@ -2000,7 +1999,7 @@ def test_quantization_config_rotation_defaults():
     assert q.rotation["gemms"] == ["fwd", "dgrad", "wgrad"]
     assert q.rotation["rotation_kwargs"] == {}
     exported = TrainConfig(training=TrainingConfig(quantization=q)).to_dict()
-    assert exported["training"]["quantization"][0]["rotation"] == q.rotation
+    assert exported["training"]["quantization"]["rotation"] == q.rotation
     yaml.safe_dump(exported)
 
 
@@ -2075,42 +2074,6 @@ def test_quantization_config_rotation_raise_error(rotation):
         )
 
 
-def test_training_config_keeps_per_rule_rotations():
-    """Rules must be free to rotate differently; each keeps its own spec."""
-    config = TrainingConfig(
-        mixed_precision="bf16",
-        quantization=[
-            {
-                "enabled": True,
-                "dtype": {"weight": "int8", "act": "bf16", "grad_out": "bf16"},
-                "include": ["*attn*"],
-                "exclude": [],
-                "rotation": {
-                    "rotation_cls": "hadamard",
-                    "rotation_kwargs": {"block_size": 16, "seed": 1},
-                },
-            },
-            {
-                "enabled": True,
-                "dtype": {"weight": "int8", "act": "bf16", "grad_out": "bf16"},
-                "include": ["*mlp*"],
-                "exclude": [],
-                "rotation": {
-                    "rotation_cls": "hadamard",
-                    "rotation_kwargs": {"block_size": 64, "seed": 2},
-                    "gemms": ["wgrad"],
-                },
-            },
-        ],
-    )
-
-    attn, mlp = config.quantization
-    assert attn.rotation["rotation_kwargs"] == {"block_size": 16, "seed": 1}
-    assert attn.rotation["gemms"] == ["fwd", "dgrad", "wgrad"]
-    assert mlp.rotation["rotation_kwargs"] == {"block_size": 64, "seed": 2}
-    assert mlp.rotation["gemms"] == ["wgrad"]
-
-
 def test_quantization_config_rotation_kwargs_raise_error():
     """Kwargs must survive the YAML round trip that carries them into a run."""
     with pytest.raises(ValueError, match="rotation"):
@@ -2146,7 +2109,7 @@ def test_training_config_hadamard_rotation_seed(rotation_kwargs, expected_seed):
         },
     )
 
-    assert _only_rule(config).rotation["rotation_kwargs"]["seed"] == expected_seed
+    assert config.quantization.rotation["rotation_kwargs"]["seed"] == expected_seed
 
 
 def test_quantization_config_blockwise():

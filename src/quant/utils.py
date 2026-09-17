@@ -1,5 +1,4 @@
 import fnmatch
-from typing import Optional
 
 import torch
 
@@ -121,12 +120,3 @@ def scaled_grouped_mm_op(
     if family in {"mxfp8_plus", "nvfp4_plus"}:
         family = family.removesuffix("_plus")
     return None if family is None else f"gemm.{family}_scaled_grouped_mm"
-
-
-def resolve_quantization_config(
-    fqn: str, quantization_configs: list[QuantizationConfig]
-) -> Optional[QuantizationConfig]:
-    for quantization_config in quantization_configs:
-        if quantization_config.enabled and should_quantize(fqn, quantization_config):
-            return quantization_config
-    return None
