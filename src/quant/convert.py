@@ -18,7 +18,11 @@ def enable_quantization(model: nn.Module) -> None:
 def apply_quantization(model: nn.Module, config) -> nn.Module:
     """Convert eligible modules before optimizer construction."""
     quantization_config = config.training.quantization
-    if not quantization_config.enabled or all(
+    if not quantization_config.enabled:
+        return model
+    if quantization_config.layer_idx == []:
+        return model
+    if all(
         fmt in QUANT_PASSTHROUGH
         for per_gemm in quantization_config.dtype.values()
         for fmt in per_gemm.values()

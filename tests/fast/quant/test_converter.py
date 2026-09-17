@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from src.layers.mlp import SparseMoEBlock
+from src.model import build_model
 from src.quant.convert import apply_quantization, enable_quantization
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
@@ -161,6 +162,104 @@ def test_apply_quantization(quantization, swapped, untouched):
         assert isinstance(model.get_submodule(fqn), QuantizedLinear), fqn
     for fqn in untouched:
         assert not isinstance(model.get_submodule(fqn), QuantizedLinear), fqn
+
+
+LAYER_CASES = [
+    (None, [0, 1, 2]),
+    ([], []),
+    ([0], [0]),
+    ([2, 0], [2, 0]),
+    ([-1, -2], []),
+    ([2, -1, 0, 2, -3, 0], [2, 0]),
+    ([3, 20], []),
+    ([3, 2, 0, 2, -1, 20], [2, 0]),
+]
+MLP_CLASSES = ["dense", "moe"]
+COMPONENT_SCOPES = ["all", "attn", "mlp"]
+
+
+@pytest.mark.parametrize("layer_idx,selected_layers", LAYER_CASES)
+@pytest.mark.parametrize("mlp_cls", MLP_CLASSES)
+@pytest.mark.parametrize("scope", COMPONENT_SCOPES)
+def test_apply_quantization_layer_idx(layer_idx, selected_layers, mlp_cls, scope):
+    mlp_kwargs = {"intermediate_size": 64}
+    if mlp_cls == "moe":
+        mlp_kwargs.update(
+            n_routed_experts=4,
+            n_routed_experts_per_token=2,
+            n_shared_experts=1,
+            aux_loss=True,
+        )
+    quantization = _spec(
+        INT8_W8A16_DTYPES,
+        include=[] if scope == "all" else [f"*{scope}*"],
+        exclude=["k_proj", "*router.gate"],
+        rotation={"rotation_cls": "hadamard"},
+    )
+    quantization["layer_idx"] = layer_idx
+    config = TrainConfig(
+        model=ModelConfig(
+            d_model=32,
+            n_layers=3,
+            vocab_size=64,
+            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
+            mlp=[{"mlp_cls": mlp_cls, "mlp_kwargs": mlp_kwargs}],
+            tie_word_embeddings=False,
+        ),
+        training=TrainingConfig(quantization=quantization),
+    )
+    model = build_model(config)
+    original_modules = dict(model.named_modules())
+    original_parameters = dict(model.named_parameters())
+    original_values = {
+        name: parameter.detach().clone()
+        for name, parameter in original_parameters.items()
+    }
+
+    assert apply_quantization(model, config) is model
+
+    expected = set()
+    for index in selected_layers:
+        if scope in ("all", "attn"):
+            expected.update(
+                f"blocks.{index}.attn.{projection}"
+                for projection in ("q_proj", "v_proj", "o_proj")
+            )
+        if scope in ("all", "mlp"):
+            prefix = f"blocks.{index}.mlp"
+            if mlp_cls == "moe":
+                expected.add(prefix)
+                prefix += ".shared_expert"
+            expected.update(
+                f"{prefix}.{projection}"
+                for projection in ("gate_proj", "up_proj", "down_proj")
+            )
+    if layer_idx is None and scope == "all":
+        expected.add("lm_head")
+    quantized = {
+        name: module
+        for name, module in model.named_modules()
+        if isinstance(module, (QuantizedLinear, QuantizedSparseMoEBlock))
+    }
+    assert set(quantized) == expected
+    for index in range(3):
+        if index not in selected_layers:
+            for name, module in original_modules.items():
+                if name.startswith(f"blocks.{index}."):
+                    assert model.get_submodule(name) is module
+    for name, parameter in model.named_parameters():
+        assert torch.equal(parameter, original_values[name])
+    if layer_idx is not None:
+        assert model.lm_head is original_modules["lm_head"]
+    if config.training.quantization.layer_idx == []:
+        assert not hasattr(model, "quant_rotations")
+    else:
+        assert len(model.quant_rotations) == 1
+        rotation = next(iter(model.quant_rotations.values()))
+        assert all(module.rotation is rotation for module in quantized.values())
+    assert all(not module.quantization_enabled for module in quantized.values())
+    enable_quantization(model)
+    assert all(module.quantization_enabled for module in quantized.values())
 
 
 def test_apply_quantization_skips_a_tied_lm_head(capsys):
