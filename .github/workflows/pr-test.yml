@@ -200,6 +200,8 @@ jobs:
       - name: Run kernel tests
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.tool_cache }}/ci-venv
+          # Custom-op C++ metadata changes do not invalidate cached Inductor graphs.
+          TORCHINDUCTOR_CACHE_DIR: ${{ runner.temp }}/torchinductor
         run: |
           uv run python tests/ci/gpu_lock_exec.py -- \
             uv run pytest tests/fast/kernel/ $SPLIT_BY_TEST
