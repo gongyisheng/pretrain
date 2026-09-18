@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from src.kernel.ops.quantize import pack_e2m1_rne
+from src.metrics.quant import accumulate_quantization_sums
 from src.quant.constants import EPS, _FP4_E2M1_VALUES
 from src.quant.rotation import Rotation
 from src.quant.utils import (
@@ -486,20 +487,9 @@ def quantize_operand(
     ragged_dim: int | None = None,
     stochastic_rounding: bool = False,
     rotation: Rotation | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Quantize `x` with scales along `contract_dim`.
-
-    `contract_dim` and `ragged_dim` are -2 or -1; `offs` and `ragged_dim` are
-    supplied together, and `offs` keeps blocks within groups. In 2D blockwise
-    quantization, either axis may be ragged. Returns codes in `fmt` (packed uint8
-    for FP4 formats), scales expanded on the outer axis and blockwise on the
-    contraction axis, and `global_scale`. Output strides are unspecified.
-
-    `rotation` preconditions `x` and is inverted by `dequantize_operand`; ragged
-    contraction boundaries must align with its blocks. With `enable_global_scale`,
-    `global_scale` is an fp32 `(G,)` factor that block scales are relative to;
-    otherwise it is None. Pass it to dequantization or scaled GEMM.
-    """
+    return_quantization_stats: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Return quantized codes, scales, optional global scale, and optional stats."""
     _check_dims(x, contract_dim, ragged_dim, offs)
     if is_fp4(fmt):
         _check_e2m1_dims(x, contract_dim, ragged_dim, offs)
@@ -507,6 +497,7 @@ def quantize_operand(
         _check_rotation_dims(contract_dim, ragged_dim, offs, rotation)
     # Rotation retains fp32 values.
     xf = x.float() if rotation is None else rotation(x, contract_dim, torch.float32)
+    rotated_source = xf if return_quantization_stats else None
     granularity = scale_cfg["granularity"]
     block_outer, block_size = scale_cfg["block_shape"]
     scale_dtype = scale_cfg["scale_dtype"]
@@ -560,7 +551,31 @@ def quantize_operand(
             if stochastic_rounding
             else pack_e2m1_rne(codes, contract_dim)
         )
-    return codes, scale, global_scale
+    if not return_quantization_stats:
+        return codes, scale, global_scale, None
+
+    detached_global_scale = None if global_scale is None else global_scale.detach()
+    dequantized = dequantize_operand(
+        codes.detach(),
+        scale.detach(),
+        contract_dim,
+        scale_cfg,
+        offs=offs,
+        ragged_dim=ragged_dim,
+        rotation=rotation,
+        global_scale=detached_global_scale,
+    )
+    stats = torch.stack(
+        accumulate_quantization_sums(
+            x.detach(),
+            codes.detach(),
+            dequantized,
+            contract_dim=contract_dim,
+            rotated_source=rotated_source.detach(),
+        ),
+        dim=-1,
+    ).detach()
+    return codes, scale, global_scale, stats
 
 
 def dequantize_operand(

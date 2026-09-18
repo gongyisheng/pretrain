@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.layers.mlp import SparseMoEBlock
+from src.metrics.functional import compute_quantization_metrics
 from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
 from src.model import build_model
 from src.quant.convert import apply_quantization, enable_quantization
@@ -39,6 +40,7 @@ from tests.fast.quant.helper import (
     BLOCKWISE2D_32_E8M0,
     BLOCKWISE2D_16_E2M1,
     ROWWISE,
+    TENSORWISE,
     mm_ref,
     operand_fmt,
     rel,
@@ -222,20 +224,32 @@ GROUPED_STATS_CONFIGS = [
     ("fp4_e2m1_4over6", "fp4_e2m1_4over6", True, True, True),
 ]
 # fmt: on
-GROUPED_STATS_LAYOUTS = ["ragged_m", "ragged_k"]
+GROUPED_STATS_LAYOUTS = ["ragged_m", "ragged_k", "ragged_n"]
 GROUPED_STATS_DEVICES = ["cpu", "cuda"]
+GROUPED_STATS_WITH_PADDING = [False, True]
+PADDING_STATS_CONFIG = ("fp4_e2m1", "fp4_e2m1", True, True, True)
+PADDING_STATS_SCALES = (TENSORWISE, TENSORWISE)
 
 
 @pytest.mark.parametrize("device", GROUPED_STATS_DEVICES)
 @pytest.mark.parametrize("layout", GROUPED_STATS_LAYOUTS)
 @pytest.mark.parametrize("config", GROUPED_STATS_CONFIGS)
 @pytest.mark.parametrize("a_scale,b_scale", SCALE_PAIRS)
-def test_quantized_grouped_mm_records_stats(device, layout, config, a_scale, b_scale):
+@pytest.mark.parametrize("with_padding", GROUPED_STATS_WITH_PADDING)
+def test_quantized_grouped_mm_records_stats(
+    device, layout, config, a_scale, b_scale, with_padding
+):
     a_fmt, b_fmt, with_stats, a_folded, b_folded = config
+    if with_padding and (
+        device != "cpu"
+        or config != PADDING_STATS_CONFIG
+        or (a_scale, b_scale) != PADDING_STATS_SCALES
+    ):
+        pytest.skip("padding statistics cover CPU FP4 tensorwise operands")
     skip_unsupported_fmt_scale(a_fmt, a_scale)
     skip_unsupported_fmt_scale(b_fmt, b_scale)
     nvfp4 = is_fp4(a_fmt)
-    if nvfp4 and layout != "ragged_m":
+    if nvfp4 and layout != "ragged_m" and not with_padding:
         pytest.skip("NVFP4 statistics coverage uses ragged-M")
     if not nvfp4 and device == "cpu":
         pytest.skip("CPU statistics coverage is limited to NVFP4")
@@ -244,23 +258,34 @@ def test_quantized_grouped_mm_records_stats(device, layout, config, a_scale, b_s
         pytest.skip(f"CUDA SM{capability[0]}{capability[1]} or newer required")
     if is_fp4(a_fmt):
         torch.manual_seed(0)
-        counts = [16, 16]
+        counts = [16, 0, 32] if with_padding else [16, 16]
         offs = torch.tensor(counts, device=device, dtype=torch.int32).cumsum(
             0, dtype=torch.int32
         )
         a = torch.randn(sum(counts), 32, device=device)
-        b = torch.randn(len(counts), 32, 16, device=device)
+        if with_padding:
+            a[0].zero_()
+        b = torch.randn(len(counts), 32, 8 if with_padding else 16, device=device)
     else:
         a, b, offs = _make(COUNTS, K=64, N=48)
     if layout == "ragged_m":
         src_a, src_b = a, b
-    else:
+    elif layout == "ragged_k":
         src_a = a.mT
         src_b = torch.randn(a.shape[0], b.shape[-1], device=a.device, dtype=a.dtype)
-    # Allocate one stats slot per expert to catch cold experts.
-    experts = len(offs)
-    a_stats = QuantizationStats("act/x", experts, a.device) if with_stats else None
-    b_stats = QuantizationStats("weight/x", experts, b.device) if with_stats else None
+        if with_padding:
+            src_b[0].zero_()
+    else:
+        src_a, src_b = b.mT, a.mT
+    a_stats = QuantizationStats("act/x", a.device) if with_stats else None
+    b_stats = QuantizationStats("weight/x", b.device) if with_stats else None
+    rotation = (
+        build_rotation(
+            {"rotation_cls": "hadamard", "rotation_kwargs": {"block_size": 32}}
+        )
+        if with_padding
+        else None
+    )
     unmonitored = quantized_grouped_mm(
         src_a,
         src_b,
@@ -270,6 +295,7 @@ def test_quantized_grouped_mm_records_stats(device, layout, config, a_scale, b_s
         torch.float32 if is_fp4(a_fmt) else a.dtype,
         a_scale,
         b_scale,
+        rotation=rotation,
     )
     set_quantization_monitoring_status(True)
     try:
@@ -284,30 +310,58 @@ def test_quantized_grouped_mm_records_stats(device, layout, config, a_scale, b_s
             b_scale,
             a_stats=a_stats,
             b_stats=b_stats,
+            rotation=rotation,
         )
     finally:
         set_quantization_monitoring_status(False)
     torch.testing.assert_close(out, unmonitored, rtol=0, atol=0)
-    if is_fp4(a_fmt):
+    if is_fp4(a_fmt) and not with_padding:
         expected = []
         start = 0
         for group, stop in enumerate(offs.tolist()):
-            aq, sa, gsa = quantize_operand(a[start:stop], -1, a_fmt, a_scale)
-            bq, sb, gsb = quantize_operand(b[group], -2, b_fmt, b_scale)
+            aq, sa, gsa, _ = quantize_operand(a[start:stop], -1, a_fmt, a_scale)
+            bq, sb, gsb, _ = quantize_operand(b[group], -2, b_fmt, b_scale)
             expected.append(
                 dequantize_operand(aq, sa, -1, a_scale, global_scale=gsa)
                 @ dequantize_operand(bq, sb, -2, b_scale, global_scale=gsb)
             )
             start = stop
         torch.testing.assert_close(out, torch.cat(expected), rtol=0, atol=1e-5)
-        assert a_stats.numel.tolist() == [16 * 32, 16 * 32]
-        assert b_stats.numel.tolist() == [32 * 16, 32 * 16]
     else:
         assert torch.isfinite(out).all()
-    if with_stats and not is_fp4(a_fmt):
-        assert a_stats.numel.shape == (experts,)
-        assert a_stats.numel.sum().item() == (src_a.numel() if a_folded else 0)
-        assert b_stats.numel.sum().item() == (src_b.numel() if b_folded else 0)
+    if with_stats:
+        assert a_stats.numel.shape == (1,)
+        assert b_stats.numel.shape == (1,)
+        expected_a_numel = (
+            160 * src_a.shape[-2]
+            if with_padding and layout == "ragged_k"
+            else src_a.numel()
+        )
+        expected_b_numel = (
+            160 * src_b.shape[-1]
+            if with_padding and layout == "ragged_k"
+            else src_b.numel()
+        )
+        assert a_stats.numel.item() == (expected_a_numel if a_folded else 0)
+        assert b_stats.numel.item() == (expected_b_numel if b_folded else 0)
+        for source, stats, folded in (
+            (src_a, a_stats, a_folded),
+            (src_b, b_stats, b_folded),
+        ):
+            if folded and not with_padding:
+                expected = source.float().square().sum().reshape(1)
+                assert torch.equal(stats.src_sq, expected)
+        folded_stats = [
+            stats
+            for stats, folded in ((a_stats, a_folded), (b_stats, b_folded))
+            if folded
+        ]
+        metrics = compute_quantization_metrics(torch.nn.ModuleList(folded_stats))
+        assert set(metrics) == {
+            f"{metric}/{stats.key}"
+            for metric in ("sqnr", "underflow_rate")
+            for stats in folded_stats
+        }
 
 
 # 168 rows over four experts: one empty, one shorter than a rotation block, and one

@@ -5,7 +5,11 @@ import torch
 
 from src.kernel.ops.gemm import SCALED_MM_OPS, grouped_mm
 from src.layers.mlp import SparseMoEBlock
-from src.metrics.quant import QuantizationStats, record_operand
+from src.metrics.quant import (
+    QuantizationStats,
+    get_quantization_monitoring_status,
+    record_operand,
+)
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.rotation import Rotation
 from src.quant.utils import is_fp4, is_quantized, resolve_scale, scaled_grouped_mm_op
@@ -97,7 +101,8 @@ def quantized_grouped_mm(
 
     aq = sa = gsa = bq = sb = gsb = None
     if is_quantized(a_fmt):
-        aq, sa, gsa = quantize_operand(
+        collect_stats = a_stats is not None and get_quantization_monitoring_status()
+        aq, sa, gsa, a_quantization_stats = quantize_operand(
             src_a,
             contract_a,
             a_fmt,
@@ -106,21 +111,13 @@ def quantized_grouped_mm(
             ragged_dim=a_ragged_dim,
             stochastic_rounding=a_stochastic_rounding,
             rotation=rotation,
+            return_quantization_stats=collect_stats,
         )
-        record_operand(
-            a_stats,
-            src_a,
-            aq,
-            sa,
-            contract_a,
-            a_scale,
-            offs=a_offs,
-            ragged_dim=a_ragged_dim,
-            rotation=rotation,
-            global_scale=gsa,
-        )
+        if a_quantization_stats is not None:
+            record_operand(a_stats, a_quantization_stats)
     if is_quantized(b_fmt):
-        bq, sb, gsb = quantize_operand(
+        collect_stats = b_stats is not None and get_quantization_monitoring_status()
+        bq, sb, gsb, b_quantization_stats = quantize_operand(
             b,
             -2,
             b_fmt,
@@ -129,20 +126,10 @@ def quantized_grouped_mm(
             ragged_dim=b_ragged_dim,
             stochastic_rounding=b_stochastic_rounding,
             rotation=rotation,
+            return_quantization_stats=collect_stats,
         )
-        # Keep `offs` for per-expert B metrics, even when B is not ragged.
-        record_operand(
-            b_stats,
-            b,
-            bq,
-            sb,
-            -2,
-            b_scale,
-            offs=offs,
-            ragged_dim=b_ragged_dim,
-            rotation=rotation,
-            global_scale=gsb,
-        )
+        if b_quantization_stats is not None:
+            record_operand(b_stats, b_quantization_stats)
 
     if op is not None:
         return SCALED_MM_OPS[op](

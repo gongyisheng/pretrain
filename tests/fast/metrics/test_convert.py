@@ -231,7 +231,10 @@ def test_moe_monitoring_installs_per_projection_stats():
         model=_block_cfg(),
         training=TrainingConfig(
             mixed_precision="no",
-            quantization={"enabled": True, "dtype": {"weight": "int8"}},
+            quantization={
+                "enabled": True,
+                "dtype": {"weight": "int8", "act": "int8", "grad_out": "int8"},
+            },
         ),
     )
     apply_quantization(model, cfg)
@@ -246,11 +249,12 @@ def test_moe_monitoring_installs_per_projection_stats():
     assert {
         site.key for sites in moe.quant_stats.values() for site in sites.values()
     } == {
-        "weight/moe.expert_gate",
-        "weight/moe.expert_up",
-        "weight/moe.expert_down",
+        f"{tensor}/moe.expert_{projection}"
+        for tensor in ("weight", "act", "grad_out")
+        for projection in ("gate", "up", "down")
     }
     # children, so reset_quantization_stats and the metric read reach them
-    assert len(moe._quant_stats) == 3
-    # per expert: one cold, badly scaled expert has to be visible on its own
-    assert moe.quant_stats["gate"]["weight"].numel.shape == (2,)
+    assert len(moe._quant_stats) == 9
+    for sites in moe.quant_stats.values():
+        for stats in sites.values():
+            assert stats.numel.shape == (1,)
