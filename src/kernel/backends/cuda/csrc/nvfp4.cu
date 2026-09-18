@@ -15,13 +15,13 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <tuple>
 #include <vector>
 
 namespace {
 
 constexpr int kContractBlock = 16;
-constexpr float kFp8Min = 0x1p-9f;
 constexpr float kFp8Max = 448.0f;
 
 template <int kQmax>
@@ -30,28 +30,6 @@ __device__ __forceinline__ float sanitize_magnitude(float value) {
     return static_cast<float>(kQmax);
   }
   return fminf(fabsf(value), static_cast<float>(kQmax));
-}
-
-// Positive encodings are ordered; round the discarded mantissa bits upward.
-__device__ __forceinline__ uint8_t encode_e4m3_ceil(float value) {
-  if (isnan(value)) {
-    return 0x7f;
-  }
-  value = fminf(fmaxf(value, kFp8Min), kFp8Max);
-  if (value <= 0x1p-6f) {
-    return static_cast<uint8_t>(ceilf(value * 512.0f));
-  }
-  return static_cast<uint8_t>(((__float_as_uint(value) + 0xfffff) >> 20) - 960);
-}
-
-__device__ __forceinline__ float decode_e4m3(uint8_t code) {
-  if (code < 8) {
-    return static_cast<float>(code) * 0x1p-9f;
-  }
-  if (code == 127) {
-    return nanf("");
-  }
-  return __uint_as_float((static_cast<unsigned>(code) + 960) << 20);
 }
 
 __device__ __forceinline__ float decode_e2m1(uint8_t code) {
@@ -129,16 +107,16 @@ __global__ void global_amax_kernel(
     int64_t partial_count) {
   const auto* input = params.input_data<scalar_t>();
   constexpr int kChunk = 2048;
-  int64_t matrix_size = params.rows * params.cols;
+  int64_t matrix_size = params.row * params.col;
   int64_t batch = blockIdx.y;
-  bool contiguous = (params.input_col_stride == 1 && params.input_row_stride == params.cols) ||
-      (params.input_row_stride == 1 && params.input_col_stride == params.rows);
+  bool contiguous = (params.input_col_stride == 1 && params.input_row_stride == params.col) ||
+      (params.input_row_stride == 1 && params.input_col_stride == params.row);
   const int64_t chunk_start = static_cast<int64_t>(blockIdx.x) * kChunk;
-  const int64_t start_row = contiguous ? 0 : chunk_start / params.cols;
-  const index_t start_col = contiguous ? 0 : chunk_start % params.cols;
+  const int64_t start_row = contiguous ? 0 : chunk_start / params.col;
+  const index_t start_col = contiguous ? 0 : chunk_start % params.col;
   const int64_t input_base = batch * params.input_batch_stride +
       (contiguous ? chunk_start : start_row * params.input_row_stride);
-  const index_t cols = params.cols;
+  const index_t cols = params.col;
   const index_t row_stride = params.input_row_stride;
   const index_t col_stride = params.input_col_stride;
   unsigned maximum = 0;
@@ -177,8 +155,8 @@ __global__ void global_scale_kernel(const float* partials, float* global_scale, 
   }
 }
 
-template <typename scalar_t, typename index_t, int kQmax, int kOuterBlock, bool kContractLast,
-          bool kStochastic, bool kCollectStats>
+template <typename scalar_t, typename index_t, int kQmax, typename block_shape, bool kContractLast,
+          bool kStochastic, bool kCollectStats, bool kSwizzledScales>
 __global__ void quantize_kernel(
     QuantizeParams params,
     at::PhiloxCudaState philox_args) {
@@ -186,13 +164,20 @@ __global__ void quantize_kernel(
   auto* codes = params.code_data<uint8_t>();
   auto* scales = params.scale_data<uint8_t>();
   const float* global_scale = params.global_scale;
-  float* stats_partials = params.statistics_partials;
-  constexpr int kValues = kOuterBlock == 1 ? 16 : 8;
-  constexpr int kTileThreads = kOuterBlock == 1 ? 1 : 32;
+  constexpr int kValues = block_shape::dim0 == 1 ? block_shape::dim1 : 8;
+  constexpr int kTileThreads = block_shape::dim0 == 1 ? 1 : 32;
   constexpr int kTilesPerCta = 128 / kTileThreads;
-  int64_t contract_groups = (kContractLast ? params.cols : params.rows) / 16;
-  int64_t outer_size = kContractLast ? params.rows : params.cols;
-  int64_t outer_groups = (outer_size + kOuterBlock - 1) / kOuterBlock;
+  if constexpr (kSwizzledScales) {
+    const int64_t logical_rows = kContractLast ? params.row : params.col;
+    const int64_t logical_cols = kContractLast
+        ? params.col / kContractBlock : params.row / kContractBlock;
+    swizzled_32_4_4_scale_epilogue(
+        scales, 0, 0, 0, logical_rows, logical_cols, true);
+  }
+  int64_t contract_groups =
+      (kContractLast ? params.col : params.row) / block_shape::dim1;
+  int64_t outer_size = kContractLast ? params.row : params.col;
+  int64_t outer_groups = (outer_size + block_shape::dim0 - 1) / block_shape::dim0;
   int64_t tile = static_cast<int64_t>(blockIdx.x) * kTilesPerCta + threadIdx.x / kTileThreads;
   const bool tile_valid =
       tile < static_cast<int64_t>(outer_groups) * contract_groups;
@@ -208,13 +193,14 @@ __global__ void quantize_kernel(
   int64_t contract_group = contract_contiguous
       ? matrix_tile % matrix_contract_groups : matrix_tile / matrix_outer_groups;
   int lane = threadIdx.x % kTileThreads;
-  int64_t outer_origin = outer_group * kOuterBlock;
-  int64_t contract_origin = contract_group * 16;
+  int64_t outer_origin = outer_group * block_shape::dim0;
+  int64_t contract_origin = contract_group * block_shape::dim1;
   index_t local_outer = 0;
   index_t local_contract = 0;
-  if constexpr (kOuterBlock == 16) {
-    local_outer = contract_contiguous ? lane / 8 : lane % 16;
-    local_contract = contract_contiguous ? (lane % 8) * 2 : (lane / 16) * 8;
+  if constexpr (block_shape::dim0 == 16) {
+    local_outer = contract_contiguous ? lane / 8 : lane % block_shape::dim0;
+    local_contract = contract_contiguous
+        ? (lane % 8) * 2 : (lane / block_shape::dim0) * 8;
   }
   int64_t row_origin = kContractLast ? outer_origin : contract_origin;
   int64_t col_origin = kContractLast ? contract_origin : outer_origin;
@@ -233,8 +219,8 @@ __global__ void quantize_kernel(
   float global = global_scale == nullptr ? 1.0f : global_scale[batch];
   #pragma unroll
   for (int index = 0; index < kValues; ++index) {
-    int outer_offset = kOuterBlock == 16 && contract_contiguous ? (index / 2) * 4 : 0;
-    int contract_offset = kOuterBlock == 16 && contract_contiguous ? index % 2 : index;
+    int outer_offset = block_shape::dim0 == 16 && contract_contiguous ? (index / 2) * 4 : 0;
+    int contract_offset = block_shape::dim0 == 16 && contract_contiguous ? index % 2 : index;
     bool value_valid = tile_valid && outer + outer_offset < outer_size;
     float value = value_valid ? static_cast<float>(input[input_base +
         (local_outer + outer_offset) * input_outer_stride +
@@ -246,22 +232,26 @@ __global__ void quantize_kernel(
     values[index] = value;
     maximum = max(maximum, isnan(value) ? 0x7fffffffu : __float_as_uint(fabsf(value)));
   }
-  if constexpr (kOuterBlock == 16) {
+  if constexpr (block_shape::dim0 == 16) {
     for (int offset = 16; offset > 0; offset >>= 1) {
       maximum = max(maximum, __shfl_down_sync(0xffffffff, maximum, offset));
     }
     maximum = __shfl_sync(0xffffffff, maximum, 0);
   }
-  uint8_t scale_code = encode_e4m3_ceil(
+  uint8_t scale_code = encode_fp8_ceil<false>(
       __uint_as_float(maximum) * (1.0f / static_cast<float>(kQmax)));
-  float scale = decode_e4m3(scale_code);
+  float scale = decode_fp8<false>(scale_code);
   int64_t scale_outer = outer_origin + lane;
-  if (tile_valid && lane < kOuterBlock && scale_outer < outer_size) {
-    const int64_t scale_row = kContractLast ? scale_outer : contract_group;
-    const int64_t scale_col = kContractLast ? contract_group : scale_outer;
-    const int64_t scale_index =
-        scale_offset(params, batch, scale_row, scale_col);
-    scales[scale_index] = scale_code;
+  if (tile_valid && lane < block_shape::dim0 && scale_outer < outer_size) {
+    if constexpr (kSwizzledScales) {
+      swizzled_32_4_4_scale_epilogue(
+          scales, scale_code, scale_outer, contract_group,
+          outer_size, contract_groups);
+    } else {
+      const int64_t scale_row = kContractLast ? scale_outer : contract_group;
+      const int64_t scale_col = kContractLast ? contract_group : scale_outer;
+      scales[scale_offset(params, batch, scale_row, scale_col)] = scale_code;
+    }
   }
   if (!valid && !kCollectStats) return;
   const int64_t code_row = kContractLast ? row_origin : row_origin / 2;
@@ -297,8 +287,8 @@ __global__ void quantize_kernel(
     }
     encoded[2 * pair] = low;
     encoded[2 * pair + 1] = high;
-    int outer_offset = kOuterBlock == 16 && contract_contiguous ? pair * 4 : 0;
-    int contract_offset = kOuterBlock == 16 && contract_contiguous ? 0 : pair;
+    int outer_offset = block_shape::dim0 == 16 && contract_contiguous ? pair * 4 : 0;
+    int contract_offset = block_shape::dim0 == 16 && contract_contiguous ? 0 : pair;
     if (outer + outer_offset < outer_size) {
       codes[code_base + (local_outer + outer_offset) * code_outer_stride +
             (local_contract / 2 + contract_offset) * code_contract_stride] =
@@ -308,84 +298,21 @@ __global__ void quantize_kernel(
   }
 
   if constexpr (kCollectStats) {
-    float src_sq = 0.0f, err_sq = 0.0f, under = 0.0f, nonzero = 0.0f;
+    QuantizationStatistics partial;
 #pragma unroll
     for (int index = 0; index < kValues; ++index) {
-      const int outer_offset = kOuterBlock == 16 && contract_contiguous
+      const int outer_offset = block_shape::dim0 == 16 && contract_contiguous
           ? (index / 2) * 4 : 0;
       if (tile_valid && outer + outer_offset < outer_size) {
-        const float source = source_values[index];
-        float reconstructed = decode_e2m1(encoded[index]) * scale;
+        const uint8_t code = encoded[index];
+        float reconstructed = decode_e2m1(code) * scale;
         if (global_scale != nullptr) reconstructed *= global;
-        src_sq += source * source;
-        const float error = source - reconstructed;
-        err_sq += error * error;
-        const bool source_nonzero = source != 0.0f;
-        under += source_nonzero && (encoded[index] & 7) == 0;
-        nonzero += source_nonzero;
+        accumulate_quantization_statistics(
+            &partial, source_values[index], reconstructed);
       }
     }
-    __shared__ float stats_warp_sums[4][4];
-    const int stats_lane = threadIdx.x & 31;
-    const int stats_warp = threadIdx.x >> 5;
-    float stat_values[4] = {src_sq, err_sq, under, nonzero};
-#pragma unroll
-    for (int value = 0; value < 4; ++value) {
-#pragma unroll
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        stat_values[value] += __shfl_down_sync(0xffffffffu, stat_values[value], offset);
-      }
-      if (stats_lane == 0) stats_warp_sums[value][stats_warp] = stat_values[value];
-    }
-    __syncthreads();
-    if (stats_warp == 0) {
-#pragma unroll
-      for (int value = 0; value < 4; ++value) {
-        float sum = stats_lane < 4 ? stats_warp_sums[value][stats_lane] : 0.0f;
-        sum += __shfl_down_sync(0xffffffffu, sum, 16);
-        sum += __shfl_down_sync(0xffffffffu, sum, 8);
-        sum += __shfl_down_sync(0xffffffffu, sum, 4);
-        sum += __shfl_down_sync(0xffffffffu, sum, 2);
-        sum += __shfl_down_sync(0xffffffffu, sum, 1);
-        if (stats_lane == 0) {
-          const int64_t partial_index = static_cast<int64_t>(blockIdx.y) * gridDim.x + blockIdx.x;
-          stats_partials[partial_index * 4 + value] = sum;
-        }
-      }
-    }
-  }
-}
-
-__global__ void finalize_nvfp4_stats_kernel(const float* partials, int64_t count,
-                                            int64_t numel, float* stats) {
-  float sums[4] = {};
-  for (int64_t index = threadIdx.x; index < count; index += blockDim.x) {
-#pragma unroll
-    for (int value = 0; value < 4; ++value) sums[value] += partials[index * 4 + value];
-  }
-  __shared__ float warp_sums[4][8];
-  const int lane = threadIdx.x & 31;
-  const int warp = threadIdx.x >> 5;
-#pragma unroll
-  for (int value = 0; value < 4; ++value) {
-#pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-      sums[value] += __shfl_down_sync(0xffffffffu, sums[value], offset);
-    }
-    if (lane == 0) warp_sums[value][warp] = sums[value];
-  }
-  __syncthreads();
-  if (warp == 0) {
-#pragma unroll
-    for (int value = 0; value < 4; ++value) {
-      float sum = lane < blockDim.x / 32 ? warp_sums[value][lane] : 0.0f;
-#pragma unroll
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(0xffffffffu, sum, offset);
-      }
-      if (lane == 0) stats[value == 3 ? 4 : value] = sum;
-    }
-    if (lane == 0) stats[3] = static_cast<float>(numel);
+    quantization_statistics_epilogue<128>(
+        partial, params.statistics, params.batch * params.row * params.col);
   }
 }
 
@@ -394,7 +321,8 @@ void check_arguments(
     int64_t contract_dim,
     at::IntArrayRef block_shape,
     double qmax,
-    const std::string& output_layout) {
+    const std::string& output_layout,
+    const std::string& scale_layout) {
   TORCH_CHECK(input.is_cuda() || input.is_meta(),
               "quantize_nvfp4 expects a CUDA tensor");
   TORCH_CHECK(input.dim() == 2 || input.dim() == 3,
@@ -417,6 +345,10 @@ void check_arguments(
               "quantize_nvfp4 qmax must be 4 or 6");
   TORCH_CHECK(output_layout == "row_major" || output_layout == "column_major",
               "quantize_nvfp4 output_layout must be row_major or column_major");
+  TORCH_CHECK(scale_layout == "row_major" || scale_layout == "swizzled_32_4_4",
+              "quantize_nvfp4 scale_layout must be row_major or swizzled_32_4_4");
+  TORCH_CHECK(scale_layout != "swizzled_32_4_4" || input.dim() == 2,
+              "quantize_nvfp4 swizzled_32_4_4 scales require a 2D input");
   for (auto stride : input.sym_strides()) {
     TORCH_CHECK(stride >= 0, "quantize_nvfp4 expects non-negative input strides");
   }
@@ -434,6 +366,20 @@ std::vector<c10::SymInt> scale_shape(const at::Tensor& input, int64_t contract_d
   return shape;
 }
 
+at::Tensor allocate_scales(
+    const at::Tensor& input,
+    int64_t contract_dim,
+    const std::string& scale_layout) {
+  const auto options = input.options().dtype(at::kFloat8_e4m3fn);
+  const auto shape = scale_shape(input, contract_dim);
+  if (scale_layout == "row_major") return at::empty_symint(shape, options);
+  const c10::SymInt logical_rows = contract_dim == -1 ? shape[0] : shape[1];
+  const c10::SymInt logical_blocks = contract_dim == -1 ? shape[1] : shape[0];
+  const c10::SymInt padded_rows = (logical_rows + 127) / 128 * 128;
+  const c10::SymInt padded_blocks = (logical_blocks + 3) / 4 * 4;
+  return at::empty_symint({padded_rows * padded_blocks}, options);
+}
+
 at::Tensor allocate_codes(const at::Tensor& input, int64_t contract_dim,
                           const std::string& output_layout) {
   const auto shape = output_shape(input, contract_dim);
@@ -447,7 +393,8 @@ at::Tensor allocate_codes(const at::Tensor& input, int64_t contract_dim,
   return at::empty_strided_symint(shape, strides, options);
 }
 
-template <typename scalar_t, typename index_t, int kQmax, bool kCollectStats>
+template <typename scalar_t, typename index_t, int kQmax, bool kCollectStats,
+          bool kSwizzledScales>
 void launch_quantize_impl(
     QuantizeParams params,
     bool stochastic_rounding,
@@ -459,11 +406,12 @@ void launch_quantize_impl(
   const int64_t tiles = params.row_block_count * params.col_block_count;
   const int tiles_per_cta = outer_block == 1 ? 128 : 4;
   const int64_t blocks = (tiles + tiles_per_cta - 1) / tiles_per_cta;
-  TORCH_CHECK(blocks <= std::numeric_limits<int32_t>::max() && params.batches <= 65535,
+  TORCH_CHECK(blocks <= std::numeric_limits<int32_t>::max() && params.batch <= 65535,
               "quantize_nvfp4 launch exceeds CUDA grid limits");
-  const dim3 grid(blocks, params.batches);
+  const dim3 grid(blocks, params.batch);
 #define LAUNCH_KERNEL(OUTER, CONTRACT, STOCHASTIC)                             \
-  quantize_kernel<scalar_t, index_t, kQmax, OUTER, CONTRACT, STOCHASTIC, kCollectStats><<< \
+  quantize_kernel<scalar_t, index_t, kQmax, BlockShape<OUTER, kContractBlock>, \
+                  CONTRACT, STOCHASTIC, kCollectStats, kSwizzledScales><<<  \
       grid, 128, 0, stream>>>(params, philox_args)
   if (contract_dim == -1) {
     if (outer_block == 1) {
@@ -492,26 +440,26 @@ void launch_quantize_impl(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <typename scalar_t, int kQmax>
+template <typename scalar_t, int kQmax, bool kSwizzledScales>
 void launch_quantize(
     QuantizeParams params,
     bool stochastic_rounding,
     at::PhiloxCudaState philox_args,
     cudaStream_t stream) {
-  if (params.statistics_partials != nullptr) {
+  if (params.statistics != nullptr) {
     if (can_use_int32_indices(params)) {
-      launch_quantize_impl<scalar_t, int32_t, kQmax, true>(
+      launch_quantize_impl<scalar_t, int32_t, kQmax, true, kSwizzledScales>(
           params, stochastic_rounding, philox_args, stream);
     } else {
-      launch_quantize_impl<scalar_t, int64_t, kQmax, true>(
+      launch_quantize_impl<scalar_t, int64_t, kQmax, true, kSwizzledScales>(
           params, stochastic_rounding, philox_args, stream);
     }
   } else {
     if (can_use_int32_indices(params)) {
-      launch_quantize_impl<scalar_t, int32_t, kQmax, false>(
+      launch_quantize_impl<scalar_t, int32_t, kQmax, false, kSwizzledScales>(
           params, stochastic_rounding, philox_args, stream);
     } else {
-      launch_quantize_impl<scalar_t, int64_t, kQmax, false>(
+      launch_quantize_impl<scalar_t, int64_t, kQmax, false, kSwizzledScales>(
           params, stochastic_rounding, philox_args, stream);
     }
   }
@@ -525,46 +473,54 @@ std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>> quantize_nvfp4_imp
     bool stochastic_rounding,
     double qmax,
     const std::string& output_layout,
+    const std::string& scale_layout,
     at::Tensor* stats) {
-  check_arguments(input, contract_dim, block_shape, qmax, output_layout);
+  check_arguments(input, contract_dim, block_shape, qmax, output_layout, scale_layout);
   c10::cuda::CUDAGuard device_guard(input.device());
   QuantizeParams params;
   params.input = input.const_data_ptr();
-  params.batches = input.dim() == 3 ? input.size(0) : 1;
-  params.rows = input.size(-2);
-  params.cols = input.size(-1);
+  params.batch = input.dim() == 3 ? input.size(0) : 1;
+  params.row = input.size(-2);
+  params.col = input.size(-1);
   params.input_batch_stride = input.dim() == 3 ? input.stride(0) : 0;
   params.input_row_stride = input.stride(-2);
   params.input_col_stride = input.stride(-1);
   params.rows_per_block = contract_dim == -1 ? block_shape[0] : kContractBlock;
   params.cols_per_block = contract_dim == -1 ? kContractBlock : block_shape[0];
   params.row_block_count =
-      (params.rows - 1) / params.rows_per_block + 1;
+      (params.row - 1) / params.rows_per_block + 1;
   params.col_block_count =
-      (params.cols - 1) / params.cols_per_block + 1;
+      (params.col - 1) / params.cols_per_block + 1;
   params.contract_dim = static_cast<int>(contract_dim);
   at::Tensor codes = allocate_codes(input, contract_dim, output_layout);
   params.code_batch_stride = codes.dim() == 3 ? codes.stride(0) : 0;
   params.code_row_stride = codes.stride(-2);
   params.code_col_stride = codes.stride(-1);
-  at::Tensor scales = at::empty_symint(scale_shape(input, contract_dim),
-                                 input.options().dtype(at::kFloat8_e4m3fn));
+  const bool swizzled_scales = scale_layout == "swizzled_32_4_4";
+  at::Tensor scales = allocate_scales(input, contract_dim, scale_layout);
+  if (swizzled_scales) {
+    const int64_t cols = contract_dim == -1
+        ? params.col / kContractBlock : params.row / kContractBlock;
+    params.scale_row_stride = contract_dim == -1 ? cols : 1;
+    params.scale_col_stride = contract_dim == -1 ? 1 : cols;
+  } else {
+    params.scale_batch_stride = scales.dim() == 3 ? scales.stride(0) : 0;
+    params.scale_row_stride = scales.stride(-2);
+    params.scale_col_stride = scales.stride(-1);
+  }
   params.codes = codes.data_ptr();
-  params.scales = scales.data_ptr();
-  params.scale_batch_stride = scales.dim() == 3 ? scales.stride(0) : 0;
-  params.scale_row_stride = scales.stride(-2);
-  params.scale_col_stride = scales.stride(-1);
+  params.scale = scales.data_ptr();
   c10::optional<at::Tensor> global_scale;
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   if (enable_global_scale) {
-    global_scale = at::empty({params.batches}, input.options().dtype(at::kFloat));
-    const int64_t blocks = (params.rows * params.cols - 1) / 2048 + 1;
-    TORCH_CHECK(blocks <= std::numeric_limits<int32_t>::max() && params.batches <= 65535,
+    global_scale = at::empty({params.batch}, input.options().dtype(at::kFloat));
+    const int64_t blocks = (params.row * params.col - 1) / 2048 + 1;
+    TORCH_CHECK(blocks <= std::numeric_limits<int32_t>::max() && params.batch <= 65535,
                 "quantize_nvfp4 launch exceeds CUDA grid limits");
     auto partials = blocks == 1 ? *global_scale :
-        at::empty({params.batches, blocks}, input.options().dtype(at::kFloat));
+        at::empty({params.batch, blocks}, input.options().dtype(at::kFloat));
 #define LAUNCH_AMAX(QMAX, INDEX) \
-      global_amax_kernel<scalar_t, INDEX, QMAX><<<dim3(blocks, params.batches), 256, 0, stream>>>( \
+      global_amax_kernel<scalar_t, INDEX, QMAX><<<dim3(blocks, params.batch), 256, 0, stream>>>( \
           params, partials.data_ptr<float>(), blocks)
     AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(),
                                     "quantize_nvfp4_global_amax", [&] {
@@ -584,10 +540,10 @@ std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>> quantize_nvfp4_imp
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     if (blocks > 1) {
       if (qmax == 4.0) {
-        global_scale_kernel<4><<<params.batches, 256, 0, stream>>>(
+        global_scale_kernel<4><<<params.batch, 256, 0, stream>>>(
             partials.data_ptr<float>(), global_scale->data_ptr<float>(), blocks);
       } else {
-        global_scale_kernel<6><<<params.batches, 256, 0, stream>>>(
+        global_scale_kernel<6><<<params.batch, 256, 0, stream>>>(
             partials.data_ptr<float>(), global_scale->data_ptr<float>(), blocks);
       }
       C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -602,38 +558,33 @@ std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>> quantize_nvfp4_imp
     philox_args = static_cast<at::CUDAGeneratorImpl*>(generator.unsafeGetGeneratorImpl())
                       ->philox_cuda_state(16);
   }
-  at::Tensor partials;
-  float* stats_partials = nullptr;
   if (stats != nullptr) {
     *stats = at::zeros({5}, input.options().dtype(at::kFloat));
-    const int64_t contract_groups =
-        (contract_dim == -1 ? params.cols : params.rows) / kContractBlock;
-    const int64_t outer_size = contract_dim == -1 ? params.rows : params.cols;
-    const int64_t outer_groups = (outer_size + block_shape[0] - 1) / block_shape[0];
-    const int64_t tiles = outer_groups * contract_groups;
-    const int64_t tiles_per_cta = block_shape[0] == 1 ? 128 : 4;
-    const int64_t blocks = (tiles + tiles_per_cta - 1) / tiles_per_cta * params.batches;
-    partials = at::empty({blocks, 4}, input.options().dtype(at::kFloat));
-    stats_partials = partials.data_ptr<float>();
   }
   params.global_scale = global_scale ? global_scale->data_ptr<float>() : nullptr;
   params.statistics = stats != nullptr ? stats->data_ptr<float>() : nullptr;
-  params.statistics_partials = stats_partials;
   if (qmax == 4.0) {
     AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(),
                                     "quantize_nvfp4", [&] {
-      launch_quantize<scalar_t, 4>(params, stochastic_rounding, philox_args, stream);
+      if (swizzled_scales) {
+        launch_quantize<scalar_t, 4, true>(
+            params, stochastic_rounding, philox_args, stream);
+      } else {
+        launch_quantize<scalar_t, 4, false>(
+            params, stochastic_rounding, philox_args, stream);
+      }
     });
   } else {
     AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(),
                                     "quantize_nvfp4", [&] {
-      launch_quantize<scalar_t, 6>(params, stochastic_rounding, philox_args, stream);
+      if (swizzled_scales) {
+        launch_quantize<scalar_t, 6, true>(
+            params, stochastic_rounding, philox_args, stream);
+      } else {
+        launch_quantize<scalar_t, 6, false>(
+            params, stochastic_rounding, philox_args, stream);
+      }
     });
-  }
-  if (stats != nullptr) {
-    finalize_nvfp4_stats_kernel<<<1, 256, 0, stream>>>(
-        stats_partials, partials.size(0), input.numel(), stats->data_ptr<float>());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return {codes, scales, global_scale};
 }
@@ -641,20 +592,21 @@ std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>> quantize_nvfp4_imp
 std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>> quantize_nvfp4_cuda(
     const at::Tensor& input, int64_t contract_dim, at::IntArrayRef block_shape,
     bool enable_global_scale, bool stochastic_rounding, double qmax,
-    const std::string& output_layout) {
+    const std::string& output_layout, const std::string& scale_layout) {
   return quantize_nvfp4_impl(input, contract_dim, block_shape, enable_global_scale,
-                              stochastic_rounding, qmax, output_layout, nullptr);
+                              stochastic_rounding, qmax, output_layout, scale_layout,
+                              nullptr);
 }
 
 std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>, at::Tensor>
 quantize_nvfp4_with_stats_cuda(
     const at::Tensor& input, int64_t contract_dim, at::IntArrayRef block_shape,
     bool enable_global_scale, bool stochastic_rounding, double qmax,
-    const std::string& output_layout) {
+    const std::string& output_layout, const std::string& scale_layout) {
   at::Tensor stats;
   auto [codes, scales, global_scale] = quantize_nvfp4_impl(
       input, contract_dim, block_shape, enable_global_scale, stochastic_rounding,
-      qmax, output_layout, &stats);
+      qmax, output_layout, scale_layout, &stats);
   return {codes, scales, global_scale, stats};
 }
 
@@ -665,11 +617,11 @@ std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>> quantize_nvfp4_met
     bool enable_global_scale,
     bool stochastic_rounding,
     double qmax,
-    const std::string& output_layout) {
-  check_arguments(input, contract_dim, block_shape, qmax, output_layout);
+    const std::string& output_layout,
+    const std::string& scale_layout) {
+  check_arguments(input, contract_dim, block_shape, qmax, output_layout, scale_layout);
   auto codes = allocate_codes(input, contract_dim, output_layout);
-  auto scales = at::empty_symint(scale_shape(input, contract_dim),
-                          input.options().dtype(at::kFloat8_e4m3fn));
+  auto scales = allocate_scales(input, contract_dim, scale_layout);
   c10::optional<at::Tensor> global_scale;
   if (enable_global_scale) {
     global_scale = at::empty_symint({input.dim() == 3 ? input.sym_size(0) : c10::SymInt(1)},
@@ -682,10 +634,10 @@ std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>, at::Tensor>
 quantize_nvfp4_with_stats_meta(
     const at::Tensor& input, int64_t contract_dim, at::IntArrayRef block_shape,
     bool enable_global_scale, bool stochastic_rounding, double qmax,
-    const std::string& output_layout) {
+    const std::string& output_layout, const std::string& scale_layout) {
   auto [codes, scales, global_scale] = quantize_nvfp4_meta(
       input, contract_dim, block_shape, enable_global_scale, stochastic_rounding,
-      qmax, output_layout);
+      qmax, output_layout, scale_layout);
   return {codes, scales, global_scale,
           at::empty_symint({5}, input.options().dtype(at::kFloat))};
 }
@@ -696,13 +648,13 @@ TORCH_LIBRARY_FRAGMENT(aot_kernel, m) {
   m.def(
       "quantize_nvfp4(Tensor x, int contract_dim, int[] block_shape, bool "
       "enable_global_scale=True, bool stochastic_rounding=False, float qmax=6, "
-      "str output_layout=\"row_major\") -> (Tensor, "
+      "str output_layout=\"row_major\", str scale_layout=\"row_major\") -> (Tensor, "
       "Tensor, Tensor?)",
       {at::Tag::nondeterministic_seeded});
   m.def(
       "quantize_nvfp4_with_stats(Tensor x, int contract_dim, int[] block_shape, bool "
       "enable_global_scale=True, bool stochastic_rounding=False, float qmax=6, "
-      "str output_layout=\"row_major\") -> (Tensor, Tensor, Tensor?, Tensor)",
+      "str output_layout=\"row_major\", str scale_layout=\"row_major\") -> (Tensor, Tensor, Tensor?, Tensor)",
       {at::Tag::nondeterministic_seeded});
 }
 

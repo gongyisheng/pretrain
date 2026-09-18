@@ -1,5 +1,7 @@
 """Eager integer quantization kernels."""
 
+from typing import Literal
+
 import torch
 
 from src.kernel.backends.eager.quantize import (
@@ -26,17 +28,21 @@ def quantize_int8(
     x: torch.Tensor,
     contract_dim: int,
     block_shape: tuple[int, int],
-    bits: int = 8,
-    stochastic_rounding: bool = False,
+    fmt: str = "int8",
     scale_dtype: torch.dtype = torch.float32,
     enable_global_scale: bool = False,
+    stochastic_rounding: bool = False,
     output_layout: str = "row_major",
+    scale_layout: str = "row_major",
     return_quantization_stats: bool = False,
-) -> (
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
-    | tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]
-):
-    """Return signed integer codes, scales, and an optional global scale."""
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | Literal[False]
+]:
+    if fmt not in ("int4", "int5", "int6", "int7", "int8"):
+        raise ValueError("INT8 requires int4 through int8")
+    bits = int(fmt[3:])
+    if scale_layout != "row_major":
+        raise ValueError("INT8 requires row_major scales")
     values = x.float()
     qmax = float(2 ** (bits - 1) - 1)
     global_scale = None
@@ -59,9 +65,12 @@ def quantize_int8(
     codes = layout_codes(codes, output_layout)
     if block_shape[1]:
         scale = scale.contiguous()
-    if return_quantization_stats:
-        return codes, scale, global_scale, quantization_stats
-    return codes, scale, global_scale
+    return (
+        codes,
+        scale,
+        global_scale,
+        quantization_stats if return_quantization_stats else False,
+    )
 
 
 @register_kernel(

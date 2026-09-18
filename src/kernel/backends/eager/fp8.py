@@ -1,5 +1,7 @@
 """Eager FP8 quantization kernels."""
 
+from typing import Literal
+
 import torch
 
 from src.kernel.backends.eager.quantize import (
@@ -25,19 +27,22 @@ from src.kernel.registry import register_kernel
 def quantize_fp8(
     x: torch.Tensor,
     contract_dim: int,
-    dtype: torch.dtype,
     block_shape: tuple[int, int],
-    stochastic_rounding: bool = False,
+    fmt: str = "fp8_e4m3",
     scale_dtype: torch.dtype = torch.float32,
     enable_global_scale: bool = False,
-    preserve_strides: bool = False,
+    stochastic_rounding: bool = False,
     output_layout: str = "row_major",
+    scale_layout: str = "row_major",
     return_quantization_stats: bool = False,
-) -> (
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
-    | tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]
-):
-    """Return FP8 codes, dequantization scales, and an optional global scale."""
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | Literal[False]
+]:
+    if fmt not in ("fp8_e4m3", "fp8_e5m2"):
+        raise ValueError("FP8 requires fp8_e4m3 or fp8_e5m2")
+    dtype = torch.float8_e4m3fn if fmt == "fp8_e4m3" else torch.float8_e5m2
+    if scale_layout != "row_major":
+        raise ValueError("FP8 requires row_major scales")
     values = x.float()
     qmax = float(torch.finfo(dtype).max)
     global_scale = None
@@ -57,15 +62,15 @@ def quantize_fp8(
         source=x if return_quantization_stats else None,
         global_scale=global_scale,
     )
-    if preserve_strides and output_layout != "row_major":
-        raise ValueError("preserve_strides cannot be combined with column_major output")
-    if not preserve_strides:
-        codes = layout_codes(codes, output_layout)
-    if block_shape != (0, 0) and not preserve_strides:
+    codes = layout_codes(codes, output_layout)
+    if block_shape != (0, 0):
         scale = scale.contiguous()
-    if return_quantization_stats:
-        return codes, scale, global_scale, quantization_stats
-    return codes, scale, global_scale
+    return (
+        codes,
+        scale,
+        global_scale,
+        quantization_stats if return_quantization_stats else False,
+    )
 
 
 @register_kernel(

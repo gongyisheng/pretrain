@@ -33,13 +33,24 @@ LARGE_BATCH_SQUARE32_SHAPES = ((65536, 1, 2),)
 SHAPES = TAIL_SHAPES + CONTIGUOUS_B32_SHAPES + ALIGNED_SQUARE32_SHAPES
 NARROW_SHAPES = ((3, 17), (2, 3, 17))
 LAYOUTS = ("dense", "strided", "transposed", "offset")
-STAT_SHAPES = ((35, 65), (3, 17), (0, 32), (32, 0))
+STAT_SHAPES = ((35, 65), (3, 17), (0, 32), (32, 0), (8192, 1024))
 OUTPUT_LAYOUTS = ("row_major", "column_major")
+INPUT_LAYOUTS = ("dense", "transposed")
+SCALE_LAYOUTS = ("row_major", "swizzled_32_4_4")
 CUDA_GRAPH_SHAPES = ((130, 256), (130, 259))
 COMPILE_SHAPES = ((130, 259), (33, 64))
-SWIZZLE_SHAPES = ((128, 128), (130, 160))
+SWIZZLE_SHAPES = (
+    (1, 1),
+    (128, 128),
+    (129, 128),
+    (128, 160),
+    (130, 160),
+    ((1 << 21) + 1, 1),
+)
+CHUNKED_SWIZZLE_SHAPES = (((1 << 21) + 1, 1),)
 SWIZZLE_INPUT_LAYOUTS = ("row_major", "column_major")
 SWIZZLE_BLOCK_OUTERS = (1, 32)
+RETURN_QUANTIZATION_STATS = (False, True)
 INDEX_STRIDE_CASES = (
     ((1, 64), (((1 << 31) - 1) // 31, 1), -1),
     ((1, 64), (((1 << 31) - 1) // 31 + 1, 1), -1),
@@ -154,10 +165,10 @@ def test_quantize_mxfp8_precision(
                 boundary, values.new_tensor(float("inf"))
             )
 
-    actual_codes, actual_scales, _ = quantize_mxfp8(
+    actual_codes, actual_scales, _, _ = quantize_mxfp8(
         source, contract_dim, block_shape, backend="cuda", output_layout=output_layout
     )
-    expected_codes, expected_scales, _ = quantize_mxfp8(
+    expected_codes, expected_scales, _, _ = quantize_mxfp8(
         source, contract_dim, block_shape, backend="eager"
     )
 
@@ -176,6 +187,7 @@ def test_quantize_mxfp8_precision(
 @pytest.mark.parametrize("output_layout", OUTPUT_LAYOUTS)
 @pytest.mark.parametrize("block_outer", SWIZZLE_BLOCK_OUTERS)
 @pytest.mark.parametrize("stochastic_rounding", (False, True))
+@pytest.mark.parametrize("return_quantization_stats", RETURN_QUANTIZATION_STATS)
 def test_quantize_mxfp8_scale_layout(
     dtype,
     shape,
@@ -184,7 +196,18 @@ def test_quantize_mxfp8_scale_layout(
     output_layout,
     block_outer,
     stochastic_rounding,
+    return_quantization_stats,
 ):
+    if shape in CHUNKED_SWIZZLE_SHAPES and (
+        dtype is not torch.bfloat16
+        or contract_dim != -1
+        or block_outer != 1
+        or input_layout != "row_major"
+        or output_layout != "column_major"
+        or stochastic_rounding
+        or return_quantization_stats
+    ):
+        pytest.skip("chunked scale-layout coverage uses the smallest API grid")
     source = torch.linspace(-448, 448, prod(shape), device="cuda", dtype=dtype).reshape(
         shape
     )
@@ -195,26 +218,28 @@ def test_quantize_mxfp8_scale_layout(
         assert source.is_contiguous()
 
     torch.manual_seed(17)
-    codes, scales, _, stats = quantize_mxfp8(
+    codes, scales, global_scale, stats = quantize_mxfp8(
         source,
         contract_dim,
         (block_outer, 32),
         stochastic_rounding=stochastic_rounding,
         backend="cuda",
         output_layout=output_layout,
-        return_quantization_stats=True,
+        return_quantization_stats=return_quantization_stats,
     )
+    state = torch.cuda.get_rng_state()
     torch.manual_seed(17)
-    packed_codes, packed_scales, _, packed_stats = quantize_mxfp8(
+    packed_codes, packed_scales, packed_global_scale, packed_stats = quantize_mxfp8(
         source,
         contract_dim,
         (block_outer, 32),
         stochastic_rounding=stochastic_rounding,
         backend="cuda",
         output_layout=output_layout,
-        return_quantization_stats=True,
+        return_quantization_stats=return_quantization_stats,
         scale_layout="swizzled_32_4_4",
     )
+    packed_state = torch.cuda.get_rng_state()
 
     expected_scales = to_swizzle_32_4_4(scales if contract_dim == -1 else scales.t())
     assert torch.equal(packed_codes.view(torch.uint8), codes.view(torch.uint8))
@@ -226,7 +251,21 @@ def test_quantize_mxfp8_scale_layout(
     assert torch.equal(
         packed_scales.view(torch.uint8), expected_scales.view(torch.uint8)
     )
-    assert torch.equal(packed_stats, stats)
+    assert global_scale is None
+    assert packed_global_scale is None
+    assert torch.equal(packed_state, state)
+    if return_quantization_stats:
+        assert torch.equal(packed_stats[2:], stats[2:])
+        energy_scale = stats[:2].clamp_min(1e-30)
+        torch.testing.assert_close(
+            packed_stats[:2] / energy_scale,
+            stats[:2] / energy_scale,
+            rtol=0,
+            atol=2.3e-6,
+        )
+    else:
+        assert stats is False
+        assert packed_stats is False
 
 
 @cuda_only
@@ -242,7 +281,7 @@ def test_quantize_mxfp8_large_strides(stochastic_rounding, index_case):
 
     torch.manual_seed(17)
     before = torch.cuda.get_rng_state()
-    actual_codes, actual_scales, _ = quantize_mxfp8(
+    actual_codes, actual_scales, _, _ = quantize_mxfp8(
         source,
         contract_dim,
         (1, 16),
@@ -252,7 +291,7 @@ def test_quantize_mxfp8_large_strides(stochastic_rounding, index_case):
     )
     actual_state = torch.cuda.get_rng_state()
     torch.manual_seed(17)
-    expected_codes, expected_scales, _ = quantize_mxfp8(
+    expected_codes, expected_scales, _, _ = quantize_mxfp8(
         compact,
         contract_dim,
         (1, 16),
@@ -281,11 +320,11 @@ def test_quantize_mxfp8_large_offsets(index_case):
         source[..., 0] = torch.finfo(torch.float8_e4m3fn).max
         compact = source.clone()
         before = torch.cuda.get_rng_state()
-        actual_codes, actual_scales, _ = quantize_mxfp8(
+        actual_codes, actual_scales, _, _ = quantize_mxfp8(
             source, -1, (1, 16), backend="cuda", output_layout="column_major"
         )
         assert torch.equal(torch.cuda.get_rng_state(), before)
-        expected_codes, expected_scales, _ = quantize_mxfp8(
+        expected_codes, expected_scales, _, _ = quantize_mxfp8(
             compact, -1, (1, 16), backend="cuda", output_layout="column_major"
         )
         assert torch.equal(
@@ -327,19 +366,14 @@ def test_quantize_mxfp8_stochastic_rounding(
 
     torch.manual_seed(0)
     before_rne = torch.cuda.get_rng_state()
-    rne_codes, rne_scales, _ = quantize_mxfp8(
-        source,
-        contract_dim,
-        block_shape,
-        stochastic_rounding=False,
-        backend="cuda",
-        output_layout=output_layout,
+    rne_codes, rne_scales, _, _ = quantize_mxfp8(
+        source, contract_dim, block_shape, backend="cuda", output_layout=output_layout
     )
     assert torch.equal(torch.cuda.get_rng_state(), before_rne)
 
     torch.manual_seed(1)
     before_sr = torch.cuda.get_rng_state()
-    first_codes, first_scales, _ = quantize_mxfp8(
+    first_codes, first_scales, _, _ = quantize_mxfp8(
         source,
         contract_dim,
         block_shape,
@@ -348,7 +382,7 @@ def test_quantize_mxfp8_stochastic_rounding(
         output_layout=output_layout,
     )
     assert not torch.equal(torch.cuda.get_rng_state(), before_sr)
-    second_codes, _, _ = quantize_mxfp8(
+    second_codes, _, _, _ = quantize_mxfp8(
         source,
         contract_dim,
         block_shape,
@@ -357,7 +391,7 @@ def test_quantize_mxfp8_stochastic_rounding(
         output_layout=output_layout,
     )
     torch.manual_seed(1)
-    repeated_codes, repeated_scales, _ = quantize_mxfp8(
+    repeated_codes, repeated_scales, _, _ = quantize_mxfp8(
         source,
         contract_dim,
         block_shape,
@@ -417,9 +451,10 @@ def test_quantize_mxfp8_compile(
     )
 
     torch.manual_seed(0)
-    actual_codes, actual_scales, _ = quantize(source)
+    actual_codes, actual_scales, _, stats = quantize(source)
+    assert stats is False
     torch.manual_seed(0)
-    expected_codes, expected_scales, _ = quantize_mxfp8(
+    expected_codes, expected_scales, _, _ = quantize_mxfp8(
         source,
         contract_dim,
         block_shape,
@@ -457,8 +492,9 @@ def test_quantize_mxfp8_scale_layout_compile(shape, contract_dim, block_outer):
         fullgraph=True,
     )
 
-    codes, scales, _ = quantize(source)
-    expected_codes, expected_scales, _ = quantize_mxfp8(
+    codes, scales, _, stats = quantize(source)
+    assert stats is False
+    expected_codes, expected_scales, _, _ = quantize_mxfp8(
         source, contract_dim, (block_outer, 32), backend="cuda"
     )
     expected_packed_scales = to_swizzle_32_4_4(
@@ -475,22 +511,34 @@ def test_quantize_mxfp8_scale_layout_compile(shape, contract_dim, block_outer):
 @pytest.mark.parametrize("block_shape", BLOCK_SHAPES)
 @pytest.mark.parametrize("shape", CUDA_GRAPH_SHAPES)
 @pytest.mark.parametrize("output_layout", OUTPUT_LAYOUTS)
+@pytest.mark.parametrize("scale_layout", SCALE_LAYOUTS)
 def test_quantize_mxfp8_cuda_graph_stochastic_rounding(
-    block_shape, shape, output_layout
+    block_shape, shape, output_layout, scale_layout
 ):
+    if scale_layout == "swizzled_32_4_4" and block_shape[1] != 32:
+        pytest.skip("swizzled scales require block-32 quantization")
     source = torch.full(shape, 1.0625, device="cuda")
     source[..., :: block_shape[1]] = 448
+    _, row_major_scales, _, _ = quantize_mxfp8(
+        source, block_shape=block_shape, backend="cuda"
+    )
+    expected_scales = (
+        row_major_scales
+        if scale_layout == "row_major"
+        else to_swizzle_32_4_4(row_major_scales)
+    )
     graph = torch.cuda.CUDAGraph()
 
     torch.manual_seed(1)
     torch.cuda.synchronize()
     with torch.cuda.graph(graph):
-        codes, scales, _ = quantize_mxfp8(
+        codes, scales, _, _ = quantize_mxfp8(
             source,
             block_shape=block_shape,
             stochastic_rounding=True,
             backend="cuda",
             output_layout=output_layout,
+            scale_layout=scale_layout,
         )
     graph.replay()
     first_codes = codes.clone()
@@ -503,22 +551,51 @@ def test_quantize_mxfp8_cuda_graph_stochastic_rounding(
         first_codes.view(torch.uint8), second_codes.view(torch.uint8)
     )
     assert torch.equal(first_scales.view(torch.uint8), second_scales.view(torch.uint8))
+    assert torch.equal(
+        first_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
+
+    source[..., : block_shape[1]] /= 2
+    _, row_major_scales, _, _ = quantize_mxfp8(
+        source, block_shape=block_shape, backend="cuda"
+    )
+    expected_scales = (
+        row_major_scales
+        if scale_layout == "row_major"
+        else to_swizzle_32_4_4(row_major_scales)
+    )
+    graph.replay()
+    changed_scales = scales.clone()
+
+    assert not torch.equal(
+        first_scales.view(torch.uint8), changed_scales.view(torch.uint8)
+    )
+    assert torch.equal(
+        changed_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
 
 
 @cuda_only
 @cuda_sm89_or_newer
 @pytest.mark.parametrize("output_layout", OUTPUT_LAYOUTS)
+@pytest.mark.parametrize("input_layout", INPUT_LAYOUTS)
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("block_shape", ((1, 16), (32, 32)))
+@pytest.mark.parametrize("block_shape", BLOCK_SHAPES)
 @pytest.mark.parametrize("stochastic_rounding", (False, True))
 @pytest.mark.parametrize("shape", STAT_SHAPES)
 def test_quantize_mxfp8_quantization_stats(
-    output_layout, contract_dim, dtype, block_shape, stochastic_rounding, shape
+    output_layout,
+    input_layout,
+    contract_dim,
+    dtype,
+    block_shape,
+    stochastic_rounding,
+    shape,
 ):
     generator = torch.Generator(device="cuda").manual_seed(17)
-    source = torch.randn(shape, device="cuda", dtype=dtype, generator=generator).mT
-    if contract_dim == -1:
+    source = torch.randn(shape, device="cuda", dtype=dtype, generator=generator)
+    if input_layout == "transposed":
         source = source.mT
     if source.numel():
         source[0, 0] = 0.0
@@ -527,7 +604,7 @@ def test_quantize_mxfp8_quantization_stats(
     source.requires_grad_()
     torch.manual_seed(7)
     before = torch.cuda.get_rng_state()
-    off_codes, off_scales, _ = quantize_mxfp8(
+    off_codes, off_scales, _, _ = quantize_mxfp8(
         source,
         contract_dim,
         block_shape,
@@ -570,8 +647,9 @@ def test_quantize_mxfp8_quantization_stats(
     assert not stats.requires_grad
     assert torch.equal(stats[2:], expected[2:])
     energy_scale = expected[:2].clamp_min(1e-30)
+    # Atomic reduction measured at most 9.3e-6 normalized error over 3,840 cases.
     torch.testing.assert_close(
-        stats[:2] / energy_scale, expected[:2] / energy_scale, rtol=0, atol=2.3e-6
+        stats[:2] / energy_scale, expected[:2] / energy_scale, rtol=0, atol=3.9e-5
     )
 
 

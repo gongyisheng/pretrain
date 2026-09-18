@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 
 from src.kernel.ops.quantize import (
@@ -94,31 +96,22 @@ def quantize_operand(
     stochastic_rounding: bool = False,
     rotation: Rotation | None = None,
     return_quantization_stats: bool = False,
-    output_layout: str | None = None,
+    output_layout: str = "row_major",
     backend: str | None = None,
     scale_layout: str = "row_major",
-) -> (
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
-    | tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]
-):
-    """Return codes, scales, and an optional global scale.
-
-    For unrotated dense 2D inputs, `return_quantization_stats` appends a detached
-    FP32 tensor in (src_sq, err_sq, under, numel, nonzero) order. Backends without
-    fused statistics append None so callers can fall back to post-quantization
-    monitoring without changing the selected quantizer. An omitted layout retains
-    legacy rank-3 code layouts; explicit layouts use the dense storage contract.
-    """
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | Literal[False]
+]:
+    """Return codes, scales, optional global scales, and statistics or False."""
+    if type(return_quantization_stats) is not bool:
+        raise ValueError("return_quantization_stats must be a bool")
     if return_quantization_stats and (
         x.ndim != 2 or offs is not None or rotation is not None
     ):
         raise ValueError(
             "quantization statistics require an unrotated dense 2D operand"
         )
-    layout_was_omitted = output_layout is None
-    if layout_was_omitted:
-        output_layout = "row_major"
-    elif output_layout not in ("row_major", "column_major"):
+    if output_layout not in ("row_major", "column_major"):
         raise ValueError("output_layout must be row_major or column_major")
     if offs is not None and output_layout != "row_major":
         raise ValueError("output_layout is supported only for dense quantization")
@@ -138,58 +131,49 @@ def quantize_operand(
         raise ValueError(f"unknown granularity: {granularity!r}")
     enable_global_scale = scale_cfg["enable_global_scale"]
     if scale_layout != "row_major" and (
-        offs is not None or scale_dtype is not torch.float8_e8m0fnu
+        offs is not None
+        or not (
+            scale_dtype is torch.float8_e8m0fnu
+            or (is_fp4(fmt) and scale_dtype is torch.float8_e4m3fn)
+        )
     ):
-        raise ValueError("packed scales require dense MXFP8 quantization")
+        raise ValueError("packed scales require dense MXFP8 or NVFP4 quantization")
     if scale_dtype is torch.float8_e8m0fnu and is_quantized(fmt) and fmt != "fp8_e4m3":
         raise ValueError("MXFP8 quantization requires fp8_e4m3")
     # Rotation retains FP32 values before quantization.
     source = x if rotation is None else rotation(x, contract_dim, torch.float32)
+    if offs is None:
+        if scale_dtype is torch.float8_e8m0fnu:
+            quantize = quantize_mxfp8
+        elif is_fp8(fmt):
+            quantize = quantize_fp8
+        elif is_int8s(fmt):
+            quantize = quantize_int8
+        elif is_fp4(fmt):
+            quantize = quantize_nvfp4
+        else:
+            raise ValueError(f"unsupported quantization format: {fmt!r}")
+        return quantize(
+            source,
+            contract_dim,
+            block_shape,
+            fmt,
+            scale_dtype,
+            enable_global_scale,
+            stochastic_rounding,
+            output_layout,
+            scale_layout,
+            return_quantization_stats,
+            backend,
+        )
     if scale_dtype is torch.float8_e8m0fnu:
-        if offs is None:
-            return quantize_mxfp8(
-                source,
-                contract_dim,
-                block_shape,
-                fmt,
-                stochastic_rounding,
-                output_layout=output_layout,
-                return_quantization_stats=return_quantization_stats,
-                backend=backend,
-                scale_layout=scale_layout,
-            )
-        return quantize_mxfp8_grouped(
+        if enable_global_scale is not False:
+            raise ValueError("MXFP8 does not support global scaling")
+        result = quantize_mxfp8_grouped(
             source, offs, ragged_dim, contract_dim, block_shape, stochastic_rounding
         )
-    if is_fp8(fmt):
-        if offs is None:
-            if layout_was_omitted and source.ndim == 3:
-                return quantize_fp8(
-                    source,
-                    contract_dim,
-                    str_to_dtype(fmt),
-                    block_shape,
-                    stochastic_rounding,
-                    backend="eager",
-                    scale_dtype=scale_dtype,
-                    enable_global_scale=enable_global_scale,
-                    preserve_strides=True,
-                    return_quantization_stats=return_quantization_stats,
-                    output_layout=output_layout,
-                )
-            return quantize_fp8(
-                source,
-                contract_dim,
-                str_to_dtype(fmt),
-                block_shape,
-                stochastic_rounding,
-                scale_dtype=scale_dtype,
-                enable_global_scale=enable_global_scale,
-                return_quantization_stats=return_quantization_stats,
-                output_layout=output_layout,
-                backend=backend,
-            )
-        return quantize_fp8_grouped(
+    elif is_fp8(fmt):
+        result = quantize_fp8_grouped(
             source,
             offs,
             ragged_dim,
@@ -200,55 +184,20 @@ def quantize_operand(
             scale_dtype=scale_dtype,
             enable_global_scale=enable_global_scale,
         )
-    if is_int8s(fmt):
-        bits = int(fmt[3:])
-        if offs is None:
-            int8_output_layout = output_layout
-            if (
-                layout_was_omitted
-                and source.ndim == 3
-                and block_shape[1] == 0
-                and source.stride(-2) == 1
-            ):
-                int8_output_layout = "column_major"
-            return quantize_int8(
-                source,
-                contract_dim,
-                block_shape,
-                bits,
-                stochastic_rounding,
-                scale_dtype=scale_dtype,
-                enable_global_scale=enable_global_scale,
-                return_quantization_stats=return_quantization_stats,
-                output_layout=int8_output_layout,
-                backend=backend,
-            )
-        return quantize_int8_grouped(
+    elif is_int8s(fmt):
+        result = quantize_int8_grouped(
             source,
             offs,
             ragged_dim,
             contract_dim,
             block_shape,
-            bits,
+            int(fmt[3:]),
             stochastic_rounding,
             scale_dtype=scale_dtype,
             enable_global_scale=enable_global_scale,
         )
-    if is_fp4(fmt):
-        if offs is None:
-            return quantize_nvfp4(
-                source,
-                contract_dim,
-                block_shape,
-                enable_global_scale,
-                stochastic_rounding,
-                scale_dtype=scale_dtype,
-                qmax=str_to_qmax(fmt),
-                return_quantization_stats=return_quantization_stats,
-                output_layout=output_layout,
-                backend=backend,
-            )
-        return quantize_nvfp4_grouped(
+    elif is_fp4(fmt):
+        result = quantize_nvfp4_grouped(
             source,
             offs,
             ragged_dim,
@@ -259,7 +208,10 @@ def quantize_operand(
             scale_dtype=scale_dtype,
             qmax=str_to_qmax(fmt),
         )
-    raise ValueError(f"unsupported quantization format: {fmt!r}")
+    else:
+        raise ValueError(f"unsupported quantization format: {fmt!r}")
+    codes, scale, global_scale = result
+    return codes, scale, global_scale, False
 
 
 def dequantize_operand(

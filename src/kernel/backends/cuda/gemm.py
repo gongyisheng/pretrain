@@ -216,6 +216,7 @@ def _check_nvfp4_scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None,
+    scale_layout: str = "row_major",
 ) -> None:
     _check_operand_shapes(aq, bq, "NVFP4 GEMM")
     _check_out_dtype(
@@ -232,7 +233,17 @@ def _check_nvfp4_scaled_mm(
     _check_packed_e2m1_element(bq, "NVFP4 GEMM B")
     _check_e4m3_element(sa, "NVFP4 GEMM A scale")
     _check_e4m3_element(sb, "NVFP4 GEMM B scale")
-    _check_scale_shapes(aq, bq, sa, sb, block_size // 2, "NVFP4 GEMM")
+    if scale_layout == "row_major":
+        _check_scale_shapes(aq, bq, sa, sb, block_size // 2, "NVFP4 GEMM")
+    elif scale_layout == "swizzled_32_4_4":
+        blocks = -(-aq.shape[1] // (block_size // 2))
+        padded_blocks = (blocks + 3) // 4 * 4
+        for scale, outer in ((sa, aq.shape[0]), (sb, bq.shape[1])):
+            size = (outer + 127) // 128 * 128 * padded_blocks
+            if scale.shape != (size,) or not scale.is_contiguous():
+                raise ValueError("NVFP4 GEMM requires contiguous packed scale buffers")
+    else:
+        raise ValueError("unsupported NVFP4 scale layout")
     if bias is not None:
         if out_dtype is torch.float32:
             raise ValueError("NVFP4 GEMM does not support float32 output with bias")
@@ -247,9 +258,12 @@ def supports_nvfp4_scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None,
+    scale_layout: str = "row_major",
 ) -> bool:
     try:
-        _check_nvfp4_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+        _check_nvfp4_scaled_mm(
+            aq, bq, sa, sb, out_dtype, block_size, bias, scale_layout
+        )
     except ValueError:
         return False
     return True
@@ -272,14 +286,15 @@ def nvfp4_scaled_mm(
     bias: torch.Tensor | None = None,
     gsa: torch.Tensor | None = None,
     gsb: torch.Tensor | None = None,
+    scale_layout: str = "row_major",
 ) -> torch.Tensor:
     """Dense NVFP4 GEMM through the project-owned cuBLASLt kernel."""
-    _check_nvfp4_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+    _check_nvfp4_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias, scale_layout)
     return torch.ops.aot_kernel._scaled_mm_nvfp4_cublaslt(
         aq,
         to_column_major(bq),
-        to_swizzle_32_4_4(sa),
-        to_swizzle_32_4_4(sb.t()),
+        to_swizzle_32_4_4(sa) if scale_layout == "row_major" else sa,
+        to_swizzle_32_4_4(sb.t()) if scale_layout == "row_major" else sb,
         out_dtype,
         bias,
         gsa,

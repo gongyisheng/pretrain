@@ -48,8 +48,8 @@ def test_quantize_int8_precision(bits, block_shape, contract_dim):
         source, contract_dim, block_shape, bits
     )
 
-    codes, scales, _ = quantize_int8(
-        source, contract_dim, block_shape, bits, backend="eager"
+    codes, scales, _, _ = quantize_int8(
+        source, contract_dim, block_shape, fmt=f"int{bits}", backend="eager"
     )
 
     assert torch.equal(codes, expected_codes)
@@ -60,15 +60,17 @@ def test_quantize_int8_stochastic_rounding():
     source = torch.full((64, 16), 1.5)
     source[:, 0] = 7
 
-    rne_codes, rne_scales, _ = quantize_int8(source, -1, (1, 16), 4, backend="eager")
+    rne_codes, rne_scales, _, _ = quantize_int8(
+        source, -1, (1, 16), fmt="int4", backend="eager"
+    )
     torch.manual_seed(0)
     before = (
         torch.cuda.get_rng_state(source.device)
         if source.is_cuda
         else torch.get_rng_state()
     )
-    first_codes, first_scales, _ = quantize_int8(
-        source, -1, (1, 16), 4, True, backend="eager"
+    first_codes, first_scales, _, _ = quantize_int8(
+        source, -1, (1, 16), fmt="int4", stochastic_rounding=True, backend="eager"
     )
     after = (
         torch.cuda.get_rng_state(source.device)
@@ -76,8 +78,8 @@ def test_quantize_int8_stochastic_rounding():
         else torch.get_rng_state()
     )
     assert not torch.equal(after, before)
-    second_codes, second_scales, _ = quantize_int8(
-        source, -1, (1, 16), 4, True, backend="eager"
+    second_codes, second_scales, _, _ = quantize_int8(
+        source, -1, (1, 16), fmt="int4", stochastic_rounding=True, backend="eager"
     )
 
     assert not torch.equal(first_codes, second_codes)
@@ -89,11 +91,11 @@ def test_quantize_int8_stochastic_rounding():
 def test_quantize_int8_grouped_precision():
     source = torch.linspace(-32, 32, 160).reshape(5, 32)
     offs = torch.tensor((16, 16, 32), dtype=torch.int32)
-    first_codes, first_scale, _ = quantize_int8(
-        source[:, :16], -1, (1, 16), 6, backend="eager"
+    first_codes, first_scale, _, _ = quantize_int8(
+        source[:, :16], -1, (1, 16), fmt="int6", backend="eager"
     )
-    second_codes, second_scale, _ = quantize_int8(
-        source[:, 16:], -1, (1, 16), 6, backend="eager"
+    second_codes, second_scale, _, _ = quantize_int8(
+        source[:, 16:], -1, (1, 16), fmt="int6", backend="eager"
     )
 
     codes, scale, _ = quantize_int8_grouped(

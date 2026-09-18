@@ -3,7 +3,12 @@ import torch
 
 from src.kernel.backends.cuda import gemm as cuda_mm
 from src.kernel.backends.eager import gemm as eager_mm
-from src.kernel.ops import mxfp8_scaled_mm, quantize_mxfp8
+from src.kernel.ops import (
+    mxfp8_scaled_mm,
+    nvfp4_scaled_mm,
+    quantize_mxfp8,
+    quantize_nvfp4,
+)
 from tests.fast.kernel.backends.helper import (
     BF16_OUT,
     BIAS_CASES,
@@ -172,14 +177,14 @@ def test_mxfp8_scaled_mm_scale_layout(m, k, n):
     generator = torch.Generator(device="cuda").manual_seed(17)
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16, generator=generator)
     b = torch.randn((k, n), device="cuda", dtype=torch.bfloat16, generator=generator)
-    aq, sa, _ = quantize_mxfp8(a, -1, (1, 32), backend="cuda")
-    bq, sb, _ = quantize_mxfp8(
+    aq, sa, _, _ = quantize_mxfp8(a, -1, (1, 32), backend="cuda")
+    bq, sb, _, _ = quantize_mxfp8(
         b, -2, (1, 32), backend="cuda", output_layout="column_major"
     )
-    packed_aq, packed_sa, _ = quantize_mxfp8(
+    packed_aq, packed_sa, _, _ = quantize_mxfp8(
         a, -1, (1, 32), backend="cuda", scale_layout="swizzled_32_4_4"
     )
-    packed_bq, packed_sb, _ = quantize_mxfp8(
+    packed_bq, packed_sb, _, _ = quantize_mxfp8(
         b,
         -2,
         (1, 32),
@@ -202,6 +207,52 @@ def test_mxfp8_scaled_mm_scale_layout(m, k, n):
 
     assert torch.equal(packed_aq.view(torch.uint8), aq.view(torch.uint8))
     assert torch.equal(packed_bq.view(torch.uint8), bq.view(torch.uint8))
+    assert torch.equal(actual, expected)
+
+
+@cuda_only
+@cuda_sm100_or_newer
+def test_nvfp4_scaled_mm_scale_layout():
+    m, k, n = 129, 128, 144
+    generator = torch.Generator(device="cuda").manual_seed(17)
+    a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16, generator=generator)
+    b = torch.randn((k, n), device="cuda", dtype=torch.bfloat16, generator=generator)
+    aq, sa, gsa, _ = quantize_nvfp4(a, -1, (1, 16), backend="cuda")
+    bq, sb, gsb, _ = quantize_nvfp4(
+        b, -2, (1, 16), output_layout="column_major", backend="cuda"
+    )
+    packed_aq, packed_sa, packed_gsa, _ = quantize_nvfp4(
+        a, -1, (1, 16), scale_layout="swizzled_32_4_4", backend="cuda"
+    )
+    packed_bq, packed_sb, packed_gsb, _ = quantize_nvfp4(
+        b,
+        -2,
+        (1, 16),
+        output_layout="column_major",
+        scale_layout="swizzled_32_4_4",
+        backend="cuda",
+    )
+
+    expected = nvfp4_scaled_mm(
+        aq, bq, sa, sb, torch.bfloat16, 16, gsa=gsa, gsb=gsb, backend="cuda"
+    )
+    actual = nvfp4_scaled_mm(
+        packed_aq,
+        packed_bq,
+        packed_sa,
+        packed_sb,
+        torch.bfloat16,
+        16,
+        gsa=packed_gsa,
+        gsb=packed_gsb,
+        backend="cuda",
+        scale_layout="swizzled_32_4_4",
+    )
+
+    assert torch.equal(packed_aq, aq)
+    assert torch.equal(packed_bq, bq)
+    assert torch.equal(packed_gsa, gsa)
+    assert torch.equal(packed_gsb, gsb)
     assert torch.equal(actual, expected)
 
 

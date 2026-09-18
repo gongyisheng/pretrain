@@ -55,25 +55,24 @@ def _quantize(
         return quantize_fp8(
             source,
             contract_dim,
-            torch.float8_e4m3fn,
             block_shape,
-            stochastic_rounding,
-            backend="eager",
             scale_dtype=torch.float8_e4m3fn,
             enable_global_scale=True,
-            return_quantization_stats=return_quantization_stats,
+            stochastic_rounding=stochastic_rounding,
             output_layout=output_layout,
+            return_quantization_stats=return_quantization_stats,
+            backend="eager",
         )
     if fmt == "fp8_e5m2":
         return quantize_fp8(
             source,
             contract_dim,
-            torch.float8_e5m2,
             block_shape,
-            stochastic_rounding,
-            backend="eager",
-            return_quantization_stats=return_quantization_stats,
+            fmt="fp8_e5m2",
+            stochastic_rounding=stochastic_rounding,
             output_layout=output_layout,
+            return_quantization_stats=return_quantization_stats,
+            backend="eager",
         )
     if fmt == "mxfp8":
         return quantize_mxfp8(
@@ -90,22 +89,21 @@ def _quantize(
             source,
             contract_dim,
             block_shape,
-            bits=int(fmt[3:]),
+            fmt="int8",
             stochastic_rounding=stochastic_rounding,
-            backend="eager",
-            return_quantization_stats=return_quantization_stats,
             output_layout=output_layout,
+            return_quantization_stats=return_quantization_stats,
+            backend="eager",
         )
     return quantize_nvfp4(
         source,
         contract_dim,
         block_shape,
-        enable_global_scale=True,
+        fmt="fp4_e2m1_4over6" if fmt.endswith("4over6") else "fp4_e2m1",
         stochastic_rounding=stochastic_rounding,
-        backend="eager",
-        qmax=4.0 if fmt.endswith("4over6") else 6.0,
-        return_quantization_stats=return_quantization_stats,
         output_layout=output_layout,
+        return_quantization_stats=return_quantization_stats,
+        backend="eager",
     )
 
 
@@ -146,7 +144,7 @@ def test_quantize_dense_quantization_stats_precision(
     source = _source(fmt, contract_dim, dtype).requires_grad_()
     original = source.detach().clone()
     torch.manual_seed(29)
-    ordinary_codes, ordinary_scale, ordinary_global = _quantize(
+    ordinary_codes, ordinary_scale, ordinary_global, ordinary_stats = _quantize(
         source,
         fmt,
         contract_dim,
@@ -155,6 +153,7 @@ def test_quantize_dense_quantization_stats_precision(
         False,
         output_layout,
     )
+    assert ordinary_stats is False
     torch.manual_seed(29)
     codes, scale, global_scale, stats = _quantize(
         source, fmt, contract_dim, block_shape, stochastic_rounding, True, output_layout
@@ -218,7 +217,10 @@ def test_quantize_dense_quantization_stats_compile_precision(
     try:
         compiled = torch.compile(quantize, fullgraph=True)
         torch.manual_seed(41)
-        ordinary_codes, ordinary_scale, ordinary_global = compiled(source, False)
+        ordinary_codes, ordinary_scale, ordinary_global, ordinary_stats = compiled(
+            source, False
+        )
+        assert ordinary_stats is False
         torch.manual_seed(41)
         codes, scale, global_scale, stats = compiled(source, True)
         code_values = (

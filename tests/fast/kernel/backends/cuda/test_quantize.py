@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from src.kernel.ops import dequantize_dense, quantize_nvfp4, unpack_e2m1
+from src.kernel.utils import to_swizzle_32_4_4
 from src.quant.quantize import dequantize_operand
 from tests.fast.kernel.backends.cuda._quantize_test_utils import (
     LARGE_OFFSET_CASES,
@@ -17,7 +18,22 @@ CONTRACT_DIMS = (-2, -1)
 BLOCK_SHAPES = ((1, 16), (16, 16))
 GLOBAL_SCALES = (False, True)
 QMAX_VALUES = (6.0, 4.0)
+SWIZZLE_SHAPES = (
+    (1, 16),
+    (16, 16),
+    (17, 80),
+    (128, 128),
+    (144, 64),
+    (128, 80),
+    (144, 80),
+)
+SWIZZLE_INPUT_LAYOUTS = ("dense", "strided")
+STAT_SHAPES = ((17, 64), (8192, 1024))
+OUTPUT_LAYOUTS = ("row_major", "column_major")
+SCALE_LAYOUTS = ("row_major", "swizzled_32_4_4")
+RETURN_QUANTIZATION_STATS = (False, True)
 STOCHASTIC_CASES = ("rounding", "nonfinite", "large")
+STOCHASTIC_ROUNDING = (False, True)
 LAYOUTS = ("dense", "strided")
 SHAPES = ((32, 64), (17, 64), (64, 17), (2, 32, 64), (2, 65, 64), (2, 64, 65))
 DYNAMIC_RANKS = (2, 3)
@@ -93,17 +109,17 @@ def _assert_rne_matches_eager(
         source,
         contract_dim,
         block_shape,
-        enable_global_scale,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
         backend="eager",
-        qmax=qmax,
     )
     actual = quantize_nvfp4(
         source,
         contract_dim,
         block_shape,
-        enable_global_scale,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
         backend="cuda",
-        qmax=qmax,
     )
     assert torch.equal(actual[0], expected[0])
     assert torch.equal(
@@ -118,6 +134,8 @@ def _assert_rne_matches_eager(
         )
     else:
         assert actual[2] is None
+    assert actual[3] is False
+    assert expected[3] is False
 
 
 @cuda_only
@@ -144,6 +162,88 @@ def test_quantize_nvfp4_precision(
 
 @cuda_only
 @cuda_sm100_or_newer
+@pytest.mark.parametrize("qmax", QMAX_VALUES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("shape", SWIZZLE_SHAPES)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("block_shape", BLOCK_SHAPES)
+@pytest.mark.parametrize("input_layout", SWIZZLE_INPUT_LAYOUTS)
+@pytest.mark.parametrize("output_layout", OUTPUT_LAYOUTS)
+@pytest.mark.parametrize("stochastic_rounding", STOCHASTIC_ROUNDING)
+@pytest.mark.parametrize("return_quantization_stats", RETURN_QUANTIZATION_STATS)
+@pytest.mark.parametrize("enable_global_scale", GLOBAL_SCALES)
+def test_quantize_nvfp4_scale_layout(
+    dtype,
+    shape,
+    contract_dim,
+    block_shape,
+    input_layout,
+    output_layout,
+    stochastic_rounding,
+    return_quantization_stats,
+    enable_global_scale,
+    qmax,
+):
+    if shape[contract_dim] % 16:
+        pytest.skip("NVFP4 requires a contraction extent divisible by 16")
+    source = _make_source(shape, dtype, input_layout)
+    fmt = "fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1"
+    torch.manual_seed(17)
+    codes, scales, global_scale, stats = quantize_nvfp4(
+        source,
+        contract_dim,
+        block_shape,
+        fmt=fmt,
+        enable_global_scale=enable_global_scale,
+        stochastic_rounding=stochastic_rounding,
+        output_layout=output_layout,
+        return_quantization_stats=return_quantization_stats,
+        backend="cuda",
+    )
+    state = torch.cuda.get_rng_state()
+    torch.manual_seed(17)
+    packed_codes, packed_scales, packed_global_scale, packed_stats = quantize_nvfp4(
+        source,
+        contract_dim,
+        block_shape,
+        fmt=fmt,
+        enable_global_scale=enable_global_scale,
+        stochastic_rounding=stochastic_rounding,
+        output_layout=output_layout,
+        return_quantization_stats=return_quantization_stats,
+        scale_layout="swizzled_32_4_4",
+        backend="cuda",
+    )
+    packed_state = torch.cuda.get_rng_state()
+
+    expected_scales = to_swizzle_32_4_4(scales if contract_dim == -1 else scales.t())
+    assert torch.equal(packed_codes, codes)
+    assert torch.equal(
+        packed_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
+    if enable_global_scale:
+        assert global_scale is not None
+        assert torch.equal(packed_global_scale, global_scale)
+    else:
+        assert global_scale is None
+        assert packed_global_scale is None
+    assert torch.equal(packed_state, state)
+    if return_quantization_stats:
+        assert torch.equal(packed_stats[2:], stats[2:])
+        energy_scale = stats[:2].clamp_min(1e-30)
+        torch.testing.assert_close(
+            packed_stats[:2] / energy_scale,
+            stats[:2] / energy_scale,
+            rtol=0,
+            atol=2.3e-6,
+        )
+    else:
+        assert stats is False
+        assert packed_stats is False
+
+
+@cuda_only
+@cuda_sm100_or_newer
 @pytest.mark.parametrize("stochastic_rounding", (False, True))
 @pytest.mark.parametrize("index_case", INDEX_STRIDE_CASES)
 def test_quantize_nvfp4_large_strides(stochastic_rounding, index_case):
@@ -155,23 +255,23 @@ def test_quantize_nvfp4_large_strides(stochastic_rounding, index_case):
 
     torch.manual_seed(17)
     before = torch.cuda.get_rng_state()
-    actual_codes, actual_scales, actual_global_scale = quantize_nvfp4(
+    actual_codes, actual_scales, actual_global_scale, _ = quantize_nvfp4(
         source,
         contract_dim,
         (1, 16),
         stochastic_rounding=stochastic_rounding,
-        backend="cuda",
         output_layout="column_major",
+        backend="cuda",
     )
     actual_state = torch.cuda.get_rng_state()
     torch.manual_seed(17)
-    expected_codes, expected_scales, expected_global_scale = quantize_nvfp4(
+    expected_codes, expected_scales, expected_global_scale, _ = quantize_nvfp4(
         compact,
         contract_dim,
         (1, 16),
         stochastic_rounding=stochastic_rounding,
-        backend="cuda",
         output_layout="column_major",
+        backend="cuda",
     )
     expected_state = torch.cuda.get_rng_state()
 
@@ -196,12 +296,12 @@ def test_quantize_nvfp4_large_offsets(index_case):
         source[..., 0] = 6.0
         compact = source.clone()
         before = torch.cuda.get_rng_state()
-        actual_codes, actual_scales, actual_global_scale = quantize_nvfp4(
-            source, -1, (1, 16), backend="cuda", output_layout="column_major"
+        actual_codes, actual_scales, actual_global_scale, _ = quantize_nvfp4(
+            source, -1, (1, 16), output_layout="column_major", backend="cuda"
         )
         assert torch.equal(torch.cuda.get_rng_state(), before)
-        expected_codes, expected_scales, expected_global_scale = quantize_nvfp4(
-            compact, -1, (1, 16), backend="cuda", output_layout="column_major"
+        expected_codes, expected_scales, expected_global_scale, _ = quantize_nvfp4(
+            compact, -1, (1, 16), output_layout="column_major", backend="cuda"
         )
         assert torch.equal(actual_codes, expected_codes)
         assert torch.equal(
@@ -314,19 +414,19 @@ def test_quantize_nvfp4_stochastic_rounding_precision(
         source,
         contract_dim,
         block_shape,
-        enable_global_scale,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
         stochastic_rounding=True,
         backend="eager",
-        qmax=qmax,
     )
     actual = quantize_nvfp4(
         source,
         contract_dim,
         block_shape,
-        enable_global_scale,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
         stochastic_rounding=True,
         backend="cuda",
-        qmax=qmax,
     )
 
     assert torch.equal(
@@ -372,14 +472,19 @@ def test_quantize_nvfp4_compiles_fullgraph(block_shape, enable_global_scale, qma
         source,
         -1,
         block_shape,
-        enable_global_scale,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
         backend="eager",
-        qmax=qmax,
     )
 
     def quantize(x):
         return quantize_nvfp4(
-            x, -1, block_shape, enable_global_scale, backend="cuda", qmax=qmax
+            x,
+            -1,
+            block_shape,
+            fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+            enable_global_scale=enable_global_scale,
+            backend="cuda",
         )
 
     actual = torch.compile(quantize, fullgraph=True)(source)
@@ -411,7 +516,12 @@ def test_quantize_nvfp4_compiles_dynamic_shape(
 
     def quantize(x):
         return quantize_nvfp4(
-            x, contract_dim, block_shape, enable_global_scale, backend="cuda", qmax=qmax
+            x,
+            contract_dim,
+            block_shape,
+            fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+            enable_global_scale=enable_global_scale,
+            backend="cuda",
         )
 
     compiled = torch.compile(quantize, fullgraph=True, dynamic=True)
@@ -421,9 +531,9 @@ def test_quantize_nvfp4_compiles_dynamic_shape(
             source,
             contract_dim,
             block_shape,
-            enable_global_scale,
+            fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+            enable_global_scale=enable_global_scale,
             backend="eager",
-            qmax=qmax,
         )
         if index == 0:
             # Resolve dispatch before checking recompilation from shape changes.
@@ -451,13 +561,21 @@ def test_quantize_nvfp4_compiles_dynamic_shape(
 @pytest.mark.parametrize("qmax", QMAX_VALUES)
 @pytest.mark.parametrize("block_shape", BLOCK_SHAPES)
 @pytest.mark.parametrize("enable_global_scale", GLOBAL_SCALES)
-def test_quantize_nvfp4_stochastic_rounding_rng(block_shape, enable_global_scale, qmax):
+@pytest.mark.parametrize("scale_layout", SCALE_LAYOUTS)
+def test_quantize_nvfp4_stochastic_rounding_rng(
+    block_shape, enable_global_scale, qmax, scale_layout
+):
     source = torch.full((4096, 16), 0.3, device="cuda")
     source[:, -1] = qmax
     torch.manual_seed(0)
     initial_state = torch.cuda.get_rng_state()
     quantize_nvfp4(
-        source, -1, block_shape, enable_global_scale, backend="cuda", qmax=qmax
+        source,
+        -1,
+        block_shape,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
+        backend="cuda",
     )
     assert torch.equal(torch.cuda.get_rng_state(), initial_state)
 
@@ -466,12 +584,14 @@ def test_quantize_nvfp4_stochastic_rounding_rng(block_shape, enable_global_scale
             x,
             -1,
             block_shape,
-            enable_global_scale,
+            fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+            enable_global_scale=enable_global_scale,
             stochastic_rounding=True,
             backend="cuda",
-            qmax=qmax,
+            scale_layout=scale_layout,
         )
 
+    torch._dynamo.reset()
     compiled = torch.compile(quantize, fullgraph=True)
     compiled(source)
     torch.cuda.synchronize()
@@ -486,35 +606,82 @@ def test_quantize_nvfp4_stochastic_rounding_rng(block_shape, enable_global_scale
     for _ in range(3):
         quantize(source)
     torch.cuda.synchronize()
+    _, row_major_scales, _, _ = quantize_nvfp4(
+        source,
+        -1,
+        block_shape,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
+        backend="cuda",
+    )
+    expected_scales = (
+        row_major_scales
+        if scale_layout == "row_major"
+        else to_swizzle_32_4_4(row_major_scales)
+    )
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = quantize(source)
     graph.replay()
     first_replay = captured[0].clone()
+    first_scales = captured[1].clone()
     graph.replay()
     second_replay = captured[0].clone()
+    second_scales = captured[1].clone()
     assert not torch.equal(first_replay, second_replay)
+    assert torch.equal(first_scales.view(torch.uint8), second_scales.view(torch.uint8))
+    assert torch.equal(
+        first_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
+
+    source[: block_shape[0], -1] = qmax / 2
+    _, row_major_scales, _, _ = quantize_nvfp4(
+        source,
+        -1,
+        block_shape,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
+        backend="cuda",
+    )
+    expected_scales = (
+        row_major_scales
+        if scale_layout == "row_major"
+        else to_swizzle_32_4_4(row_major_scales)
+    )
+    graph.replay()
+    changed_scales = captured[1].clone()
+
+    assert not torch.equal(
+        first_scales.view(torch.uint8), changed_scales.view(torch.uint8)
+    )
+    assert torch.equal(
+        changed_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
 
 
 @cuda_only
 @cuda_sm100_or_newer
 @pytest.mark.parametrize("output_layout", ("row_major", "column_major"))
+@pytest.mark.parametrize("input_layout", LAYOUTS)
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("block_shape", BLOCK_SHAPES)
 @pytest.mark.parametrize("enable_global_scale", GLOBAL_SCALES)
 @pytest.mark.parametrize("qmax", QMAX_VALUES)
 @pytest.mark.parametrize("stochastic_rounding", (False, True))
+@pytest.mark.parametrize("shape", STAT_SHAPES)
 def test_quantize_nvfp4_quantization_stats(
     output_layout,
+    input_layout,
     contract_dim,
     dtype,
     block_shape,
     enable_global_scale,
     qmax,
     stochastic_rounding,
+    shape,
 ):
-    source = _make_source((17, 64), dtype, "strided")
+    source = _make_source(shape, dtype, input_layout)
     if contract_dim == -2:
         source = source.mT
     source[0, 0] = 0.0
@@ -523,15 +690,15 @@ def test_quantize_nvfp4_quantization_stats(
     source.requires_grad_()
     torch.manual_seed(7)
     before = torch.cuda.get_rng_state()
-    off_codes, off_scales, off_global = quantize_nvfp4(
+    off_codes, off_scales, off_global, _ = quantize_nvfp4(
         source,
         contract_dim,
         block_shape,
-        enable_global_scale,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
         stochastic_rounding=stochastic_rounding,
-        backend="cuda",
-        qmax=qmax,
         output_layout=output_layout,
+        backend="cuda",
     )
     off_state = torch.cuda.get_rng_state()
     torch.manual_seed(7)
@@ -539,12 +706,12 @@ def test_quantize_nvfp4_quantization_stats(
         source,
         contract_dim,
         block_shape,
-        enable_global_scale,
+        fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
+        enable_global_scale=enable_global_scale,
         stochastic_rounding=stochastic_rounding,
-        backend="cuda",
-        qmax=qmax,
         output_layout=output_layout,
         return_quantization_stats=True,
+        backend="cuda",
     )
     assert torch.equal(torch.cuda.get_rng_state(), off_state)
     if not stochastic_rounding:
@@ -566,8 +733,9 @@ def test_quantize_nvfp4_quantization_stats(
     assert torch.signbit(unpacked[0, 1])
     assert torch.equal(stats[2:], expected[2:])
     energy_scale = expected[:2].clamp_min(1e-30)
+    # Maximum normalized energy error was 3.10e-6 across the 22,080-case grid.
     torch.testing.assert_close(
-        stats[:2] / energy_scale, expected[:2] / energy_scale, rtol=0, atol=2.3e-6
+        stats[:2] / energy_scale, expected[:2] / energy_scale, rtol=0, atol=1.3e-5
     )
 
 
@@ -604,12 +772,12 @@ def test_quantize_nvfp4_quantization_stats_compile(
             values,
             contract_dim,
             block_shape,
+            fmt="fp4_e2m1_4over6" if qmax == 4.0 else "fp4_e2m1",
             enable_global_scale=enable_global_scale,
             stochastic_rounding=stochastic_rounding,
-            backend="cuda",
-            qmax=qmax,
             output_layout=output_layout,
             return_quantization_stats=True,
+            backend="cuda",
         ),
         fullgraph=True,
     )

@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.kernel.ops.gemm import SCALED_MM_OPS, _is_kernel_available, mxfp8_scaled_mm
+from src.kernel.ops.gemm import SCALED_MM_OPS, _is_kernel_available
 from src.metrics.quant import QuantizationStats, quantize_and_record
 from src.quant.quantize import dequantize_operand
 from src.quant.rotation import Rotation
-from src.quant.utils import is_quantized, resolve_scale, scaled_mm_op
+from src.quant.utils import is_fp4, is_quantized, resolve_scale, scaled_mm_op
 from src.utils.config import QuantizationConfig
 
 
@@ -47,18 +47,33 @@ def quantized_mm(
     scale_layout = "row_major"
     if (
         backend == "cuda"
-        and op == "gemm.mxfp8_scaled_mm"
-        and a_fmt == b_fmt == "fp8_e4m3"
-        and a_scale["scale_dtype"] is torch.float8_e8m0fnu
-        and b_scale["scale_dtype"] is torch.float8_e8m0fnu
-        and a_scale["block_shape"][1] == b_scale["block_shape"][1] == 32
         and a.ndim == b.ndim == 2
         and a.shape[1] == b.shape[0]
         and a.shape[1] % 16 == 0
         and b.shape[1] % 16 == 0
-        and out_dtype is torch.bfloat16
         and (bias is None or (bias.shape == (b.shape[1],) and bias.is_contiguous()))
         and rotation is None
+        and (
+            (
+                op == "gemm.mxfp8_scaled_mm"
+                and a_fmt == b_fmt == "fp8_e4m3"
+                and a_scale["scale_dtype"] is torch.float8_e8m0fnu
+                and b_scale["scale_dtype"] is torch.float8_e8m0fnu
+                and a_scale["block_shape"][1] == b_scale["block_shape"][1] == 32
+                and out_dtype is torch.bfloat16
+            )
+            or (
+                op == "gemm.nvfp4_scaled_mm"
+                and is_fp4(a_fmt)
+                and is_fp4(b_fmt)
+                and a_scale["scale_dtype"] is torch.float8_e4m3fn
+                and b_scale["scale_dtype"] is torch.float8_e4m3fn
+                and a_scale["block_shape"][1] == b_scale["block_shape"][1] == 16
+                and a.shape[1] % 32 == 0
+                and out_dtype in (torch.bfloat16, torch.float16, torch.float32)
+                and (bias is None or out_dtype is not torch.float32)
+            )
+        )
         and _is_kernel_available(op, "cuda", a.device)
     ):
         scale_layout = "swizzled_32_4_4"
@@ -91,14 +106,16 @@ def quantized_mm(
         )
 
     if scale_layout == "swizzled_32_4_4":
-        return mxfp8_scaled_mm(
+        return SCALED_MM_OPS[op](
             aq,
             bq,
             sa,
             sb,
             out_dtype,
-            32,
+            a_scale["block_shape"][1],
             bias=None if bias is None else bias.to(out_dtype),
+            gsa=gsa,
+            gsb=gsb,
             scale_layout=scale_layout,
         )
     if op is not None:

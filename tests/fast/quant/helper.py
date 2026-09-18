@@ -366,7 +366,9 @@ def roundtrip(x, contract_dim, fmt, scale_cfg, rotation=None):
     """Return a quantized operand after dequantization."""
     if not is_quantized(fmt):
         return x
-    xq, scale, g = quantize_operand(x, contract_dim, fmt, scale_cfg, rotation=rotation)
+    xq, scale, g, _ = quantize_operand(
+        x, contract_dim, fmt, scale_cfg, rotation=rotation
+    )
     return dequantize_operand(
         xq, scale, contract_dim, scale_cfg, rotation=rotation, global_scale=g
     )

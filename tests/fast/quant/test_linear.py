@@ -10,7 +10,12 @@ from src.quant.linear import QuantizedLinear, quantized_mm
 from src.quant.quantize import quantize_operand
 from src.quant.rotation import build_rotation
 from src.quant.utils import is_fp4
-from src.kernel.ops import mxfp8_scaled_mm, quantize_mxfp8
+from src.kernel.ops import (
+    mxfp8_scaled_mm,
+    nvfp4_scaled_mm,
+    quantize_mxfp8,
+    quantize_nvfp4,
+)
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
 from tests.fast.helper import (
     cuda_capability_at_least,
@@ -22,6 +27,8 @@ from tests.fast.quant.helper import (
     FORWARD_DTYPES,
     BACKWARD_DTYPES,
     BLOCKWISE1D_32_E8M0,
+    FP4_E2M1_4OVER6_W4A4G4_DTYPES,
+    FP4_E2M1_W4A4G4_DTYPES,
     FP8_E4M3_W8A16_DTYPES,
     FP8_E4M3_W8A8G8_DTYPES,
     INT4_W8A16_DTYPES,
@@ -142,31 +149,47 @@ def test_quantized_mm_output_layout(monkeypatch):
     assert codes[1].stride(-2) == 1
 
 
-MXFP8_TOKEN_COUNTS = (128, 130)
-MXFP8_COMPILE_CASES = (False, True)
-MXFP8_RECORDING_CASES = (False, True)
-MXFP8_BIAS_LAYOUTS = ("contiguous", "strided")
+PACKED_TOKEN_COUNTS = (128, 130, 160)
+PACKED_COMPILE_CASES = (False, True)
+PACKED_RECORDING_CASES = (False, True)
+PACKED_BIAS_LAYOUTS = ("contiguous", "strided")
+PACKED_SCALE_FORMATS = ("mxfp8", "fp4_e2m1", "fp4_e2m1_4over6")
 
 
 @cuda_sm100_or_newer
-@pytest.mark.parametrize("n_tokens", MXFP8_TOKEN_COUNTS)
-@pytest.mark.parametrize("compiled", MXFP8_COMPILE_CASES)
-@pytest.mark.parametrize("recording", MXFP8_RECORDING_CASES)
-@pytest.mark.parametrize("bias_layout", MXFP8_BIAS_LAYOUTS)
-def test_quantized_linear_mxfp8_precision(n_tokens, compiled, recording, bias_layout):
+@pytest.mark.parametrize("n_tokens", PACKED_TOKEN_COUNTS)
+@pytest.mark.parametrize("compiled", PACKED_COMPILE_CASES)
+@pytest.mark.parametrize("recording", PACKED_RECORDING_CASES)
+@pytest.mark.parametrize("bias_layout", PACKED_BIAS_LAYOUTS)
+@pytest.mark.parametrize("fmt", PACKED_SCALE_FORMATS)
+def test_quantized_linear_packed_scale_precision(
+    n_tokens, compiled, recording, bias_layout, fmt
+):
+    if fmt != "mxfp8" and n_tokens % 16:
+        pytest.skip("NVFP4 Wgrad requires a contraction extent divisible by 16")
     torch.manual_seed(17)
     linear = nn.Linear(64, 96, device="cuda", dtype=torch.bfloat16)
+    if fmt == "mxfp8":
+        dtypes = FP8_E4M3_W8A8G8_DTYPES
+        scale_dtype = torch.float8_e8m0fnu
+        enable_global_scale = False
+        block_shape = {"weight": (32, 32), "act": (1, 32), "grad_out": (1, 32)}
+    else:
+        dtypes = (
+            FP4_E2M1_W4A4G4_DTYPES
+            if fmt == "fp4_e2m1"
+            else FP4_E2M1_4OVER6_W4A4G4_DTYPES
+        )
+        scale_dtype = torch.float8_e4m3fn
+        enable_global_scale = True
+        block_shape = {"weight": (16, 16), "act": (1, 16), "grad_out": (1, 16)}
     config = rule(
-        FP8_E4M3_W8A8G8_DTYPES,
+        dtypes,
         {
             "granularity": "blockwise",
-            "scale_dtype": torch.float8_e8m0fnu,
-            "enable_global_scale": False,
-            "block_shape": {
-                "weight": (32, 32),
-                "act": (1, 32),
-                "grad_out": (1, 32),
-            },
+            "scale_dtype": scale_dtype,
+            "enable_global_scale": enable_global_scale,
+            "block_shape": block_shape,
         },
     )
     config.backend = "cuda"
@@ -205,26 +228,60 @@ def test_quantized_linear_mxfp8_precision(n_tokens, compiled, recording, bias_la
         for left, right, left_name, right_name, bias in operands:
             codes = []
             scales = []
+            global_scales = []
             for tensor, name, contract_dim, layout in (
                 (left, left_name, -1, "row_major"),
                 (right, right_name, -2, "column_major"),
             ):
-                code, scale, _, stats = quantize_mxfp8(
-                    tensor,
-                    contract_dim,
-                    config.scale["block_shape"][name],
-                    backend="cuda",
-                    output_layout=layout,
-                    return_quantization_stats=True,
-                )
+                if fmt == "mxfp8":
+                    code, scale, global_scale, stats = quantize_mxfp8(
+                        tensor,
+                        contract_dim,
+                        config.scale["block_shape"][name],
+                        backend="cuda",
+                        output_layout=layout,
+                        return_quantization_stats=True,
+                    )
+                else:
+                    code, scale, global_scale, stats = quantize_nvfp4(
+                        tensor,
+                        contract_dim,
+                        config.scale["block_shape"][name],
+                        fmt=fmt,
+                        backend="cuda",
+                        output_layout=layout,
+                        return_quantization_stats=True,
+                    )
                 codes.append(code)
                 scales.append(scale)
+                global_scales.append(global_scale)
                 expected_stats[name] += stats
-            expected.append(
-                mxfp8_scaled_mm(
-                    codes[0], codes[1], scales[0], scales[1], torch.bfloat16, 32, bias
+            if fmt == "mxfp8":
+                expected.append(
+                    mxfp8_scaled_mm(
+                        codes[0],
+                        codes[1],
+                        scales[0],
+                        scales[1],
+                        torch.bfloat16,
+                        32,
+                        bias,
+                    )
                 )
-            )
+            else:
+                expected.append(
+                    nvfp4_scaled_mm(
+                        codes[0],
+                        codes[1],
+                        scales[0],
+                        scales[1],
+                        torch.bfloat16,
+                        16,
+                        bias,
+                        global_scales[0],
+                        global_scales[1],
+                    )
+                )
     for actual, reference in (
         (output, expected[0].reshape_as(output)),
         (source.grad, expected[1].reshape_as(source)),
@@ -241,9 +298,18 @@ def test_quantized_linear_mxfp8_precision(n_tokens, compiled, recording, bias_la
             if recording
             else torch.zeros_like(expected_stats[name])
         )
-        torch.testing.assert_close(
-            stats.quantization_stats[0], reference, atol=0, rtol=0
-        )
+        actual = stats.quantization_stats[0]
+        if recording:
+            assert torch.equal(actual[2:], reference[2:])
+            energy_scale = reference[:2].clamp_min(1e-30)
+            torch.testing.assert_close(
+                actual[:2] / energy_scale,
+                reference[:2] / energy_scale,
+                rtol=0,
+                atol=2.3e-6,
+            )
+        else:
+            torch.testing.assert_close(actual, reference, atol=0, rtol=0)
         assert not stats.quantization_stats.requires_grad
 
 

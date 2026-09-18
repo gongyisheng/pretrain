@@ -23,6 +23,10 @@ from src.quant.utils import str_to_dtype
 
 FP8_INPUT_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
 FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+_FP8_FORMATS = {
+    torch.float8_e4m3fn: "fp8_e4m3",
+    torch.float8_e5m2: "fp8_e5m2",
+}
 FP8_CONTRACT_DIMS = (-2, -1)
 FP8_BLOCK_SHAPES = ((0, 0), (1, 0), (1, 7), (1, 32), (32, 32))
 FP8_SHAPES = ((35, 65), (2, 35, 65))
@@ -59,8 +63,12 @@ def test_quantize_fp8(input_dtype, fp8_dtype, contract_dim, block_shape, shape):
     ).to(input_dtype)
     original = source.clone()
 
-    codes, scales, global_scale = quantize_fp8(
-        source, contract_dim, fp8_dtype, block_shape, backend="eager"
+    codes, scales, global_scale, _ = quantize_fp8(
+        source,
+        contract_dim,
+        block_shape,
+        fmt=_FP8_FORMATS.get(fp8_dtype, "invalid"),
+        backend="eager",
     )
 
     expected_scale_shape = list(shape)
@@ -105,13 +113,16 @@ def test_quantize_fp8_recipe(block_shape, grouped, scale_dtype, enable_global_sc
         result = quantize_fp8(
             source,
             -1,
-            torch.float8_e4m3fn,
             block_shape,
-            backend="eager",
             scale_dtype=scale_dtype,
             enable_global_scale=enable_global_scale,
+            backend="eager",
         )
-    codes, scales, global_scale = result
+    if grouped:
+        codes, scales, global_scale = result
+    else:
+        codes, scales, global_scale, stats = result
+        assert stats is False
 
     assert codes.shape == source.shape
     assert codes.dtype is torch.float8_e4m3fn
@@ -137,13 +148,7 @@ def test_quantize_fp8_recipe(block_shape, grouped, scale_dtype, enable_global_sc
         )
     else:
         without_global = quantize_fp8(
-            source,
-            -1,
-            torch.float8_e4m3fn,
-            block_shape,
-            backend="eager",
-            scale_dtype=scale_dtype,
-            enable_global_scale=False,
+            source, -1, block_shape, scale_dtype=scale_dtype, backend="eager"
         )
     assert without_global[2] is None
     assert torch.equal(codes.view(torch.uint8), without_global[0].view(torch.uint8))
@@ -157,9 +162,9 @@ def test_quantize_fp8_raise_error(case):
         quantize_fp8(
             torch.empty(shape, dtype=input_dtype),
             contract_dim,
-            fp8_dtype,
             block_shape,
-            stochastic_rounding,
+            fmt=_FP8_FORMATS.get(fp8_dtype, "invalid"),
+            stochastic_rounding=stochastic_rounding,
             backend="eager",
         )
 
@@ -204,8 +209,8 @@ def test_quantize_int8(
         source = source.repeat_interleave(2, dim=-1)[..., ::2]
     elif layout == "broadcast":
         source = source[..., :1, :].expand(shape)
-    codes, scales, global_scale = quantize_int8(
-        source, contract_dim, block_shape, bits, backend=backend
+    codes, scales, global_scale, _ = quantize_int8(
+        source, contract_dim, block_shape, fmt=f"int{bits}", backend=backend
     )
 
     assert codes.dtype is torch.int8
@@ -252,12 +257,16 @@ def test_quantize_int8_recipe(
             source,
             -1,
             block_shape,
-            4,
-            backend=backend,
+            fmt="int4",
             scale_dtype=scale_dtype,
             enable_global_scale=enable_global_scale,
+            backend=backend,
         )
-    codes, scales, global_scale = result
+    if grouped:
+        codes, scales, global_scale = result
+    else:
+        codes, scales, global_scale, stats = result
+        assert stats is False
 
     assert codes.shape == source.shape
     assert codes.dtype is torch.int8
@@ -286,10 +295,9 @@ def test_quantize_int8_recipe(
             source,
             -1,
             block_shape,
-            4,
-            backend="eager",
+            fmt="int4",
             scale_dtype=scale_dtype,
-            enable_global_scale=False,
+            backend="eager",
         )
     assert without_global[2] is None
     assert torch.equal(codes, without_global[0])
@@ -301,7 +309,9 @@ def test_quantize_int8_raise_error(case):
     shape, dtype, contract_dim, block_shape, bits = case
     source = torch.empty(shape, dtype=dtype)
     with pytest.raises(ValueError):
-        quantize_int8(source, contract_dim, block_shape, bits, backend="eager")
+        quantize_int8(
+            source, contract_dim, block_shape, fmt=f"int{bits}", backend="eager"
+        )
 
 
 NVFP4_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
@@ -319,6 +329,11 @@ NVFP4_ERROR_CASES = (
     ((16, 16), torch.float32, 0, (1, 16)),
     ((16, 16), torch.int32, -1, (1, 16)),
     ((16, 16), torch.float32, -1, (2, 32)),
+)
+NVFP4_SCALE_LAYOUT_ERROR_CASES = (
+    ("invalid", (16, 32), (1, 16)),
+    ("swizzled_32_4_4", (2, 16, 32), (1, 16)),
+    ("swizzled_32_4_4", (16, 32), (1, 32)),
 )
 NVFP4_RECIPE_BLOCK_SHAPES = ((0, 0), (1, 0), (1, 8))
 NVFP4_RECIPE_SCALE_DTYPES = (torch.float32, torch.float8_e4m3fn)
@@ -428,11 +443,11 @@ def test_quantize_nvfp4(
     source = _make_nvfp4_source(shape, dtype, layout)
     original = source.clone()
 
-    packed, scale, global_scale = quantize_nvfp4(
+    packed, scale, global_scale, _ = quantize_nvfp4(
         source,
         contract_dim,
         block_shape,
-        enable_global_scale,
+        enable_global_scale=enable_global_scale,
         backend="eager",
     )
 
@@ -466,17 +481,31 @@ def test_quantize_dense_output_layout(output_layout, contract_dim, fmt):
     if contract_dim == -2:
         shape = shape[::-1]
     source = torch.arange(prod(shape), dtype=torch.float32).reshape(shape) / 17 - 20
-    kwargs = {"backend": "eager", "output_layout": output_layout}
     if fmt == "fp8":
-        codes, scale, _ = quantize_fp8(
-            source, contract_dim, torch.float8_e4m3fn, (1, 16), **kwargs
+        codes, scale, _, _ = quantize_fp8(
+            source, contract_dim, (1, 16), output_layout=output_layout, backend="eager"
         )
     elif fmt == "int8":
-        codes, scale, _ = quantize_int8(source, contract_dim, (1, 16), **kwargs)
+        codes, scale, _, _ = quantize_int8(
+            source,
+            contract_dim,
+            (1, 16),
+            fmt="int8",
+            output_layout=output_layout,
+            backend="eager",
+        )
     elif fmt == "mxfp8":
-        codes, scale, _ = quantize_mxfp8(source, contract_dim, (1, 16), **kwargs)
+        codes, scale, _, _ = quantize_mxfp8(
+            source,
+            contract_dim,
+            (1, 16),
+            output_layout=output_layout,
+            backend="eager",
+        )
     else:
-        codes, scale, _ = quantize_nvfp4(source, contract_dim, (1, 16), **kwargs)
+        codes, scale, _, _ = quantize_nvfp4(
+            source, contract_dim, (1, 16), output_layout=output_layout, backend="eager"
+        )
 
     if output_layout == "column_major":
         assert codes.stride(-2) == 1
@@ -492,6 +521,20 @@ def test_quantize_nvfp4_raise_error(shape, dtype, contract_dim, block_shape):
     source = torch.empty(shape, dtype=dtype)
     with pytest.raises(ValueError):
         quantize_nvfp4(source, contract_dim, block_shape, backend="eager")
+
+
+@pytest.mark.parametrize(
+    "scale_layout,shape,block_shape", NVFP4_SCALE_LAYOUT_ERROR_CASES
+)
+def test_quantize_nvfp4_scale_layout_raise_error(scale_layout, shape, block_shape):
+    with pytest.raises(ValueError):
+        quantize_nvfp4(
+            torch.empty(shape),
+            -1,
+            block_shape,
+            scale_layout=scale_layout,
+            backend="eager",
+        )
 
 
 @pytest.mark.parametrize("block_shape", NVFP4_RECIPE_BLOCK_SHAPES)
@@ -517,12 +560,16 @@ def test_quantize_nvfp4_recipe(block_shape, scale_dtype, grouped, enable_global_
             source,
             -1,
             block_shape,
-            backend="eager",
-            enable_global_scale=enable_global_scale,
+            fmt="fp4_e2m1_4over6",
             scale_dtype=scale_dtype,
-            qmax=4.0,
+            enable_global_scale=enable_global_scale,
+            backend="eager",
         )
-    codes, scales, global_scale = result
+    if grouped:
+        codes, scales, global_scale = result
+    else:
+        codes, scales, global_scale, stats = result
+        assert stats is False
 
     assert codes.shape == (8, 8)
     assert codes.dtype is torch.uint8
@@ -551,10 +598,10 @@ def test_quantize_nvfp4_recipe(block_shape, scale_dtype, grouped, enable_global_
             source,
             -1,
             block_shape,
-            backend="eager",
-            enable_global_scale=False,
+            fmt="fp4_e2m1_4over6",
             scale_dtype=scale_dtype,
-            qmax=4.0,
+            enable_global_scale=False,
+            backend="eager",
         )
     assert without_global[2] is None
     assert torch.equal(codes, without_global[0])
@@ -588,13 +635,13 @@ def test_quantize_mxfp8(
         source = source[:1].expand(*shape)
     original = source.clone()
 
-    codes, scales, global_scale = quantize_mxfp8(
+    codes, scales, global_scale, _ = quantize_mxfp8(
         source,
         contract_dim,
         block_shape,
-        fmt,
-        backend=backend,
+        fmt=fmt,
         output_layout=output_layout,
+        backend=backend,
     )
 
     expected_scale_shape = list(source.shape)
@@ -625,7 +672,7 @@ def test_quantize_mxfp8(
 
 @pytest.mark.parametrize(("shape", "contract_dim"), MXFP8_SWIZZLE_EMPTY_CASES)
 def test_quantize_mxfp8_scale_layout_empty(shape, contract_dim):
-    codes, scales, global_scale = quantize_mxfp8(
+    codes, scales, global_scale, _ = quantize_mxfp8(
         torch.empty(shape),
         contract_dim,
         (1, 32),
@@ -679,10 +726,10 @@ def test_quantize_mxfp8_raise_error(
             torch.empty(shape, dtype=dtype),
             contract_dim,
             block_shape,
-            fmt,
-            stochastic_rounding,
-            backend="eager",
+            fmt=fmt,
+            stochastic_rounding=stochastic_rounding,
             output_layout=output_layout,
+            backend="eager",
         )
 
 
@@ -701,7 +748,7 @@ def test_quantize_mxfp8_empty(
     ):
         pytest.skip("CUDA MXFP8 requires SM89 or newer")
     source = torch.empty(shape, device=device)
-    codes, scales, global_scale = quantize_mxfp8(
+    codes, scales, global_scale, _ = quantize_mxfp8(
         source, contract_dim, block_shape, backend=backend, output_layout=output_layout
     )
 
@@ -725,17 +772,15 @@ def test_quantize_mxfp8_stochastic_rounding(block_shape):
 
     torch.manual_seed(0)
     before_rne = torch.get_rng_state()
-    rne_codes, rne_scales, _ = quantize_mxfp8(
-        source, block_shape=block_shape, stochastic_rounding=False
-    )
+    rne_codes, rne_scales, _, _ = quantize_mxfp8(source, block_shape=block_shape)
     assert torch.equal(torch.get_rng_state(), before_rne)
 
     torch.manual_seed(1)
-    first_codes, first_scales, _ = quantize_mxfp8(
+    first_codes, first_scales, _, _ = quantize_mxfp8(
         source, block_shape=block_shape, stochastic_rounding=True
     )
     torch.manual_seed(1)
-    second_codes, second_scales, _ = quantize_mxfp8(
+    second_codes, second_scales, _, _ = quantize_mxfp8(
         source, block_shape=block_shape, stochastic_rounding=True
     )
 

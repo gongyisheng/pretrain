@@ -218,7 +218,7 @@ def quantize_and_record(
         backend != "cuda" or rotation is not None or source.ndim != 2
     ):
         raise ValueError("packed scale monitoring requires fused CUDA statistics")
-    result = quantize_operand(
+    codes, scale, global_scale, quantization_stats = quantize_operand(
         source,
         contract_dim,
         fmt,
@@ -230,13 +230,9 @@ def quantize_and_record(
         backend=backend,
         scale_layout=scale_layout,
     )
-    if collect:
-        codes, scale, global_scale, quantization_stats = result
-        if quantization_stats is not None:
-            stats.quantization_stats.add_(quantization_stats)
-            return codes, scale, global_scale
-    else:
-        codes, scale, global_scale = result
+    if collect and quantization_stats is not False:
+        stats.quantization_stats.add_(quantization_stats)
+        return codes, scale, global_scale
     record_operand(
         stats,
         source,

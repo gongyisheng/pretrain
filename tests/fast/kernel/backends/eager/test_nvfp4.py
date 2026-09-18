@@ -5,6 +5,7 @@ import torch
 
 from src.kernel.ops import quantize_nvfp4, quantize_nvfp4_grouped
 from src.quant.constants import _FP4_E2M1_VALUES
+from src.kernel.utils import to_swizzle_32_4_4
 from tests.fast.helper import cuda_only
 
 CONTRACT_DIMS = (-2, -1)
@@ -55,13 +56,13 @@ def test_quantize_nvfp4_precision(dtype, contract_dim, case, grouped):
             scale_dtype=torch.float32,
         )
     else:
-        codes, scales, global_scale = quantize_nvfp4(
+        codes, scales, global_scale, _ = quantize_nvfp4(
             source,
             contract_dim,
             (1, 0),
-            False,
-            backend="eager",
             scale_dtype=torch.float32,
+            enable_global_scale=False,
+            backend="eager",
         )
 
     assert torch.equal(codes, expected)
@@ -76,19 +77,11 @@ def test_quantize_nvfp4_grouped_precision(contract_dim, block_shape):
     if contract_dim == -2:
         source = source.mT
     offs = torch.tensor((16, 16, 32), dtype=torch.int32)
-    first_codes, first_scale, first_global = quantize_nvfp4(
-        source.narrow(contract_dim, 0, 16),
-        contract_dim,
-        block_shape,
-        True,
-        backend="eager",
+    first_codes, first_scale, first_global, _ = quantize_nvfp4(
+        source.narrow(contract_dim, 0, 16), contract_dim, block_shape, backend="eager"
     )
-    second_codes, second_scale, second_global = quantize_nvfp4(
-        source.narrow(contract_dim, 16, 16),
-        contract_dim,
-        block_shape,
-        True,
-        backend="eager",
+    second_codes, second_scale, second_global, _ = quantize_nvfp4(
+        source.narrow(contract_dim, 16, 16), contract_dim, block_shape, backend="eager"
     )
     packed, scales, global_scale = quantize_nvfp4_grouped(
         source,
@@ -110,6 +103,33 @@ def test_quantize_nvfp4_grouped_precision(contract_dim, block_shape):
     assert torch.equal(packed, torch.cat((first_codes, second_codes), dim=contract_dim))
     assert torch.equal(scales.view(torch.uint8), expected_scale.view(torch.uint8))
     assert torch.equal(global_scale, expected_global)
+
+
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("block_shape", BLOCK_SHAPES)
+def test_quantize_nvfp4_scale_layout(contract_dim, block_shape):
+    shape = (129, 64) if contract_dim == -1 else (64, 129)
+    source = torch.linspace(-6, 6, 129 * 64).reshape(shape)
+    codes, scales, _, stats = quantize_nvfp4(
+        source, contract_dim, block_shape, backend="eager"
+    )
+    packed_codes, packed_scales, _, packed_stats = quantize_nvfp4(
+        source,
+        contract_dim,
+        block_shape,
+        scale_layout="swizzled_32_4_4",
+        backend="eager",
+    )
+
+    assert stats is False
+    assert packed_stats is False
+    assert torch.equal(packed_codes, codes)
+    assert torch.equal(
+        packed_scales.view(torch.uint8),
+        to_swizzle_32_4_4(scales if contract_dim == -1 else scales.t()).view(
+            torch.uint8
+        ),
+    )
 
 
 def test_quantize_nvfp4_grouped_stochastic_rounding():
@@ -162,14 +182,13 @@ def test_quantize_nvfp4_qmax4_precision(block_shape, scale_dtype, grouped):
             qmax=4.0,
         )
     else:
-        codes, scales, global_scale = quantize_nvfp4(
+        codes, scales, global_scale, _ = quantize_nvfp4(
             source,
             -1,
             block_shape,
-            backend="eager",
-            enable_global_scale=True,
+            fmt="fp4_e2m1_4over6",
             scale_dtype=scale_dtype,
-            qmax=4.0,
+            backend="eager",
         )
 
     assert not source.is_contiguous()

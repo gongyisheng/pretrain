@@ -14,17 +14,15 @@ def test_quantize_fp8_stochastic_rounding():
     source = torch.full((64, 32), 1.0625)
     source[:, 0] = 448
 
-    rne_codes, rne_scales, _ = quantize_fp8(
-        source, -1, torch.float8_e4m3fn, (1, 32), backend="eager"
-    )
+    rne_codes, rne_scales, _, _ = quantize_fp8(source, -1, (1, 32), backend="eager")
     torch.manual_seed(0)
     before = (
         torch.cuda.get_rng_state(source.device)
         if source.is_cuda
         else torch.get_rng_state()
     )
-    first_codes, first_scales, _ = quantize_fp8(
-        source, -1, torch.float8_e4m3fn, (1, 32), True, backend="eager"
+    first_codes, first_scales, _, _ = quantize_fp8(
+        source, -1, (1, 32), stochastic_rounding=True, backend="eager"
     )
     after = (
         torch.cuda.get_rng_state(source.device)
@@ -32,8 +30,8 @@ def test_quantize_fp8_stochastic_rounding():
         else torch.get_rng_state()
     )
     assert not torch.equal(after, before)
-    second_codes, second_scales, _ = quantize_fp8(
-        source, -1, torch.float8_e4m3fn, (1, 32), True, backend="eager"
+    second_codes, second_scales, _, _ = quantize_fp8(
+        source, -1, (1, 32), stochastic_rounding=True, backend="eager"
     )
 
     assert not torch.equal(
@@ -51,19 +49,11 @@ def test_quantize_fp8_grouped_precision(contract_dim, block_shape):
     if contract_dim == -2:
         source = source.mT
     offs = torch.tensor((16, 16, 32), dtype=torch.int32)
-    first_codes, first_scale, _ = quantize_fp8(
-        source.narrow(contract_dim, 0, 16),
-        contract_dim,
-        torch.float8_e4m3fn,
-        block_shape,
-        backend="eager",
+    first_codes, first_scale, _, _ = quantize_fp8(
+        source.narrow(contract_dim, 0, 16), contract_dim, block_shape, backend="eager"
     )
-    second_codes, second_scale, _ = quantize_fp8(
-        source.narrow(contract_dim, 16, 16),
-        contract_dim,
-        torch.float8_e4m3fn,
-        block_shape,
-        backend="eager",
+    second_codes, second_scale, _, _ = quantize_fp8(
+        source.narrow(contract_dim, 16, 16), contract_dim, block_shape, backend="eager"
     )
 
     codes, scale, _ = quantize_fp8_grouped(

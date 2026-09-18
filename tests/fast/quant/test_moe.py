@@ -293,8 +293,8 @@ def test_quantized_grouped_mm_records_stats(device, layout, config, a_scale, b_s
         expected = []
         start = 0
         for group, stop in enumerate(offs.tolist()):
-            aq, sa, gsa = quantize_operand(a[start:stop], -1, a_fmt, a_scale)
-            bq, sb, gsb = quantize_operand(b[group], -2, b_fmt, b_scale)
+            aq, sa, gsa, _ = quantize_operand(a[start:stop], -1, a_fmt, a_scale)
+            bq, sb, gsb, _ = quantize_operand(b[group], -2, b_fmt, b_scale)
             expected.append(
                 dequantize_operand(aq, sa, -1, a_scale, global_scale=gsa)
                 @ dequantize_operand(bq, sb, -2, b_scale, global_scale=gsb)

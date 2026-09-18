@@ -95,7 +95,7 @@ def quantized_grouped_mm(
 
     aq = sa = gsa = bq = sb = gsb = None
     if is_quantized(a_fmt):
-        aq, sa, gsa = quantize_operand(
+        aq, sa, gsa, _ = quantize_operand(
             src_a,
             contract_a,
             a_fmt,
@@ -118,7 +118,7 @@ def quantized_grouped_mm(
             global_scale=gsa,
         )
     if is_quantized(b_fmt):
-        bq, sb, gsb = quantize_operand(
+        bq, sb, gsb, _ = quantize_operand(
             b,
             -2,
             b_fmt,

@@ -26,6 +26,8 @@ SCALED_MM_FUNCS = (
     mxfp8_scaled_mm,
     nvfp4_scaled_mm,
 )
+PACKED_SCALE_MM_FUNCS = (mxfp8_scaled_mm, nvfp4_scaled_mm)
+PACKED_SCALE_LAYOUT_ERRORS = ("layout", "rank", "size", "dtype")
 SCALED_GROUPED_MM_FUNCS = (
     int8_scaled_grouped_mm,
     fp8_scaled_grouped_mm,
@@ -268,13 +270,28 @@ def test_scaled_mm_raise_error(op, case):
 
 @cuda_only
 @cuda_sm100_or_newer
-@pytest.mark.parametrize("error", ("layout", "rank", "size", "dtype"))
-def test_mxfp8_scaled_mm_scale_layout_raise_error(error):
+@pytest.mark.parametrize("op", PACKED_SCALE_MM_FUNCS)
+@pytest.mark.parametrize("error", PACKED_SCALE_LAYOUT_ERRORS)
+def test_scaled_mm_scale_layout_raise_error(op, error):
     device = "cuda"
-    aq = torch.zeros((32, 64), device=device, dtype=torch.float8_e4m3fn)
-    bq = torch.zeros((64, 48), device=device, dtype=torch.float8_e4m3fn)
-    sa = torch.ones((512,), device=device, dtype=torch.float8_e8m0fnu)
-    sb = torch.ones((512,), device=device, dtype=torch.float8_e8m0fnu)
+    if op is mxfp8_scaled_mm:
+        code_dtype, scale_dtype, width, block_size = (
+            torch.float8_e4m3fn,
+            torch.float8_e8m0fnu,
+            64,
+            32,
+        )
+    else:
+        code_dtype, scale_dtype, width, block_size = (
+            torch.uint8,
+            torch.float8_e4m3fn,
+            32,
+            16,
+        )
+    aq = torch.zeros((32, width), device=device, dtype=code_dtype)
+    bq = torch.zeros((width, 48), device=device, dtype=code_dtype)
+    sa = torch.ones((512,), device=device, dtype=scale_dtype)
+    sb = torch.ones((512,), device=device, dtype=scale_dtype)
     scale_layout = "swizzled_32_4_4"
     if error == "layout":
         scale_layout = "invalid"
@@ -283,16 +300,16 @@ def test_mxfp8_scaled_mm_scale_layout_raise_error(error):
     elif error == "size":
         sa = sa[:-1]
     else:
-        sa = sa.to(torch.float8_e4m3fn)
+        sa = sa.float()
 
     with pytest.raises(ValueError):
-        mxfp8_scaled_mm(
+        op(
             aq,
             bq,
             sa,
             sb,
             torch.bfloat16,
-            32,
+            block_size,
             backend="cuda",
             scale_layout=scale_layout,
         )

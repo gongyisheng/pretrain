@@ -209,11 +209,14 @@ def _select_nvfp4_scaled_mm_backend(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None,
+    scale_layout: str = "row_major",
 ) -> str | None:
     op = "gemm.nvfp4_scaled_mm"
     if (
         _cuda is not None
-        and _cuda.supports_nvfp4_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+        and _cuda.supports_nvfp4_scaled_mm(
+            aq, bq, sa, sb, out_dtype, block_size, bias, scale_layout
+        )
         and _is_kernel_available(op, "cuda", aq.device)
     ):
         return "cuda"
@@ -305,9 +308,35 @@ def mxfp8_scaled_mm(
 
 
 def nvfp4_scaled_mm(
-    aq, bq, sa, sb, out_dtype, block_size, bias=None, gsa=None, gsb=None, backend=None
+    aq,
+    bq,
+    sa,
+    sb,
+    out_dtype,
+    block_size,
+    bias=None,
+    gsa=None,
+    gsb=None,
+    backend=None,
+    scale_layout="row_major",
 ):
     """Multiply packed NVFP4 matrices with block and optional global scales."""
+    if scale_layout == "swizzled_32_4_4":
+        _check_global_scale(gsa, gsb, 1)
+        _check_contraction(aq, bq)
+        if backend not in (None, "cuda") or not _is_kernel_available(
+            "gemm.nvfp4_scaled_mm", "cuda", aq.device
+        ):
+            raise ValueError("packed NVFP4 scales require the CUDA GEMM backend")
+        return dispatch(
+            "gemm.nvfp4_scaled_mm",
+            (aq, bq, sa, sb, out_dtype, block_size, bias),
+            {"gsa": gsa, "gsb": gsb, "scale_layout": scale_layout},
+            "cuda",
+            device=aq.device,
+        )
+    if scale_layout != "row_major":
+        raise ValueError("unsupported NVFP4 scale layout")
     _check_scaled_mm(
         aq,
         bq,
@@ -322,7 +351,7 @@ def nvfp4_scaled_mm(
     selected_backend = backend
     if selected_backend is None:
         selected_backend = _select_nvfp4_scaled_mm_backend(
-            aq, bq, sa, sb, out_dtype, block_size, bias
+            aq, bq, sa, sb, out_dtype, block_size, bias, scale_layout
         )
     return dispatch(
         "gemm.nvfp4_scaled_mm",

@@ -246,8 +246,8 @@ def run_benchmark(
                     outputs = function(source)
                 torch.cuda.synchronize()
                 for actual, expected in zip(outputs, reference):
-                    if expected is None:
-                        assert actual is None
+                    if expected is None or expected is False:
+                        assert actual is expected
                     else:
                         assert (
                             actual.shape == expected.shape

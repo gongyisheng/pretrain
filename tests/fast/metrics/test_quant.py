@@ -239,7 +239,7 @@ def test_sqnr_min_ignores_an_all_zero_expert():
 def test_sqnr_positive_and_finite_over_a_real_round_trip(fmt):
     torch.manual_seed(0)
     x = torch.randn(64, 64)
-    q, scale, _ = quantize_operand(x, -1, fmt, _TENSORWISE)
+    q, scale, _, _ = quantize_operand(x, -1, fmt, _TENSORWISE)
     m = _metrics(x, dequantize_operand(q, scale, -1, _TENSORWISE), q)
     assert torch.isfinite(m["sqnr"]) and m["sqnr"].item() > 10.0
 
@@ -249,7 +249,7 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
     x = torch.zeros(1, 256)
     x[0, 0] = 1000.0
     x[0, 1:] = 1e-3  # well below (1000/448) * 2^-9 for e4m3
-    q, scale, _ = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
+    q, scale, _, _ = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
     m = _metrics(x, dequantize_operand(q, scale, -1, _TENSORWISE), q)
     assert m["underflow_rate"].item() > 0.9
 
@@ -257,7 +257,7 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
 def test_record_operand_rotation_aligns_underflow_with_codes():
     source = torch.ones(1, 4)
     rotation = HadamardRotation(block_size=4, random_sign=False)
-    codes, scale, _ = quantize_operand(
+    codes, scale, _, _ = quantize_operand(
         source, -1, "int8", _TENSORWISE, rotation=rotation
     )
     stats = QuantizationStats("act/x", 1, source.device)
@@ -304,7 +304,7 @@ def test_record_operand_global_scale_tracks_true_error(fmt):
     """
     torch.manual_seed(0)
     source = torch.randn(8, 128, device="cuda") * 1e4
-    codes, scale, global_scale = quantize_operand(source, -1, fmt, _NVFP4)
+    codes, scale, global_scale, _ = quantize_operand(source, -1, fmt, _NVFP4)
     stats = QuantizationStats("act/x", 1, source.device)
 
     set_quantization_monitoring_status(True)
@@ -338,7 +338,7 @@ def _holder(sites):
 
 def _fold(stats, source, fmt="fp8_e4m3", offs=None, ragged_dim=None):
     """Quantize one operand and fold it in, the way `record_operand` does."""
-    codes, scale, _ = quantize_operand(
+    codes, scale, _, _ = quantize_operand(
         source, -1, fmt, _TENSORWISE, offs=offs, ragged_dim=ragged_dim
     )
     deq = dequantize_operand(
@@ -358,7 +358,7 @@ def test_folding_chunks_equals_folding_the_whole_operand():
     """
     torch.manual_seed(0)
     x = torch.randn(24, 32)
-    codes, scale, _ = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
+    codes, scale, _, _ = quantize_operand(x, -1, "fp8_e4m3", _TENSORWISE)
     deq = dequantize_operand(codes, scale, -1, _TENSORWISE)
 
     whole = accumulate_quantization_sums(x, codes, deq)

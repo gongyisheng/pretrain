@@ -104,7 +104,7 @@ def test_quantize_mxfp8_precision(
                     )
                 ] = scale_code
 
-    actual_codes, actual_scales, _ = quantize_mxfp8(
+    actual_codes, actual_scales, _, _ = quantize_mxfp8(
         source, contract_dim, block_shape, backend="eager", output_layout=output_layout
     )
     expected_codes = expected_codes.movedim(-1, contract_dim).contiguous()
@@ -125,13 +125,13 @@ def test_quantize_mxfp8_precision(
 @pytest.mark.parametrize("block_outer", (1, 32))
 def test_quantize_mxfp8_scale_layout(shape, contract_dim, block_outer):
     source = torch.linspace(-448, 448, prod(shape), dtype=torch.float32).reshape(shape)
-    codes, scales, _ = quantize_mxfp8(
+    codes, scales, _, _ = quantize_mxfp8(
         source,
         contract_dim,
         (block_outer, 32),
         backend="eager",
     )
-    packed_codes, packed_scales, _ = quantize_mxfp8(
+    packed_codes, packed_scales, _, _ = quantize_mxfp8(
         source,
         contract_dim,
         (block_outer, 32),
@@ -175,7 +175,7 @@ def test_quantize_mxfp8_compile(
 
     def quantize(
         values: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | bool]:
         return quantize_mxfp8(
             values,
             contract_dim,
@@ -189,8 +189,10 @@ def test_quantize_mxfp8_compile(
     try:
         compiled = torch.compile(quantize, fullgraph=True)
         if not stochastic_rounding:
-            eager_codes, eager_scales, _ = quantize(source)
-            compiled_codes, compiled_scales, _ = compiled(source)
+            eager_codes, eager_scales, _, eager_stats = quantize(source)
+            compiled_codes, compiled_scales, _, compiled_stats = compiled(source)
+            assert eager_stats is False
+            assert compiled_stats is False
             assert torch.equal(
                 compiled_codes.view(torch.uint8), eager_codes.view(torch.uint8)
             )
@@ -201,16 +203,19 @@ def test_quantize_mxfp8_compile(
 
         source.fill_(1.0625)
         source.select(contract_dim, 0).fill_(448.0)
-        rne_codes, rne_scales, _ = quantize_mxfp8(
+        rne_codes, rne_scales, _, _ = quantize_mxfp8(
             source, contract_dim, block_shape, backend="eager"
         )
         torch.manual_seed(0)
         before = torch.cuda.get_rng_state()
-        first_codes, first_scales, _ = compiled(source)
+        first_codes, first_scales, _, first_stats = compiled(source)
+        assert first_stats is False
         assert not torch.equal(torch.cuda.get_rng_state(), before)
-        second_codes, second_scales, _ = compiled(source)
+        second_codes, second_scales, _, second_stats = compiled(source)
+        assert second_stats is False
         torch.manual_seed(0)
-        repeated_codes, repeated_scales, _ = compiled(source)
+        repeated_codes, repeated_scales, _, repeated_stats = compiled(source)
+        assert repeated_stats is False
 
         assert not torch.equal(
             first_codes.view(torch.uint8), second_codes.view(torch.uint8)

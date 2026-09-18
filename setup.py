@@ -35,7 +35,10 @@ if CUDA_HOME is not None:
                 "src/kernel/backends/cuda/csrc/nvfp4.cu",
                 "src/kernel/backends/cuda/csrc/mxfp8.cu",
             ],
-            depends=["src/kernel/backends/cuda/csrc/quantize.cuh"],
+            depends=[
+                "src/kernel/backends/cuda/csrc/quantize.cuh",
+                "src/kernel/backends/cuda/csrc/reduce.cuh",
+            ],
             libraries=["cublasLt"],
             extra_compile_args={"cxx": ["-O3"], "nvcc": ["-O3"]},
         )
