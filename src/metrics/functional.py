@@ -224,40 +224,6 @@ def compute_variance_norm(optimizer: torch.optim.Optimizer) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _quantization_metrics(src_sq, err_sq, under, numel, nonzero, grouped):
-    """Return quantization metrics from one operand's accumulated statistics."""
-    # clamps match the pre-vectorized form, which clamped each norm before the ratio
-    sqnr = 20.0 * torch.log10(
-        src_sq.sqrt().clamp_min(EPS) / err_sq.sqrt().clamp_min(EPS)
-    )
-    valid = (numel > 0).to(src_sq.dtype)
-    n_valid = valid.sum().clamp_min(1.0)
-    # over the values that could underflow: a source element that was already exactly
-    # zero cannot, so dividing by numel would under-report by the operand's zero
-    # fraction -- large for grads (ignore_index) and relu activations.
-    informative = nonzero.clamp_min(1.0)
-    underflow_rate = under / informative
-    metrics = {
-        "sqnr": (sqnr * valid).sum() / n_valid,
-        "underflow_rate": (underflow_rate * valid).sum() / n_valid,
-    }
-    if not grouped:
-        return metrics
-    # min over a dB quantity, max over the rate: both are defined over the whole
-    # range, unlike the max/min ratio a signed dB value would make meaningless
-    keep = valid > 0
-    # sqnr needs signal to measure: an expert with numel > 0 but nonzero == 0 (it
-    # received tokens that were all exactly zero) has no error to report, and its
-    # sqnr of 0.0 would otherwise drag sqnr_min down next to healthy experts.
-    has_signal = nonzero > 0
-    zeros = torch.zeros_like(underflow_rate)
-    metrics["sqnr_min"] = torch.where(
-        has_signal, sqnr, torch.full_like(sqnr, float("inf"))
-    ).min()
-    metrics["underflow_rate_max"] = torch.where(keep, underflow_rate, zeros).max()
-    return metrics
-
-
 def compute_quantization_metrics(model: torch.nn.Module) -> dict[str, float]:
     """Return quantization metrics for populated sites as `<metric>/<site>` floats."""
     metrics = {}
@@ -265,9 +231,18 @@ def compute_quantization_metrics(model: torch.nn.Module) -> dict[str, float]:
     for module in model.modules():
         if not isinstance(module, QuantizationStats):
             continue
-        sums = [getattr(module, name) for name in QuantizationStats.FIELDS]
-        keep = (module.numel.sum() > 0).float()
-        for name, value in _quantization_metrics(*sums, module.grouped).items():
+        src_sq, err_sq, under, numel, nonzero = (
+            getattr(module, name) for name in QuantizationStats.FIELDS
+        )
+        keep = (numel[0] > 0).float()
+        sqnr = 20.0 * torch.log10(
+            src_sq.sqrt().clamp_min(EPS) / err_sq.sqrt().clamp_min(EPS)
+        )
+        underflow_rate = under / nonzero.clamp_min(1.0)
+        for name, value in {
+            "sqnr": sqnr[0],
+            "underflow_rate": underflow_rate[0],
+        }.items():
             key = f"{name}/{module.key}"
             metrics[key] = value
             has_data[key] = keep

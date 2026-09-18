@@ -533,34 +533,8 @@ def test_quantize_operand_return_quantization_stats(
         ((mask_source != 0) & (code_values == 0)).float(),
         (mask_source != 0).float(),
     )
-    if source.ndim == 3:
-        expected_fields = [field.flatten(1).sum(1) for field in fields]
-        expected_numel = torch.full_like(
-            expected_fields[0], source.shape[-2] * source.shape[-1]
-        )
-    elif offs is None:
-        expected_fields = [field.sum().reshape(1) for field in fields]
-        expected_numel = torch.full_like(expected_fields[0], source.numel())
-    else:
-        starts = [0, *offs.tolist()]
-        dense_dim = -1 if ragged_dim == -2 else -2
-        expected_fields = [
-            torch.stack(
-                [
-                    field.narrow(ragged_dim, start, stop - start).sum()
-                    for start, stop in zip(starts[:-1], starts[1:])
-                ]
-            )
-            for field in fields
-        ]
-        expected_numel = torch.tensor(
-            [
-                (stop - start) * source.shape[dense_dim]
-                for start, stop in zip(starts[:-1], starts[1:])
-            ],
-            device=source.device,
-            dtype=torch.float32,
-        )
+    expected_fields = [field.sum().reshape(1) for field in fields]
+    expected_numel = torch.full_like(expected_fields[0], source.numel())
     expected = torch.stack(
         (
             expected_fields[0],
@@ -572,12 +546,8 @@ def test_quantize_operand_return_quantization_stats(
         dim=-1,
     )
     assert stats.dtype is torch.float32 and not stats.requires_grad
-    assert stats.shape == (expected.shape[0], 5)
-    # Ragged reduction orders differ; the CPU grid peaks at 0.001953125 (3.74x).
-    torch.testing.assert_close(
-        stats[:, :2], expected[:, :2], rtol=0, atol=0.0073 if offs is not None else 0
-    )
-    assert torch.equal(stats[:, 2:], expected[:, 2:])
+    assert stats.shape == (1, 5)
+    assert torch.equal(stats, expected)
 
 
 @pytest.mark.parametrize("init_method", INIT_METHODS)
@@ -1280,39 +1250,43 @@ def test_quantize_operand_compiles_fullgraph(scale_cfg, fmt, return_quantization
         )
 
     eager = quantize(x)
-    compiled = torch.compile(quantize, fullgraph=True)(x)
-    eager_codes, eager_scale, eager_global, eager_stats = eager
-    compiled_codes, compiled_scale, compiled_global, compiled_stats = compiled
+    torch.compiler.reset()
+    try:
+        compiled = torch.compile(quantize, fullgraph=True)(x)
+        eager_codes, eager_scale, eager_global, eager_stats = eager
+        compiled_codes, compiled_scale, compiled_global, compiled_stats = compiled
 
-    assert torch.equal(compiled_codes, eager_codes)
-    assert torch.equal(compiled_scale, eager_scale)
-    assert (eager_global is None) == (compiled_global is None)
-    if eager_global is not None:
-        assert torch.equal(compiled_global, eager_global)
-    if return_quantization_stats:
-        # Compiled reduction errors peak at 7.63e-6 across this grid (4.06x).
-        torch.testing.assert_close(
-            compiled_stats[:, :2], eager_stats[:, :2], rtol=0, atol=3.1e-5
+        assert torch.equal(compiled_codes, eager_codes)
+        assert torch.equal(compiled_scale, eager_scale)
+        assert (eager_global is None) == (compiled_global is None)
+        if eager_global is not None:
+            assert torch.equal(compiled_global, eager_global)
+        if return_quantization_stats:
+            # Compiled reduction errors peak at 7.63e-6 across this grid (4.06x).
+            torch.testing.assert_close(
+                compiled_stats[:, :2], eager_stats[:, :2], rtol=0, atol=3.1e-5
+            )
+            assert torch.equal(compiled_stats[:, 2:], eager_stats[:, 2:])
+        else:
+            assert eager_stats is None and compiled_stats is None
+
+        def dequantize(codes, scale, global_scale):
+            return dequantize_operand(
+                codes,
+                scale,
+                -1,
+                scale_cfg,
+                rotation=rotation,
+                global_scale=global_scale,
+            )
+
+        eager_dequantized = dequantize(eager_codes, eager_scale, eager_global)
+        compiled_dequantized = torch.compile(dequantize, fullgraph=True)(
+            eager_codes, eager_scale, eager_global
         )
-        assert torch.equal(compiled_stats[:, 2:], eager_stats[:, 2:])
-    else:
-        assert eager_stats is None and compiled_stats is None
-
-    def dequantize(codes, scale, global_scale):
-        return dequantize_operand(
-            codes,
-            scale,
-            -1,
-            scale_cfg,
-            rotation=rotation,
-            global_scale=global_scale,
-        )
-
-    eager_dequantized = dequantize(eager_codes, eager_scale, eager_global)
-    compiled_dequantized = torch.compile(dequantize, fullgraph=True)(
-        eager_codes, eager_scale, eager_global
-    )
-    assert torch.equal(compiled_dequantized, eager_dequantized)
+        assert torch.equal(compiled_dequantized, eager_dequantized)
+    finally:
+        torch.compiler.reset()
 
 
 @cuda_sm89_or_newer

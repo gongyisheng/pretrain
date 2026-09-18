@@ -570,8 +570,6 @@ def quantize_operand(
             x.detach(),
             codes.detach(),
             dequantized,
-            offs=offs,
-            ragged_dim=ragged_dim,
             contract_dim=contract_dim,
             rotated_source=rotated_source.detach(),
         ),

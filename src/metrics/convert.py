@@ -18,14 +18,14 @@ def apply_activation_monitoring(model) -> None:
             module.register_forward_pre_hook(linear_input_hook)
 
 
-def _tensor_stats(prefix, cfg, n_groups, device):
+def _tensor_stats(prefix, cfg, device):
     """Create one accumulator per tensor for a site.
 
     Tensors shared by GEMMs share stats. Passthrough-only tensors get none, so
     their fold is skipped.
     """
     return {
-        tensor: QuantizationStats(f"{tensor}/{prefix}", n_groups, device)
+        tensor: QuantizationStats(f"{tensor}/{prefix}", device)
         for tensor in GEMM_TENSORS
         if any(is_quantized(fmt) for fmt in cfg.dtype[tensor].values())
     }
@@ -50,16 +50,13 @@ def apply_quantization_monitoring(model) -> None:
     for name, module in getattr(model, "_orig_mod", model).named_modules():
         cfg = getattr(module, "quantization_config", None)
         if isinstance(module, QuantizedLinear):
-            module.quant_stats = _tensor_stats(name, cfg, 1, module.weight.device)
+            module.quant_stats = _tensor_stats(name, cfg, module.weight.device)
             _register(module, module.quant_stats.values())
         elif isinstance(module, QuantizedSparseMoEBlock):
-            # Each expert has its own scale, so stats must expose experts separately.
             device = next(module.parameters()).device
             projections = ("gate", "up", "down") if module.gated else ("up", "down")
             module.quant_stats = {
-                projection: _tensor_stats(
-                    f"{name}.expert_{projection}", cfg, module.n_routed_experts, device
-                )
+                projection: _tensor_stats(f"{name}.expert_{projection}", cfg, device)
                 for projection in projections
             }
             _register(

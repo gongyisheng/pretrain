@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.metrics.convert import apply_quantization_monitoring
 from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
 from src.model import build_model
 from src.quant.convert import apply_quantization, enable_quantization
@@ -57,6 +58,7 @@ MM_PRECISION_BIASES = [False, True]
 MM_PRECISION_ROTATIONS = [None, ROTATION_CFG]
 COMPILE_SCALE_TRIPLES = scale_combinations([BLOCKWISE1D_128, BLOCKWISE2D_128], 3)
 COMPILE_SCALE_TRIPLES.append((TENSORWISE, BLOCKWISE1D_128, ROWWISE))
+COMPILE_SCALE_TRIPLES.append((TENSORWISE, TENSORWISE, TENSORWISE))
 
 
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
@@ -169,8 +171,8 @@ def test_quantized_mm_records_stats(
     skip_unsupported_fmt_scale(a_fmt, a_scale)
     skip_unsupported_fmt_scale(b_fmt, b_scale)
     a, b = torch.randn(20, 32), torch.randn(32, 40)
-    a_stats = QuantizationStats("act/x", 1, a.device) if with_stats else None
-    b_stats = QuantizationStats("weight/x", 1, b.device) if with_stats else None
+    a_stats = QuantizationStats("act/x", a.device) if with_stats else None
+    b_stats = QuantizationStats("weight/x", b.device) if with_stats else None
     unmonitored = quantized_mm(a, b, a_fmt, b_fmt, torch.float32, a_scale, b_scale)
     set_quantization_monitoring_status(True)
     try:
@@ -511,6 +513,7 @@ def test_quantized_linear_autocast():
 
 
 @cuda_sm89_or_newer
+@pytest.mark.parametrize("with_stats", [False, True])
 @pytest.mark.parametrize("rotation_cfg", [None, ROTATION_CFG])
 @pytest.mark.parametrize("act_scale,weight_scale,grad_out_scale", COMPILE_SCALE_TRIPLES)
 def test_quantized_linear_compiles_fullgraph(
@@ -518,6 +521,7 @@ def test_quantized_linear_compiles_fullgraph(
     act_scale,
     weight_scale,
     grad_out_scale,
+    with_stats,
 ):
     torch.manual_seed(0)
     lin = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
@@ -530,20 +534,49 @@ def test_quantized_linear_compiles_fullgraph(
         },
         rotation=rotation_cfg,
     )
-    q = QuantizedLinear.from_module(lin, cfg, rotation=build_rotation(rotation_cfg))
-    enable_quantization(q)
-    x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    eager = QuantizedLinear.from_module(lin, cfg, rotation=build_rotation(rotation_cfg))
+    compiled = QuantizedLinear.from_module(
+        lin, cfg, rotation=build_rotation(rotation_cfg)
+    )
+    for module in (eager, compiled):
+        enable_quantization(module)
+        if with_stats:
+            apply_quantization_monitoring(module)
+    eager_x = torch.randn(
+        64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    compiled_x = eager_x.detach().clone().requires_grad_()
 
-    torch.compiler.reset()
+    set_quantization_monitoring_status(with_stats)
     try:
-        out = torch.compile(q, fullgraph=True)(x)
-        out.square().mean().backward()
+        eager_out = eager(eager_x)
+        eager_out.square().mean().backward()
+        torch.compiler.reset()
+        compiled_out = torch.compile(compiled, fullgraph=True)(compiled_x)
+        compiled_out.square().mean().backward()
     finally:
+        set_quantization_monitoring_status(False)
         torch.compiler.reset()
 
-    assert out.shape == (64, 128) and torch.isfinite(out).all()
-    assert q.weight.grad is not None and torch.isfinite(q.weight.grad).all()
-    assert x.grad is not None and torch.isfinite(x.grad).all()
+    assert torch.equal(compiled_out, eager_out)
+    assert torch.equal(compiled_x.grad, eager_x.grad)
+    assert torch.equal(compiled.weight.grad, eager.weight.grad)
+    assert compiled_out.shape == (64, 128) and torch.isfinite(compiled_out).all()
+    assert (
+        compiled.weight.grad is not None and torch.isfinite(compiled.weight.grad).all()
+    )
+    assert compiled_x.grad is not None and torch.isfinite(compiled_x.grad).all()
+    if with_stats:
+        for tensor, numel in (
+            ("weight", lin.weight.numel()),
+            ("act", eager_x.numel()),
+            ("grad_out", eager_out.numel()),
+        ):
+            eager_stats = eager.quant_stats[tensor]
+            compiled_stats = compiled.quant_stats[tensor]
+            assert eager_stats.numel.item() == compiled_stats.numel.item() == 2 * numel
+            assert torch.equal(compiled_stats.under, eager_stats.under)
+            assert torch.equal(compiled_stats.nonzero, eager_stats.nonzero)
 
 
 MODEL_LAYER_INDICES = [None, [1]]
