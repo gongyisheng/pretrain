@@ -69,6 +69,12 @@ def run_benchmark(
         choices=("rne", "stochastic"),
         default=["rne", "stochastic"],
     )
+    parser.add_argument(
+        "--quantization-metrics",
+        nargs="+",
+        choices=("disabled", "enabled"),
+        default=["disabled", "enabled"],
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--rep-ms", type=float, default=20)
     parser.add_argument("--seed", type=int, default=0)
@@ -109,12 +115,13 @@ def run_benchmark(
     for (name, shape), layout, contract_dim, (
         granularity,
         block_shape,
-    ), rounding in product(
+    ), rounding, quantization_metrics in product(
         shapes,
         dict.fromkeys(args.layouts),
         dict.fromkeys(args.contract_dims),
         schemes,
         dict.fromkeys(args.rounding),
+        dict.fromkeys(args.quantization_metrics),
     ):
         input_shape = shape if layout == "contiguous" else shape[::-1]
         if format_name == "nvfp4" and input_shape[contract_dim] % 16:
@@ -132,16 +139,20 @@ def run_benchmark(
                 "granularity": granularity,
                 "block_shape": block_shape,
                 "rounding": rounding,
+                "quantization_metrics": quantization_metrics == "enabled",
             }
         )
     if args.list_cases:
-        print("| Shape | Input | Layout | Axis | Output | Scheme | Block | Rounding |")
-        print("|---|---|---|---:|---|---|---|---|")
+        print(
+            "| Shape | Input | Layout | Axis | Output | Scheme | Block | Rounding | Metrics |"
+        )
+        print("|---|---|---|---:|---|---|---|---|---|")
         for case in cases:
             print(
                 f"| {case['shape_name']} | {case['input_shape']} | {case['input_layout']} "
                 f"| {case['contract_dim']} | {case['output_layout']} | {case['granularity']} "
-                f"| {case['block_shape']} | {case['rounding']} |"
+                f"| {case['block_shape']} | {case['rounding']} "
+                f"| {'enabled' if case['quantization_metrics'] else 'disabled'} |"
             )
         print(f"\n{len(cases)} cases; two timed implementations per case.")
         return
@@ -183,9 +194,9 @@ def run_benchmark(
         flush=True,
     )
     print(
-        "\n| Case | Shape | Input | Layout | Axis | Scheme | Block | Rounding | Compiled µs | CUDA µs | Speedup |"
+        "\n| Case | Shape | Input | Layout | Axis | Scheme | Block | Rounding | Metrics | Compiled µs | CUDA µs | Speedup |"
     )
-    print("|---:|---|---|---|---:|---|---|---|---:|---:|---:|", flush=True)
+    print("|---:|---|---|---|---:|---|---|---|---|---:|---:|---:|", flush=True)
     torch.manual_seed(args.seed)
     generator = torch.Generator(device="cuda").manual_seed(args.seed)
     current_shape = None
@@ -211,6 +222,7 @@ def run_benchmark(
                 block_shape=case["block_shape"],
                 stochastic_rounding=case["rounding"] == "stochastic",
                 output_layout=case["output_layout"],
+                return_quantization_stats=case["quantization_metrics"],
             )
             torch.compiler.reset()
             reference = quantize(source, backend="eager")
@@ -289,6 +301,7 @@ def run_benchmark(
                 f"| {index}/{len(cases)} | {case['shape_name']} | {case['input_shape']} "
                 f"| {case['input_layout']} | {case['contract_dim']} | {case['granularity']} "
                 f"| {case['block_shape']} | {case['rounding']} "
+                f"| {'enabled' if case['quantization_metrics'] else 'disabled'} "
                 f"| {result['compiled_eager_us']:.2f} | {result['cuda_us']:.2f} "
                 f"| {result['cuda_speedup']:.2f}× |",
                 flush=True,

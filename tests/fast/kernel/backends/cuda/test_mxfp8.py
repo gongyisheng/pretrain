@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from src.kernel.ops import dequantize_dense, quantize_mxfp8
+from src.kernel.utils import to_swizzle_32_4_4
 from tests.fast.kernel.backends.cuda._quantize_test_utils import (
     LARGE_OFFSET_CASES,
     large_offset_source,
@@ -36,6 +37,9 @@ STAT_SHAPES = ((35, 65), (3, 17), (0, 32), (32, 0))
 OUTPUT_LAYOUTS = ("row_major", "column_major")
 CUDA_GRAPH_SHAPES = ((130, 256), (130, 259))
 COMPILE_SHAPES = ((130, 259), (33, 64))
+SWIZZLE_SHAPES = ((128, 128), (130, 160))
+SWIZZLE_INPUT_LAYOUTS = ("row_major", "column_major")
+SWIZZLE_BLOCK_OUTERS = (1, 32)
 INDEX_STRIDE_CASES = (
     ((1, 64), (((1 << 31) - 1) // 31, 1), -1),
     ((1, 64), (((1 << 31) - 1) // 31 + 1, 1), -1),
@@ -161,6 +165,68 @@ def test_quantize_mxfp8_precision(
     assert torch.equal(
         actual_scales.view(torch.uint8), expected_scales.view(torch.uint8)
     )
+
+
+@cuda_only
+@cuda_sm89_or_newer
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("shape", SWIZZLE_SHAPES)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("input_layout", SWIZZLE_INPUT_LAYOUTS)
+@pytest.mark.parametrize("output_layout", OUTPUT_LAYOUTS)
+@pytest.mark.parametrize("block_outer", SWIZZLE_BLOCK_OUTERS)
+@pytest.mark.parametrize("stochastic_rounding", (False, True))
+def test_quantize_mxfp8_scale_layout(
+    dtype,
+    shape,
+    contract_dim,
+    input_layout,
+    output_layout,
+    block_outer,
+    stochastic_rounding,
+):
+    source = torch.linspace(-448, 448, prod(shape), device="cuda", dtype=dtype).reshape(
+        shape
+    )
+    if input_layout == "column_major":
+        source = source.mT.contiguous().mT
+        assert source.stride(-2) == 1
+    else:
+        assert source.is_contiguous()
+
+    torch.manual_seed(17)
+    codes, scales, _, stats = quantize_mxfp8(
+        source,
+        contract_dim,
+        (block_outer, 32),
+        stochastic_rounding=stochastic_rounding,
+        backend="cuda",
+        output_layout=output_layout,
+        return_quantization_stats=True,
+    )
+    torch.manual_seed(17)
+    packed_codes, packed_scales, _, packed_stats = quantize_mxfp8(
+        source,
+        contract_dim,
+        (block_outer, 32),
+        stochastic_rounding=stochastic_rounding,
+        backend="cuda",
+        output_layout=output_layout,
+        return_quantization_stats=True,
+        scale_layout="swizzled_32_4_4",
+    )
+
+    expected_scales = to_swizzle_32_4_4(scales if contract_dim == -1 else scales.t())
+    assert torch.equal(packed_codes.view(torch.uint8), codes.view(torch.uint8))
+    assert (codes if output_layout == "row_major" else codes.mT).is_contiguous()
+    assert (
+        packed_codes if output_layout == "row_major" else packed_codes.mT
+    ).is_contiguous()
+    assert packed_scales.ndim == 1
+    assert torch.equal(
+        packed_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
+    assert torch.equal(packed_stats, stats)
 
 
 @cuda_only
@@ -365,6 +431,42 @@ def test_quantize_mxfp8_compile(
     assert torch.equal(actual_codes.view(torch.uint8), expected_codes.view(torch.uint8))
     assert torch.equal(
         actual_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
+
+
+@cuda_only
+@cuda_sm89_or_newer
+@pytest.mark.parametrize(
+    ("shape", "contract_dim"),
+    (((130, 160), -1), ((160, 130), -2)),
+)
+@pytest.mark.parametrize("block_outer", (1, 32))
+def test_quantize_mxfp8_scale_layout_compile(shape, contract_dim, block_outer):
+    source = torch.linspace(
+        -448, 448, prod(shape), device="cuda", dtype=torch.bfloat16
+    ).reshape(shape)
+    torch._dynamo.reset()
+    quantize = torch.compile(
+        lambda values: quantize_mxfp8(
+            values,
+            contract_dim,
+            (block_outer, 32),
+            backend="cuda",
+            scale_layout="swizzled_32_4_4",
+        ),
+        fullgraph=True,
+    )
+
+    codes, scales, _ = quantize(source)
+    expected_codes, expected_scales, _ = quantize_mxfp8(
+        source, contract_dim, (block_outer, 32), backend="cuda"
+    )
+    expected_packed_scales = to_swizzle_32_4_4(
+        expected_scales if contract_dim == -1 else expected_scales.t()
+    )
+    assert torch.equal(codes.view(torch.uint8), expected_codes.view(torch.uint8))
+    assert torch.equal(
+        scales.view(torch.uint8), expected_packed_scales.view(torch.uint8)
     )
 
 

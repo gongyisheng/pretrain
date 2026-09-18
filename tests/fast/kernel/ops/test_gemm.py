@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import pytest
 import torch
 
+from src.kernel.ops import mxfp8_scaled_mm
 from src.kernel.ops.gemm import (
     fp8_scaled_grouped_mm,
     fp8_scaled_mm,
@@ -12,10 +13,10 @@ from src.kernel.ops.gemm import (
     int8_scaled_grouped_mm,
     int8_scaled_mm,
     mxfp8_scaled_grouped_mm,
-    mxfp8_scaled_mm,
     nvfp4_scaled_grouped_mm,
     nvfp4_scaled_mm,
 )
+from tests.fast.helper import cuda_only, cuda_sm100_or_newer
 
 E, M, K, N = 4, 32, 64, 48
 
@@ -263,6 +264,38 @@ def test_grouped_mm_raise_error(case):
 def test_scaled_mm_raise_error(op, case):
     with pytest.raises(ValueError):
         op(**make_inputs(case, op))
+
+
+@cuda_only
+@cuda_sm100_or_newer
+@pytest.mark.parametrize("error", ("layout", "rank", "size", "dtype"))
+def test_mxfp8_scaled_mm_scale_layout_raise_error(error):
+    device = "cuda"
+    aq = torch.zeros((32, 64), device=device, dtype=torch.float8_e4m3fn)
+    bq = torch.zeros((64, 48), device=device, dtype=torch.float8_e4m3fn)
+    sa = torch.ones((512,), device=device, dtype=torch.float8_e8m0fnu)
+    sb = torch.ones((512,), device=device, dtype=torch.float8_e8m0fnu)
+    scale_layout = "swizzled_32_4_4"
+    if error == "layout":
+        scale_layout = "invalid"
+    elif error == "rank":
+        sa = sa.reshape(512, 1)
+    elif error == "size":
+        sa = sa[:-1]
+    else:
+        sa = sa.to(torch.float8_e4m3fn)
+
+    with pytest.raises(ValueError):
+        mxfp8_scaled_mm(
+            aq,
+            bq,
+            sa,
+            sb,
+            torch.bfloat16,
+            32,
+            backend="cuda",
+            scale_layout=scale_layout,
+        )
 
 
 @pytest.mark.parametrize(

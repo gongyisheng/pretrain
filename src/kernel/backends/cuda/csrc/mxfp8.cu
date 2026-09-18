@@ -101,11 +101,65 @@ __global__ void finalize_stats_kernel(
   }
 }
 
+__global__ void zero_swizzled_scale_padding_kernel(
+    uint8_t* scales,
+    int64_t logical_rows,
+    int64_t logical_blocks,
+    int64_t padded_blocks,
+    int64_t count
+) {
+  for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < count;
+       index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    const int64_t block = index % 4 + (index / (4 * 32 * 4)) %
+        (padded_blocks / 4) * 4;
+    const int64_t row = index / (4 * 32 * 4 * (padded_blocks / 4)) * 128 +
+        (index / 4) % 4 * 32 + (index / (4 * 4)) % 32;
+    if (row >= logical_rows || block >= logical_blocks) scales[index] = 0;
+  }
+}
+
 template <int outer_size, int inner_size>
 struct ScaleShape {
   static constexpr int outer = outer_size;
   static constexpr int inner = inner_size;
 };
+
+__device__ __forceinline__ void store_scale(
+    uint8_t* scales,
+    const QuantizeParams& params,
+    bool swizzled_scales,
+    int64_t row_origin,
+    int64_t col_origin,
+    int32_t row,
+    int32_t col,
+    int32_t scale_row,
+    int32_t scale_col,
+    bool narrow_offsets,
+    uint8_t scale
+) {
+  if (!swizzled_scales) {
+    scales[local_offset(scale_row, scale_col, params.scale_row_stride,
+                        params.scale_col_stride, narrow_offsets)] = scale;
+    return;
+  }
+  const int64_t global_row = row_origin + row;
+  const int64_t global_col = col_origin + col;
+  const int64_t packed_row = params.contract_dim == -1 ? global_row : global_col;
+  const int64_t packed_block = params.contract_dim == -1
+      ? global_col / 32 : global_row / 32;
+  const int64_t contract_size = params.contract_dim == -1 ? params.cols : params.rows;
+  const int64_t padded_blocks = (contract_size + 127) / 128 * 4;
+  const int64_t row_group = packed_row / 128;
+  const int64_t row_inner = packed_row % 32;
+  const int64_t row_tile = packed_row % 128 / 32;
+  const int64_t block_group = packed_block / 4;
+  const int64_t block_inner = packed_block % 4;
+  const int64_t offset =
+      (((row_group * (padded_blocks / 4) + block_group) * 32 + row_inner) * 4 +
+       row_tile) * 4 + block_inner;
+  scales[offset] = scale;
+}
 
 template <typename input_t, typename scale_shape, bool contract_contiguous,
           bool input_column_major, bool transpose_output, bool stochastic_rounding,
@@ -142,6 +196,7 @@ __global__ void quantize_mxfp8_kernel(
     int64_t first_col_tile,
     int64_t first_batch,
     bool narrow_offsets,
+    bool swizzled_scales,
     at::PhiloxCudaState philox
 ) {
   constexpr bool contract_contiguous =
@@ -190,12 +245,16 @@ __global__ void quantize_mxfp8_kernel(
         input_offset(params, batch, row_origin, col_origin);
     codes = params.code_data<uint8_t>() +
         output_offset(params, batch, row_origin, col_origin);
-    const int64_t scale_row =
-        contract_dim == -1 ? row_origin : row_origin / scale_shape::inner;
-    const int64_t scale_col =
-        contract_dim == -1 ? col_origin / scale_shape::inner : col_origin;
-    scales = params.scale_data<uint8_t>() +
-        scale_offset(params, batch, scale_row, scale_col);
+    if (swizzled_scales) {
+      scales = params.scale_data<uint8_t>();
+    } else {
+      const int64_t scale_row =
+          contract_dim == -1 ? row_origin : row_origin / scale_shape::inner;
+      const int64_t scale_col =
+          contract_dim == -1 ? col_origin / scale_shape::inner : col_origin;
+      scales = params.scale_data<uint8_t>() +
+          scale_offset(params, batch, scale_row, scale_col);
+    }
   }
   const int lane = threadIdx.x % 32;
   const int warp = threadIdx.x / 32;
@@ -306,8 +365,8 @@ __global__ void quantize_mxfp8_kernel(
     if (group_lane == 0 && row < row_size && col < col_size) {
       const int32_t scale_row = contract_dim == -1 ? row : row / scale_shape::inner;
       const int32_t scale_col = contract_dim == -1 ? col / scale_shape::inner : col;
-      scales[local_offset(scale_row, scale_col, params.scale_row_stride,
-                          params.scale_col_stride, narrow_offsets)] = scale;
+      store_scale(scales, params, swizzled_scales, row_origin, col_origin,
+                  row, col, scale_row, scale_col, narrow_offsets, scale);
     }
   } else if constexpr (scale_shape::outer == 1) {
     __shared__ float partial_maximum[tile::threads / 32][32];
@@ -332,9 +391,9 @@ __global__ void quantize_mxfp8_kernel(
             contract_dim == -1 ? row : row / scale_shape::inner;
         const int32_t scale_col =
             contract_dim == -1 ? col / scale_shape::inner : col;
-        scales[local_offset(scale_row, scale_col, params.scale_row_stride,
-                            params.scale_col_stride, narrow_offsets)] =
-            group_scales[lane];
+        store_scale(scales, params, swizzled_scales, row_origin, col_origin,
+                    row, col, scale_row, scale_col, narrow_offsets,
+                    group_scales[lane]);
       }
     }
     __syncthreads();
@@ -371,8 +430,8 @@ __global__ void quantize_mxfp8_kernel(
             contract_dim == -1 ? row : row / scale_shape::inner;
         const int32_t scale_col =
             contract_dim == -1 ? col / scale_shape::inner : col;
-        scales[local_offset(scale_row, scale_col, params.scale_row_stride,
-                            params.scale_col_stride, narrow_offsets)] = scale;
+        store_scale(scales, params, swizzled_scales, row_origin, col_origin,
+                    row, col, scale_row, scale_col, narrow_offsets, scale);
       }
     }
   }
@@ -549,6 +608,7 @@ template <typename input_t, typename scale_shape, int contract_dim,
 void launch_quantize_mxfp8(
     const at::Tensor& input,
     QuantizeParams params,
+    bool swizzled_scales,
     at::PhiloxCudaState philox,
     cudaStream_t stream,
     at::Tensor* stats
@@ -633,7 +693,7 @@ void launch_quantize_mxfp8(
                               transpose_output, stochastic_rounding, collect_stats>
             <<<grid, tile::threads, 0, stream>>>(
                 params, row_tiles, col_tiles, first_row, first_col, first_batch,
-                narrow_offsets, philox);
+                narrow_offsets, swizzled_scales, philox);
         first_col += col_chunk;
       }
       first_row += row_chunk;
@@ -660,6 +720,7 @@ template <typename input_t, typename scale_shape>
 void dispatch_layout(
     const at::Tensor& input,
     QuantizeParams params,
+    bool swizzled_scales,
     int64_t contract_dim,
     bool input_column_major,
     bool transpose_output,
@@ -686,7 +747,7 @@ void dispatch_layout(
                           kTransposeOutput,
                           kStochasticRounding,
                           kCollectStats>(
-                          input, params, philox, stream,
+                          input, params, swizzled_scales, philox, stream,
                           stats))))))
 }
 
@@ -694,6 +755,7 @@ template <typename input_t>
 void dispatch_scale_shape(
     const at::Tensor& input,
     QuantizeParams params,
+    bool swizzled_scales,
     int64_t block_size,
     int64_t block_outer,
     int64_t contract_dim,
@@ -708,7 +770,7 @@ void dispatch_scale_shape(
   BOOL_DISPATCH(                                                            \
       block_outer != 1, kSquare,                                           \
       dispatch_layout<input_t, ScaleShape<(kSquare ? SIZE : 1), SIZE>>(    \
-          input, params, contract_dim, input_column_major,                 \
+          input, params, swizzled_scales, contract_dim, input_column_major, \
           transpose_output, stochastic_rounding, philox, stream, stats))
   switch (block_size) {
     case 16:
@@ -734,7 +796,8 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_meta(
     int64_t block_outer,
     int64_t block_size,
     bool stochastic_rounding,
-    const std::string& output_layout
+    const std::string& output_layout,
+    const std::string& scale_layout
 ) {
   auto scale_sizes = input.sym_sizes().vec();
   const int64_t contract_axis = contract_dim + input.dim();
@@ -751,8 +814,25 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_meta(
   } else {
     codes = at::empty_symint(input.sym_sizes(), options);
   }
-  return {codes, at::empty_symint(scale_sizes,
-                                  input.options().dtype(at::kFloat8_e8m0fnu))};
+  const auto scale_options = input.options().dtype(at::kFloat8_e8m0fnu);
+  if (scale_layout == "row_major") {
+    return {codes, at::empty_symint(scale_sizes, scale_options)};
+  }
+  TORCH_CHECK(scale_layout == "swizzled_32_4_4",
+              "quantize_mxfp8 scale_layout must be row_major or swizzled_32_4_4");
+  TORCH_CHECK(input.dim() == 2 && block_size == 32 &&
+                  (block_outer == 1 || block_outer == 32),
+              "quantize_mxfp8 swizzled_32_4_4 scales require a 2D input, "
+              "block_size=32, and block_outer=1 or 32");
+  const c10::SymInt logical_rows = contract_dim == -1
+      ? scale_sizes[0] : scale_sizes[1];
+  const c10::SymInt logical_blocks = contract_dim == -1
+      ? scale_sizes[1] : scale_sizes[0];
+  const c10::SymInt padded_rows = (logical_rows + 127) / 128 * 128;
+  const c10::SymInt padded_blocks = (logical_blocks + 3) / 4 * 4;
+  return {codes, at::empty_symint(std::vector<c10::SymInt>{
+                                      padded_rows * padded_blocks},
+                                  scale_options)};
 }
 
 std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_impl(
@@ -762,6 +842,7 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_impl(
     int64_t block_size,
     bool stochastic_rounding,
     const std::string& output_layout,
+    const std::string& scale_layout,
     at::Tensor* stats
 ) {
   TORCH_CHECK(input.is_cuda(), "quantize_mxfp8 requires a CUDA tensor");
@@ -780,14 +861,41 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_impl(
               "quantize_mxfp8 block_outer must be 1 or block_size");
   TORCH_CHECK(output_layout == "row_major" || output_layout == "column_major",
               "quantize_mxfp8 output_layout must be row_major or column_major");
+  TORCH_CHECK(scale_layout == "row_major" || scale_layout == "swizzled_32_4_4",
+              "quantize_mxfp8 scale_layout must be row_major or swizzled_32_4_4");
+  const bool swizzled_scales = scale_layout == "swizzled_32_4_4";
+  TORCH_CHECK(!swizzled_scales ||
+                  (input.dim() == 2 && block_size == 32 &&
+                   (block_outer == 1 || block_outer == 32)),
+              "quantize_mxfp8 swizzled_32_4_4 scales require a 2D input, "
+              "block_size=32, and block_outer=1 or 32");
   TORCH_CHECK(std::all_of(input.strides().begin(), input.strides().end(),
                           [](int64_t stride) { return stride >= 0; }),
               "quantize_mxfp8 requires nonnegative strides");
   c10::cuda::CUDAGuard device_guard(input.device());
   auto [codes, scales] =
       quantize_mxfp8_meta(input, contract_dim, block_outer, block_size,
-                          stochastic_rounding, output_layout);
+                          stochastic_rounding, output_layout, scale_layout);
   if (stats != nullptr) *stats = at::zeros({5}, input.options().dtype(at::kFloat));
+  const auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (swizzled_scales && scales.numel() != 0) {
+    const int64_t scale_rows = contract_dim == -1 ? input.size(-2) :
+        (input.size(-2) + block_size - 1) / block_size;
+    const int64_t scale_cols = contract_dim == -1 ?
+        (input.size(-1) + block_size - 1) / block_size : input.size(-1);
+    const int64_t logical_rows = contract_dim == -1 ? scale_rows : scale_cols;
+    const int64_t logical_blocks = contract_dim == -1 ? scale_cols : scale_rows;
+    const int64_t padded_rows = (logical_rows + 127) / 128 * 128;
+    const int64_t padded_blocks = (logical_blocks + 3) / 4 * 4;
+    if (padded_rows != logical_rows || padded_blocks != logical_blocks) {
+      const auto* device = at::cuda::getCurrentDeviceProperties();
+      const int64_t blocks = std::min(
+          (scales.numel() + 255) / 256, int64_t{device->maxGridSize[0]});
+      zero_swizzled_scale_padding_kernel<<<blocks, 256, 0, stream.stream()>>>(
+          static_cast<uint8_t*>(scales.data_ptr()), logical_rows, logical_blocks,
+          padded_blocks, scales.numel());
+    }
+  }
   if (input.numel() == 0) return {codes, scales};
 
   const bool input_column_major = input.stride(-2) < input.stride(-1);
@@ -805,9 +913,11 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_impl(
   params.code_batch_stride = codes.dim() == 3 ? codes.stride(0) : 0;
   params.code_row_stride = codes.stride(-2);
   params.code_col_stride = codes.stride(-1);
-  params.scale_batch_stride = scales.dim() == 3 ? scales.stride(0) : 0;
-  params.scale_row_stride = scales.stride(-2);
-  params.scale_col_stride = scales.stride(-1);
+  if (!swizzled_scales) {
+    params.scale_batch_stride = scales.dim() == 3 ? scales.stride(0) : 0;
+    params.scale_row_stride = scales.stride(-2);
+    params.scale_col_stride = scales.stride(-1);
+  }
   params.rows_per_block = contract_dim == -1 ? block_outer : block_size;
   params.cols_per_block = contract_dim == -1 ? block_size : block_outer;
   params.row_block_count = (params.rows + params.rows_per_block - 1) /
@@ -826,9 +936,8 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_impl(
     const int64_t draws = std::max(int64_t{16}, block_size * block_size / 256);
     philox = generator->philox_cuda_state(draws);
   }
-  const auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
 #define LAUNCH_TYPE(TYPE)                                                      \
-  dispatch_scale_shape<TYPE>(input, params, block_size,                         \
+  dispatch_scale_shape<TYPE>(input, params, swizzled_scales, block_size,       \
                              block_outer, contract_dim, input_column_major,     \
                              transpose_output, stochastic_rounding, philox,     \
                              stream.stream(), stats)
@@ -856,10 +965,12 @@ std::tuple<at::Tensor, at::Tensor> quantize_mxfp8_cuda(
     int64_t block_outer,
     int64_t block_size,
     bool stochastic_rounding,
-    const std::string& output_layout
+    const std::string& output_layout,
+    const std::string& scale_layout
 ) {
   return quantize_mxfp8_impl(input, contract_dim, block_outer, block_size,
-                              stochastic_rounding, output_layout, nullptr);
+                              stochastic_rounding, output_layout, scale_layout,
+                              nullptr);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_mxfp8_with_stats_cuda(
@@ -868,12 +979,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_mxfp8_with_stats_cuda(
     int64_t block_outer,
     int64_t block_size,
     bool stochastic_rounding,
-    const std::string& output_layout
+    const std::string& output_layout,
+    const std::string& scale_layout
 ) {
   at::Tensor stats;
   auto [codes, scales] = quantize_mxfp8_impl(
       input, contract_dim, block_outer, block_size, stochastic_rounding,
-      output_layout, &stats);
+      output_layout, scale_layout, &stats);
   return {codes, scales, stats};
 }
 
@@ -883,11 +995,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_mxfp8_with_stats_meta(
     int64_t block_outer,
     int64_t block_size,
     bool stochastic_rounding,
-    const std::string& output_layout
+    const std::string& output_layout,
+    const std::string& scale_layout
 ) {
   auto [codes, scales] = quantize_mxfp8_meta(
       input, contract_dim, block_outer, block_size, stochastic_rounding,
-      output_layout);
+      output_layout, scale_layout);
   return {codes, scales, at::empty_symint({5}, input.options().dtype(at::kFloat))};
 }
 
@@ -897,13 +1010,13 @@ TORCH_LIBRARY_FRAGMENT(aot_kernel, m) {
   m.def(
       "quantize_mxfp8(Tensor x, int contract_dim, int block_outer, int "
       "block_size, "
-      "bool stochastic_rounding, str output_layout=\"row_major\") -> (Tensor, "
-      "Tensor)",
+      "bool stochastic_rounding, str output_layout=\"row_major\", str "
+      "scale_layout=\"row_major\") -> (Tensor, Tensor)",
       {at::Tag::nondeterministic_seeded});
   m.def(
       "quantize_mxfp8_with_stats(Tensor x, int contract_dim, int block_outer, int "
-      "block_size, bool stochastic_rounding, str output_layout=\"row_major\") -> "
-      "(Tensor, Tensor, Tensor)",
+      "block_size, bool stochastic_rounding, str output_layout=\"row_major\", "
+      "str scale_layout=\"row_major\") -> (Tensor, Tensor, Tensor)",
       {at::Tag::nondeterministic_seeded});
 }
 TORCH_LIBRARY_IMPL(aot_kernel, Meta, m) {

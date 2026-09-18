@@ -335,6 +335,7 @@ def quantize_mxfp8(
     backend: str | None = None,
     output_layout: str = "row_major",
     return_quantization_stats: bool = False,
+    scale_layout: str = "row_major",
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
     | tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]
@@ -345,7 +346,9 @@ def quantize_mxfp8(
     with its block count; square-tile scales repeat along the outer axis.
     CUDA supports (1, B) and (B, B) for B in {16, 32, 64, 128}.
     `output_layout` selects row-major or column-major code matrices; logical
-    shapes and row-major scales are unchanged, including for batched inputs.
+    shapes are unchanged, including for batched inputs. Scales are row-major by
+    default; `swizzled_32_4_4` packs rank-2 block-32 scales for cuBLASLt, orienting
+    the non-contracting dimension first and padding it to 128 and blocks to 4.
     The default is PyTorch/eager so whole-model compilation can fuse this operation.
     When requested, append FP32 statistics in (src_sq, err_sq, under, numel,
     nonzero) order. Backends without fused statistics append None without
@@ -357,11 +360,23 @@ def quantize_mxfp8(
     _check_mxfp8_block_shape(block_shape)
     _check_rounding(stochastic_rounding)
     _check_output_layout(output_layout)
+    if scale_layout not in ("row_major", "swizzled_32_4_4"):
+        raise ValueError("unsupported MXFP8 scale layout")
+    if scale_layout == "swizzled_32_4_4" and (x.ndim != 2 or block_shape[1] != 32):
+        raise ValueError("swizzled MXFP8 scales require rank-2 block-32 quantization")
     if backend is None:
         backend = "eager"
     return _dispatch_quantize(
         "quantize.quantize_mxfp8",
-        (x, contract_dim, tuple(block_shape), fmt, stochastic_rounding, output_layout),
+        (
+            x,
+            contract_dim,
+            tuple(block_shape),
+            fmt,
+            stochastic_rounding,
+            output_layout,
+            scale_layout,
+        ),
         backend,
         x.device,
         return_quantization_stats,

@@ -95,6 +95,8 @@ def quantize_operand(
     rotation: Rotation | None = None,
     return_quantization_stats: bool = False,
     output_layout: str | None = None,
+    backend: str | None = None,
+    scale_layout: str = "row_major",
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
     | tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]
@@ -135,6 +137,10 @@ def quantize_operand(
     elif granularity != "blockwise":
         raise ValueError(f"unknown granularity: {granularity!r}")
     enable_global_scale = scale_cfg["enable_global_scale"]
+    if scale_layout != "row_major" and (
+        offs is not None or scale_dtype is not torch.float8_e8m0fnu
+    ):
+        raise ValueError("packed scales require dense MXFP8 quantization")
     if scale_dtype is torch.float8_e8m0fnu and is_quantized(fmt) and fmt != "fp8_e4m3":
         raise ValueError("MXFP8 quantization requires fp8_e4m3")
     # Rotation retains FP32 values before quantization.
@@ -149,6 +155,8 @@ def quantize_operand(
                 stochastic_rounding,
                 output_layout=output_layout,
                 return_quantization_stats=return_quantization_stats,
+                backend=backend,
+                scale_layout=scale_layout,
             )
         return quantize_mxfp8_grouped(
             source, offs, ragged_dim, contract_dim, block_shape, stochastic_rounding
@@ -179,6 +187,7 @@ def quantize_operand(
                 enable_global_scale=enable_global_scale,
                 return_quantization_stats=return_quantization_stats,
                 output_layout=output_layout,
+                backend=backend,
             )
         return quantize_fp8_grouped(
             source,
@@ -212,6 +221,7 @@ def quantize_operand(
                 enable_global_scale=enable_global_scale,
                 return_quantization_stats=return_quantization_stats,
                 output_layout=int8_output_layout,
+                backend=backend,
             )
         return quantize_int8_grouped(
             source,
@@ -236,6 +246,7 @@ def quantize_operand(
                 qmax=str_to_qmax(fmt),
                 return_quantization_stats=return_quantization_stats,
                 output_layout=output_layout,
+                backend=backend,
             )
         return quantize_nvfp4_grouped(
             source,

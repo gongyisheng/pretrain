@@ -1090,6 +1090,17 @@ def test_quant_rounding_defaults_to_rne_everywhere():
     assert not any(mode == "SR" for mode in q.rounding.values())
 
 
+@pytest.mark.parametrize("backend", (None, "eager", "cuda"))
+def test_quantization_config_backend(backend):
+    config = TrainingConfig(quantization={"enabled": True, "backend": backend})
+    assert config.quantization[0].backend == backend
+
+
+def test_quantization_config_backend_raise_error():
+    with pytest.raises(ValueError):
+        QuantizationConfig(enabled=True, backend="unsupported")
+
+
 def test_quant_rounding_fills_unnamed_tensors_and_round_trips():
     config = TrainConfig(
         training=TrainingConfig(

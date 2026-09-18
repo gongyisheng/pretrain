@@ -339,10 +339,13 @@ class QuantizationConfig:
     rotation: Optional[dict] = None
     include: List[str] = field(default_factory=list)
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
+    backend: Optional[str] = None
 
     def __post_init__(self):
         if not self.enabled:
             return
+        if self.backend is not None:
+            _check_one_of("quant backend", self.backend, ("eager", "cuda"))
         self._post_init_dtype()
         self._post_init_scale()
         self._post_init_rounding()

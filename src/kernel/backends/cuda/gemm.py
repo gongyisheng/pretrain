@@ -122,6 +122,7 @@ def _check_mxfp8_scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None,
+    scale_layout: str = "row_major",
 ) -> None:
     """Everything this backend's dense kernel requires beyond its SM window."""
     _check_operand_shapes(aq, bq, "MXFP8 GEMM")
@@ -135,7 +136,16 @@ def _check_mxfp8_scaled_mm(
     _check_e4m3_element(bq, "MXFP8 GEMM B")
     _check_e8m0_element(sa, "MXFP8 GEMM A scale")
     _check_e8m0_element(sb, "MXFP8 GEMM B scale")
-    _check_scale_shapes(aq, bq, sa, sb, block_size, "MXFP8 GEMM")
+    if scale_layout == "row_major":
+        _check_scale_shapes(aq, bq, sa, sb, block_size, "MXFP8 GEMM")
+    elif scale_layout == "swizzled_32_4_4":
+        padded_blocks = ((aq.shape[1] + 127) // 128) * 4
+        for scale, outer in ((sa, aq.shape[0]), (sb, bq.shape[1])):
+            size = ((outer + 127) // 128) * 128 * padded_blocks
+            if scale.shape != (size,) or not scale.is_contiguous():
+                raise ValueError("MXFP8 GEMM requires contiguous packed scale buffers")
+    else:
+        raise ValueError("unsupported MXFP8 scale layout")
     _check_bias(bias, out_dtype, bq.shape[1], "MXFP8 GEMM")
 
 
@@ -147,6 +157,7 @@ def supports_mxfp8_scaled_mm(
     out_dtype: torch.dtype,
     block_size: int,
     bias: torch.Tensor | None,
+    scale_layout: str = "row_major",
 ) -> bool:
     """Can this backend support the call? Routed through the kernel's own guards so
     the routing decision and the kernel's contract cannot drift apart.
@@ -156,7 +167,9 @@ def supports_mxfp8_scaled_mm(
     operand alignment (an unaligned token count leaves a non-16-byte row stride).
     """
     try:
-        _check_mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+        _check_mxfp8_scaled_mm(
+            aq, bq, sa, sb, out_dtype, block_size, bias, scale_layout
+        )
     except ValueError:
         return False
     return True
@@ -179,14 +192,15 @@ def scaled_mm_mxfp8(
     bias: torch.Tensor | None = None,
     gsa: torch.Tensor | None = None,
     gsb: torch.Tensor | None = None,
+    scale_layout: str = "row_major",
 ) -> torch.Tensor:
-    _check_mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias)
+    _check_mxfp8_scaled_mm(aq, bq, sa, sb, out_dtype, block_size, bias, scale_layout)
     del block_size
     return torch.ops.aot_kernel._scaled_mm_mxfp8_cublaslt(
         aq,
         to_column_major(bq),
-        to_swizzle_32_4_4(sa),
-        to_swizzle_32_4_4(sb.t()),
+        to_swizzle_32_4_4(sa) if scale_layout == "row_major" else sa,
+        to_swizzle_32_4_4(sb.t()) if scale_layout == "row_major" else sb,
         out_dtype,
         bias,
         gsa,

@@ -339,6 +339,12 @@ MXFP8_BLOCK_SHAPES = (
 MXFP8_SHAPES = ((35, 65), (2, 35, 65))
 MXFP8_LAYOUTS = ("dense", "strided", "broadcast")
 MXFP8_OUTPUT_LAYOUTS = ("row_major", "column_major")
+MXFP8_SWIZZLE_EMPTY_CASES = (
+    ((0, 32), -2),
+    ((0, 32), -1),
+    ((32, 0), -2),
+    ((32, 0), -1),
+)
 MXFP8_DEVICES = ("cpu", "cuda")
 MXFP8_BACKENDS = ("eager", "cuda")
 MXFP8_EMPTY_CASES = (
@@ -615,6 +621,42 @@ def test_quantize_mxfp8(
                 .expand(*outer.shape[:-2], count, -1)
                 .view(torch.uint8),
             )
+
+
+@pytest.mark.parametrize(("shape", "contract_dim"), MXFP8_SWIZZLE_EMPTY_CASES)
+def test_quantize_mxfp8_scale_layout_empty(shape, contract_dim):
+    codes, scales, global_scale = quantize_mxfp8(
+        torch.empty(shape),
+        contract_dim,
+        (1, 32),
+        backend="eager",
+        scale_layout="swizzled_32_4_4",
+    )
+
+    assert codes.shape == shape
+    assert scales.shape == (0,)
+    assert global_scale is None
+
+
+@pytest.mark.parametrize(
+    ("shape", "contract_dim", "block_shape", "scale_layout"),
+    (
+        ((2, 32), -1, (1, 32), "invalid"),
+        ((2, 32), -1, (1, 16), "swizzled_32_4_4"),
+        ((2, 2, 32), -1, (1, 32), "swizzled_32_4_4"),
+    ),
+)
+def test_quantize_mxfp8_scale_layout_raise_error(
+    shape, contract_dim, block_shape, scale_layout
+):
+    with pytest.raises(ValueError):
+        quantize_mxfp8(
+            torch.empty(shape),
+            contract_dim,
+            block_shape,
+            backend="eager",
+            scale_layout=scale_layout,
+        )
 
 
 @pytest.mark.parametrize(

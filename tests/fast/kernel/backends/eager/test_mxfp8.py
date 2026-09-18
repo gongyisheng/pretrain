@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from src.kernel.ops import quantize_mxfp8, quantize_mxfp8_grouped
+from src.kernel.utils import to_swizzle_32_4_4
 from tests.fast.helper import cuda_only
 
 
@@ -28,6 +29,7 @@ COMPILE_SHAPES = ((131, 259), (2, 131, 259))
 STOCHASTIC_ROUNDING = (False, True)
 OUTPUT_LAYOUTS = ("row_major", "column_major")
 RAGGED_DIMS = (-2, -1)
+SCALE_LAYOUT_SHAPES = ((128, 128), (130, 160))
 
 
 def _transposed_source(
@@ -115,6 +117,33 @@ def test_quantize_mxfp8_precision(
     assert torch.equal(actual_codes.view(torch.uint8), expected_codes.view(torch.uint8))
     assert torch.equal(
         actual_scales.view(torch.uint8), expected_scales.view(torch.uint8)
+    )
+
+
+@pytest.mark.parametrize("shape", SCALE_LAYOUT_SHAPES)
+@pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
+@pytest.mark.parametrize("block_outer", (1, 32))
+def test_quantize_mxfp8_scale_layout(shape, contract_dim, block_outer):
+    source = torch.linspace(-448, 448, prod(shape), dtype=torch.float32).reshape(shape)
+    codes, scales, _ = quantize_mxfp8(
+        source,
+        contract_dim,
+        (block_outer, 32),
+        backend="eager",
+    )
+    packed_codes, packed_scales, _ = quantize_mxfp8(
+        source,
+        contract_dim,
+        (block_outer, 32),
+        backend="eager",
+        scale_layout="swizzled_32_4_4",
+    )
+
+    expected_scales = to_swizzle_32_4_4(scales if contract_dim == -1 else scales.t())
+    assert torch.equal(packed_codes.view(torch.uint8), codes.view(torch.uint8))
+    assert packed_scales.ndim == 1
+    assert torch.equal(
+        packed_scales.view(torch.uint8), expected_scales.view(torch.uint8)
     )
 
 

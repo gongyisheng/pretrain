@@ -8,6 +8,7 @@ from src.kernel.backends.eager.quantize import (
     layout_codes,
 )
 from src.kernel.registry import register_kernel
+from src.kernel.utils import to_swizzle_32_4_4
 
 
 @register_kernel(
@@ -24,6 +25,7 @@ def quantize_mxfp8(
     fmt: str = "fp8_e4m3",
     stochastic_rounding: bool = False,
     output_layout: str = "row_major",
+    scale_layout: str = "row_major",
     return_quantization_stats: bool = False,
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
@@ -43,9 +45,14 @@ def quantize_mxfp8(
         global_scale=None,
     )
     codes = layout_codes(codes, output_layout)
+    scale = (
+        to_swizzle_32_4_4(scale if contract_dim == -1 else scale.t())
+        if scale_layout == "swizzled_32_4_4"
+        else scale.contiguous()
+    )
     if return_quantization_stats:
-        return codes, scale.contiguous(), None, quantization_stats
-    return codes, scale.contiguous(), None
+        return codes, scale, None, quantization_stats
+    return codes, scale, None
 
 
 @register_kernel(

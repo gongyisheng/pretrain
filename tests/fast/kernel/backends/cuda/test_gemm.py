@@ -3,6 +3,7 @@ import torch
 
 from src.kernel.backends.cuda import gemm as cuda_mm
 from src.kernel.backends.eager import gemm as eager_mm
+from src.kernel.ops import mxfp8_scaled_mm, quantize_mxfp8
 from tests.fast.kernel.backends.helper import (
     BF16_OUT,
     BIAS_CASES,
@@ -60,6 +61,7 @@ MXFP8_SUPPORT_CASES = (
     ({"bias": torch.zeros(31, dtype=torch.bfloat16)}, False),
     ({"bias": torch.zeros(64, dtype=torch.bfloat16)[::2]}, False),
 )
+MXFP8_SWIZZLE_CASES = ((128, 128, 128), (80, 160, 144))
 
 NVFP4_SUPPORT_INPUTS = {
     "aq": torch.zeros((32, 16), dtype=torch.uint8),
@@ -161,6 +163,46 @@ def test_mxfp8_scaled_mm_precision(case, format, scale, with_bias, with_global_s
     torch.testing.assert_close(actual, expected, rtol=BF16_OUT.rtol, atol=BF16_OUT.atol)
     rel = (actual.float() - expected.float()).norm() / expected.float().norm()
     assert rel < 1e-4, rel
+
+
+@cuda_only
+@cuda_sm100_or_newer
+@pytest.mark.parametrize(("m", "k", "n"), MXFP8_SWIZZLE_CASES)
+def test_mxfp8_scaled_mm_scale_layout(m, k, n):
+    generator = torch.Generator(device="cuda").manual_seed(17)
+    a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16, generator=generator)
+    b = torch.randn((k, n), device="cuda", dtype=torch.bfloat16, generator=generator)
+    aq, sa, _ = quantize_mxfp8(a, -1, (1, 32), backend="cuda")
+    bq, sb, _ = quantize_mxfp8(
+        b, -2, (1, 32), backend="cuda", output_layout="column_major"
+    )
+    packed_aq, packed_sa, _ = quantize_mxfp8(
+        a, -1, (1, 32), backend="cuda", scale_layout="swizzled_32_4_4"
+    )
+    packed_bq, packed_sb, _ = quantize_mxfp8(
+        b,
+        -2,
+        (1, 32),
+        backend="cuda",
+        output_layout="column_major",
+        scale_layout="swizzled_32_4_4",
+    )
+
+    expected = mxfp8_scaled_mm(aq, bq, sa, sb, torch.bfloat16, 32, backend="cuda")
+    actual = mxfp8_scaled_mm(
+        packed_aq,
+        packed_bq,
+        packed_sa,
+        packed_sb,
+        torch.bfloat16,
+        32,
+        backend="cuda",
+        scale_layout="swizzled_32_4_4",
+    )
+
+    assert torch.equal(packed_aq.view(torch.uint8), aq.view(torch.uint8))
+    assert torch.equal(packed_bq.view(torch.uint8), bq.view(torch.uint8))
+    assert torch.equal(actual, expected)
 
 
 @cuda_only

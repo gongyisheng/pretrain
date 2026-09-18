@@ -207,11 +207,17 @@ def quantize_and_record(
     stochastic_rounding: bool = False,
     rotation: Rotation | None = None,
     output_layout: str = "row_major",
+    backend: str | None = None,
+    scale_layout: str = "row_major",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Quantize an operand and record fused statistics when the backend supplies them."""
     collect = (
         stats is not None and _RECORDING[0] and rotation is None and source.ndim == 2
     )
+    if scale_layout != "row_major" and (
+        backend != "cuda" or rotation is not None or source.ndim != 2
+    ):
+        raise ValueError("packed scale monitoring requires fused CUDA statistics")
     result = quantize_operand(
         source,
         contract_dim,
@@ -221,6 +227,8 @@ def quantize_and_record(
         rotation=rotation,
         return_quantization_stats=collect,
         output_layout=output_layout,
+        backend=backend,
+        scale_layout=scale_layout,
     )
     if collect:
         codes, scale, global_scale, quantization_stats = result

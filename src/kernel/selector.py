@@ -19,9 +19,12 @@ def compile_safe_cache(fn: Callable[..., Any]) -> Callable[..., Any]:
 
     @wraps(fn)
     def wrapper(*args: Any) -> Any:
-        if args not in cache:
-            cache[args] = fn(*args)
-        return cache[args]
+        if args in cache:
+            return cache[args]
+        result = fn(*args)
+        if not torch.compiler.is_compiling():
+            cache[args] = result
+        return result
 
     wrapper.cache_clear = cache.clear
     return wrapper

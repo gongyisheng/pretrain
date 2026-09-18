@@ -258,8 +258,35 @@ def fp8_scaled_mm(
 
 
 def mxfp8_scaled_mm(
-    aq, bq, sa, sb, out_dtype, block_size, bias=None, gsa=None, gsb=None, backend=None
+    aq,
+    bq,
+    sa,
+    sb,
+    out_dtype,
+    block_size,
+    bias=None,
+    gsa=None,
+    gsb=None,
+    backend=None,
+    scale_layout="row_major",
 ):
+    """Multiply MXFP8 codes with ordinary scales or CUDA 32x4x4 packed scales."""
+    if scale_layout == "swizzled_32_4_4":
+        _check_global_scale(gsa, gsb, 1)
+        _check_contraction(aq, bq)
+        if backend not in (None, "cuda") or not _is_kernel_available(
+            "gemm.mxfp8_scaled_mm", "cuda", aq.device
+        ):
+            raise ValueError("packed MXFP8 scales require the CUDA GEMM backend")
+        return dispatch(
+            "gemm.mxfp8_scaled_mm",
+            (aq, bq, sa, sb, out_dtype, block_size, bias),
+            {"gsa": gsa, "gsb": gsb, "scale_layout": scale_layout},
+            "cuda",
+            device=aq.device,
+        )
+    if scale_layout != "row_major":
+        raise ValueError("unsupported MXFP8 scale layout")
     _check_scaled_mm(
         aq, bq, sa, sb, gsa, gsb, block_size, require_nonzero_block_size=True
     )

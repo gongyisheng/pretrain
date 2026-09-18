@@ -10,8 +10,13 @@ from src.quant.linear import QuantizedLinear, quantized_mm
 from src.quant.quantize import quantize_operand
 from src.quant.rotation import build_rotation
 from src.quant.utils import is_fp4
+from src.kernel.ops import mxfp8_scaled_mm, quantize_mxfp8
 from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
-from tests.fast.helper import cuda_capability_at_least, cuda_sm89_or_newer
+from tests.fast.helper import (
+    cuda_capability_at_least,
+    cuda_sm89_or_newer,
+    cuda_sm100_or_newer,
+)
 from tests.fast.quant.helper import (
     ALL_FORMATS,
     FORWARD_DTYPES,
@@ -100,6 +105,8 @@ def test_quantized_mm_output_layout(monkeypatch):
         stochastic_rounding=False,
         rotation=None,
         output_layout="row_major",
+        backend=None,
+        scale_layout="row_major",
     ):
         del stats
         result = quantize_operand(
@@ -110,6 +117,8 @@ def test_quantized_mm_output_layout(monkeypatch):
             stochastic_rounding=stochastic_rounding,
             rotation=rotation,
             output_layout=output_layout,
+            backend=backend,
+            scale_layout=scale_layout,
         )
         codes.append(result[0])
         return result
@@ -131,6 +140,111 @@ def test_quantized_mm_output_layout(monkeypatch):
     )
     assert codes[0].is_contiguous()
     assert codes[1].stride(-2) == 1
+
+
+MXFP8_TOKEN_COUNTS = (128, 130)
+MXFP8_COMPILE_CASES = (False, True)
+MXFP8_RECORDING_CASES = (False, True)
+MXFP8_BIAS_LAYOUTS = ("contiguous", "strided")
+
+
+@cuda_sm100_or_newer
+@pytest.mark.parametrize("n_tokens", MXFP8_TOKEN_COUNTS)
+@pytest.mark.parametrize("compiled", MXFP8_COMPILE_CASES)
+@pytest.mark.parametrize("recording", MXFP8_RECORDING_CASES)
+@pytest.mark.parametrize("bias_layout", MXFP8_BIAS_LAYOUTS)
+def test_quantized_linear_mxfp8_precision(n_tokens, compiled, recording, bias_layout):
+    torch.manual_seed(17)
+    linear = nn.Linear(64, 96, device="cuda", dtype=torch.bfloat16)
+    config = rule(
+        FP8_E4M3_W8A8G8_DTYPES,
+        {
+            "granularity": "blockwise",
+            "scale_dtype": torch.float8_e8m0fnu,
+            "enable_global_scale": False,
+            "block_shape": {
+                "weight": (32, 32),
+                "act": (1, 32),
+                "grad_out": (1, 32),
+            },
+        },
+    )
+    config.backend = "cuda"
+    quantized = QuantizedLinear.from_module(linear, config)
+    if bias_layout == "strided":
+        linear.bias = nn.Parameter(linear.bias.detach().repeat_interleave(2)[::2])
+        quantized.bias = linear.bias
+    quantized.quant_stats = {
+        tensor: QuantizationStats(tensor, 1, linear.weight.device)
+        for tensor in ("weight", "act", "grad_out")
+    }
+    source = torch.randn(
+        2, n_tokens // 2, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    gradient = torch.randn(2, n_tokens // 2, 96, device="cuda", dtype=torch.bfloat16)
+    function = torch.compile(quantized, fullgraph=True) if compiled else quantized
+    set_quantization_monitoring_status(recording)
+    try:
+        output = function(source)
+        output.backward(gradient)
+    finally:
+        set_quantization_monitoring_status(False)
+
+    expected = []
+    expected_stats = {
+        tensor: torch.zeros(5, device="cuda") for tensor in quantized.quant_stats
+    }
+    source_2d = source.detach().flatten(0, -2)
+    gradient_2d = gradient.flatten(0, -2)
+    operands = (
+        (source_2d, linear.weight.t(), "act", "weight", linear.bias),
+        (gradient_2d, linear.weight, "grad_out", "weight", None),
+        (gradient_2d.t(), source_2d, "grad_out", "act", None),
+    )
+    with torch.no_grad():
+        for left, right, left_name, right_name, bias in operands:
+            codes = []
+            scales = []
+            for tensor, name, contract_dim, layout in (
+                (left, left_name, -1, "row_major"),
+                (right, right_name, -2, "column_major"),
+            ):
+                code, scale, _, stats = quantize_mxfp8(
+                    tensor,
+                    contract_dim,
+                    config.scale["block_shape"][name],
+                    backend="cuda",
+                    output_layout=layout,
+                    return_quantization_stats=True,
+                )
+                codes.append(code)
+                scales.append(scale)
+                expected_stats[name] += stats
+            expected.append(
+                mxfp8_scaled_mm(
+                    codes[0], codes[1], scales[0], scales[1], torch.bfloat16, 32, bias
+                )
+            )
+    for actual, reference in (
+        (output, expected[0].reshape_as(output)),
+        (source.grad, expected[1].reshape_as(source)),
+        (quantized.weight.grad, expected[2]),
+        (
+            quantized.bias.grad,
+            gradient_2d.sum(0, dtype=torch.float32).to(torch.bfloat16),
+        ),
+    ):
+        torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+    for name, stats in quantized.quant_stats.items():
+        reference = (
+            expected_stats[name]
+            if recording
+            else torch.zeros_like(expected_stats[name])
+        )
+        torch.testing.assert_close(
+            stats.quantization_stats[0], reference, atol=0, rtol=0
+        )
+        assert not stats.quantization_stats.requires_grad
 
 
 @pytest.mark.parametrize("device", MM_PRECISION_DEVICES)

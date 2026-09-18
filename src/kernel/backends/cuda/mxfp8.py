@@ -18,6 +18,7 @@ def quantize_mxfp8(
     fmt: str = "fp8_e4m3",
     stochastic_rounding: bool = False,
     output_layout: str = "row_major",
+    scale_layout: str = "row_major",
     return_quantization_stats: bool = False,
 ) -> (
     tuple[torch.Tensor, torch.Tensor, None]
@@ -33,6 +34,7 @@ def quantize_mxfp8(
             block_shape[1],
             stochastic_rounding,
             output_layout,
+            scale_layout,
         )
         return codes, scale, None, stats.detach()
     codes, scale = torch.ops.aot_kernel.quantize_mxfp8(
@@ -42,5 +44,6 @@ def quantize_mxfp8(
         block_shape[1],
         stochastic_rounding,
         output_layout,
+        scale_layout,
     )
     return codes, scale, None

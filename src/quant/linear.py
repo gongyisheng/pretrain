@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.kernel.ops.gemm import SCALED_MM_OPS
+from src.kernel.ops.gemm import SCALED_MM_OPS, _is_kernel_available, mxfp8_scaled_mm
 from src.metrics.quant import QuantizationStats, quantize_and_record
 from src.quant.quantize import dequantize_operand
 from src.quant.rotation import Rotation
@@ -26,6 +26,7 @@ def quantized_mm(
     a_stats: QuantizationStats | None = None,
     b_stats: QuantizationStats | None = None,
     rotation: Rotation | None = None,
+    backend: str | None = None,
 ) -> torch.Tensor:
     """Quantized 2D GEMM with optional per-operand quantization statistics.
 
@@ -43,6 +44,24 @@ def quantized_mm(
         a_scale["scale_dtype"],
         a_scale["block_shape"],
     )
+    scale_layout = "row_major"
+    if (
+        backend == "cuda"
+        and op == "gemm.mxfp8_scaled_mm"
+        and a_fmt == b_fmt == "fp8_e4m3"
+        and a_scale["scale_dtype"] is torch.float8_e8m0fnu
+        and b_scale["scale_dtype"] is torch.float8_e8m0fnu
+        and a_scale["block_shape"][1] == b_scale["block_shape"][1] == 32
+        and a.ndim == b.ndim == 2
+        and a.shape[1] == b.shape[0]
+        and a.shape[1] % 16 == 0
+        and b.shape[1] % 16 == 0
+        and out_dtype is torch.bfloat16
+        and (bias is None or (bias.shape == (b.shape[1],) and bias.is_contiguous()))
+        and rotation is None
+        and _is_kernel_available(op, "cuda", a.device)
+    ):
+        scale_layout = "swizzled_32_4_4"
     aq = sa = gsa = bq = sb = gsb = None
     if is_quantized(a_fmt):
         aq, sa, gsa = quantize_and_record(
@@ -54,6 +73,8 @@ def quantized_mm(
             stochastic_rounding=a_stochastic_rounding,
             rotation=rotation,
             output_layout="row_major",
+            backend=backend,
+            scale_layout=scale_layout,
         )
     if is_quantized(b_fmt):
         bq, sb, gsb = quantize_and_record(
@@ -65,8 +86,21 @@ def quantized_mm(
             stochastic_rounding=b_stochastic_rounding,
             rotation=rotation,
             output_layout="column_major" if op is not None else "row_major",
+            backend=backend,
+            scale_layout=scale_layout,
         )
 
+    if scale_layout == "swizzled_32_4_4":
+        return mxfp8_scaled_mm(
+            aq,
+            bq,
+            sa,
+            sb,
+            out_dtype,
+            32,
+            bias=None if bias is None else bias.to(out_dtype),
+            scale_layout=scale_layout,
+        )
     if op is not None:
         return SCALED_MM_OPS[op](
             aq,
@@ -122,6 +156,7 @@ class QuantizedLinearFn(torch.autograd.Function):
                 if cfg.rotation is not None and "fwd" in cfg.rotation["gemms"]
                 else None
             ),
+            backend=cfg.backend,
         )
 
         ctx.save_for_backward(x2d, w)
@@ -161,6 +196,7 @@ class QuantizedLinearFn(torch.autograd.Function):
                 if cfg.rotation is not None and "dgrad" in cfg.rotation["gemms"]
                 else None
             ),
+            backend=cfg.backend,
         )
         # dW = gᵀ @ X, (N,M)@(M,K) -> (N,K)
         dw = quantized_mm(
@@ -180,6 +216,7 @@ class QuantizedLinearFn(torch.autograd.Function):
                 if cfg.rotation is not None and "wgrad" in cfg.rotation["gemms"]
                 else None
             ),
+            backend=cfg.backend,
         )
         db = g.sum(dim=0, dtype=torch.float32) if ctx.has_bias else None
 

@@ -28,15 +28,16 @@ hidden activations. The LM head is excluded by default.
 | `mlp_hidden` | `M×1536` | MLP activations and gradients |
 
 All scripts take the same selectors. Defaults sweep contiguous and transposed
-inputs, both contraction dimensions, RNE (nearest, ties to even) and stochastic rounding, every
-format-supported granularity and block size, five warmups, and 20 ms timing
-replicates. Shapes and layout/axis combinations form a Cartesian sweep for
-kernel coverage. Transposing a stored shape also swaps its logical dimensions.
-Axis `-1` produces row-major codes and axis `-2` produces column-major codes,
-matching the left/right operands in `quantized_mm`. This includes forward
-weight transposes, contiguous weights for input gradients, and transposed
-output gradients for weight gradients. `--tokens` changes `M` for activation
-shapes; `--input-dtype` defaults to `bfloat16`.
+inputs, both contraction dimensions, RNE (nearest, ties to even) and stochastic
+rounding, quantization metrics disabled and enabled, every format-supported
+granularity and block size, five warmups, and 20 ms timing replicates. Shapes
+and layout/axis combinations form a Cartesian sweep for kernel coverage.
+Transposing a stored shape also swaps its logical dimensions. Axis `-1`
+produces row-major codes and axis `-2` produces column-major codes, matching
+the left/right operands in `quantized_mm`. This includes forward weight
+transposes, contiguous weights for input gradients, and transposed output
+gradients for weight gradients. `--tokens` changes `M` for activation shapes;
+`--input-dtype` defaults to `bfloat16`.
 
 CUDA graph replay and median GPU timing exclude compilation, validation,
 Python dispatch, and host allocation overhead. Inputs are seeded unit-normal
@@ -44,7 +45,10 @@ random values, reused across the configurations for each stored shape.
 Stochastic-rounding timing advances RNG state, so its codes are not compared
 bitwise. Results include relative reconstruction RMSE against the input and
 RNE code mismatch fraction against eager; mismatches are diagnostics, not
-an assertion of bitwise equivalence for compiled arithmetic.
+an assertion of bitwise equivalence for compiled arithmetic. The
+`--quantization-metrics` selector controls statistics collection inside timed
+quantization; reconstruction diagnostics always run outside timing. Tables
+and JSON/CSV results identify the metrics setting for each case.
 
 ```bash
 uv run python benchmarks/quantize/benchmark_fp8.py \
@@ -57,12 +61,16 @@ uv run python benchmarks/quantize/benchmark_nvfp4.py
 
 uv run python benchmarks/quantize/benchmark_fp8.py \
   --granularities blockwise1d --block-sizes 32
+
+uv run python benchmarks/quantize/benchmark_fp8.py \
+  --quantization-metrics enabled
 ```
 
-The first command has all ten FP8 schemes and both rounding modes (20 cases)
-for one tensor layout and contraction dimension. Full matrices can compile
-slowly; use `--shapes`, `--layouts`, `--contract-dims`, `--granularities`, and
-`--block-sizes` to reduce them. Results default to
+The first command has all ten FP8 schemes, both rounding modes, and both
+quantization-metrics settings (40 cases) for one tensor layout and contraction
+dimension. Full matrices can compile slowly; use `--shapes`, `--layouts`,
+`--contract-dims`, `--granularities`, `--block-sizes`, and
+`--quantization-metrics` to reduce them. Results default to
 `benchmarks/results/quantize/<format>.json` with a CSV sibling. Latencies are in
 microseconds; speedup is compiled eager latency divided by CUDA latency. Use
 `--list-cases` to inspect the selected cases without running them.
