@@ -100,11 +100,7 @@ def _compute_scale(
         # Clamp to E4M3's finite, nonzero range.
         low, high = str_to_qmin("fp8_e4m3"), str_to_qmax("fp8_e4m3")
         exact = (amax / str_to_qmax(fmt)).clamp(low, high)
-        coded = exact.to(scale_dtype)
-        # Round up after a downward cast to avoid clipping block maxima.
-        # Positive E4M3 encodings are ordered, so the next byte is the next scale.
-        bits = coded.contiguous().view(torch.uint8)
-        return torch.where(coded.float() < exact, bits + 1, bits).view(scale_dtype)
+        return exact.to(scale_dtype)
     return (amax / str_to_qmax(fmt)).clamp_min(EPS)
 
 
