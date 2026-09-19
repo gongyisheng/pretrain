@@ -42,8 +42,6 @@ training:
       weight:
         granularity: blockwise
         block_shape: [32, 32]
-      act:
-        granularity: tensorwise
       scale_dtype: fp32
     rounding:
       weight: RNE
