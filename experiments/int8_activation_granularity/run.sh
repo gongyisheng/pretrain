@@ -7,7 +7,14 @@ cd "$(dirname "$0")/../.."
 
 configs=(qwen3_51m_bf16 qwen3_51m_int8_w8a16 qwen3_51m_int8_w8a8_act_rowwise)
 for layout in blockwise1d blockwise2d; do
-    configs+=("qwen3_51m_int8_w8a8_act_${layout}_32")
+    if [[ "$layout" == blockwise1d ]]; then
+        block_sizes=(16 32 64 128)
+    else
+        block_sizes=(32)
+    fi
+    for block_size in "${block_sizes[@]}"; do
+        configs+=("qwen3_51m_int8_w8a8_act_${layout}_${block_size}")
+    done
 done
 
 for config in "${configs[@]}"; do
