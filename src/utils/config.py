@@ -443,16 +443,6 @@ class QuantizationConfig:
                     f"for {non_blockwise}"
                 )
 
-        blockwise_contracts = {
-            tensor_scale["block_shape"][1]
-            for tensor_scale in resolved_scale.values()
-            if tensor_scale["granularity"] == "blockwise"
-        }
-        if len(blockwise_contracts) > 1:
-            raise ValueError(
-                "quant block_shape contract extents must match across blockwise tensors"
-            )
-
         # The e8m0 shared exponent only has fp8 kernels, so mxfp8 + int8 (or any
         # other non-fp8 element) is rejected here. Pass-through formats are exempt:
         # they are unquantized and carry no scale.

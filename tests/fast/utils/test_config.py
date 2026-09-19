@@ -211,7 +211,7 @@ def test_config_to_dict_serializes_quant_scale_dtype(scale, scale_dtype):
 
 
 BLOCK_SHAPE_TENSORS = ["weight", "act", "grad_out"]
-BLOCK_SHAPE_OVERRIDES = [(1, 16), (16, 16)]
+BLOCK_SHAPE_OVERRIDES = [(1, 16), (16, 16), (1, 32), (1, 64), (1, 128)]
 OFF_BLOCKWISE_SHAPES = [
     {
         "weight": (1, 128),
@@ -1549,10 +1549,6 @@ BLOCK_SHAPE_ERRORS = [
     {"weight": {"granularity": "blockwise"}},
     {
         "weight": {"granularity": "blockwise", "block_shape": (1, 16, 16)},
-    },
-    {
-        "weight": {"granularity": "blockwise", "block_shape": (1, 16)},
-        "act": {"granularity": "blockwise", "block_shape": (1, 32)},
     },
 ]
 
