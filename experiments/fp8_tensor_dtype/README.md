@@ -59,4 +59,4 @@ Scale-up of the e4m3 forward recipes to Qwen3 404M. The reason is that at 51M th
 - A scaled GEMM fuses only when both operands are FP8. The weight- or activation-only runs are not throughput-comparable with bf16; full recipes fuse all three GEMMs and can be compared with each other.
 - Read `rel. quant err` from `train-quant/sqnr/<tensor>/<module>` in W&B. Use training series because validation has no backward tensors.
 - `grad_out` is not tested alone: it would measure unfused emulation, not a deployable recipe.
-- Related experiments: `fp8_granularity/`, `int8_tensor_dtype/`, and `int8_granularity/`.
+- Related experiments: `fp8_granularity/`, `int8_tensor_dtype/`, and `int8_weight_granularity/`.

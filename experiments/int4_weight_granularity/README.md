@@ -2,7 +2,7 @@
 
 Sweep blockwise quantization scale granularity at Qwen3-51M with **int4 weights**, across three arms — **W4A16** (int4 weights, bf16 activations), **W4A4** (int4 weights and activations), and **W4A4G4** (int4 weights, activations, and `grad_out`) — against a shared bf16 baseline. Each arm adds one more int4 operand to the previous one; `lm_head` is excluded from quantization in every quantized run.
 
-Only blockwise layouts are swept: 1D `(1, N)` and square 2D `(N, N)` at extents 16, 32, and 64. (Each tensor's scale entry has a `block_shape` with a contract extent that is a positive multiple of 16.) `experiments/int8_granularity/` also runs extent 128; it is dropped here because 128 elements per scale leaves int4's 16 codes far too little resolution to be informative. 19 runs: 1 baseline + 6 granularities × 3 arms.
+Only blockwise layouts are swept: 1D `(1, N)` and square 2D `(N, N)` at extents 16, 32, and 64. (Each tensor's scale entry has a `block_shape` with a contract extent that is a positive multiple of 16.) `experiments/int8_weight_granularity/` also runs extent 128; it is dropped here because 128 elements per scale leaves int4's 16 codes far too little resolution to be informative. 19 runs: 1 baseline + 6 granularities × 3 arms.
 
 ## Hypothesis
 
@@ -104,4 +104,4 @@ W&B project: `pretrain-int4-granularity`. Baseline: `qwen3_51m_bf16`.
 - **Do not compare step time across arms.** Fused `gemm.int8_scaled_mm` covers only the GEMMs whose *both* operands are int4: all three in W4A4G4, forward only in W4A4, none in W4A16. Everything else falls back to dequantizing into a bf16 matmul (simulated quantization), which is slower than bf16 itself. So the arms are ordered by how much fusion they get, not by quantization cost. Within an arm, step time across granularities is a fair comparison.
 - The three arms are nested (W4A16 ⊂ W4A4 ⊂ W4A4G4), so the per-granularity Δ chain attributes damage to a stage: weight rounding → forward activation error → backward gradient error.
 - int4 shares the int8 GEMM path (`gemm.int8_scaled_mm`) because int4 values are stored in an int8 container, so W4A4 and W4A4G4 buy no memory or bandwidth over int8 here. This experiment measures the *accuracy* cost of a 4-bit code range against scale granularity, not packed-int4 throughput.
-- The comparable int8 curve, including its `tensorwise`, `rowwise`, and extent-128 anchors, is `experiments/int8_granularity/`; the same axes are run there at int8 with identical hyperparameters, so the two projects can be overlaid on the shared cells directly.
+- The comparable int8 weight-only curve, including its `tensorwise`, `rowwise`, and extent-128 anchors, is `experiments/int8_weight_granularity/`; it uses identical hyperparameters, so compare this experiment's W4A16 runs with its W8A16 runs at shared granularities.

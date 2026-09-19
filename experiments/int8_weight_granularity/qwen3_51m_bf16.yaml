@@ -32,7 +32,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int8_granularity/qwen3_51m_bf16/
+  checkpoint_dir: checkpoints/int8_weight_granularity/qwen3_51m_bf16/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -53,6 +53,6 @@ scheduler:
   warmup_steps: 1500
   min_lr: 5e-5
 logging:
-  wandb_project: pretrain-int8-granularity
+  wandb_project: pretrain-int8-weight-granularity
   wandb_run_name: qwen3-51m-bf16
   log_every: 10
