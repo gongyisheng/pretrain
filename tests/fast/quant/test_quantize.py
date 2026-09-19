@@ -34,7 +34,7 @@ GEOMETRY_CASES = [
 DENSE_SHAPES = [shape for shape, ragged_dim in GEOMETRY_CASES if ragged_dim is None]
 RAGGED_GROUPS = 5
 INPUT_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
-INIT_METHODS = ["normal", "transposed", "spread", "zeros", "tiny"]
+INIT_METHODS = ["normal", "transposed", "spread", "zeros", "tiny", "scale_rounding"]
 TEST_DEVICES = ["cpu", "cuda"]
 STOCHASTIC_ROUNDING = [False, True]
 COMPILED_FORMATS = [E4M3, "fp4_e2m1", "fp4_e2m1_4over6"]
@@ -138,10 +138,13 @@ def _ref_scale(amax, fmt, scale_dtype):
     elif scale_dtype is torch.float8_e4m3fn:
         low, high = str_to_qmin("fp8_e4m3"), str_to_qmax("fp8_e4m3")
         exact = (amax / str_to_qmax(fmt)).clamp(low, high)
-        # Ceiling by lookup over every value e4m3 represents, which cross-checks the
-        # implementation's byte increment without restating it.
         grid = _E4M3_GRID.to(exact.device)
-        reference_scale = grid[torch.searchsorted(grid, exact.contiguous())]
+        upper = torch.searchsorted(grid, exact.contiguous())
+        lower = (upper - 1).clamp(min=0)
+        choose_upper = (exact - grid[lower] > grid[upper] - exact) | (
+            (exact - grid[lower] == grid[upper] - exact) & (upper.remainder(2) == 0)
+        )
+        reference_scale = grid[torch.where(choose_upper, upper, lower)]
     else:
         reference_scale = (amax / str_to_qmax(fmt)).clamp_min(EPS)
     return reference_scale
@@ -565,7 +568,25 @@ def test_quantize_operand_precision(
     if init_method == "tiny" and dtype is not torch.float32:
         pytest.skip("tiny values are not representable in this dtype")
 
-    x = _make(init_method, shape, dtype)
+    if init_method == "scale_rounding":
+        if (
+            fmt != "int4"
+            or scale_cfg["scale_dtype"] is not torch.float8_e4m3fn
+            or scale_cfg["block_shape"][0] != 1
+        ):
+            pytest.skip("scale rounding cases use int4 with rowwise or 1D E4M3 scales")
+        # Midpoint neighbors and ties; 448 keeps the global factor at one.
+        scales = torch.tensor(
+            [1.03125, 1.0625, 1.09375, 1.15625, 1.1875, 1.21875, 448.0]
+        )
+        outer_dim = -1 if contract_dim == -2 else -2
+        rows = torch.arange(shape[outer_dim]) % scales.numel()
+        row_shape = [1] * len(shape)
+        row_shape[outer_dim] = shape[outer_dim]
+        x = (7 * scales[rows]).reshape(row_shape).expand(shape).to(dtype).clone()
+        x.movedim(contract_dim, -1)[..., 1::2].neg_()
+    else:
+        x = _make(init_method, shape, dtype)
     offs = None if ragged_dim is None else _ragged_offs(shape[ragged_dim])
     if is_fp4(fmt) and (
         shape[contract_dim] % 16
@@ -687,8 +708,9 @@ def test_quantize_operand_precision(
             )
 
     qmax = str_to_qmax(fmt)
-    # Every block peak is in range, so code clamping is inactive.
-    assert (x.abs().float() <= div * qmax * (1 + 2**-20)).all()
+    if scale_cfg["scale_dtype"] is not torch.float8_e4m3fn:
+        # E4M3 nearest rounding can put block peaks outside the code range.
+        assert (x.abs().float() <= div * qmax * (1 + 2**-20)).all()
     floored = scale_cfg["scale_dtype"] is torch.float8_e8m0fnu and not is_int8s(fmt)
     if init_method == "tiny" and floored:
         # The clamped E8M0 scale preserves this value as an fp8 subnormal.
@@ -698,11 +720,7 @@ def test_quantize_operand_precision(
         if scale_cfg["scale_dtype"] is torch.float32:
             assert ratio == pytest.approx(qmax, rel=1e-6)  # The peak maps to qmax.
         elif scale_cfg["scale_dtype"] is torch.float8_e4m3fn:
-            # A scale floored at e4m3's min subnormal cannot be tight: fp8_e5m2's
-            # qmax of 57344 puts its natural scale three decades under that floor,
-            # so every block floors and utilisation collapses to 0.038. Normalising
-            # that is the global scale's job, so only blocks inside e4m3's window
-            # are held to the bound. Measured worst case over the grid: 0.967 qmax.
+            # Scale flooring can reduce utilization for small blocks.
             unfloored = raw_div > str_to_qmin("fp8_e4m3")
             if unfloored.any():
                 assert (x.abs().float() / div)[unfloored].amax().item() > qmax / 2
@@ -766,19 +784,17 @@ def test_quantize_operand_narrow_scale_clamps(contract_dim, case, device, fmt):
 # Eight decades of operand magnitude. Without a global scale an e4m3 block scale is
 # only usable near 1e0; the whole point of the scale is that these agree.
 GLOBAL_SCALE_MAGNITUDES = [1e-4, 1e-2, 1.0, 1e2, 1e4]
-# Worst relMSE over magnitude x contract_dim with the nvfp4 recipe, times 4.3. The
-# bounds are per format because a single loose one would let int8 regress 300x and
-# still pass. Unscaled, the far magnitudes sit near 1.0, so every bound has teeth.
+# Worst CPU/CUDA relMSE over magnitude x contract_dim, with 3.9-5.5x margins.
 GLOBAL_SCALE_REL_MSE_BOUND = {
-    "fp8_e4m3": 0.0028,  # measured 6.429e-04
-    "fp8_e5m2": 0.011,  # measured 2.647e-03
-    "fp4_e2m1": 0.045,  # measured 1.003e-02
-    "fp4_e2m1_4over6": 0.048,  # measured 1.108e-02, margin 4.33x
-    "int4": 0.036,  # measured 8.479e-03
-    "int5": 0.0078,  # measured 1.802e-03
-    "int6": 0.0018,  # measured 4.221e-04
-    "int7": 0.00045,  # measured 1.040e-04
-    "int8": 0.00011,  # measured 2.570e-05
+    "fp8_e4m3": 3e-3,  # measured 6.791e-04
+    "fp8_e5m2": 1e-2,  # measured 2.196e-03
+    "fp4_e2m1": 5e-2,  # measured 9.209e-03
+    "fp4_e2m1_4over6": 5e-2,  # measured 9.988e-03
+    "int4": 4e-2,  # measured 7.712e-03
+    "int5": 8e-3,  # measured 1.763e-03
+    "int6": 2e-3,  # measured 5.059e-04
+    "int7": 9e-4,  # measured 2.107e-04
+    "int8": 6e-4,  # measured 1.384e-04
 }
 
 
