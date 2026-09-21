@@ -6,8 +6,15 @@ set -e
 cd "$(dirname "$0")/../.."
 
 configs=(qwen3_51m_bf16 qwen3_51m_int8_w8a8)
-for granularity in rowwise blockwise1d_32 blockwise2d_32; do
-    configs+=("qwen3_51m_int8_w8a8g8_grad_${granularity}")
+configs+=(qwen3_51m_int8_w8a8g8_grad_rowwise)
+for granularity in blockwise1d blockwise2d; do
+    block_sizes=(32)
+    if [[ "${granularity}" == "blockwise1d" ]]; then
+        block_sizes=(16 32 64 128)
+    fi
+    for block_size in "${block_sizes[@]}"; do
+        configs+=("qwen3_51m_int8_w8a8g8_grad_${granularity}_${block_size}")
+    done
 done
 
 for config in "${configs[@]}"; do

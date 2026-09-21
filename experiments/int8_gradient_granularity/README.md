@@ -1,6 +1,6 @@
 # INT8 Gradient Granularity
 
-Measure how INT8 output-gradient scale granularity affects W8A8G8 pretraining. Weight and activation quantization remain fixed, so the three W8A8G8 runs differ only in `training.quantization.scale.grad_out`.
+Measure how INT8 output-gradient scale granularity affects W8A8G8 pretraining. Weight and activation quantization remain fixed, so the six W8A8G8 runs differ only in `training.quantization.scale.grad_out`.
 
 ## Hypothesis
 
@@ -13,7 +13,10 @@ Smaller gradient scale groups should limit outlier-driven error. We expect 1D bl
 | `qwen3_51m_bf16` | BF16 | BF16 | BF16 |
 | `qwen3_51m_int8_w8a8` | INT8 (32, 32) | INT8 (1, 32) | BF16 |
 | `qwen3_51m_int8_w8a8g8_grad_rowwise` | INT8 (32, 32) | INT8 (1, 32) | INT8 rowwise |
+| `qwen3_51m_int8_w8a8g8_grad_blockwise1d_16` | INT8 (32, 32) | INT8 (1, 32) | INT8 (1, 16) |
 | `qwen3_51m_int8_w8a8g8_grad_blockwise1d_32` | INT8 (32, 32) | INT8 (1, 32) | INT8 (1, 32) |
+| `qwen3_51m_int8_w8a8g8_grad_blockwise1d_64` | INT8 (32, 32) | INT8 (1, 32) | INT8 (1, 64) |
+| `qwen3_51m_int8_w8a8g8_grad_blockwise1d_128` | INT8 (32, 32) | INT8 (1, 32) | INT8 (1, 128) |
 | `qwen3_51m_int8_w8a8g8_grad_blockwise2d_32` | INT8 (32, 32) | INT8 (1, 32) | INT8 (32, 32) |
 
 | Shared parameter | Value |
@@ -47,12 +50,15 @@ Compare validation loss and BPB at equal training tokens. Compute the mean over 
 | `bf16` | — | 0 | — | Pending |
 | `int8_w8a8` | — | — | 0 | Pending |
 | `int8_w8a8g8_grad_rowwise` | — | — | — | Pending |
+| `int8_w8a8g8_grad_blockwise1d_16` | — | — | — | Pending |
 | `int8_w8a8g8_grad_blockwise1d_32` | — | — | — | Pending |
+| `int8_w8a8g8_grad_blockwise1d_64` | — | — | — | Pending |
+| `int8_w8a8g8_grad_blockwise1d_128` | — | — | — | Pending |
 | `int8_w8a8g8_grad_blockwise2d_32` | — | — | — | Pending |
 
 ## Notes
 
 - Validation runs in BF16 because `QuantizedLinear.eval()` bypasses quantization.
-- Output gradients are the left operand in dgrad (`g @ W`) and wgrad (`g.T @ X`). In dgrad, 1D `(1, 32)` groups 32 output channels for one token and 2D `(32, 32)` groups 32 tokens × 32 output channels. In wgrad, 1D groups 32 tokens for one output channel and 2D groups 32 output channels × 32 tokens.
+- Output gradients are the left operand in dgrad (`g @ W`) and wgrad (`g.T @ X`). In dgrad, 1D `(1, N)` groups N output channels for one token and 2D `(32, 32)` groups 32 tokens × 32 output channels. In wgrad, 1D groups N tokens for one output channel and 2D groups 32 output channels × 32 tokens.
 - Rowwise output gradients group all output channels for each token in dgrad and all flattened tokens for each output channel in wgrad.
-- Rowwise output gradients use the BF16 backward fallback. The width-32 blockwise runs use matching-width INT8 kernels where available.
+- Rowwise output gradients use the BF16 backward fallback. Width-16, width-64, and width-128 1D gradients also use this fallback because their block width does not match the weight and activation width of 32; `src/quant/linear.py` selects an INT8 kernel only when both operands have the same block width. The width-32 blockwise runs use matching-width INT8 kernels where available.
