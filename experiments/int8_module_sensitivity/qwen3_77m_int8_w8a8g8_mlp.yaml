@@ -1,4 +1,5 @@
 max_seq_len: 1024
+
 model:
   d_model: 512
   n_layers: 8
@@ -15,46 +16,56 @@ model:
     mlp_kwargs:
       intermediate_size: 1536
       dropout: 0.0
+  tie_word_embeddings: false
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
   dropout_embd: 0.0
+
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k
   data_dir: data/
   val_split: 0.01
   num_workers: 4
+
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
+  seed: 42
   quantization:
     enabled: true
     dtype:
-      weight: int6
-      act: int6
-      grad_out: bf16
+      weight: int8
+      act: int8
+      grad_out: int8
     scale:
       weight:
-        granularity: tensorwise
-        block_shape: [0, 0]
+        granularity: blockwise
+        block_shape: [32, 32]
       act:
-        granularity: tensorwise
-        block_shape: [0, 0]
+        granularity: blockwise
+        block_shape: [1, 32]
       grad_out:
-        granularity: tensorwise
-        block_shape: [0, 0]
+        granularity: blockwise
+        block_shape: [1, 32]
       scale_dtype: fp32
       enable_global_scale: false
+    rounding:
+      weight: RNE
+      act: RNE
+      grad_out: RNE
+    include: [blocks.*.mlp.*]
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int8_tensor_dtype/qwen3_51m_int6_w8a8_tensorwise/
+  checkpoint_dir: checkpoints/int8_module_sensitivity/qwen3_77m_int8_w8a8g8_mlp/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
+
 optimizer:
   optimizer_cls: muon
   lr: 5e-4
@@ -71,7 +82,8 @@ scheduler:
   name: cosine
   warmup_steps: 1500
   min_lr: 5e-5
+
 logging:
-  wandb_project: pretrain-int8-tensor-dtype
-  wandb_run_name: qwen3-51m-int6-w8a8-tensorwise
+  wandb_project: pretrain-int8-module-sensitivity
+  wandb_run_name: qwen3-77m-int8-w8a8g8-mlp
   log_every: 10
