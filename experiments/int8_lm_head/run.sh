@@ -12,6 +12,16 @@ for granularity in blockwise1d blockwise2d; do
     done
 done
 
+for block_size in 16 64 128; do
+    configs+=("qwen3_77m_int8_w8a16_blockwise2d_${block_size}")
+done
+
+for granularity in blockwise1d blockwise2d; do
+    for block_size in 32; do
+        configs+=("qwen3_77m_int8_w8a8_act_${granularity}_${block_size}")
+    done
+done
+
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
     echo "Started at: $(date)"
