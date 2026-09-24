@@ -30,8 +30,8 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 128
-  gradient_accumulation_steps: 2
+  batch_size: 16
+  gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
   seed: 42
