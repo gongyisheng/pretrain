@@ -1,15 +1,18 @@
 #!/bin/bash
-# Qwen3-51M bf16 baseline plus int4 W4A16 with fp32 block scales and with e4m3 block scales + fp32 global scale.
+# Qwen3-51M bf16 baseline plus int4 W4A16 with 1D and 2D blockwise scales, with and without global scale.
 # Usage: nohup bash experiments/int4_global_scale/run.sh > logs/int4_global_scale_51m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
 
-arms=(bs_fp32 bs_fp8_e4m3_gs_fp32)
+layouts=(blockwise1d blockwise2d)
+global_scales=(off on)
 
 configs=(qwen3_51m_bf16)
-for arm in "${arms[@]}"; do
-    configs+=("qwen3_51m_int4_w4a16_${arm}")
+for layout in "${layouts[@]}"; do
+    for global_scale in "${global_scales[@]}"; do
+        configs+=("qwen3_51m_int4_w4a16_${layout}_16_gs_${global_scale}")
+    done
 done
 
 for config in "${configs[@]}"; do

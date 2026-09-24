@@ -55,7 +55,7 @@ training:
       enable_global_scale: true
     exclude: [lm_head]
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int4_global_scale/qwen3_51m_int4_w4a16_bs_fp8_e4m3_gs_fp32/
+  checkpoint_dir: checkpoints/int4_global_scale/qwen3_51m_int4_w4a16_blockwise1d_16_gs_on/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -79,6 +79,6 @@ scheduler:
 
 logging:
   wandb_project: pretrain-int4-global-scale
-  wandb_run_name: qwen3-51m-int4-w4a16-bs-fp8-e4m3-gs-fp32
+  wandb_run_name: qwen3-51m-int4-w4a16-blockwise1d-16-gs-on
   log_every: 10
   log_quant_metrics: true
