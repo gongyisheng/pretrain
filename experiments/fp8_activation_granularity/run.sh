@@ -9,6 +9,7 @@ configs=(qwen3_51m_bf16 qwen3_51m_fp8_w8a16 qwen3_51m_fp8_w8a8_act_rowwise)
 for block_size in 16 32 64 128; do
     configs+=("qwen3_51m_fp8_w8a8_act_blockwise1d_${block_size}")
 done
+configs+=(qwen3_51m_fp8_w8a8_act_blockwise1d_32_e5m2)
 configs+=(qwen3_51m_fp8_w8a8_act_blockwise2d_32)
 
 for config in "${configs[@]}"; do
