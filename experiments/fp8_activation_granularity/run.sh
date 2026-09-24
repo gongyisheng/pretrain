@@ -6,11 +6,10 @@ set -e
 cd "$(dirname "$0")/../.."
 
 configs=(qwen3_51m_bf16 qwen3_51m_fp8_w8a16 qwen3_51m_fp8_w8a8_act_rowwise)
-for layout in blockwise1d blockwise2d; do
-    for block_size in 32; do
-        configs+=("qwen3_51m_fp8_w8a8_act_${layout}_${block_size}")
-    done
+for block_size in 16 32 64 128; do
+    configs+=("qwen3_51m_fp8_w8a8_act_blockwise1d_${block_size}")
 done
+configs+=(qwen3_51m_fp8_w8a8_act_blockwise2d_32)
 
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
