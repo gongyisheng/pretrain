@@ -41,11 +41,12 @@ training:
     scale:
       weight:
         granularity: blockwise
-        block_shape: [32, 32]
+        block_shape: [16, 16]
       act:
         granularity: blockwise
         block_shape: [1, 16]
-      scale_dtype: fp32
+      scale_dtype: fp8_e4m3
+      enable_global_scale: true
     rounding:
       weight: RNE
       act: RNE

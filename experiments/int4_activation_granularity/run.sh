@@ -5,11 +5,11 @@
 set -e
 cd "$(dirname "$0")/../.."
 
-configs=(qwen3_51m_bf16 qwen3_51m_int4_w4a16 qwen3_51m_int4_w4a4_act_rowwise)
+configs=(qwen3_51m_bf16 qwen3_51m_int4_w4a16)
 for layout in blockwise1d blockwise2d; do
-    block_sizes=(32)
+    block_sizes=(16)
     if [[ "$layout" == blockwise1d ]]; then
-        block_sizes=(16 32 64 128)
+        block_sizes=(16 32 64)
     fi
     for block_size in "${block_sizes[@]}"; do
         configs+=("qwen3_51m_int4_w4a4_act_${layout}_${block_size}")
