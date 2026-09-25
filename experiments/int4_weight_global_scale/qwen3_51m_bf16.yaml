@@ -36,26 +36,9 @@ training:
   mixed_precision: bf16
   seed: 42
   quantization:
-    enabled: true
-    dtype:
-      weight: int4
-      act: bf16
-      grad_out: bf16
-    scale:
-      weight:
-        granularity: blockwise
-        block_shape: [1, 16]
-      act:
-        granularity: blockwise
-        block_shape: [1, 16]
-      grad_out:
-        granularity: blockwise
-        block_shape: [1, 16]
-      scale_dtype: fp32
-      enable_global_scale: false
-    exclude: [lm_head]
+    enabled: false
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int4_global_scale/qwen3_51m_int4_w4a16_blockwise1d_16_gs_off/
+  checkpoint_dir: checkpoints/int4_weight_global_scale/qwen3_51m_bf16/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -78,7 +61,6 @@ scheduler:
   min_lr: 5e-5
 
 logging:
-  wandb_project: pretrain-int4-global-scale
-  wandb_run_name: qwen3-51m-int4-w4a16-blockwise1d-16-gs-off
+  wandb_project: pretrain-int4-weight-global-scale
+  wandb_run_name: qwen3-51m-bf16
   log_every: 10
-  log_quant_metrics: true
