@@ -31,21 +31,21 @@ data:
 
 training:
   batch_size: 16
-  gradient_accumulation_steps: 16
-  max_steps: 50000
+  gradient_accumulation_steps: 1
+  max_steps: 800000
   device: cuda
   mixed_precision: bf16
   enable_torch_compile: true
   seed: 42
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/adamc/qwen3_51m_adamc/
-  checkpoint_every: 5000
+  checkpoint_dir: checkpoints/adamc/qwen3_51m_adamw_steps_800k/
+  checkpoint_every: 80000
   eval_every: 100
   eval_steps: 100
 
 optimizer:
-  optimizer_cls: adamc
-  lr: 5e-4
+  optimizer_cls: adamw
+  lr: 1.25e-4
   weight_decay: 0.1
   optimizer_kwargs:
     betas:
@@ -55,10 +55,10 @@ optimizer:
 
 scheduler:
   name: cosine
-  warmup_steps: 1500
-  min_lr: 5e-5
+  warmup_steps: 24000
+  min_lr: 1.25e-5
 
 logging:
   wandb_project: pretrain-adamc
-  wandb_run_name: qwen3-51m-adamc
-  log_every: 10
+  wandb_run_name: qwen3-51m-adamw-steps-800k
+  log_every: 100
