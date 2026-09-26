@@ -3,13 +3,16 @@
 A research playground for LLM pretraining and model architecture exploration.
 
 ## Install
-Requires python >=3.12
-Notable pins:
-- `torch>=2.10`
+
+Requires Python >=3.12. `uv sync` installs PyTorch from the CUDA 13.2 wheel index.
+
+Key dependency requirements:
+
+- `torch>=2.12.1,<2.13`
 - `triton>=3.6`
 - `tokenizers>=0.22`
 - `datasets>=4.5`
-- `wandb>=0.26`
+- `wandb>=0.30`
 
 ```bash
 uv sync
