@@ -11,6 +11,31 @@ if TYPE_CHECKING:
 AdamWOptimizer = torch.optim.AdamW
 
 
+class AdamCOptimizer(torch.optim.AdamW):
+    """AdamW with schedule-corrected weight decay for marked parameter groups.
+
+    AdamC scales a corrected group's decoupled weight decay by ``lr / max_lr``.
+    This makes its decay term ``lr**2 / max_lr * weight_decay`` while ordinary
+    groups retain AdamW's ``lr * weight_decay`` term.
+    """
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        original_weight_decays = []
+        try:
+            for group in self.param_groups:
+                if not group.get("use_adamc", False):
+                    continue
+                if group["lr"] == 0.0:
+                    continue
+                original_weight_decays.append((group, group["weight_decay"]))
+                group["weight_decay"] *= group["lr"] / group["max_lr"]
+            return super().step(closure)
+        finally:
+            for group, weight_decay in original_weight_decays:
+                group["weight_decay"] = weight_decay
+
+
 class LionOptimizer(torch.optim.Optimizer):
     """
     Lion: EvoLved Sign Momentum (Chen et al. 2023, https://arxiv.org/pdf/2302.06675).
@@ -120,6 +145,11 @@ def _is_muon_param(name: str, param: torch.nn.Parameter) -> bool:
         and "lm_head" not in name
         and "router" not in name
     )
+
+
+def _is_adamc_param(name: str, param: torch.nn.Parameter) -> bool:
+    """AdamC corrects matrix-valued weights except embeddings, heads, and routers."""
+    return _is_muon_param(name, param)
 
 
 def _adjust_lr(lr: float, adjust_lr_fn: str | None, dim_out: int, dim_in: int) -> float:
@@ -344,6 +374,7 @@ class MuonAdamWOptimizer:
 
 OPTIMIZER_REGISTRY = {
     "adamw": AdamWOptimizer,
+    "adamc": AdamCOptimizer,
     "lion": LionOptimizer,
     "muon": MuonAdamWOptimizer,
 }
@@ -361,6 +392,10 @@ def build_optimizer(
     with `lr_mult=1.0`. Within every group, weight decay still follows the
     standard rule (`ndim >= 2` and no `"ln"`/`"bias"` in the name → decay).
 
+    For `optimizer_cls == "adamc"`, hidden ``nn.Linear`` weights and Sparse
+    MoE experts use corrected weight decay. Embeddings and the output head keep
+    AdamW's ordinary decay.
+
     For `optimizer_cls == "muon"`, params are additionally split on `use_muon` (2D hidden
     weights → Muon; everything else → AdamW), so the two subsystems get disjoint
     param groups.
@@ -370,10 +405,11 @@ def build_optimizer(
     silent no-op.
     """
     optimizer_cls = config.optimizer.optimizer_cls
-    split_muon = optimizer_cls == "muon"
+    use_muon_optm = optimizer_cls == "muon"
+    use_adamc_optm = optimizer_cls == "adamc"
     patterns = [(re.compile(k), k) for k in config.optimizer.lr_mult.keys()]
     wd = config.optimizer.weight_decay
-    groups: dict = {}  # (matched_pattern_key_or_None, is_no_decay, use_muon) -> [params]
+    groups: dict = {}  # (matched key, no decay, Muon, AdamC) -> [params]
 
     for param_name, param in model.named_parameters():
         if not param.requires_grad:
@@ -384,25 +420,29 @@ def build_optimizer(
                 matched = key
                 break
         is_no_decay = param.ndim < 2 or "ln" in param_name or "bias" in param_name
-        use_muon = split_muon and _is_muon_param(param_name, param)
-        groups.setdefault((matched, is_no_decay, use_muon), []).append(param)
+        use_muon = use_muon_optm and _is_muon_param(param_name, param)
+        use_adamc = (
+            use_adamc_optm and not is_no_decay and _is_adamc_param(param_name, param)
+        )
+        groups.setdefault((matched, is_no_decay, use_muon, use_adamc), []).append(param)
 
     param_groups = []
-    for (matched, is_no_decay, use_muon), params in groups.items():
+    for (matched, is_no_decay, use_muon, use_adamc), params in groups.items():
         mult = config.optimizer.lr_mult.get(matched, 1.0) if matched else 1.0
-        param_groups.append(
-            {
-                "params": params,
-                "weight_decay": 0.0 if is_no_decay else wd,
-                "lr_mult": mult,
-                "use_muon": use_muon,
-            }
-        )
+        group = {
+            "params": params,
+            "weight_decay": 0.0 if is_no_decay else wd,
+            "lr_mult": mult,
+            "use_muon": use_muon,
+            "use_adamc": use_adamc,
+        }
+        if use_adamc_optm:
+            group["lr"] = config.optimizer.lr * mult
+            group["max_lr"] = config.optimizer.lr * mult
+        param_groups.append(group)
 
-    kwargs = dict(config.optimizer.optimizer_kwargs)
-    if "betas" in kwargs:
-        kwargs["betas"] = tuple(kwargs["betas"])
-    if split_muon:
+    kwargs = config.optimizer.optimizer_kwargs
+    if use_muon_optm:
         return MuonAdamWOptimizer(
             [g for g in param_groups if g["use_muon"]],
             [g for g in param_groups if not g["use_muon"]],

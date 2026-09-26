@@ -590,7 +590,7 @@ class TrainingConfig:
 
 @dataclass
 class OptimizerConfig:
-    optimizer_cls: str = "adamw"  # "adamw" | "lion" | "muon"
+    optimizer_cls: str = "adamw"  # "adamw" | "adamc" | "lion" | "muon"
     lr: float = 5e-4
     lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
@@ -599,7 +599,7 @@ class OptimizerConfig:
     def __post_init__(self):
         _check_one_of("optimizer_cls", self.optimizer_cls, OPTIMIZER_REGISTRY)
         kwargs = self.optimizer_kwargs
-        if self.optimizer_cls == "adamw":
+        if self.optimizer_cls in ("adamw", "adamc"):
             # beta2=0.95 (not torch's 0.999) is the GPT-3/LLaMA setting.
             kwargs.setdefault("betas", (0.9, 0.95))
             kwargs.setdefault("eps", 1e-8)

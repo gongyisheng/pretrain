@@ -15,6 +15,7 @@ import torch
 from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, SchedulerConfig
 from src.model import build_model
 from src.training.optimizer import (
+    AdamCOptimizer,
     LionOptimizer,
     MuonOptimizer,
     MuonAdamWOptimizer,
@@ -217,6 +218,141 @@ def test_lion_state_dict_roundtrip():
 # --------------------------------------------------------------------------- #
 # 2. build_optimizer function                                                 #
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("use_adamc", [False, True])
+def test_adamc_step_weight_decay(use_adamc):
+    param = torch.nn.Parameter(torch.tensor([2.0, -3.0]))
+    lr, max_lr, weight_decay = 1e-3, 1e-2, 0.5
+    optimizer = AdamCOptimizer(
+        [
+            {
+                "params": [param],
+                "use_adamc": use_adamc,
+                "max_lr": max_lr,
+            }
+        ],
+        lr=lr,
+        weight_decay=weight_decay,
+        foreach=False,
+        fused=False,
+    )
+    param.grad = torch.zeros_like(param)
+
+    expected_decay = weight_decay * (lr / max_lr if use_adamc else 1.0)
+    expected = param.detach() * (1 - lr * expected_decay)
+    optimizer.step()
+
+    assert torch.allclose(param.detach(), expected, atol=1e-7)
+    assert optimizer.param_groups[0]["weight_decay"] == weight_decay
+
+
+def test_adamc_step_matches_adamw_at_peak_lr():
+    param_adamc = torch.nn.Parameter(torch.tensor([2.0, -3.0]))
+    param_adamw = torch.nn.Parameter(param_adamc.detach().clone())
+    lr, weight_decay = 1e-3, 0.5
+    optimizer_adamc = AdamCOptimizer(
+        [{"params": [param_adamc], "use_adamc": True, "max_lr": lr}],
+        lr=lr,
+        weight_decay=weight_decay,
+        foreach=False,
+        fused=False,
+    )
+    optimizer_adamw = torch.optim.AdamW(
+        [param_adamw],
+        lr=lr,
+        weight_decay=weight_decay,
+        foreach=False,
+        fused=False,
+    )
+    gradient = torch.tensor([0.25, -0.5])
+    param_adamc.grad = gradient.clone()
+    param_adamw.grad = gradient.clone()
+
+    optimizer_adamc.step()
+    optimizer_adamw.step()
+
+    assert torch.equal(param_adamc.detach(), param_adamw.detach())
+
+
+def test_adamc_step_zero_lr_group():
+    param = torch.nn.Parameter(torch.tensor([2.0, -3.0]))
+    optimizer = AdamCOptimizer(
+        [{"params": [param], "use_adamc": True, "lr": 0.0, "max_lr": 0.0}],
+        lr=1e-3,
+        weight_decay=0.5,
+        foreach=False,
+        fused=False,
+    )
+    param.grad = torch.ones_like(param)
+
+    optimizer.step()
+
+    assert torch.equal(param.detach(), torch.tensor([2.0, -3.0]))
+
+
+def test_build_optimizer_dispatches_to_adamc():
+    cfg = _make_cfg(tie=False, optimizer_cls="adamc")
+    cfg.optimizer.lr = 2e-3
+    cfg.optimizer.lr_mult = {"q_proj": 0.5, "lm_head": 1.0}
+    cfg.model.residual_cls = "attn_res"
+    model = build_model(cfg)
+    optimizer = build_optimizer(model, cfg)
+
+    assert isinstance(optimizer, AdamCOptimizer)
+    groups_by_param = {
+        id(param): group
+        for group in optimizer.param_groups
+        for param in group["params"]
+    }
+    params = dict(model.named_parameters())
+    assert groups_by_param[id(params["blocks.0.attn.q_proj.weight"])]["use_adamc"]
+    assert groups_by_param[id(params["blocks.0.attn.q_proj.weight"])]["max_lr"] == (
+        cfg.optimizer.lr * 0.5
+    )
+    assert not groups_by_param[id(model.token_emb.weight)]["use_adamc"]
+    assert not groups_by_param[id(model.lm_head.weight)]["use_adamc"]
+    assert not groups_by_param[id(params["blocks.0.norm1.weight"])]["use_adamc"]
+    assert groups_by_param[id(params["blocks.0.attn_res_layer.proj.weight"])][
+        "use_adamc"
+    ]
+
+
+def test_build_optimizer_adamc_corrects_matrix_outside_blocks():
+    model = torch.nn.Module()
+    model.register_parameter("matrix", torch.nn.Parameter(torch.empty(4, 4)))
+    cfg = _make_cfg(optimizer_cls="adamc")
+    optimizer = build_optimizer(model, cfg)
+
+    assert optimizer.param_groups[0]["use_adamc"]
+
+
+def test_build_optimizer_adamc_raise_error():
+    cfg = _make_cfg(tie=False, optimizer_cls="adamc")
+    cfg.optimizer.optimizer_kwargs["max_lr"] = cfg.optimizer.lr * 2
+
+    with pytest.raises(TypeError):
+        build_optimizer(build_model(cfg), cfg)
+
+
+def test_build_optimizer_adamc_corrects_stacked_expert_weights():
+    cfg = _make_moe_cfg()
+    cfg.optimizer = OptimizerConfig("adamc", lr=1e-3, weight_decay=0.1)
+    model = build_model(cfg)
+    optimizer = build_optimizer(model, cfg)
+    groups_by_param = {
+        id(param): group
+        for group in optimizer.param_groups
+        for param in group["params"]
+    }
+    params = dict(model.named_parameters())
+
+    for name, param in model.named_parameters():
+        if "expert_" in name and param.ndim == 3:
+            assert groups_by_param[id(param)]["use_adamc"]
+    assert not groups_by_param[id(params["blocks.0.mlp.router.gate.weight"])][
+        "use_adamc"
+    ]
 
 
 def test_default_lr_mult_produces_two_groups_untied():
