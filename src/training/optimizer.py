@@ -31,6 +31,12 @@ class AdamCOptimizer(torch.optim.AdamW):
                 group["weight_decay"] = weight_decay
 
 
+ADAM_OPTIMIZER_REGISTRY = {
+    "adamw": AdamWOptimizer,
+    "adamc": AdamCOptimizer,
+}
+
+
 class LionOptimizer(torch.optim.Optimizer):
     """Lion sign-momentum optimizer. https://arxiv.org/abs/2302.06675"""
 
@@ -125,8 +131,8 @@ def _is_muon_param(name: str, param: torch.nn.Parameter) -> bool:
 
 
 def _is_adamc_param(name: str, param: torch.nn.Parameter) -> bool:
-    """Reuse Muon's matrix selection for AdamC."""
-    return _is_muon_param(name, param)
+    """Select matrix weights other than embeddings and the output head."""
+    return param.ndim >= 2 and "emb" not in name and "lm_head" not in name
 
 
 def _adjust_lr(lr: float, adjust_lr_fn: str | None, dim_out: int, dim_in: int) -> float:
@@ -257,8 +263,8 @@ class MuonOptimizer(torch.optim.Optimizer):
         return loss
 
 
-class MuonAdamWOptimizer:
-    """Muon for hidden matrices, AdamW for other weights.
+class MuonAdamOptimizer:
+    """Muon for hidden matrices, AdamW or AdamC for other weights.
 
     Muon: https://kellerjordan.github.io/posts/muon/
     """
@@ -266,43 +272,29 @@ class MuonAdamWOptimizer:
     def __init__(
         self,
         muon_groups,
-        adamw_groups,
+        adam_groups,
         lr: float,
-        weight_decay: float = 0.1,
-        betas=(0.9, 0.95),
-        eps: float = 1e-8,
-        fused: bool = True,
-        momentum: float = 0.95,
-        nesterov: bool = True,
-        ns_coefficients=(3.4445, -4.7750, 2.0315),
-        ns_max_batch_elems: int = 8_000_000,
-        ns_steps: int = 5,
-        adjust_lr_fn: str | None = "match_rms_adamw",
+        adam_cls: str = "adamw",
+        adam_kwargs: dict | None = None,
+        muon_kwargs: dict | None = None,
     ):
-        self.muon = MuonOptimizer(
-            muon_groups,
+        adam_optimizer_cls = ADAM_OPTIMIZER_REGISTRY.get(adam_cls)
+        if adam_optimizer_cls is None:
+            raise ValueError(f"unknown Adam companion: {adam_cls!r}")
+        self.adam_cls = adam_cls
+        muon_kwargs = {} if muon_kwargs is None else muon_kwargs
+        adam_kwargs = {} if adam_kwargs is None else adam_kwargs
+        self.muon = MuonOptimizer(muon_groups, lr=lr, **muon_kwargs)
+        self.adam = adam_optimizer_cls(
+            adam_groups,
             lr=lr,
-            weight_decay=weight_decay,
-            momentum=momentum,
-            nesterov=nesterov,
-            ns_coefficients=tuple(ns_coefficients),
-            ns_max_batch_elems=ns_max_batch_elems,
-            eps=eps,
-            ns_steps=ns_steps,
-            adjust_lr_fn=adjust_lr_fn,
+            **adam_kwargs,
         )
-        self.adamw = AdamWOptimizer(
-            adamw_groups,
-            lr=lr,
-            betas=tuple(betas),
-            eps=eps,
-            fused=fused,
-        )
-        self._optimizers = [self.muon, self.adamw]
+        self._optimizers = [self.muon, self.adam]
 
     @property
     def param_groups(self):
-        return self.muon.param_groups + self.adamw.param_groups
+        return self.muon.param_groups + self.adam.param_groups
 
     @property
     def state(self):
@@ -323,18 +315,27 @@ class MuonAdamWOptimizer:
             opt.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self):
-        return {"muon": self.muon.state_dict(), "adamw": self.adamw.state_dict()}
+        return {
+            "muon": self.muon.state_dict(),
+            "adam": self.adam.state_dict(),
+            "adam_cls": self.adam_cls,
+        }
 
     def load_state_dict(self, state_dict):
+        saved_adam_cls = state_dict["adam_cls"]
+        if saved_adam_cls != self.adam_cls:
+            raise ValueError(
+                f"checkpoint Adam companion {saved_adam_cls!r} does not match "
+                f"configured companion {self.adam_cls!r}"
+            )
         self.muon.load_state_dict(state_dict["muon"])
-        self.adamw.load_state_dict(state_dict["adamw"])
+        self.adam.load_state_dict(state_dict["adam"])
 
 
 OPTIMIZER_REGISTRY = {
-    "adamw": AdamWOptimizer,
-    "adamc": AdamCOptimizer,
+    **ADAM_OPTIMIZER_REGISTRY,
     "lion": LionOptimizer,
-    "muon": MuonAdamWOptimizer,
+    "muonadam": MuonAdamOptimizer,
 }
 
 
@@ -346,8 +347,10 @@ def build_optimizer(
     The first matching `lr_mult` regex sets each parameter's multiplier.
     """
     optimizer_cls = config.optimizer.optimizer_cls
-    use_muon_optm = optimizer_cls == "muon"
-    use_adamc_optm = optimizer_cls == "adamc"
+    use_muonadam_optm = optimizer_cls == "muonadam"
+    use_adamc_optm = optimizer_cls == "adamc" or (
+        use_muonadam_optm and config.optimizer.optimizer_kwargs["adam_cls"] == "adamc"
+    )
     patterns = [(re.compile(k), k) for k in config.optimizer.lr_mult.keys()]
     wd = config.optimizer.weight_decay
     groups: dict = {}  # (matched key, no decay, Muon, AdamC) -> [params]
@@ -361,9 +364,12 @@ def build_optimizer(
                 matched = key
                 break
         is_no_decay = param.ndim < 2 or "ln" in param_name or "bias" in param_name
-        use_muon = use_muon_optm and _is_muon_param(param_name, param)
+        use_muon = use_muonadam_optm and _is_muon_param(param_name, param)
         use_adamc = (
-            use_adamc_optm and not is_no_decay and _is_adamc_param(param_name, param)
+            use_adamc_optm
+            and not use_muon
+            and not is_no_decay
+            and _is_adamc_param(param_name, param)
         )
         groups.setdefault((matched, is_no_decay, use_muon, use_adamc), []).append(param)
 
@@ -377,19 +383,20 @@ def build_optimizer(
             "use_muon": use_muon,
             "use_adamc": use_adamc,
         }
-        if use_adamc_optm:
+        if use_adamc_optm and not use_muon:
             group["lr"] = config.optimizer.lr * mult
             group["max_lr"] = config.optimizer.lr * mult
         param_groups.append(group)
 
     kwargs = config.optimizer.optimizer_kwargs
-    if use_muon_optm:
-        return MuonAdamWOptimizer(
+    if use_muonadam_optm:
+        return MuonAdamOptimizer(
             [g for g in param_groups if g["use_muon"]],
             [g for g in param_groups if not g["use_muon"]],
             lr=config.optimizer.lr,
-            weight_decay=wd,
-            **kwargs,
+            adam_cls=kwargs["adam_cls"],
+            adam_kwargs=kwargs["adam_kwargs"],
+            muon_kwargs=kwargs["muon_kwargs"],
         )
     return OPTIMIZER_REGISTRY[optimizer_cls](
         param_groups, lr=config.optimizer.lr, **kwargs
