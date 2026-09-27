@@ -15,9 +15,11 @@ import torch
 from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, SchedulerConfig
 from src.model import build_model
 from src.training.optimizer import (
+    AdamCOptimizer,
+    AdamWOptimizer,
     LionOptimizer,
     MuonOptimizer,
-    MuonAdamWOptimizer,
+    MuonAdamOptimizer,
     build_optimizer,
     build_scheduler,
     ConstantWarmupScheduler,
@@ -219,6 +221,139 @@ def test_lion_state_dict_roundtrip():
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize("use_adamc", [False, True])
+def test_adamc_step_weight_decay(use_adamc):
+    param = torch.nn.Parameter(torch.tensor([2.0, -3.0]))
+    lr, max_lr, weight_decay = 1e-3, 1e-2, 0.5
+    optimizer = AdamCOptimizer(
+        [
+            {
+                "params": [param],
+                "use_adamc": use_adamc,
+                "max_lr": max_lr,
+            }
+        ],
+        lr=lr,
+        weight_decay=weight_decay,
+        foreach=False,
+        fused=False,
+    )
+    param.grad = torch.zeros_like(param)
+
+    expected_decay = weight_decay * (lr / max_lr if use_adamc else 1.0)
+    expected = param.detach() * (1 - lr * expected_decay)
+    optimizer.step()
+
+    assert torch.allclose(param.detach(), expected, atol=1e-7)
+    assert optimizer.param_groups[0]["weight_decay"] == weight_decay
+
+
+def test_adamc_step_matches_adamw_at_peak_lr():
+    param_adamc = torch.nn.Parameter(torch.tensor([2.0, -3.0]))
+    param_adamw = torch.nn.Parameter(param_adamc.detach().clone())
+    lr, weight_decay = 1e-3, 0.5
+    optimizer_adamc = AdamCOptimizer(
+        [{"params": [param_adamc], "use_adamc": True, "max_lr": lr}],
+        lr=lr,
+        weight_decay=weight_decay,
+        foreach=False,
+        fused=False,
+    )
+    optimizer_adamw = torch.optim.AdamW(
+        [param_adamw],
+        lr=lr,
+        weight_decay=weight_decay,
+        foreach=False,
+        fused=False,
+    )
+    gradient = torch.tensor([0.25, -0.5])
+    param_adamc.grad = gradient.clone()
+    param_adamw.grad = gradient.clone()
+
+    optimizer_adamc.step()
+    optimizer_adamw.step()
+
+    assert torch.equal(param_adamc.detach(), param_adamw.detach())
+
+
+def test_adamc_step_zero_lr_group():
+    param = torch.nn.Parameter(torch.tensor([2.0, -3.0]))
+    optimizer = AdamCOptimizer(
+        [{"params": [param], "use_adamc": True, "lr": 0.0, "max_lr": 0.0}],
+        lr=1e-3,
+        weight_decay=0.5,
+        foreach=False,
+        fused=False,
+    )
+    param.grad = torch.ones_like(param)
+
+    optimizer.step()
+
+    assert torch.equal(param.detach(), torch.tensor([2.0, -3.0]))
+
+
+def test_build_optimizer_dispatches_to_adamc():
+    cfg = _make_cfg(tie=False, optimizer_cls="adamc")
+    cfg.optimizer.lr = 2e-3
+    cfg.optimizer.lr_mult = {"q_proj": 0.5, "lm_head": 1.0}
+    cfg.model.residual_cls = "attn_res"
+    model = build_model(cfg)
+    optimizer = build_optimizer(model, cfg)
+
+    assert isinstance(optimizer, AdamCOptimizer)
+    groups_by_param = {
+        id(param): group
+        for group in optimizer.param_groups
+        for param in group["params"]
+    }
+    params = dict(model.named_parameters())
+    assert groups_by_param[id(params["blocks.0.attn.q_proj.weight"])]["use_adamc"]
+    assert groups_by_param[id(params["blocks.0.attn.q_proj.weight"])]["max_lr"] == (
+        cfg.optimizer.lr * 0.5
+    )
+    assert not groups_by_param[id(model.token_emb.weight)]["use_adamc"]
+    assert not groups_by_param[id(model.lm_head.weight)]["use_adamc"]
+    assert not groups_by_param[id(params["blocks.0.norm1.weight"])]["use_adamc"]
+    assert groups_by_param[id(params["blocks.0.attn_res_layer.proj.weight"])][
+        "use_adamc"
+    ]
+
+
+def test_build_optimizer_adamc_corrects_matrix_outside_blocks():
+    model = torch.nn.Module()
+    model.register_parameter("matrix", torch.nn.Parameter(torch.empty(4, 4)))
+    cfg = _make_cfg(optimizer_cls="adamc")
+    optimizer = build_optimizer(model, cfg)
+
+    assert optimizer.param_groups[0]["use_adamc"]
+
+
+def test_build_optimizer_adamc_raise_error():
+    cfg = _make_cfg(tie=False, optimizer_cls="adamc")
+    cfg.optimizer.optimizer_kwargs["max_lr"] = cfg.optimizer.lr * 2
+
+    with pytest.raises(TypeError):
+        build_optimizer(build_model(cfg), cfg)
+
+
+def test_build_optimizer_adamc_corrects_moe_weights():
+    cfg = _make_moe_cfg()
+    cfg.optimizer = OptimizerConfig("adamc", lr=1e-3, weight_decay=0.1)
+    model = build_model(cfg)
+    optimizer = build_optimizer(model, cfg)
+    groups_by_param = {
+        id(param): group
+        for group in optimizer.param_groups
+        for param in group["params"]
+    }
+    params = dict(model.named_parameters())
+
+    for name, param in model.named_parameters():
+        if "expert_" in name and param.ndim == 3:
+            assert groups_by_param[id(param)]["use_adamc"]
+    assert groups_by_param[id(params["blocks.0.mlp.router.gate.weight"])]["use_adamc"]
+
+
 def test_default_lr_mult_produces_two_groups_untied():
     """Default {lm_head: 1.0} with untied: all params effectively at mult=1.0."""
     cfg = _make_cfg(tie=False)
@@ -350,11 +485,12 @@ def test_build_optimizer_dispatches_to_lion():
 
 
 def test_build_optimizer_dispatches_to_muon():
-    cfg = _make_cfg(tie=False, optimizer_cls="muon")
+    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
-    assert isinstance(opt, MuonAdamWOptimizer)
-    # Kwargs absent from the config fall back to MuonAdamWOptimizer's own defaults.
+    assert isinstance(opt, MuonAdamOptimizer)
+    assert isinstance(opt.adam, AdamWOptimizer)
+    # Kwargs absent from the config fall back to MuonAdamOptimizer's own defaults.
     assert opt.muon.param_groups[0]["ns_steps"] == 5
     assert opt.muon.param_groups[0]["ns_coefficients"] == (3.4445, -4.7750, 2.0315)
     # Every trainable param appears exactly once across the two subsystems.
@@ -364,15 +500,51 @@ def test_build_optimizer_dispatches_to_muon():
     assert len(seen) == len(set(seen))
 
 
+def test_build_optimizer_muon_nested_kwargs():
+    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
+    cfg.optimizer.optimizer_kwargs["adam_kwargs"] = {
+        "betas": (0.8, 0.9),
+        "eps": 1e-7,
+        "fused": False,
+    }
+    cfg.optimizer.optimizer_kwargs["muon_kwargs"] = {
+        "momentum": 0.8,
+        "nesterov": False,
+        "ns_steps": 3,
+        "adjust_lr_fn": "original",
+        "eps": 1e-7,
+    }
+    opt = build_optimizer(build_model(cfg), cfg)
+
+    assert opt.adam.defaults["betas"] == (0.8, 0.9)
+    assert opt.adam.defaults["eps"] == 1e-7
+    assert opt.adam.defaults["fused"] is False
+    assert opt.muon.param_groups[0]["momentum"] == 0.8
+    assert not opt.muon.param_groups[0]["nesterov"]
+    assert opt.muon.param_groups[0]["ns_steps"] == 3
+    assert opt.muon.param_groups[0]["adjust_lr_fn"] == "original"
+    assert opt.muon.param_groups[0]["eps"] == 1e-7
+
+
+def test_build_optimizer_muon_ignores_unknown_kwargs():
+    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
+    cfg.optimizer = OptimizerConfig(
+        "muonadam", lr=1e-3, weight_decay=0.1, optimizer_kwargs={"betas": (0.9, 0.95)}
+    )
+    opt = build_optimizer(build_model(cfg), cfg)
+
+    assert isinstance(opt, MuonAdamOptimizer)
+
+
 def test_muon_routes_only_2d_hidden_weights():
     """2D weights -> Muon; embeddings, lm_head, and 1D params -> AdamW."""
-    cfg = _make_cfg(tie=False, optimizer_cls="muon")
+    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
 
     name_by_id = {id(p): n for n, p in model.named_parameters()}
     muon_ids = {id(p) for pg in opt.muon.param_groups for p in pg["params"]}
-    adamw_ids = {id(p) for pg in opt.adamw.param_groups for p in pg["params"]}
+    adam_ids = {id(p) for pg in opt.adam.param_groups for p in pg["params"]}
 
     # Muon only ever sees 2D non-embedding, non-head weights.
     for pid in muon_ids:
@@ -381,14 +553,14 @@ def test_muon_routes_only_2d_hidden_weights():
         assert p.ndim == 2 and "emb" not in n and "lm_head" not in n
 
     # Embeddings and the output head route to AdamW; a hidden projection to Muon.
-    assert id(model.token_emb.weight) in adamw_ids
-    assert id(model.lm_head.weight) in adamw_ids
+    assert id(model.token_emb.weight) in adam_ids
+    assert id(model.lm_head.weight) in adam_ids
     q_proj = dict(model.named_parameters())["blocks.0.attn.q_proj.weight"]
     assert id(q_proj) in muon_ids
 
 
 def _make_moe_cfg() -> TrainConfig:
-    cfg = _make_cfg(tie=False, optimizer_cls="muon")
+    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
     cfg.model = ModelConfig(
         d_model=cfg.model.d_model,
         n_layers=cfg.model.n_layers,
@@ -426,7 +598,7 @@ def test_muon_routes_experts_in_router_out():
 
     name_by_id = {id(p): n for n, p in model.named_parameters()}
     muon_ids = {id(p) for pg in opt.muon.param_groups for p in pg["params"]}
-    adamw_ids = {id(p) for pg in opt.adamw.param_groups for p in pg["params"]}
+    adam_ids = {id(p) for pg in opt.adam.param_groups for p in pg["params"]}
 
     params = dict(model.named_parameters())
     # Stacked 3D experts go to Muon.
@@ -437,17 +609,43 @@ def test_muon_routes_experts_in_router_out():
 
     # Router gate (2D) stays on AdamW; shared-expert 2D weights go to Muon.
     router_gate = params["blocks.0.mlp.router.gate.weight"]
-    assert id(router_gate) in adamw_ids
+    assert id(router_gate) in adam_ids
     for proj in ("gate_proj", "up_proj"):
         shared = params[f"blocks.0.mlp.shared_expert.{proj}.weight"]
         assert id(shared) in muon_ids
 
     # Embeddings / head on AdamW; nothing routed to Muon has ndim<2 or is excluded.
-    assert id(model.token_emb.weight) in adamw_ids
-    assert id(model.lm_head.weight) in adamw_ids
+    assert id(model.token_emb.weight) in adam_ids
+    assert id(model.lm_head.weight) in adam_ids
     for pid in muon_ids:
         n = name_by_id[pid]
         assert "router" not in n and "emb" not in n and "lm_head" not in n
+
+
+def test_muon_adamc_companion_routes_router_out():
+    cfg = _make_moe_cfg()
+    cfg.optimizer.lr_mult = {"router": 0.5}
+    cfg.optimizer.optimizer_kwargs["adam_cls"] = "adamc"
+    model = build_model(cfg)
+    opt = build_optimizer(model, cfg)
+
+    assert isinstance(opt.adam, AdamCOptimizer)
+    groups_by_param = {
+        id(param): group for group in opt.adam.param_groups for param in group["params"]
+    }
+    params = dict(model.named_parameters())
+    router = params["blocks.0.mlp.router.gate.weight"]
+    assert groups_by_param[id(router)]["use_adamc"]
+    assert groups_by_param[id(router)]["max_lr"] == cfg.optimizer.lr * 0.5
+    assert not groups_by_param[id(model.token_emb.weight)]["use_adamc"]
+    assert not groups_by_param[id(model.lm_head.weight)]["use_adamc"]
+
+    muon_ids = {
+        id(param) for group in opt.muon.param_groups for param in group["params"]
+    }
+    for name, param in params.items():
+        if "expert_" in name and param.ndim == 3:
+            assert id(param) in muon_ids
 
 
 def test_muon_2d_matches_torch_reference():
@@ -577,7 +775,7 @@ def test_muon_rejects_1d_param():
 def test_muon_step_updates_params(device):
     if device != "cuda":
         pytest.skip("Muon hybrid uses fused AdamW (CUDA-only)")
-    cfg = _make_cfg(tie=False, optimizer_cls="muon")
+    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
     for p in model.parameters():
@@ -591,7 +789,7 @@ def test_muon_step_updates_params(device):
 def test_muon_state_dict_roundtrip(device):
     if device != "cuda":
         pytest.skip("Muon hybrid uses fused AdamW (CUDA-only)")
-    cfg = _make_cfg(tie=False, optimizer_cls="muon")
+    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
     for p in model.parameters():
@@ -599,12 +797,31 @@ def test_muon_state_dict_roundtrip(device):
     opt.step()
 
     state = opt.state_dict()
-    assert set(state) == {"muon", "adamw"}
+    assert set(state) == {"muon", "adam", "adam_cls"}
+    assert state["adam_cls"] == "adamw"
 
     opt2 = build_optimizer(model, cfg)
     opt2.load_state_dict(state)  # must not raise
     # Muon momentum buffers were restored.
     assert any("momentum_buffer" in s for s in opt2.muon.state.values())
+
+
+def test_muon_adamc_state_dict_roundtrip():
+    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
+    cfg.optimizer.optimizer_kwargs["adam_cls"] = "adamc"
+    state = build_optimizer(build_model(cfg), cfg).state_dict()
+
+    build_optimizer(build_model(cfg), cfg).load_state_dict(state)
+
+
+def test_muon_state_dict_raise_error():
+    adamw_cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
+    state = build_optimizer(build_model(adamw_cfg), adamw_cfg).state_dict()
+    adamc_cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
+    adamc_cfg.optimizer.optimizer_kwargs["adam_cls"] = "adamc"
+
+    with pytest.raises(ValueError):
+        build_optimizer(build_model(adamc_cfg), adamc_cfg).load_state_dict(state)
 
 
 # --------------------------------------------------------------------------- #

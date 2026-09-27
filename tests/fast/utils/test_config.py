@@ -411,6 +411,24 @@ def test_load_config_optimizer_section():
         }
 
 
+def test_load_config_optimizer_nested_kwargs():
+    with tempfile.TemporaryDirectory() as tmp:
+        raw = copy.deepcopy(MINIMAL_CONFIG)
+        raw["optimizer"] = {
+            "optimizer_cls": "muonadam",
+            "lr": 1e-3,
+            "weight_decay": 0.1,
+            "optimizer_kwargs": {
+                "adam_kwargs": {"eps": "1e-7"},
+                "muon_kwargs": {"eps": "1e-6"},
+            },
+        }
+        cfg = load_config(_write_yaml(tmp, raw)).optimizer
+
+    assert cfg.optimizer_kwargs["adam_kwargs"]["eps"] == 1e-7
+    assert cfg.optimizer_kwargs["muon_kwargs"]["eps"] == 1e-6
+
+
 def test_config_cli_overrides():
     with tempfile.TemporaryDirectory() as tmp:
         config_data = copy.deepcopy(MINIMAL_CONFIG)
@@ -1075,14 +1093,20 @@ def test_scheduler_unknown_name_raises():
         ("adamw", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
         ("lion", {"betas": (0.9, 0.99), "foreach": True}),
         (
-            "muon",
+            "muonadam",
             {
-                "betas": (0.9, 0.95),
-                "eps": 1e-8,
-                "momentum": 0.95,
-                "nesterov": True,
-                "adjust_lr_fn": "match_rms_adamw",
-                "fused": True,
+                "adam_cls": "adamw",
+                "adam_kwargs": {
+                    "betas": (0.9, 0.95),
+                    "eps": 1e-8,
+                    "fused": True,
+                },
+                "muon_kwargs": {
+                    "momentum": 0.95,
+                    "nesterov": True,
+                    "adjust_lr_fn": "match_rms_adamw",
+                    "eps": 1e-8,
+                },
             },
         ),
     ],
@@ -1092,10 +1116,62 @@ def test_optimizer_config_defaults(optimizer_cls, expected):
 
     # Unset kwargs get the pretraining-tuned defaults for the selected optimizer.
     assert OptimizerConfig(optimizer_cls, lr=1e-3).optimizer_kwargs == expected
+    if optimizer_cls == "muonadam":
+        return
     # An explicit value wins; the remaining keys are still filled in.
     for key in expected:
         cfg = OptimizerConfig(optimizer_cls, lr=1e-3, optimizer_kwargs={key: "set"})
         assert cfg.optimizer_kwargs == {**expected, key: "set"}
+
+
+def test_optimizer_config_muon_nested_kwargs():
+    from src.utils.config import OptimizerConfig
+
+    cfg = OptimizerConfig(
+        "muonadam",
+        lr=1e-3,
+        optimizer_kwargs={
+            "adam_cls": "adamc",
+            "adam_kwargs": {"betas": (0.8, 0.9), "fused": False},
+            "muon_kwargs": {"momentum": 0.8, "ns_steps": 3},
+        },
+    )
+
+    assert cfg.optimizer_kwargs == {
+        "adam_cls": "adamc",
+        "adam_kwargs": {"betas": (0.8, 0.9), "eps": 1e-8, "fused": False},
+        "muon_kwargs": {
+            "momentum": 0.8,
+            "ns_steps": 3,
+            "nesterov": True,
+            "adjust_lr_fn": "match_rms_adamw",
+            "eps": 1e-8,
+        },
+    }
+
+
+INVALID_MUON_KWARGS_CASES = [
+    ("adam_kwargs", "invalid", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
+    (
+        "muon_kwargs",
+        None,
+        {
+            "momentum": 0.95,
+            "nesterov": True,
+            "adjust_lr_fn": "match_rms_adamw",
+            "eps": 1e-8,
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("key,value,expected", INVALID_MUON_KWARGS_CASES)
+def test_optimizer_config_muon_nested_kwargs_invalid(key, value, expected):
+    from src.utils.config import OptimizerConfig
+
+    cfg = OptimizerConfig("muonadam", lr=1e-3, optimizer_kwargs={key: value})
+
+    assert cfg.optimizer_kwargs[key] == expected
 
 
 def test_optimizer_config_raise_error():
@@ -1103,6 +1179,8 @@ def test_optimizer_config_raise_error():
 
     with pytest.raises(ValueError, match="unknown optimizer_cls"):
         OptimizerConfig("sgd", lr=1e-3)
+    with pytest.raises(ValueError):
+        OptimizerConfig("muonadam", lr=1e-3, optimizer_kwargs={"adam_cls": "lion"})
 
 
 def test_training_unknown_mixed_precision_raises():

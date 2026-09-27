@@ -3,13 +3,13 @@
 A research playground for LLM pretraining and model architecture exploration.
 
 ## Install
-Requires python >=3.12
+Requires python >=3.12, CUDA >= 13.2
 Notable pins:
-- `torch>=2.10`
+- `torch>=2.12`
 - `triton>=3.6`
 - `tokenizers>=0.22`
 - `datasets>=4.5`
-- `wandb>=0.26`
+- `wandb>=0.30`
 
 ```bash
 uv sync

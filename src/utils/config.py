@@ -20,7 +20,11 @@ from src.quant.constants import (
 )
 from src.quant.rotation import ROTATION_REGISTRY
 from src.training.loss import LOSS_REGISTRY
-from src.training.optimizer import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
+from src.training.optimizer import (
+    ADAM_OPTIMIZER_REGISTRY,
+    OPTIMIZER_REGISTRY,
+    SCHEDULER_REGISTRY,
+)
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 _DEVICES = frozenset({"auto", "cuda", "cpu"})
@@ -590,31 +594,49 @@ class TrainingConfig:
 
 @dataclass
 class OptimizerConfig:
-    optimizer_cls: str = "adamw"  # "adamw" | "lion" | "muon"
+    optimizer_cls: str = "adamw"  # "adamw" | "adamc" | "lion" | "muonadam"
     lr: float = 5e-4
     lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
     optimizer_kwargs: dict = field(default_factory=dict)
 
+    def _post_init_adam(self, kwargs: dict) -> None:
+        # beta2=0.95 (not torch's 0.999) is the GPT-3/LLaMA setting.
+        kwargs.setdefault("betas", (0.9, 0.95))
+        kwargs.setdefault("eps", 1e-8)
+        kwargs.setdefault("fused", True)
+
+    def _post_init_lion(self, kwargs: dict) -> None:
+        kwargs.setdefault("betas", (0.9, 0.99))  # Chen et al. 2023 default
+        kwargs.setdefault("foreach", True)
+
+    def _post_init_muon(self, kwargs: dict) -> None:
+        kwargs.setdefault("momentum", 0.95)
+        kwargs.setdefault("nesterov", True)
+        # Rescale Muon's update RMS to AdamW's so both halves share one lr.
+        kwargs.setdefault("adjust_lr_fn", "match_rms_adamw")
+        kwargs.setdefault("eps", 1e-8)
+
     def __post_init__(self):
         _check_one_of("optimizer_cls", self.optimizer_cls, OPTIMIZER_REGISTRY)
         kwargs = self.optimizer_kwargs
-        if self.optimizer_cls == "adamw":
-            # beta2=0.95 (not torch's 0.999) is the GPT-3/LLaMA setting.
-            kwargs.setdefault("betas", (0.9, 0.95))
-            kwargs.setdefault("eps", 1e-8)
-            kwargs.setdefault("fused", True)
+        if self.optimizer_cls in ADAM_OPTIMIZER_REGISTRY:
+            self._post_init_adam(kwargs)
         elif self.optimizer_cls == "lion":
-            kwargs.setdefault("betas", (0.9, 0.99))  # Chen et al. 2023 default
-            kwargs.setdefault("foreach", True)
-        elif self.optimizer_cls == "muon":
-            kwargs.setdefault("momentum", 0.95)
-            kwargs.setdefault("nesterov", True)
-            # Rescale Muon's update RMS to AdamW's so both halves share one lr.
-            kwargs.setdefault("adjust_lr_fn", "match_rms_adamw")
-            kwargs.setdefault("betas", (0.9, 0.95))  # AdamW half
-            kwargs.setdefault("eps", 1e-8)
-            kwargs.setdefault("fused", True)
+            self._post_init_lion(kwargs)
+        elif self.optimizer_cls == "muonadam":
+            adam_cls = kwargs.setdefault("adam_cls", "adamw")
+            _check_one_of("adam_cls", adam_cls, ADAM_OPTIMIZER_REGISTRY)
+            adam_kwargs = kwargs.setdefault("adam_kwargs", {})
+            muon_kwargs = kwargs.setdefault("muon_kwargs", {})
+            if not isinstance(adam_kwargs, dict):
+                adam_kwargs = {}
+                kwargs["adam_kwargs"] = adam_kwargs
+            if not isinstance(muon_kwargs, dict):
+                muon_kwargs = {}
+                kwargs["muon_kwargs"] = muon_kwargs
+            self._post_init_adam(adam_kwargs)
+            self._post_init_muon(muon_kwargs)
 
 
 @dataclass
@@ -734,7 +756,9 @@ def _coerce_types(dc_class, raw_dict: dict) -> dict:
 
 def _coerce_kwargs(d: dict) -> None:
     for k, v in d.items():
-        if isinstance(v, str):
+        if isinstance(v, dict):
+            _coerce_kwargs(v)
+        elif isinstance(v, str):
             try:
                 d[k] = int(v)
             except ValueError:
