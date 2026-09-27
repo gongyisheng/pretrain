@@ -26,28 +26,28 @@ data:
   data_dir: data/
   val_split: 0.01
   num_workers: 4
+quantization:
+  enabled: true
+  dtype:
+    weight: fp8_e4m3
+    act: bf16
+    grad_out: bf16
+  scale:
+    weight:
+      granularity: tensorwise
+      block_shape: [0, 0]
+    scale_dtype: fp32
+    enable_global_scale: false
+  rounding:
+    weight: RNE
+    act: RNE
+    grad_out: RNE
+  exclude: [lm_head]
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  quantization:
-    enabled: true
-    dtype:
-      weight: fp8_e4m3
-      act: bf16
-      grad_out: bf16
-    scale:
-      weight:
-        granularity: tensorwise
-        block_shape: [0, 0]
-      scale_dtype: fp32
-      enable_global_scale: false
-    rounding:
-      weight: RNE
-      act: RNE
-      grad_out: RNE
-    exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_weight_granularity/qwen3_51m_fp8_w8a16_tensorwise/
   checkpoint_every: 5000

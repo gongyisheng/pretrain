@@ -1,4 +1,5 @@
 max_seq_len: 1024
+seed: 42
 
 model:
   d_model: 512
@@ -29,32 +30,31 @@ data:
   data_dir: data/
   val_split: 0.01
   num_workers: 4
+quantization:
+  enabled: true
+  dtype:
+    weight: fp8_e4m3
+    act: fp8_e4m3
+  scale:
+    weight:
+      granularity: tensorwise
+      block_shape: [0, 0]
+    act:
+      granularity: tensorwise
+      block_shape: [0, 0]
+    grad_out:
+      granularity: tensorwise
+      block_shape: [0, 0]
+    scale_dtype: fp32
+    enable_global_scale: false
+  include: [blocks.*.attn.*]
+  exclude: []
 
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
-  seed: 42
-  quantization:
-    enabled: true
-    dtype:
-      weight: fp8_e4m3
-      act: fp8_e4m3
-    scale:
-      weight:
-        granularity: tensorwise
-        block_shape: [0, 0]
-      act:
-        granularity: tensorwise
-        block_shape: [0, 0]
-      grad_out:
-        granularity: tensorwise
-        block_shape: [0, 0]
-      scale_dtype: fp32
-      enable_global_scale: false
-    include: [blocks.*.attn.*]
-    exclude: []
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_module_sensitivity/fp8_w8a8/qwen3_77m_attn/
   checkpoint_every: 5000

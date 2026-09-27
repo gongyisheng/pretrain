@@ -1,4 +1,5 @@
 max_seq_len: 1024
+seed: 42
 
 model:
   d_model: 512
@@ -28,34 +29,33 @@ data:
   data_dir: data/
   val_split: 0.01
   num_workers: 4
+quantization:
+  enabled: true
+  dtype:
+    weight: int4
+    act: bf16
+    grad_out: bf16
+  scale:
+    weight:
+      granularity: blockwise
+      block_shape: [1, 16]
+    act:
+      granularity: blockwise
+      block_shape: [1, 16]
+    grad_out:
+      granularity: blockwise
+      block_shape: [1, 16]
+    scale_dtype: fp32
+    enable_global_scale: false
+  rounding:
+    weight: RNE
+  exclude: [lm_head]
 
 training:
   batch_size: 128
   gradient_accumulation_steps: 2
   max_steps: 50000
   mixed_precision: bf16
-  seed: 42
-  quantization:
-    enabled: true
-    dtype:
-      weight: int4
-      act: bf16
-      grad_out: bf16
-    scale:
-      weight:
-        granularity: blockwise
-        block_shape: [1, 16]
-      act:
-        granularity: blockwise
-        block_shape: [1, 16]
-      grad_out:
-        granularity: blockwise
-        block_shape: [1, 16]
-      scale_dtype: fp32
-      enable_global_scale: false
-    rounding:
-      weight: RNE
-    exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int4_activation_limit/qwen3_51m_int4_w4a16_blockwise1d_16/
   checkpoint_every: 5000

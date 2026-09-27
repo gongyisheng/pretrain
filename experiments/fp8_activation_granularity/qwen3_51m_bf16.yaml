@@ -1,4 +1,5 @@
 max_seq_len: 1024
+seed: 42
 model:
   d_model: 512
   n_layers: 8
@@ -31,7 +32,6 @@ training:
   gradient_accumulation_steps: 2
   max_steps: 50000
   mixed_precision: bf16
-  seed: 42
   grad_clip: 1.0
   checkpoint_dir: checkpoints/fp8_activation_granularity/qwen3_51m_bf16/
   checkpoint_every: 5000

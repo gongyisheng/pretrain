@@ -1,4 +1,5 @@
 max_seq_len: 1024
+seed: 42
 
 model:
   d_model: 512
@@ -28,6 +29,40 @@ data:
   data_dir: data/
   val_split: 0.01
   num_workers: 4
+quantization:
+  enabled: true
+  dtype:
+    weight: fp4_e2m1
+    act: fp4_e2m1
+    grad_out: fp4_e2m1
+  scale:
+    weight:
+      granularity: blockwise
+      block_shape: [16, 16]
+    act:
+      granularity: blockwise
+      block_shape: [1, 16]
+    grad_out:
+      granularity: blockwise
+      block_shape: [1, 16]
+    scale_dtype: fp8_e4m3
+    enable_global_scale: true
+  rounding:
+    weight: RNE
+    act: RNE
+    grad_out: SR
+  rotation:
+    rotation_cls: hadamard
+    rotation_kwargs:
+      block_size: 16
+      random_sign: true
+    rotation_ops:
+      weight: []
+      act:
+      - axis: -2
+      grad_out:
+      - axis: -2
+  exclude: [lm_head, 'blocks.7.*']
 
 training:
   batch_size: 16
@@ -36,37 +71,6 @@ training:
   device: cuda
   mixed_precision: bf16
   enable_torch_compile: true
-  seed: 42
-  quantization:
-    enabled: true
-    dtype:
-      weight: fp4_e2m1
-      act: fp4_e2m1
-      grad_out: fp4_e2m1
-    scale:
-      weight:
-        granularity: blockwise
-        block_shape: [16, 16]
-      act:
-        granularity: blockwise
-        block_shape: [1, 16]
-      grad_out:
-        granularity: blockwise
-        block_shape: [1, 16]
-      scale_dtype: fp8_e4m3
-      enable_global_scale: true
-    rounding:
-      weight: RNE
-      act: RNE
-      grad_out: SR
-    rotation:
-      rotation_cls: hadamard
-      rotation_kwargs:
-        block_size: 16
-        random_sign: true
-        seed: 42
-      gemms: [wgrad]
-    exclude: [lm_head, 'blocks.7.*']
   grad_clip: 1.0
   checkpoint_dir: checkpoints/nvfp4/qwen3_51m_nvfp4/
   checkpoint_every: 5000
