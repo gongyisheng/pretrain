@@ -5,6 +5,7 @@ from src.quant.constants import _FP4_FORMATS, _FP8_FORMATS, _INT8_FORMATS
 from src.quant.utils import (
     is_fp4,
     is_fp8,
+    resolve_scale,
     scaled_grouped_mm_op,
     scaled_mm_op,
     should_quantize,
@@ -65,6 +66,26 @@ def test_str_to_qmax(fmt, expected):
 def test_str_to_dtype_raise_error(fmt):
     with pytest.raises(KeyError):
         str_to_dtype(fmt)
+
+
+@pytest.mark.parametrize(
+    ("scale_dtype", "expected_dtype"),
+    [
+        ("fp32", torch.float32),
+        ("fp8_e8m0", torch.float8_e8m0fnu),
+        ("fp8_e4m3", torch.float8_e4m3fn),
+    ],
+)
+def test_resolve_scale_converts_scale_dtype(scale_dtype, expected_dtype):
+    scale = resolve_scale(
+        {
+            "weight": {"granularity": "tensorwise", "block_shape": (0, 0)},
+            "scale_dtype": scale_dtype,
+            "enable_global_scale": False,
+        },
+        "weight",
+    )
+    assert scale["scale_dtype"] is expected_dtype
 
 
 @pytest.mark.parametrize("fmt", IS_FP8_BY_FORMAT)
