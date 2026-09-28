@@ -57,7 +57,7 @@ class Trainer:
             torch.use_deterministic_algorithms(True, warn_only=True)
 
         # Seed for reproducibility
-        self._seed(config.training.seed)
+        self._seed(config.seed)
 
         if config.training.loss_fn not in LOSS_REGISTRY:
             raise ValueError(
@@ -128,7 +128,7 @@ class Trainer:
 
         n_worker = config.data.num_workers
         g = torch.Generator()
-        g.manual_seed(config.training.seed)
+        g.manual_seed(config.seed)
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=config.training.batch_size,
@@ -218,7 +218,7 @@ class Trainer:
             return next(train_iter), train_iter
 
     def train(self):
-        cfg = self.config.training
+        training_cfg = self.config.training
         self.model.train()
 
         train_iter = iter(self.train_loader)
@@ -231,14 +231,18 @@ class Trainer:
         # Deferred loss: keep previous step's loss tensor to read while next step runs
         prev_loss_tensor = None
 
-        stop_at = cfg.early_stop if cfg.early_stop > 0 else cfg.max_steps
+        stop_at = (
+            training_cfg.early_stop
+            if training_cfg.early_stop > 0
+            else training_cfg.max_steps
+        )
         pbar = tqdm(
             total=stop_at, initial=self.step, desc="[train]", dynamic_ncols=True
         )
         while self.step < stop_at:
             if (
-                cfg.quantization.enabled
-                and self.step == cfg.quantization.enabled_after_steps
+                self.config.quantization.enabled
+                and self.step == self.config.quantization.enabled_after_steps
             ):
                 enable_quantization(self.eager_model)
             self.optimizer.zero_grad(set_to_none=True)
@@ -268,7 +272,7 @@ class Trainer:
                 position_ids = position_ids_cpu.to(self.device)
                 labels = labels_cpu.to(self.device)
 
-            for micro_step in range(cfg.gradient_accumulation_steps):
+            for micro_step in range(training_cfg.gradient_accumulation_steps):
                 # Wait for current batch transfer to complete
                 if prefetch_stream is not None:
                     torch.cuda.current_stream().wait_stream(prefetch_stream)
@@ -284,7 +288,7 @@ class Trainer:
                     labels.record_stream(torch.cuda.current_stream())
 
                 # Start prefetching next batch while computing
-                if micro_step < cfg.gradient_accumulation_steps - 1:
+                if micro_step < training_cfg.gradient_accumulation_steps - 1:
                     next_batch_cpu, train_iter = self._next_batch(train_iter)
                     next_input_ids_cpu, next_position_ids_cpu, next_labels_cpu = (
                         next_batch_cpu[0],
@@ -338,13 +342,15 @@ class Trainer:
                     loss = ce_loss
                     if aux_loss is not None:
                         loss = loss + aux_loss
-                    loss = loss / cfg.gradient_accumulation_steps
+                    loss = loss / training_cfg.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
-                accum_loss_tensor += ce_loss.detach() / cfg.gradient_accumulation_steps
+                accum_loss_tensor += (
+                    ce_loss.detach() / training_cfg.gradient_accumulation_steps
+                )
 
                 # Swap to prefetched batch
-                if micro_step < cfg.gradient_accumulation_steps - 1:
+                if micro_step < training_cfg.gradient_accumulation_steps - 1:
                     input_ids, position_ids, labels = (
                         next_input_ids,
                         next_position_ids,
@@ -354,7 +360,7 @@ class Trainer:
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(),
-                cfg.grad_clip,
+                training_cfg.grad_clip,
                 error_if_nonfinite=not self.scaler.is_enabled(),
             )
             grad_norm_val = (
@@ -401,13 +407,13 @@ class Trainer:
                 )
 
             # Evaluation
-            if self.step % cfg.eval_every == 0:
+            if self.step % training_cfg.eval_every == 0:
                 self.model.eval()
                 self._evaluate()
                 self.model.train()
 
             # Checkpoint
-            if self.step % cfg.checkpoint_every == 0:
+            if self.step % training_cfg.checkpoint_every == 0:
                 self._save_checkpoint()
 
         pbar.close()
@@ -520,7 +526,7 @@ class Trainer:
         # Own generator: sampling must not advance the global RNG stream that
         # feeds training, and a fixed seed makes samples comparable across evals.
         gen = torch.Generator(device=self.device)
-        gen.manual_seed(self.config.training.seed)
+        gen.manual_seed(self.config.seed)
         pos_ids = torch.arange(S, device=self.device).unsqueeze(0)
         attn_mask = build_causal_attention_mask(
             B,
@@ -573,10 +579,9 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.scaler.load_state_dict(checkpoint["grad_scaler"])
         self.step = checkpoint["step"]
-        cfg = self.config.training
         if (
-            cfg.quantization.enabled
-            and self.step >= cfg.quantization.enabled_after_steps
+            self.config.quantization.enabled
+            and self.step >= self.config.quantization.enabled_after_steps
         ):
             enable_quantization(self.eager_model)
         self.metrics.total_tokens = checkpoint.get(
