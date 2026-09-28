@@ -2,7 +2,7 @@ import torch
 
 from src.metrics.activation import ActivationStats, linear_input_hook
 from src.metrics.quant import QuantizationStats
-from src.quant.constants import GEMM_TENSORS
+from src.quant.constants import GEMM_OPS_BY_TENSOR
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
 from src.quant.utils import is_quantized
@@ -18,16 +18,13 @@ def apply_activation_monitoring(model) -> None:
             module.register_forward_pre_hook(linear_input_hook)
 
 
-def _tensor_stats(prefix, cfg, device):
-    """Create one accumulator per tensor for a site.
-
-    Tensors shared by GEMMs share stats. Passthrough-only tensors get none, so
-    their fold is skipped.
-    """
+def _operand_stats(prefix, cfg, device):
+    """Create one accumulator per quantized GEMM operand for a site."""
     return {
-        tensor: QuantizationStats(f"{tensor}/{prefix}", device)
-        for tensor in GEMM_TENSORS
-        if any(is_quantized(fmt) for fmt in cfg.dtype[tensor].values())
+        f"{op}/{tensor}": QuantizationStats(f"{op}/{tensor}/{prefix}", device)
+        for tensor, ops in GEMM_OPS_BY_TENSOR.items()
+        for op in ops
+        if is_quantized(cfg.dtype[tensor][op])
     }
 
 
@@ -50,13 +47,13 @@ def apply_quantization_monitoring(model) -> None:
     for name, module in getattr(model, "_orig_mod", model).named_modules():
         cfg = getattr(module, "quantization_config", None)
         if isinstance(module, QuantizedLinear):
-            module.quant_stats = _tensor_stats(name, cfg, module.weight.device)
+            module.quant_stats = _operand_stats(name, cfg, module.weight.device)
             _register(module, module.quant_stats.values())
         elif isinstance(module, QuantizedSparseMoEBlock):
             device = next(module.parameters()).device
             projections = ("gate", "up", "down") if module.gated else ("up", "down")
             module.quant_stats = {
-                projection: _tensor_stats(f"{name}.expert_{projection}", cfg, device)
+                projection: _operand_stats(f"{name}.expert_{projection}", cfg, device)
                 for projection in projections
             }
             _register(

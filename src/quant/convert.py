@@ -17,7 +17,7 @@ def enable_quantization(model: nn.Module) -> None:
 
 def apply_quantization(model: nn.Module, config) -> nn.Module:
     """Convert eligible modules before optimizer construction."""
-    quantization_config = config.training.quantization
+    quantization_config = config.quantization
     if not quantization_config.enabled:
         return model
     if quantization_config.layer_idx == []:
@@ -35,8 +35,9 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
             quantization_config.rotation,
             quantization_config.include,
             quantization_config.exclude,
+            config.seed,
         )
-        rotation = build_rotation(quantization_config.rotation)
+        rotation = build_rotation(quantization_config.rotation, config.seed)
         model.quant_rotations = nn.ModuleDict({key: rotation})
         print(f"quant: rotation {key} <- {quantization_config.rotation}")
 
@@ -66,7 +67,7 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
             else:
                 quantized_cls = QuantizedSparseMoEBlock
             quantized_module = quantized_cls.from_module(
-                child, quantization_config, rotation=rotation
+                child, quantization_config, rotation=rotation, module_name=full_name
             )
             setattr(parent, child_name, quantized_module)
     return model
