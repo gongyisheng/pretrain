@@ -14,6 +14,7 @@ for model in "${models[@]}"; do
     for block_size in "${block_sizes[@]}"; do
         configs+=("${model}_int4_w4a16_hadamard_${block_size}")
     done
+    configs+=("${model}_int4_w4a16_hadamard_16_asymmetric")
 done
 
 for config in "${configs[@]}"; do

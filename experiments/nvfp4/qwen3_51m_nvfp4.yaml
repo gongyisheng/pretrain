@@ -56,12 +56,11 @@ quantization:
     rotation_kwargs:
       block_size: 16
       random_sign: true
-    rotation_ops:
-      weight: []
+    rotation_axes:
       act:
-      - axis: -2
+        wgrad: [-2]
       grad_out:
-      - axis: -2
+        wgrad: [-2]
   exclude: [lm_head, 'blocks.7.*']
 
 training:

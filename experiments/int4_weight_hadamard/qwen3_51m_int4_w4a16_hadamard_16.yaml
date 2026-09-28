@@ -48,11 +48,16 @@ quantization:
     rotation_kwargs:
       block_size: 16
       random_sign: true
-    rotation_ops:
+    rotation_axes:
       weight:
-      - axis: -1
-      act: []
-      grad_out: []
+        fwd: [-1, -2]
+        dgrad: [-1, -2]
+      act:
+        fwd: []
+        wgrad: []
+      grad_out:
+        dgrad: []
+        wgrad: []
   include: ['*mlp.*']
   exclude: [lm_head]
 training:
