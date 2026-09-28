@@ -6,8 +6,10 @@ set -e
 cd "$(dirname "$0")/../.."
 
 configs=(qwen3_77m_bf16)
-for module in attn mlp lm_head; do
-    configs+=("qwen3_77m_int8_w8a8g8_${module}")
+for recipe in w8a16 w8a8 w8a8g8; do
+    for module in attn mlp lm_head; do
+        configs+=("qwen3_77m_int8_${recipe}_${module}")
+    done
 done
 
 for config in "${configs[@]}"; do
