@@ -491,7 +491,7 @@ class QuantizationConfig:
         self.rounding = {t: self.rounding.get(t, "RNE") for t in GEMM_TENSORS}
 
     def _post_init_rotation(self):
-        """Canonicalize rotation to {rotation_cls, rotation_kwargs, rotation_ops}."""
+        """Canonicalize rotation to per-tensor, per-GEMM matrix axes."""
         if self.rotation is None:
             return
         _check_type("quant 'rotation'", self.rotation, dict)
@@ -514,29 +514,33 @@ class QuantizationConfig:
                 f"values, got {rotation_kwargs!r}"
             ) from error
 
-        rotation_ops = self.rotation.get("rotation_ops", {})
-        _check_type("quant rotation 'rotation_ops'", rotation_ops, dict)
-        resolved_ops = {}
-        for tensor in GEMM_TENSORS:
-            ops = rotation_ops.get(tensor, [])
-            _check_type(f"quant rotation '{tensor}' operations", ops, list)
-            resolved_ops[tensor] = []
-            for op in ops:
-                _check_type(f"quant rotation '{tensor}' operation", op, dict)
-                axis = op.get("axis", -1)
-                _check_type(f"quant rotation '{tensor}' axis", axis, int)
-                _check_value(f"quant rotation '{tensor}' axis", axis, (-2, -1))
-                include = op.get("include", ["*"])
-                exclude = op.get("exclude", ["lm_head", "*mlp.router.gate"])
-                _check_include_exclude(f"quant rotation '{tensor}'", include, exclude)
-                resolved_ops[tensor].append(
-                    {"axis": axis, "include": list(include), "exclude": list(exclude)}
+        rotation_axes = self.rotation.get("rotation_axes", {})
+        _check_type("quant rotation 'rotation_axes'", rotation_axes, dict)
+        resolved_axes = {
+            tensor: {gemm: [] for gemm in gemms}
+            for tensor, gemms in GEMM_OPS_BY_TENSOR.items()
+        }
+        for tensor, gemm_axes in rotation_axes.items():
+            _check_value("quant rotation tensor", tensor, GEMM_OPS_BY_TENSOR)
+            _check_type(f"quant rotation '{tensor}'", gemm_axes, dict)
+            for gemm, axes in gemm_axes.items():
+                _check_value(
+                    f"quant rotation GEMM for {tensor}",
+                    gemm,
+                    GEMM_OPS_BY_TENSOR[tensor],
                 )
+                _check_type(f"quant rotation axes for {tensor}.{gemm}", axes, list)
+                for axis in axes:
+                    _check_type(f"quant rotation axis for {tensor}.{gemm}", axis, int)
+                    _check_value(
+                        f"quant rotation axis for {tensor}.{gemm}", axis, (-2, -1)
+                    )
+                resolved_axes[tensor][gemm] = sorted(set(axes))
 
         self.rotation = {
             "rotation_cls": rotation_cls,
             "rotation_kwargs": rotation_kwargs,
-            "rotation_ops": resolved_ops,
+            "rotation_axes": resolved_axes,
         }
 
 
