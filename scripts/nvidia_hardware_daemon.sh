@@ -4,7 +4,7 @@ set -euo pipefail
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     echo "Usage: sudo $0 [GPU index or UUID]"
     echo "Cap GPU 0 (or the selected GPU) at 400 W when its limit exceeds 400 W."
-    echo "Check now and every 5 minutes."
+    echo "Check now and every 1 minute."
     exit 0
 fi
 
@@ -42,11 +42,11 @@ EOF
 
 cat > /etc/systemd/system/nvidia_hardware_daemon.timer <<EOF
 [Unit]
-Description=Check NVIDIA GPU power limit every 5 minutes
+Description=Check NVIDIA GPU power limit every 1 minute
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=5min
+OnBootSec=0
+OnUnitActiveSec=1min
 Unit=nvidia_hardware_daemon.service
 
 [Install]
