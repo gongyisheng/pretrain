@@ -1,15 +1,10 @@
 #!/bin/bash
-# Install a systemd service that applies 400 W now and at every boot.
-# Usage: sudo ./scripts/nvidia_hardware_daemon.sh [GPU index or UUID]
-# Defaults to GPU 0; the service stores its UUID to survive index changes.
-# To stop applying the limit at boot:
-#   sudo systemctl disable --now nvidia_hardware_daemon.service
-# Disabling the service leaves the current power limit in place.
 set -euo pipefail
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     echo "Usage: sudo $0 [GPU index or UUID]"
-    echo "Set GPU 0 (or the selected GPU) to 400 W now and at every boot."
+    echo "Cap GPU 0 (or the selected GPU) at 400 W when its limit exceeds 400 W."
+    echo "Check now and every 5 minutes."
     exit 0
 fi
 
@@ -19,7 +14,7 @@ if (( $# > 1 )); then
 fi
 
 if (( EUID != 0 )); then
-    echo "Run this script with sudo to install the systemd service." >&2
+    echo "Run this script with sudo to install the systemd service and timer." >&2
     exit 1
 fi
 
@@ -34,39 +29,37 @@ if [[ ! $GPU_UUID =~ ^GPU-[[:xdigit:]-]+$ ]]; then
     exit 1
 fi
 
-POWER_RANGE=$(/usr/bin/nvidia-smi -i "$GPU_UUID" \
-    --query-gpu=power.min_limit,power.max_limit --format=csv,noheader,nounits)
-if ! awk -F, 'NF == 2 && $1 + 0 > 0 && $1 + 0 <= 400 && $2 + 0 >= 400 { valid = 1 }
-    END { exit !valid }' <<< "$POWER_RANGE"; then
-    echo "GPU does not report support for 400 W (min, max: $POWER_RANGE)." >&2
-    exit 1
-fi
-
 cat > /etc/systemd/system/nvidia_hardware_daemon.service <<EOF
 [Unit]
-Description=Set NVIDIA GPU power limit to 400 W
+Description=Cap NVIDIA GPU power limit at 400 W when needed
 After=nvidia-persistenced.service
-StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
-ExecStartPre=/usr/bin/nvidia-smi -i $GPU_UUID -pm 1
-ExecStart=/usr/bin/nvidia-smi -i $GPU_UUID -pl 400
-RemainAfterExit=yes
-Restart=on-failure
-RestartSec=5
+ExecStart=/bin/bash -c 'set -euo pipefail; export LC_ALL=C; power_limit=\$\$(/usr/bin/nvidia-smi -i $GPU_UUID --query-gpu=power.limit --format=csv,noheader,nounits); if [[ ! \$\$power_limit =~ ^[0-9]+([.][0-9]+)?\$\$ ]]; then echo "Invalid NVIDIA power limit: \$\$power_limit" >&2; exit 1; fi; if /usr/bin/awk -v power_limit="\$\$power_limit" "BEGIN { exit !(power_limit > 400) }"; then /usr/bin/nvidia-smi -i $GPU_UUID -pm 1; /usr/bin/nvidia-smi -i $GPU_UUID -pl 400; fi'
+
+EOF
+
+cat > /etc/systemd/system/nvidia_hardware_daemon.timer <<EOF
+[Unit]
+Description=Check NVIDIA GPU power limit every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=nvidia_hardware_daemon.service
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=timers.target
 EOF
-chmod 644 /etc/systemd/system/nvidia_hardware_daemon.service
+chmod 644 /etc/systemd/system/nvidia_hardware_daemon.service \
+    /etc/systemd/system/nvidia_hardware_daemon.timer
 
 systemctl daemon-reload
-systemctl enable nvidia_hardware_daemon.service
-# Restart also applies changes when an earlier version is already active.
-systemctl restart nvidia_hardware_daemon.service
-systemctl is-enabled nvidia_hardware_daemon.service
-systemctl is-active nvidia_hardware_daemon.service
+systemctl disable --now nvidia_hardware_daemon.service >/dev/null 2>&1 || true
+systemctl start nvidia_hardware_daemon.service
+systemctl enable --now nvidia_hardware_daemon.timer
+systemctl is-enabled nvidia_hardware_daemon.timer
+systemctl is-active nvidia_hardware_daemon.timer
 /usr/bin/nvidia-smi -i "$GPU_UUID" --query-gpu=name,power.limit --format=csv
-echo "400 W boot service installed for $GPU_UUID."
-echo "After reboot, verify with: nvidia-smi --query-gpu=name,power.limit --format=csv"
+echo "nvidia hardware daemon timer installed for $GPU_UUID"
