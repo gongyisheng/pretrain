@@ -35,7 +35,6 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
             quantization_config.rotation,
             quantization_config.include,
             quantization_config.exclude,
-            config.seed,
         )
         rotation = build_rotation(quantization_config.rotation, config.seed)
         model.quant_rotations = nn.ModuleDict({key: rotation})

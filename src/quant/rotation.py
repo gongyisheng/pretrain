@@ -14,21 +14,36 @@ class Rotation(nn.Module, ABC):
     def forward(
         self, x: torch.Tensor, contract_dim: int, out_dtype: torch.dtype | None = None
     ) -> torch.Tensor:
-        """Rotate along a GEMM contraction dimension, storing as `out_dtype`."""
+        """Rotate a matrix axis, storing as `out_dtype`."""
 
     @abstractmethod
     def inverse(
         self, x: torch.Tensor, contract_dim: int, out_dtype: torch.dtype | None = None
     ) -> torch.Tensor:
-        """Undo the rotation along a GEMM contraction dimension."""
+        """Undo the rotation along a matrix axis."""
 
     @property
     def alignment(self) -> int:
-        """Rows a ragged contraction must be padded to before this rotation cancels.
-
-        1 for an elementwise transform, which needs no alignment at all.
-        """
+        """Required axis alignment; elementwise transforms need only one element."""
         return 1
+
+
+def apply_rotation_on_axes(
+    tensor: torch.Tensor,
+    rotation: Rotation | None,
+    axes: tuple[int, ...] | list[int],
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Apply a rotation to the given matrix axes."""
+    if rotation is not None:
+        for axis in axes:
+            tensor = rotation(tensor, axis, out_dtype)
+    return tensor if out_dtype is None else tensor.to(out_dtype)
+
+
+def transpose_rotation_axes(axes: tuple[int, ...] | list[int]) -> tuple[int, ...]:
+    """Swap rotation axes for a matrix transpose."""
+    return tuple(-3 - axis for axis in axes)
 
 
 class HadamardRotation(Rotation):
@@ -36,7 +51,7 @@ class HadamardRotation(Rotation):
         self,
         block_size: int = 16,
         random_sign: bool = True,
-        seed: int = 0,
+        seed: int = 42,
         sign_vector: torch.Tensor | None = None,
     ):
         super().__init__()
@@ -138,12 +153,12 @@ def build_rotation_key(
     return f"{rotation_cls}-{digest}"
 
 
-def build_rotation(rotation: dict | None) -> Rotation | None:
-    if rotation is None:
+def build_rotation(rotation_cfg: dict | None, seed: int = 42) -> Rotation | None:
+    if rotation_cfg is None:
         return None
     try:
-        rotation_cls = rotation["rotation_cls"]
-        rotation_kwargs = rotation["rotation_kwargs"]
-        return ROTATION_REGISTRY[rotation_cls](**rotation_kwargs)
+        rotation_kwargs = dict(rotation_cfg["rotation_kwargs"])
+        rotation_kwargs["seed"] = seed
+        return ROTATION_REGISTRY[rotation_cfg["rotation_cls"]](**rotation_kwargs)
     except (TypeError, ValueError) as error:
         raise ValueError(f"invalid quant rotation: {error}") from error
