@@ -45,7 +45,7 @@ training:
 
 optimizer:
   optimizer_cls: adamw
-  lr: 2.5e-4
+  lr: 5e-4
   weight_decay: 0.1
   optimizer_kwargs:
     betas:
@@ -56,7 +56,7 @@ optimizer:
 scheduler:
   name: cosine
   warmup_steps: 6000
-  min_lr: 2.5e-5
+  min_lr: 5e-5
 
 logging:
   wandb_project: pretrain-adamc
