@@ -38,7 +38,7 @@ quantization:
   scale:
     weight:
       granularity: blockwise
-      block_shape: [1, 32]
+      block_shape: [32, 32]
     act:
       granularity: blockwise
       block_shape: [1, 32]
