@@ -1458,8 +1458,10 @@ def test_moe_expert_mm_seam_is_pluggable():
     seen = []
 
     def spy(a, b, offs, bias=None, projection=None):
+        expected_shape = (4, 32, 48) if projection == "down" else (4, 48, 32)
+        assert b.shape == expected_shape
         seen.append(projection)
-        return grouped_mm(a, b, offs, bias=bias)
+        return grouped_mm(a, b.mT, offs, bias=bias)
 
     blk.expert_mm = spy
     x = torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16)

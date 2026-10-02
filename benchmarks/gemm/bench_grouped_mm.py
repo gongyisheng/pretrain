@@ -76,7 +76,7 @@ class _PyTorchGroupedGemmFn(torch.autograd.Function):
 
 
 def _pytorch_grouped_mm_with_autograd(a, b, offs):
-    return _PyTorchGroupedGemmFn.apply(a, b, offs)
+    return _PyTorchGroupedGemmFn.apply(a, b.mT, offs)
 
 
 def _make(E, M, K, N, requires_grad=False):
@@ -85,7 +85,7 @@ def _make(E, M, K, N, requires_grad=False):
         M, K, device="cuda", dtype=torch.bfloat16, requires_grad=requires_grad
     )
     b = (
-        torch.randn(E, K, N, device="cuda", dtype=torch.bfloat16) * 0.1
+        torch.randn(E, N, K, device="cuda", dtype=torch.bfloat16) * 0.1
     ).requires_grad_(requires_grad)
     counts = torch.full((E,), M // E, device="cuda", dtype=torch.int64)
     counts[-1] += M - int(counts.sum())
@@ -127,15 +127,17 @@ def _bench_point(E, K, N):
     out = {}
     a, b, offs = _make(E, M_FIXED, K, N)
     with torch.no_grad():
-        eager = grouped_mm(a, b, offs, backend="eager")
-        triton_out = grouped_mm(a, b, offs, backend="triton")
+        eager = grouped_mm(a, b.mT, offs, backend="eager")
+        triton_out = grouped_mm(a, b.mT, offs, backend="triton")
         _assert_parity(triton_out, eager)
         out[("triton", "relerr")] = _relative_error(triton_out, eager)
-        out[("triton", "fwd")] = _time(lambda: grouped_mm(a, b, offs, backend="triton"))
-        pytorch_out = _pytorch_grouped_mm(a, b, offs)
+        out[("triton", "fwd")] = _time(
+            lambda: grouped_mm(a, b.mT, offs, backend="triton")
+        )
+        pytorch_out = _pytorch_grouped_mm(a, b.mT, offs)
         _assert_parity(pytorch_out, eager)
         out[("pytorch", "relerr")] = _relative_error(pytorch_out, eager)
-        out[("pytorch", "fwd")] = _time(lambda: _pytorch_grouped_mm(a, b, offs))
+        out[("pytorch", "fwd")] = _time(lambda: _pytorch_grouped_mm(a, b.mT, offs))
     for backend in ("pytorch", "triton"):
         if out[(backend, "fwd")] is None:
             out[(backend, "bwd")] = None

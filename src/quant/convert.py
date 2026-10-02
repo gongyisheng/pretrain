@@ -30,7 +30,7 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
         return model
 
     rotation = None
-    if quantization_config.rotation is not None:
+    if quantization_config.rotation["rotation_cls"] is not None:
         key = build_rotation_key(
             quantization_config.rotation,
             quantization_config.include,
@@ -66,7 +66,7 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
             else:
                 quantized_cls = QuantizedSparseMoEBlock
             quantized_module = quantized_cls.from_module(
-                child, quantization_config, rotation=rotation, module_name=full_name
+                child, quantization_config, rotation=rotation
             )
             setattr(parent, child_name, quantized_module)
     return model

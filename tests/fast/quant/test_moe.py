@@ -1,3 +1,4 @@
+# todo: test refactory
 import copy
 
 import pytest
@@ -5,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.kernel.ops.gemm import grouped_mm
 from src.layers.mlp import SparseMoEBlock
 from src.metrics.functional import compute_quantization_metrics
 from src.metrics.quant import QuantizationStats, set_quantization_monitoring_status
@@ -16,11 +18,11 @@ from src.quant.moe import (
     quantized_grouped_mm,
 )
 from src.quant.quantize import dequantize_operand, quantize_operand
-from src.quant.utils import is_fp4
-from src.quant.constants import GEMM_OPS
-from src.quant.rotation import build_rotation
+from src.quant.utils import is_fp4, is_quantized, resolve_scale
+from src.quant.rotation import apply_rotation_on_axes, build_rotation
 from src.utils.config import (
     ModelConfig,
+    QuantizationConfig,
     TrainConfig,
     TrainingConfig,
 )
@@ -57,7 +59,6 @@ from tests.fast.quant.helper import (
 
 # Worst relative error across format, scale, and layout grids: 2.93e-4 (3.41x).
 PRECISION_BOUND = 1e-3
-
 
 # 299 rows across four experts; expert 1 is empty to test expert boundaries.
 COUNTS = [128, 0, 130, 41]
@@ -109,6 +110,65 @@ def test_quantized_grouped_mm_raise_error():
 
     with pytest.raises(ValueError):
         quantized_grouped_mm(a, b, offs, "bf16", "fp16", a.dtype, ROWWISE, ROWWISE)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_quantized_grouped_mm_rotated_ragged_axis_raise_error(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    rotation = build_rotation(
+        {"rotation_cls": "hadamard", "rotation_kwargs": {"block_size": 4}}
+    )
+    a = torch.ones(3, 4, device=device)
+    b = torch.ones(1, 4, 2, device=device)
+    offs = torch.tensor([3], device=device, dtype=torch.int32)
+    a_rotation_axes = (-2,)
+
+    with pytest.raises(AssertionError):
+        quantized_grouped_mm(
+            a,
+            b,
+            offs,
+            "bf16",
+            "bf16",
+            a.dtype,
+            TENSORWISE,
+            TENSORWISE,
+            rotation=rotation,
+            a_rotation_axes=a_rotation_axes,
+        )
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_quantized_grouped_mm_rotation_ragged_k_bias(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    rotation = build_rotation(
+        {"rotation_cls": "hadamard", "rotation_kwargs": {"block_size": 4}}
+    )
+    torch.manual_seed(0)
+    a = torch.randn(4, 4, device=device)
+    b = torch.randn(4, 4, device=device)
+    bias = torch.randn(1, 4, device=device)
+    offs = torch.tensor([4], device=device, dtype=torch.int32)
+    a_rotation_axes = (-2,)
+    b_rotation_axes = (-1,)
+
+    out = quantized_grouped_mm(
+        apply_rotation_on_axes(a, rotation, a_rotation_axes),
+        apply_rotation_on_axes(b, rotation, b_rotation_axes),
+        offs,
+        "bf16",
+        "bf16",
+        a.dtype,
+        TENSORWISE,
+        TENSORWISE,
+        bias=bias,
+        rotation=rotation,
+        a_rotation_axes=a_rotation_axes,
+        b_rotation_axes=b_rotation_axes,
+    )
+    torch.testing.assert_close(out, (a @ b + bias).unsqueeze(0), atol=1e-5, rtol=0)
 
 
 @pytest.mark.parametrize("a_fmt", ALL_FORMATS)
@@ -279,13 +339,6 @@ def test_quantized_grouped_mm_records_stats(
         src_a, src_b = b.mT, a.mT
     a_stats = QuantizationStats("act/x", a.device) if with_stats else None
     b_stats = QuantizationStats("weight/x", b.device) if with_stats else None
-    rotation = (
-        build_rotation(
-            {"rotation_cls": "hadamard", "rotation_kwargs": {"block_size": 32}}
-        )
-        if with_padding
-        else None
-    )
     unmonitored = quantized_grouped_mm(
         src_a,
         src_b,
@@ -295,7 +348,6 @@ def test_quantized_grouped_mm_records_stats(
         torch.float32 if is_fp4(a_fmt) else a.dtype,
         a_scale,
         b_scale,
-        rotation=rotation,
     )
     set_quantization_monitoring_status(True)
     try:
@@ -310,7 +362,6 @@ def test_quantized_grouped_mm_records_stats(
             b_scale,
             a_stats=a_stats,
             b_stats=b_stats,
-            rotation=rotation,
         )
     finally:
         set_quantization_monitoring_status(False)
@@ -401,22 +452,36 @@ def test_quantized_grouped_mm_rotation_precision(
         skip_unsupported_ragged_k_scale(b_scale)
     a, b, offs = _make(ROTATION_COUNTS, K=64, N=48)
     rotation = build_rotation(rotation_cfg)
+    a_rotation_axes = (-1,)
+    b_rotation_axes = (-2,)
 
     if layout == "ragged_m":
         # Ragged-M: (R,K) x (E,K,N) -> (R,N)
         out = quantized_grouped_mm(
-            a, b, offs, fmt, fmt, a.dtype, a_scale, b_scale, rotation=rotation
+            apply_rotation_on_axes(a, rotation, a_rotation_axes, out_dtype=a.dtype),
+            apply_rotation_on_axes(b, rotation, b_rotation_axes, out_dtype=b.dtype),
+            offs,
+            fmt,
+            fmt,
+            a.dtype,
+            a_scale,
+            b_scale,
+            rotation=rotation,
+            a_rotation_axes=a_rotation_axes,
+            b_rotation_axes=b_rotation_axes,
         )
-        ref = quantized_grouped_mm(
-            a, b, offs, fmt, fmt, a.dtype, a_scale, b_scale, rotation=None
-        )
+        ref = quantized_grouped_mm(a, b, offs, fmt, fmt, a.dtype, a_scale, b_scale)
     elif layout == "ragged_n":
         # Ragged-N: (E,M,K) x (K,R) -> (M,R)
         slabs = torch.randn(offs.shape[0], 32, 64, device="cuda", dtype=torch.bfloat16)
         cols = torch.randn(64, a.shape[0], device="cuda", dtype=torch.bfloat16) * 0.1
         out = quantized_grouped_mm(
-            slabs,
-            cols,
+            apply_rotation_on_axes(
+                slabs, rotation, a_rotation_axes, out_dtype=slabs.dtype
+            ),
+            apply_rotation_on_axes(
+                cols, rotation, b_rotation_axes, out_dtype=cols.dtype
+            ),
             offs,
             fmt,
             fmt,
@@ -424,6 +489,8 @@ def test_quantized_grouped_mm_rotation_precision(
             a_scale,
             b_scale,
             rotation=rotation,
+            a_rotation_axes=a_rotation_axes,
+            b_rotation_axes=b_rotation_axes,
         )
         ref = quantized_grouped_mm(
             slabs,
@@ -434,16 +501,49 @@ def test_quantized_grouped_mm_rotation_precision(
             slabs.dtype,
             a_scale,
             b_scale,
-            rotation=None,
         )
     else:
         # Ragged-K: (K,R) x (R,N) -> (E,K,N)
         gy = torch.randn(a.shape[0], 48, device="cuda", dtype=torch.bfloat16)
+        padded_a, padded_gy, padded_counts = [], [], []
+        start = 0
+        for stop in offs.tolist():
+            padding = (-(stop - start)) % rotation.alignment
+            padded_a.append(F.pad(a[start:stop], (0, 0, 0, padding)))
+            padded_gy.append(F.pad(gy[start:stop], (0, 0, 0, padding)))
+            padded_counts.append(stop - start + padding)
+            start = stop
+        padded_a = torch.cat(padded_a)
+        padded_gy = torch.cat(padded_gy)
+        padded_offs = torch.tensor(
+            padded_counts, device=offs.device, dtype=offs.dtype
+        ).cumsum(0, dtype=offs.dtype)
         out = quantized_grouped_mm(
-            a.mT, gy, offs, fmt, fmt, a.dtype, a_scale, b_scale, rotation=rotation
+            apply_rotation_on_axes(
+                padded_a.mT, rotation, a_rotation_axes, out_dtype=a.dtype
+            ),
+            apply_rotation_on_axes(
+                padded_gy, rotation, b_rotation_axes, out_dtype=a.dtype
+            ),
+            padded_offs,
+            fmt,
+            fmt,
+            a.dtype,
+            a_scale,
+            b_scale,
+            rotation=rotation,
+            a_rotation_axes=a_rotation_axes,
+            b_rotation_axes=b_rotation_axes,
         )
         ref = quantized_grouped_mm(
-            a.mT, gy, offs, fmt, fmt, a.dtype, a_scale, b_scale, rotation=None
+            padded_a.mT,
+            padded_gy,
+            padded_offs,
+            fmt,
+            fmt,
+            a.dtype,
+            a_scale,
+            b_scale,
         )
 
     assert rel(out, ref) < ROTATION_PRECISION_BOUND, rel(out, ref)
@@ -459,19 +559,47 @@ COMPILE_DTYPES = [
 COMPILE_SCALES = [ROWWISE, BLOCKWISE1D_16_E2M1, BLOCKWISE2D_16_E2M1]
 COMPILE_SCALE_TRIPLES = scale_combinations(COMPILE_SCALES, 3)
 COMPILE_COUNTS = [COUNTS, [0, 7, 9, 0]]
-COMPILE_ROTATION_GEMMS = [None, list(GEMM_OPS)]
+COMPILE_ROTATIONS = [None, True]
 # Compiler arithmetic can cross quantization thresholds; worst relative norm
 # across this grid is 0.01550, with a 3.55x margin.
 COMPILE_REL_BOUND = 0.055
+
+INPUT_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+FORWARD_PRECISION_ROTATIONS = [
+    None,
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 16},
+        "rotation_axes": {"act": {"fwd": [-1]}},
+    },
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 16},
+        "rotation_axes": {"weight": {"fwd": [-1]}},
+    },
+]
+BACKWARD_PRECISION_ROTATIONS = [
+    None,
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 16},
+        "rotation_axes": {"grad_out": {"dgrad": [-1]}},
+    },
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 16},
+        "rotation_axes": {"weight": {"dgrad": [-2]}},
+    },
+]
 
 
 @cuda_sm89_or_newer
 @pytest.mark.parametrize("dtype", COMPILE_DTYPES)
 @pytest.mark.parametrize("act_scale,weight_scale,grad_out_scale", COMPILE_SCALE_TRIPLES)
 @pytest.mark.parametrize("counts", COMPILE_COUNTS)
-@pytest.mark.parametrize("rotation_gemms", COMPILE_ROTATION_GEMMS)
+@pytest.mark.parametrize("with_rotation", COMPILE_ROTATIONS)
 def test_scaled_grouped_gemm_fn_compiles_fullgraph(
-    rotation_gemms,
+    with_rotation,
     counts,
     dtype,
     act_scale,
@@ -484,25 +612,31 @@ def test_scaled_grouped_gemm_fn_compiles_fullgraph(
     ) and not cuda_capability_at_least((10, 0)):
         pytest.skip("fused FP4 requires CUDA SM100 or newer")
     a, b, offs = _make(counts, K=64, N=48)
+    weight = b.mT
     cfg = _cfg(_per_tensor_scale(act_scale, weight_scale, grad_out_scale), dtype)
     rotation = None
-    if rotation_gemms is not None:
+    if with_rotation:
         rotation_cfg = {
             "rotation_cls": "hadamard",
             "rotation_kwargs": {"block_size": 16, "seed": 0},
-            "gemms": rotation_gemms,
+            "rotation_axes": {
+                "weight": {"fwd": [-1], "dgrad": [-1]},
+                "act": {"fwd": [-1], "wgrad": []},
+                "grad_out": {"dgrad": [], "wgrad": []},
+            },
         }
         cfg.rotation = rotation_cfg
         rotation = build_rotation(rotation_cfg).cuda()
 
-    def fwd(a, b):
-        return _expert_mm(cfg, a, b, offs, rotation=rotation)
+    def fwd(a, weight):
+        return _expert_mm(cfg, a, weight, offs, rotation=rotation)
 
     def run(fn):
-        a_, b_ = a.clone().requires_grad_(True), b.clone().requires_grad_(True)
-        y = fn(a_, b_)
+        a_ = a.clone().requires_grad_(True)
+        weight_ = weight.clone().requires_grad_(True)
+        y = fn(a_, weight_)
         y.sum().backward()
-        return y, a_.grad, b_.grad
+        return y, a_.grad, weight_.grad
 
     eager = run(fwd)
     torch.compiler.reset()
@@ -526,10 +660,14 @@ def test_scaled_grouped_gemm_fn_compiles_fullgraph(
 @pytest.mark.parametrize("act_scale,weight_scale", SCALE_PAIRS)
 @pytest.mark.parametrize("dtype", FORWARD_DTYPES)
 @pytest.mark.parametrize("counts", GROUPED_COUNTS)
+@pytest.mark.parametrize("rotation_config", FORWARD_PRECISION_ROTATIONS)
+@pytest.mark.parametrize("input_dtype", INPUT_DTYPES)
 def test_scaled_grouped_gemm_fn_forward_precision(
-    dtype, act_scale, weight_scale, bias, counts
+    dtype, act_scale, weight_scale, bias, counts, rotation_config, input_dtype
 ):
     """Check forward precision across formats, scales, bias, and empty experts."""
+    if rotation_config is None and input_dtype is not torch.bfloat16:
+        pytest.skip("unrotated precision already uses bfloat16 inputs")
     skip_unsupported_dtype_scale(dtype, act_scale)
     skip_unsupported_dtype_scale(dtype, weight_scale)
     if uses_fp4_gemm(
@@ -537,14 +675,50 @@ def test_scaled_grouped_gemm_fn_forward_precision(
     ) and not cuda_capability_at_least((10, 0)):
         pytest.skip("fused FP4 requires CUDA SM100 or newer")
     a, b, offs = _make(counts, K=64, N=48)
-    bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16) * 0.1
+    a, b = a.to(input_dtype), b.to(input_dtype)
+    weight = b.mT
+    bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=input_dtype) * 0.1
+    cfg = rule(
+        dtype,
+        _per_tensor_scale(act_scale, weight_scale, act_scale),
+        rotation=rotation_config,
+    )
+    rotation = build_rotation(cfg.rotation)
     y = _expert_mm(
-        _cfg(_per_tensor_scale(act_scale, weight_scale, act_scale), dtype),
+        cfg,
         a,
-        b,
+        weight,
         offs,
         bias=bias0.clone() if bias else None,
+        rotation=rotation,
     )
+
+    if rotation is not None:
+        act_axes = cfg.rotation["rotation_axes"]["act"]["fwd"]
+        weight_axes = cfg.rotation["rotation_axes"]["weight"]["fwd"]
+        rotated_a = apply_rotation_on_axes(a, rotation, act_axes)
+        rotated_weight = apply_rotation_on_axes(weight, rotation, weight_axes)
+        fwd_a = _oracle_qdq(
+            rotated_a,
+            -1,
+            operand_fmt(dtype, "act", "fwd"),
+            act_scale,
+            offs,
+            -2,
+        )
+        fwd_weight = _oracle_qdq(
+            rotated_weight.mT,
+            -2,
+            operand_fmt(dtype, "weight", "fwd"),
+            weight_scale,
+        )
+        fwd_a = _undo_oracle_rotations(fwd_a, rotation, act_axes)
+        fwd_weight = _undo_oracle_rotations(
+            fwd_weight, rotation, tuple(-3 - axis for axis in weight_axes)
+        )
+        y_ref = grouped_mm(fwd_a, fwd_weight, offs, bias=bias0 if bias else None)
+        torch.testing.assert_close(y, y_ref, atol=0, rtol=0)
+        return
 
     y_ref = torch.empty_like(y)
     lo = 0
@@ -570,6 +744,7 @@ def test_scaled_grouped_gemm_fn_forward_precision(
 @pytest.mark.parametrize("act_scale,weight_scale,grad_out_scale", GROUPED_SCALE_TRIPLES)
 @pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
 @pytest.mark.parametrize("counts", GROUPED_COUNTS)
+@pytest.mark.parametrize("rotation_config", BACKWARD_PRECISION_ROTATIONS)
 def test_scaled_grouped_gemm_fn_backward_precision(
     dtype,
     act_scale,
@@ -577,6 +752,7 @@ def test_scaled_grouped_gemm_fn_backward_precision(
     grad_out_scale,
     bias,
     counts,
+    rotation_config,
 ):
     """Check backward precision and fp32 bias-gradient accumulation."""
     skip_unsupported_dtype_scale(dtype, act_scale)
@@ -606,31 +782,63 @@ def test_scaled_grouped_gemm_fn_backward_precision(
     skip_unsupported_ragged_k_scale(act_scale)
     skip_unsupported_ragged_k_scale(grad_out_scale)
     a, b, offs = _make(counts, K=64, N=48)
+    weight = b.mT
     bias0 = torch.randn(offs.shape[0], 48, device="cuda", dtype=torch.bfloat16) * 0.1
-    a_q, b_q = a.clone().requires_grad_(True), b.clone().requires_grad_(True)
+    a_q = a.clone().requires_grad_(True)
+    weight_q = weight.clone().requires_grad_(True)
     bias_q = bias0.clone().requires_grad_(True) if bias else None
+    cfg = rule(
+        dtype,
+        _per_tensor_scale(act_scale, weight_scale, grad_out_scale),
+        rotation=rotation_config,
+    )
+    rotation = build_rotation(cfg.rotation)
     y = _expert_mm(
-        _cfg(_per_tensor_scale(act_scale, weight_scale, grad_out_scale), dtype),
+        cfg,
         a_q,
-        b_q,
+        weight_q,
         offs,
         bias=bias_q,
+        rotation=rotation,
     )
     gy = torch.randn_like(y)
     y.backward(gy)
 
     ga_ref, gb_ref = torch.empty_like(a), torch.zeros_like(b)
+    if rotation is not None:
+        grad_out_axes = cfg.rotation["rotation_axes"]["grad_out"]["dgrad"]
+        weight_axes = cfg.rotation["rotation_axes"]["weight"]["dgrad"]
+        dgrad_y = _oracle_qdq(
+            apply_rotation_on_axes(gy, rotation, grad_out_axes),
+            -1,
+            operand_fmt(dtype, "grad_out", "dgrad"),
+            grad_out_scale,
+            offs,
+            -2,
+        )
+        dgrad_weight = _oracle_qdq(
+            apply_rotation_on_axes(weight, rotation, weight_axes),
+            -2,
+            operand_fmt(dtype, "weight", "dgrad"),
+            weight_scale,
+        )
+        ga_ref = grouped_mm(
+            _undo_oracle_rotations(dgrad_y, rotation, grad_out_axes),
+            _undo_oracle_rotations(dgrad_weight, rotation, weight_axes),
+            offs,
+        )
     lo = 0
     for group, hi in enumerate(offs.tolist()):
         if hi > lo:
-            ga_ref[lo:hi] = mm_ref(
-                gy[lo:hi],
-                b[group].t().contiguous(),
-                operand_fmt(dtype, "grad_out", "dgrad"),
-                operand_fmt(dtype, "weight", "dgrad"),
-                grad_out_scale,
-                weight_scale,
-            ).to(y.dtype)
+            if rotation is None:
+                ga_ref[lo:hi] = mm_ref(
+                    gy[lo:hi],
+                    b[group].t().contiguous(),
+                    operand_fmt(dtype, "grad_out", "dgrad"),
+                    operand_fmt(dtype, "weight", "dgrad"),
+                    grad_out_scale,
+                    weight_scale,
+                ).to(y.dtype)
             padding = (-(hi - lo)) % 16 if wgrad_uses_fp4 else 0
             gb_ref[group] = mm_ref(
                 F.pad(a[lo:hi].t(), (0, padding)),
@@ -642,7 +850,11 @@ def test_scaled_grouped_gemm_fn_backward_precision(
             ).to(y.dtype)
         lo = hi
 
-    expected = [("grad_a", a_q.grad, ga_ref), ("grad_b", b_q.grad, gb_ref)]
+    if rotation is not None:
+        torch.testing.assert_close(a_q.grad, ga_ref, atol=0, rtol=0)
+    expected = [("grad_weight", weight_q.grad, gb_ref.mT)]
+    if rotation is None:
+        expected.append(("grad_a", a_q.grad, ga_ref))
     if bias:
         rows = torch.arange(y.shape[0], device=offs.device)
         acc = torch.zeros_like(bias0, dtype=torch.float32)
@@ -652,20 +864,299 @@ def test_scaled_grouped_gemm_fn_backward_precision(
         assert rel(got, ref) < PRECISION_BOUND, (name, rel(got, ref))
 
 
+ORACLE_COUNTS = [8, 0, 8, 0]
+UNALIGNED_ROW_ROTATION_AXES = [
+    {"act": {"fwd": [-2]}},
+    {"act": {"wgrad": [-2]}},
+    {"grad_out": {"dgrad": [-2]}},
+    {"grad_out": {"wgrad": [-2]}},
+]
+UNALIGNED_ROW_CASES = [([15, 15], ValueError), ([15, 17], AssertionError)]
+# Worst relative errors are 1.36e-7, 6.40e-4, and 5.77e-3 respectively.
+ORACLE_BOUNDS = {
+    torch.float32: 5.7e-7,
+    torch.float16: 0.0043,
+    torch.bfloat16: 0.031,
+}
+
+
+@cuda_sm89_or_newer
+@pytest.mark.parametrize("rotation_axes", UNALIGNED_ROW_ROTATION_AXES)
+@pytest.mark.parametrize("counts,error", UNALIGNED_ROW_CASES)
+def test_scaled_grouped_gemm_fn_rotation_axes_raise_error(rotation_axes, counts, error):
+    rotation_config = {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 16},
+        "rotation_axes": rotation_axes,
+    }
+    cfg = rule(INT4_W8A16_DTYPES, rotation=rotation_config)
+    rotation = build_rotation(rotation_config)
+    a, b, offs = _make(counts, K=32, N=32)
+    a.requires_grad_()
+    weight = b.mT.detach().clone().requires_grad_()
+
+    with pytest.raises(error):
+        _expert_mm(cfg, a, weight, offs, rotation=rotation).sum().backward()
+
+
+def _apply_oracle_rotations(tensor, rotation, axes):
+    for axis in axes:
+        tensor = rotation(tensor, axis, tensor.dtype)
+    return tensor
+
+
+def _undo_oracle_rotations(tensor, rotation, axes):
+    for axis in reversed(axes):
+        tensor = rotation.inverse(tensor, axis, tensor.dtype)
+    return tensor
+
+
+def _oracle_qdq(tensor, axis, fmt, scale, offs=None, ragged_dim=None):
+    if not is_quantized(fmt):
+        return tensor
+    quantized, scales, global_scale, _ = quantize_operand(
+        tensor,
+        axis,
+        fmt,
+        scale,
+        offs=offs,
+        ragged_dim=ragged_dim,
+    )
+    return dequantize_operand(
+        quantized,
+        scales,
+        axis,
+        scale,
+        offs=offs,
+        ragged_dim=ragged_dim,
+        global_scale=global_scale,
+    ).to(tensor.dtype)
+
+
+def _oracle_grouped_mm(a, b, offs, bias=None):
+    output = a.new_zeros(a.shape[0], b.shape[-1])
+    start = 0
+    for group, stop in enumerate(offs.tolist()):
+        output[start:stop] = a[start:stop] @ b[group]
+        if bias is not None:
+            output[start:stop] += bias[group]
+        start = stop
+    return output
+
+
+@cuda_sm89_or_newer
+@pytest.mark.parametrize("input_dtype", INPUT_DTYPES)
+def test_scaled_grouped_gemm_fn_rotation_axes_precision(input_dtype):
+    """Compare ragged tensor rotations with an independent QDQ-restoration oracle."""
+    rotation_cfg = {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 4, "random_sign": True, "seed": 17},
+        "rotation_axes": {
+            "weight": {"fwd": [-2, -1], "dgrad": [-2, -1]},
+            "act": {"fwd": [-2, -1], "wgrad": [-2, -1]},
+            "grad_out": {"dgrad": [-2, -1], "wgrad": [-2, -1]},
+        },
+    }
+    cfg = _cfg(TENSORWISE, FP8_E4M3_W8A8_E5M2_G8_DTYPES)
+    cfg.rotation = rotation_cfg
+    a, b, offs = _make(ORACLE_COUNTS, K=8, N=8, seed=17)
+    a = a.to(input_dtype).requires_grad_()
+    weight = b.mT.to(input_dtype).detach().clone().requires_grad_()
+    bias = torch.randn(4, 8, device="cuda", dtype=input_dtype).requires_grad_()
+    rotation = build_rotation(rotation_cfg).cuda()
+    out = ScaledGroupedGemmFn.apply(a, weight, bias, offs, cfg, {}, rotation)
+    grad_y = torch.randn_like(out)
+    out.backward(grad_y)
+
+    act_fwd_axes = [-2, -1]
+    weight_fwd_axes = [-2, -1]
+    grad_out_dgrad_axes = [-2, -1]
+    weight_dgrad_axes = [-2, -1]
+    act_wgrad_axes = [-2, -1]
+    grad_out_wgrad_axes = [-2, -1]
+    act_scale = resolve_scale(cfg.scale, "act")
+    weight_scale = resolve_scale(cfg.scale, "weight")
+    grad_out_scale = resolve_scale(cfg.scale, "grad_out")
+
+    rotated_a = _apply_oracle_rotations(a.detach(), rotation, act_fwd_axes)
+    rotated_weight = _apply_oracle_rotations(weight.detach(), rotation, weight_fwd_axes)
+    fwd_a = _oracle_qdq(
+        rotated_a,
+        -1,
+        cfg.dtype["act"]["fwd"],
+        act_scale,
+        offs,
+        -2,
+    )
+    fwd_weight = _oracle_qdq(
+        rotated_weight.mT,
+        -2,
+        cfg.dtype["weight"]["fwd"],
+        weight_scale,
+    ).mT
+    out_ref = _oracle_grouped_mm(
+        _undo_oracle_rotations(fwd_a, rotation, act_fwd_axes),
+        _undo_oracle_rotations(fwd_weight, rotation, weight_fwd_axes).mT,
+        offs,
+        bias.detach(),
+    )
+
+    rotated_grad_y = _apply_oracle_rotations(grad_y, rotation, grad_out_dgrad_axes)
+    rotated_weight_dgrad = _apply_oracle_rotations(
+        weight.detach(), rotation, weight_dgrad_axes
+    )
+    dgrad_y = _oracle_qdq(
+        rotated_grad_y,
+        -1,
+        cfg.dtype["grad_out"]["dgrad"],
+        grad_out_scale,
+        offs,
+        -2,
+    )
+    dgrad_weight = _oracle_qdq(
+        rotated_weight_dgrad,
+        -2,
+        cfg.dtype["weight"]["dgrad"],
+        weight_scale,
+    )
+    grad_a_ref = _oracle_grouped_mm(
+        _undo_oracle_rotations(dgrad_y, rotation, grad_out_dgrad_axes),
+        _undo_oracle_rotations(dgrad_weight, rotation, weight_dgrad_axes),
+        offs,
+    )
+
+    wgrad_a = _oracle_qdq(
+        _apply_oracle_rotations(a.detach(), rotation, act_wgrad_axes).mT,
+        -1,
+        cfg.dtype["act"]["wgrad"],
+        act_scale,
+        offs,
+        -1,
+    ).mT
+    rotated_grad_y_wgrad = _apply_oracle_rotations(
+        grad_y, rotation, grad_out_wgrad_axes
+    )
+    wgrad_y = _oracle_qdq(
+        rotated_grad_y_wgrad,
+        -2,
+        cfg.dtype["grad_out"]["wgrad"],
+        grad_out_scale,
+        offs,
+        -2,
+    )
+    restored_a = _undo_oracle_rotations(wgrad_a, rotation, act_wgrad_axes)
+    restored_grad_y = _undo_oracle_rotations(wgrad_y, rotation, grad_out_wgrad_axes)
+    grad_b_ref = torch.stack(
+        [
+            restored_a[start:stop].mT @ restored_grad_y[start:stop]
+            for start, stop in zip([0, *offs[:-1].tolist()], offs.tolist())
+        ]
+    )
+    grad_bias_ref = torch.zeros_like(bias, dtype=torch.float32)
+    grad_bias_ref.index_add_(
+        0,
+        torch.searchsorted(
+            offs, torch.arange(grad_y.shape[0], device="cuda"), right=True
+        ),
+        grad_y.float(),
+    )
+
+    for name, actual, reference in (
+        ("output", out, out_ref),
+        ("grad_a", a.grad, grad_a_ref),
+        ("grad_weight", weight.grad, grad_b_ref.mT),
+        ("grad_bias", bias.grad, grad_bias_ref.to(input_dtype)),
+    ):
+        error = rel(actual, reference)
+        assert error < ORACLE_BOUNDS[input_dtype], (name, error)
+
+
 @cuda_sm89_or_newer
 def test_scaled_grouped_gemm_fn_bias_grad_precision():
     rows = 257
     a = torch.ones(rows, 1, device="cuda", dtype=torch.bfloat16)
-    b = torch.ones(1, 1, 1, device="cuda", dtype=torch.bfloat16)
+    weight = torch.ones(1, 1, 1, device="cuda", dtype=torch.bfloat16).requires_grad_()
     bias = torch.zeros(1, 1, device="cuda", requires_grad=True)
     offs = torch.tensor([rows], device="cuda", dtype=torch.int32)
     dtype = {"weight": "bf16", "act": "bf16", "grad_out": "bf16"}
 
-    out = _expert_mm(_cfg(dtype=dtype), a, b, offs, bias=bias)
+    out = _expert_mm(_cfg(dtype=dtype), a, weight, offs, bias=bias)
     out.backward(torch.ones_like(out))
 
     assert bias.grad.dtype is torch.float32
     torch.testing.assert_close(bias.grad, torch.full_like(bias, rows), atol=0, rtol=0)
+
+
+AUTOCAST_DTYPES = [None, torch.float16, torch.bfloat16]
+AUTOCAST_INPUT_DTYPES = [torch.float32, torch.bfloat16]
+AUTOCAST_QUANTIZATION_DTYPES = [
+    FP8_E4M3_W8A8_E5M2_G8_DTYPES,
+    INT4_W8A16_DTYPES,
+]
+AUTOCAST_ROTATIONS = [
+    None,
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 16, "seed": 0},
+        "rotation_axes": {
+            "weight": {"fwd": [-1], "dgrad": [-1]},
+            "act": {"fwd": [-1], "wgrad": []},
+            "grad_out": {"dgrad": [], "wgrad": []},
+        },
+    },
+]
+
+
+@cuda_sm89_or_newer
+@pytest.mark.parametrize("autocast_dtype", AUTOCAST_DTYPES)
+@pytest.mark.parametrize("input_dtype", AUTOCAST_INPUT_DTYPES)
+@pytest.mark.parametrize("quantization_dtype", AUTOCAST_QUANTIZATION_DTYPES)
+@pytest.mark.parametrize("rotation_config", AUTOCAST_ROTATIONS)
+def test_scaled_grouped_gemm_fn_autocast_precision(
+    autocast_dtype, input_dtype, quantization_dtype, rotation_config
+):
+    torch.manual_seed(0)
+    a, b, offs = _make([8, 0, 12], K=32, N=16)
+    x = a.to(input_dtype).detach().clone().requires_grad_()
+    weight = b.mT.float().detach().clone().requires_grad_()
+    bias = torch.randn(3, 16, device="cuda", requires_grad=True)
+    x_before = x.detach().clone()
+    weight_before = weight.detach().clone()
+    bias_before = bias.detach().clone()
+    cfg = rule(quantization_dtype, ROWWISE, rotation=rotation_config)
+    rotation = build_rotation(cfg.rotation)
+    compute_dtype = input_dtype if autocast_dtype is None else autocast_dtype
+
+    with torch.amp.autocast(
+        "cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None
+    ):
+        output = ScaledGroupedGemmFn.apply(x, weight, bias, offs, cfg, {}, rotation)
+    grad_output = torch.randint(-4, 5, output.shape, device=output.device).to(
+        compute_dtype
+    )
+    output.backward(grad_output)
+
+    ref_x = x.detach().to(compute_dtype).requires_grad_()
+    ref_weight = weight.detach().to(compute_dtype).requires_grad_()
+    ref_bias = bias.detach().clone().requires_grad_()
+    reference = ScaledGroupedGemmFn.apply(
+        ref_x, ref_weight, ref_bias, offs, cfg, {}, rotation
+    )
+    reference.backward(grad_output)
+
+    assert output.dtype is compute_dtype
+    torch.testing.assert_close(output, reference, atol=0, rtol=0)
+    for actual, expected, master in (
+        (x.grad, ref_x.grad, x),
+        (weight.grad, ref_weight.grad, weight),
+        (bias.grad, ref_bias.grad, bias),
+    ):
+        assert actual.dtype is master.dtype
+        torch.testing.assert_close(actual, expected.to(actual.dtype), atol=0, rtol=0)
+        assert torch.isfinite(actual).all()
+    assert torch.equal(x, x_before)
+    assert torch.equal(weight, weight_before)
+    assert torch.equal(bias, bias_before)
 
 
 # --- QuantizedSparseMoEBlock ---
@@ -689,16 +1180,18 @@ def test_quantized_sparse_moe_block_only_quantizes_during_training(
         n_routed_experts_per_token=1,
         aux_loss=False,
     )
-    cfg = TrainingConfig(
-        mixed_precision="no",
-        quantization={
-            "enabled": True,
-            "enabled_after_steps": enabled_after_steps,
-            "dtype": INT4_W8A16_DTYPES,
-        },
+    cfg = TrainConfig(
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            **{
+                "enabled": True,
+                "enabled_after_steps": enabled_after_steps,
+                "dtype": INT4_W8A16_DTYPES,
+            }
+        ),
     ).quantization
     block = QuantizedSparseMoEBlock.from_module(source, cfg)
-    args = (torch.randn(4, 4), torch.randn(2, 4, 8), torch.tensor([2, 4]))
+    args = (torch.randn(4, 4), torch.randn(2, 8, 4), torch.tensor([2, 4]))
     plain = SparseMoEBlock.expert_mm(block, *args, projection="gate")
 
     block.train()
@@ -712,6 +1205,33 @@ def test_quantized_sparse_moe_block_only_quantizes_during_training(
         assert torch.equal(out, plain)
     block.eval()
     assert torch.equal(block.expert_mm(*args, projection="gate"), plain)
+
+
+def test_quantized_sparse_moe_block_rotation_axes():
+    source = SparseMoEBlock(
+        d_model=4,
+        intermediate_size=8,
+        n_routed_experts=2,
+        n_routed_experts_per_token=1,
+        aux_loss=False,
+    )
+    cfg = QuantizationConfig(
+        enabled=True,
+        dtype=INT4_W8A16_DTYPES,
+        rotation={
+            "rotation_cls": "hadamard",
+            "rotation_kwargs": {"block_size": 4},
+            "rotation_axes": {"act": {"fwd": [-1]}},
+        },
+    )
+    rotation = build_rotation(cfg.rotation)
+    block = QuantizedSparseMoEBlock.from_module(source, cfg, rotation)
+
+    assert (
+        block.quantization_config.rotation["rotation_axes"]
+        == cfg.rotation["rotation_axes"]
+    )
+    assert block.rotation is rotation
 
 
 @cuda_sm89_or_newer
@@ -747,11 +1267,9 @@ def test_quantized_sparse_moe_block_autocast():
     assert torch.isfinite(x.grad).all()
 
 
-# Block 16 divides both expert contractions below (64 and 48); wgrad reaches the
-# ragged contraction, so it is the case segment padding has to carry.
+# Feature rotations support arbitrary per-expert token counts.
 E2E_QUANTIZATION = [
     {
-        "enabled": True,
         "dtype": {
             "weight": "fp8_e4m3",
             "act": "fp8_e4m3",
@@ -766,7 +1284,6 @@ E2E_QUANTIZATION = [
         },
     },
     {
-        "enabled": True,
         "dtype": {
             "weight": "fp4_e2m1",
             "act": "fp4_e2m1",
@@ -782,13 +1299,24 @@ E2E_QUANTIZATION = [
     },
 ]
 E2E_ROTATIONS = [
-    None,
+    {"rotation_cls": None},
     {
         "rotation_cls": "hadamard",
         "rotation_kwargs": {"block_size": 16},
-        "gemms": ["wgrad"],
+        "rotation_axes": {
+            "act": {"wgrad": [-1]},
+            "grad_out": {"wgrad": [-1]},
+        },
     },
-    {"rotation_cls": "hadamard", "rotation_kwargs": {"block_size": 16}},
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 16},
+        "rotation_axes": {
+            "weight": {"fwd": [-1], "dgrad": [-1]},
+            "act": {"fwd": [-1], "wgrad": [-1]},
+            "grad_out": {"wgrad": [-1]},
+        },
+    },
 ]
 
 
@@ -826,12 +1354,13 @@ def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation, quantiza
             norm_cls="rmsnorm",
             pos_emb_cls="rope",
         ),
-        training=TrainingConfig(
-            mixed_precision="bf16",
-            quantization={
+        training=TrainingConfig(mixed_precision="bf16"),
+        quantization=QuantizationConfig(
+            **{
+                "enabled": True,
                 **copy.deepcopy(quantization),
                 "rotation": rotation,
-            },
+            }
         ),
     )
     model = build_model(config)
@@ -843,7 +1372,7 @@ def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation, quantiza
     # Pin the rotation to the block: a config that silently resolves to None would
     # leave every assertion below passing without a rotation ever running.
     for block in blocks:
-        assert (block.rotation is not None) == (rotation is not None)
+        assert (block.rotation is not None) == (rotation["rotation_cls"] is not None)
 
     ids = torch.randint(0, 128, (2, 64), device="cuda")
     position_ids = torch.arange(64, device="cuda").unsqueeze(0).expand(2, 64)

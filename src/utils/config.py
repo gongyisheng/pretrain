@@ -346,7 +346,7 @@ class QuantizationConfig:
     # {tensor: {granularity, block_shape}, scale_dtype, enable_global_scale}
     scale: dict = field(default_factory=dict)
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
-    rotation: Optional[dict] = None
+    rotation: dict = field(default_factory=dict)
     layer_idx: Optional[List[int]] = None
     enabled_after_steps: int = 0
     include: List[str] = field(default_factory=lambda: ["*"])
@@ -354,9 +354,14 @@ class QuantizationConfig:
 
     def __post_init__(self):
         _check_type("quant enabled", self.enabled, bool)
+        _check_type("quant scale", self.scale, dict)
+        _check_type("quant rounding", self.rounding, dict)
+        _check_type("quant rotation", self.rotation, dict)
+        self.rotation.setdefault("rotation_cls", None)
+        self.rotation.setdefault("rotation_kwargs", {})
+        self.rotation.setdefault("rotation_axes", {})
         if not self.enabled:
             return
-        _check_type("quant scale", self.scale, dict)
         _check_include_exclude("quant", self.include, self.exclude)
         if (
             not isinstance(self.enabled_after_steps, int)
@@ -492,16 +497,21 @@ class QuantizationConfig:
 
     def _post_init_rotation(self):
         """Canonicalize rotation to per-tensor, per-GEMM matrix axes."""
-        if self.rotation is None:
-            return
-        _check_type("quant 'rotation'", self.rotation, dict)
-        rotation_cls = self.rotation.get("rotation_cls")
+        rotation_cls = self.rotation["rotation_cls"]
+        resolved_axes = {
+            tensor: {gemm: [] for gemm in gemms}
+            for tensor, gemms in GEMM_OPS_BY_TENSOR.items()
+        }
         if rotation_cls is None:
-            self.rotation = None
+            self.rotation = {
+                "rotation_cls": None,
+                "rotation_kwargs": {},
+                "rotation_axes": resolved_axes,
+            }
             return
         _check_value("rotation_cls", rotation_cls, ROTATION_REGISTRY)
 
-        rotation_kwargs = self.rotation.get("rotation_kwargs", {})
+        rotation_kwargs = self.rotation["rotation_kwargs"]
         _check_type("quant rotation 'rotation_kwargs'", rotation_kwargs, dict)
         rotation_kwargs = dict(rotation_kwargs)
         # build_rotation_key serializes these to derive a stable identity, and the
@@ -514,12 +524,8 @@ class QuantizationConfig:
                 f"values, got {rotation_kwargs!r}"
             ) from error
 
-        rotation_axes = self.rotation.get("rotation_axes", {})
+        rotation_axes = self.rotation["rotation_axes"]
         _check_type("quant rotation 'rotation_axes'", rotation_axes, dict)
-        resolved_axes = {
-            tensor: {gemm: [] for gemm in gemms}
-            for tensor, gemms in GEMM_OPS_BY_TENSOR.items()
-        }
         for tensor, gemm_axes in rotation_axes.items():
             _check_value("quant rotation tensor", tensor, GEMM_OPS_BY_TENSOR)
             _check_type(f"quant rotation '{tensor}'", gemm_axes, dict)

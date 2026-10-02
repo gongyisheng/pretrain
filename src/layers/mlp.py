@@ -49,7 +49,8 @@ class GroupedGemmFn(torch.autograd.Function):
 
 
 def grouped_mm_fn(a, b, offs, bias=None, projection=None, backend: str | None = None):
-    return GroupedGemmFn.apply(a, b, bias, offs, backend)
+    """Grouped GEMM with weights in [expert, out, in] layout."""
+    return GroupedGemmFn.apply(a, b.mT, bias, offs, backend)
 
 
 def grouped_mlp(
@@ -77,12 +78,12 @@ def grouped_mlp(
     # the per-expert bias is (E, out) and rides in the GEMM epilogue
     if w_gate is not None:
         h = act_fn(
-            expert_mm(x, w_gate.mT, offs, bias=b_gate, projection="gate"),
-            expert_mm(x, w_up.mT, offs, bias=b_up, projection="up"),
+            expert_mm(x, w_gate, offs, bias=b_gate, projection="gate"),
+            expert_mm(x, w_up, offs, bias=b_up, projection="up"),
         )
     else:
-        h = act_fn(expert_mm(x, w_up.mT, offs, bias=b_up, projection="up"))
-    return expert_mm(h, w_down.mT, offs, bias=b_down, projection="down")
+        h = act_fn(expert_mm(x, w_up, offs, bias=b_up, projection="up"))
+    return expert_mm(h, w_down, offs, bias=b_down, projection="down")
 
 
 class DenseMLPBlock(nn.Module):
@@ -401,7 +402,7 @@ class SparseMoEBlock(nn.Module):
         self.expert_load = ExpertLoad(n_routed_experts)
 
     def expert_mm(self, a, b, offs, bias=None, projection=None):
-        """The expert GEMM seam, one call per projection.
+        """Expert projection with weights shaped [expert, out, in].
 
         A method so a subclass can override it -- QuantizedSparseMoEBlock does -- while
         an instance can still assign over it to spy on or replace the GEMM.

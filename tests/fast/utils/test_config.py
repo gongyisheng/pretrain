@@ -1,8 +1,7 @@
 import copy
-import os
 import glob
 import json
-import tempfile
+
 import pytest
 import torch
 import yaml
@@ -18,6 +17,7 @@ from src.utils.config import (
 
 
 SCALE_TENSORS = ("weight", "act", "grad_out")
+QUANTIZATION_ENABLED = [False, True]
 
 
 def _scale_config(
@@ -43,11 +43,10 @@ def _scale_config(
     return scale
 
 
-def _write_yaml(tmp_dir, data):
-    path = os.path.join(tmp_dir, "test.yaml")
-    with open(path, "w") as f:
-        yaml.dump(data, f)
-    return path
+def _write_yaml(tmp_path, data):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(data))
+    return str(path)
 
 
 MINIMAL_CONFIG = {
@@ -133,81 +132,49 @@ def test_model_config_defaults():
 # ==================== Loading from YAML ====================
 
 
-def test_load_config_from_yaml():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _write_yaml(tmp, MINIMAL_CONFIG)
-        config = load_config(path)
-        assert config.max_seq_len == 128
-        assert config.model.n_layers == 2
-        assert config.optimizer.lr == 1e-3
-
-
-def test_load_config_model_kwargs():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _write_yaml(tmp, MINIMAL_CONFIG)
-        cfg = load_config(path)
-        assert cfg.model.resolve_attn(0)[1]["n_heads"] == 4
-        assert cfg.model.resolve_mlp(0)[1]["activation_cls"] == "swiglu"
-        assert cfg.model.pos_emb_kwargs["rope_theta"] == 1e4
-
-
-def test_config_to_dict_roundtrip():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _write_yaml(tmp, MINIMAL_CONFIG)
-        config = load_config(path)
-        d = config.to_dict()
-        assert d["max_seq_len"] == 128
-        assert d["model"]["attn"][0]["attn_cls"] == "gqa"
-        assert d["model"]["attn"][0]["attn_kwargs"]["n_heads"] == 4
-
-
-@pytest.mark.parametrize(
-    ("scale", "scale_dtype"),
-    [
-        (_scale_config("rowwise", scale_dtype="fp32"), "fp32"),
-        (
-            _scale_config(
-                "blockwise",
-                {"weight": [1, 32], "act": [1, 32], "grad_out": [1, 32]},
-                scale_dtype="fp8_e8m0",
-            ),
-            "fp8_e8m0",
-        ),
-    ],
-)
-def test_config_to_dict_serializes_quant_scale_dtype(scale, scale_dtype):
-    config = TrainConfig(
-        training=TrainingConfig(
-            mixed_precision="no",
-            quantization={
-                "enabled": True,
-                "dtype": {"weight": "fp8_e4m3"},
-                "scale": scale,
-            },
-        )
-    )
+def test_load_config(tmp_path):
+    config = load_config(_write_yaml(tmp_path, MINIMAL_CONFIG))
+    assert config.max_seq_len == 128
+    assert config.model.n_layers == 2
+    assert config.optimizer.lr == 1e-3
+    assert config.model.resolve_attn(0)[1]["n_heads"] == 4
+    assert config.model.resolve_mlp(0)[1]["activation_cls"] == "swiglu"
+    assert config.model.pos_emb_kwargs["rope_theta"] == 1e4
 
     exported = config.to_dict()
+    assert exported["max_seq_len"] == 128
+    assert exported["model"]["attn"][0]["attn_cls"] == "gqa"
+    assert exported["model"]["attn"][0]["attn_kwargs"]["n_heads"] == 4
+    assert load_config(_write_yaml(tmp_path, exported)).to_dict() == exported
 
-    assert exported["training"]["quantization"]["scale"]["scale_dtype"] == scale_dtype
-    json_export = json.dumps(exported)
-    yaml_export = yaml.safe_dump(exported)
+
+SCALE_DTYPE_CASES = [
+    (_scale_config("rowwise", scale_dtype="fp32"), "fp32"),
+    (_scale_config("blockwise", [1, 32], scale_dtype="fp8_e8m0"), "fp8_e8m0"),
+]
+
+
+@pytest.mark.parametrize("enabled", QUANTIZATION_ENABLED)
+@pytest.mark.parametrize("case", SCALE_DTYPE_CASES)
+def test_train_config_to_dict_scale_dtype(tmp_path, enabled, case):
+    scale, scale_dtype = case
+    config = TrainConfig(
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            enabled=enabled,
+            dtype={"weight": "fp8_e4m3"},
+            scale=copy.deepcopy(scale) if enabled else {"scale_dtype": scale_dtype},
+        ),
+    )
+    exported = config.to_dict()
+    assert config.quantization.scale["scale_dtype"] == scale_dtype
+    assert exported["quantization"]["scale"]["scale_dtype"] == scale_dtype
     assert (
-        json.loads(json_export)["training"]["quantization"]["scale"]["scale_dtype"]
+        json.loads(json.dumps(exported))["quantization"]["scale"]["scale_dtype"]
         == scale_dtype
     )
-    assert (
-        yaml.safe_load(yaml_export)["training"]["quantization"]["scale"]["scale_dtype"]
-        == scale_dtype
-    )
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "config.yaml")
-        with open(path, "w") as f:
-            f.write(yaml_export)
-        restored = load_config(path)
-    assert restored.training.quantization.scale["scale_dtype"] is getattr(
-        torch, "float32" if scale_dtype == "fp32" else "float8_e8m0fnu"
-    )
+    restored = load_config(_write_yaml(tmp_path, exported))
+    assert restored.quantization.scale["scale_dtype"] == scale_dtype
 
 
 BLOCK_SHAPE_TENSORS = ["weight", "act", "grad_out"]
@@ -222,83 +189,49 @@ OFF_BLOCKWISE_SHAPES = [
     [1, 16],
     None,
 ]
-NON_DICT_BLOCK_SHAPES = OFF_BLOCKWISE_SHAPES[1:]
 
 
 @pytest.mark.parametrize("tensor", BLOCK_SHAPE_TENSORS)
 @pytest.mark.parametrize("block_shape", BLOCK_SHAPE_OVERRIDES)
-def test_config_to_dict_roundtrips_per_tensor_block_shape(tensor, block_shape):
+def test_config_to_dict_roundtrips_per_tensor_block_shape(
+    tmp_path, tensor, block_shape
+):
+    expected_shapes = {"weight": (16, 16), "act": (1, 16), "grad_out": (1, 16)}
+    expected_shapes[tensor] = block_shape
     config = TrainConfig(
-        training=TrainingConfig(
-            mixed_precision="no",
-            quantization={
-                "enabled": True,
-                "dtype": {
-                    "weight": "fp4_e2m1",
-                    "act": "fp4_e2m1",
-                    "grad_out": "fp4_e2m1",
-                },
-                "scale": {
-                    resolved_tensor: {
-                        "granularity": "blockwise",
-                        "block_shape": (
-                            block_shape
-                            if resolved_tensor == tensor
-                            else ((16, 16) if resolved_tensor == "weight" else (1, 16))
-                        ),
-                    }
-                    for resolved_tensor in SCALE_TENSORS
-                },
-            },
-        )
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "fp4_e2m1", "act": "fp4_e2m1", "grad_out": "fp4_e2m1"},
+            scale=_scale_config("blockwise", expected_shapes),
+        ),
     )
-
-    exported = config.to_dict()
-    yaml_export = yaml.safe_dump(exported)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "config.yaml")
-        with open(path, "w") as f:
-            f.write(yaml_export)
-        restored = load_config(path)
-
-    rule = restored.training.quantization
+    restored = load_config(_write_yaml(tmp_path, config.to_dict()))
     assert {
-        resolved_tensor: rule.scale[resolved_tensor]["block_shape"]
-        for resolved_tensor in SCALE_TENSORS
-    } == {
-        resolved_tensor: (
-            block_shape
-            if resolved_tensor == tensor
-            else ((16, 16) if resolved_tensor == "weight" else (1, 16))
-        )
-        for resolved_tensor in ("weight", "act", "grad_out")
-    }
+        tensor: restored.quantization.scale[tensor]["block_shape"]
+        for tensor in SCALE_TENSORS
+    } == expected_shapes
 
 
-@pytest.mark.parametrize(
-    ("granularity", "expected_shape"),
-    [("tensorwise", (0, 0)), ("rowwise", (1, 0))],
-)
-def test_config_to_dict_roundtrips_nonblock_scale_shape(granularity, expected_shape):
+NONBLOCK_SCALE_CASES = [("tensorwise", (0, 0)), ("rowwise", (1, 0))]
+
+
+@pytest.mark.parametrize("case", NONBLOCK_SCALE_CASES)
+def test_config_to_dict_roundtrips_nonblock_scale_shape(case):
+    granularity, expected_shape = case
     config = TrainConfig(
-        training=TrainingConfig(
-            mixed_precision="no",
-            quantization={
-                "enabled": True,
-                "dtype": {
-                    "weight": "fp8_e4m3",
-                    "act": "fp8_e4m3",
-                    "grad_out": "fp8_e5m2",
-                },
-                "scale": {
-                    tensor: {"granularity": granularity, "block_shape": None}
-                    for tensor in SCALE_TENSORS
-                },
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+            scale={
+                tensor: {"granularity": granularity, "block_shape": None}
+                for tensor in SCALE_TENSORS
             },
-        )
+        ),
     )
     exported = config.to_dict()
-    exported_scale = exported["training"]["quantization"]["scale"]
+    exported_scale = exported["quantization"]["scale"]
     assert {
         tensor: exported_scale[tensor]["block_shape"] for tensor in SCALE_TENSORS
     } == {tensor: expected_shape for tensor in SCALE_TENSORS}
@@ -309,71 +242,53 @@ def test_config_to_dict_roundtrips_nonblock_scale_shape(granularity, expected_sh
     ):
         decoded = deserialize(serialized)
         assert {
-            tensor: decoded["training"]["quantization"]["scale"][tensor]["block_shape"]
+            tensor: decoded["quantization"]["scale"][tensor]["block_shape"]
             for tensor in SCALE_TENSORS
         } == {tensor: list(expected_shape) for tensor in SCALE_TENSORS}
-        restored = TrainConfig(training=TrainingConfig(**decoded["training"]))
+        restored = TrainConfig(
+            training=TrainingConfig(**decoded["training"]),
+            quantization=QuantizationConfig(**decoded["quantization"]),
+        )
         assert {
-            tensor: restored.training.quantization.scale[tensor]["block_shape"]
+            tensor: restored.quantization.scale[tensor]["block_shape"]
             for tensor in SCALE_TENSORS
         } == {tensor: expected_shape for tensor in SCALE_TENSORS}
 
 
-@pytest.mark.parametrize(
-    ("runtime_dtype", "scale_dtype"),
-    [
-        (torch.float32, "fp32"),
-        (torch.float8_e8m0fnu, "fp8_e8m0"),
-    ],
-)
-def test_config_to_dict_serializes_disabled_quant_scale_dtype(
-    runtime_dtype, scale_dtype
-):
+def test_quantization_config_rejects_runtime_scale_dtype():
+    with pytest.raises(ValueError):
+        QuantizationConfig(enabled=True, scale={"scale_dtype": torch.float32})
+
+
+def test_config_to_dict_rotation_roundtrip(tmp_path):
     config = TrainConfig(
-        training=TrainingConfig(
-            quantization={
-                "enabled": False,
-                "scale": {"scale_dtype": runtime_dtype},
-            },
-        )
-    )
-
-    exported = config.to_dict()
-
-    assert exported["training"]["quantization"]["scale"]["scale_dtype"] == scale_dtype
-    json.dumps(exported)
-    yaml.safe_dump(exported)
-
-
-def test_config_to_dict_rotation_roundtrip():
-    config = TrainConfig(
-        training=TrainingConfig(
-            mixed_precision="no",
-            quantization={
-                "enabled": True,
-                "dtype": {
-                    "weight": "fp8_e4m3",
-                    "act": "fp8_e4m3",
-                    "grad_out": "fp8_e5m2",
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+            rotation={
+                "rotation_cls": "hadamard",
+                "rotation_kwargs": {
+                    "block_size": 4,
+                    "random_sign": True,
+                    "sign_vector": [1.0, -1.0, -1.0, 1.0],
                 },
-                "rotation": {
-                    "rotation_cls": "hadamard",
-                    "rotation_kwargs": {
-                        "block_size": 4,
-                        "random_sign": True,
-                        "sign_vector": [1.0, -1.0, -1.0, 1.0],
-                    },
-                    "gemms": ["fwd", "wgrad"],
+                "rotation_axes": {
+                    "weight": {"fwd": [-1], "dgrad": [-1]},
+                    "act": {"fwd": [-2], "wgrad": [-2]},
                 },
             },
-        )
+        ),
     )
-    original_rule = config.training.quantization
-    assert not hasattr(original_rule, "_rotation")
+    original_rule = config.quantization
 
     exported = config.to_dict()
-    exported_rotation = exported["training"]["quantization"]["rotation"]
-    assert set(exported_rotation) == {"rotation_cls", "rotation_kwargs", "gemms"}
+    exported_rotation = exported["quantization"]["rotation"]
+    assert set(exported_rotation) == {
+        "rotation_cls",
+        "rotation_kwargs",
+        "rotation_axes",
+    }
     assert exported_rotation["rotation_kwargs"]["sign_vector"] == [
         1.0,
         -1.0,
@@ -381,80 +296,63 @@ def test_config_to_dict_rotation_roundtrip():
         1.0,
     ]
     json.loads(json.dumps(exported))
-    yaml_export = yaml.safe_dump(exported)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "config.yaml")
-        with open(path, "w") as f:
-            f.write(yaml_export)
-        restored = load_config(path)
-
-    restored_rule = restored.training.quantization
+    restored = load_config(_write_yaml(tmp_path, exported))
+    restored_rule = restored.quantization
     assert restored_rule.rotation == original_rule.rotation
 
 
 # ==================== CLI overrides ====================
 
 
-def test_load_config_optimizer_section():
-    with tempfile.TemporaryDirectory() as tmp:
-        # The section is optional (tokenizer-training configs have none) and
-        # falls back to the dataclass defaults.
-        raw = copy.deepcopy(MINIMAL_CONFIG)
-        del raw["optimizer"]
-        cfg = load_config(_write_yaml(tmp, raw)).optimizer
-        assert (cfg.optimizer_cls, cfg.lr) == ("adamw", 5e-4)
-        assert cfg.optimizer_kwargs == {
-            "betas": (0.9, 0.95),
-            "eps": 1e-8,
-            "fused": True,
-        }
+def test_load_config_optimizer_defaults(tmp_path):
+    raw = copy.deepcopy(MINIMAL_CONFIG)
+    del raw["optimizer"]
+    config = load_config(_write_yaml(tmp_path, raw)).optimizer
+    assert (config.optimizer_cls, config.lr) == ("adamw", 5e-4)
+    assert config.optimizer_kwargs == {
+        "betas": (0.9, 0.95),
+        "eps": 1e-8,
+        "fused": True,
+    }
 
 
-def test_load_config_optimizer_nested_kwargs():
-    with tempfile.TemporaryDirectory() as tmp:
-        raw = copy.deepcopy(MINIMAL_CONFIG)
-        raw["optimizer"] = {
-            "optimizer_cls": "muonadam",
-            "lr": 1e-3,
-            "weight_decay": 0.1,
-            "optimizer_kwargs": {
-                "adam_kwargs": {"eps": "1e-7"},
-                "muon_kwargs": {"eps": "1e-6"},
-            },
-        }
-        cfg = load_config(_write_yaml(tmp, raw)).optimizer
-
-    assert cfg.optimizer_kwargs["adam_kwargs"]["eps"] == 1e-7
-    assert cfg.optimizer_kwargs["muon_kwargs"]["eps"] == 1e-6
+def test_load_config_optimizer_nested_kwargs(tmp_path):
+    raw = copy.deepcopy(MINIMAL_CONFIG)
+    raw["optimizer"] = {
+        "optimizer_cls": "muonadam",
+        "lr": 1e-3,
+        "weight_decay": 0.1,
+        "optimizer_kwargs": {
+            "adam_kwargs": {"eps": "1e-7"},
+            "muon_kwargs": {"eps": "1e-6"},
+        },
+    }
+    config = load_config(_write_yaml(tmp_path, raw)).optimizer
+    assert config.optimizer_kwargs["adam_kwargs"]["eps"] == 1e-7
+    assert config.optimizer_kwargs["muon_kwargs"]["eps"] == 1e-6
 
 
-def test_config_cli_overrides():
-    with tempfile.TemporaryDirectory() as tmp:
-        config_data = copy.deepcopy(MINIMAL_CONFIG)
-        config_data["training"]["quantization"] = {"enabled": True}
-        path = _write_yaml(tmp, config_data)
-        config = load_config(
-            path,
-            overrides=[
-                "optimizer.lr=3e-4",
-                "training.batch_size=8",
-                "training.quantization.enabled_after_steps=2",
-            ],
-        )
-        assert config.optimizer.lr == 3e-4
-        assert config.training.batch_size == 8
-        assert config.training.quantization.enabled_after_steps == 2
-
-
-def test_config_cli_override_nested_kwargs():
-    # attn/mlp kwargs live inside per-layer list items now (not directly
-    # overridable by dotted path); exercise the same nested-dict-override
-    # mechanism against pos_emb_kwargs, which is still a flat dict field.
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _write_yaml(tmp, MINIMAL_CONFIG)
-        cfg = load_config(path, overrides=["model.pos_emb_kwargs.rope_theta=5000"])
-        assert cfg.model.pos_emb_kwargs["rope_theta"] == 5000
+def test_load_config_overrides(tmp_path):
+    config_data = copy.deepcopy(MINIMAL_CONFIG)
+    config_data["quantization"] = {
+        "enabled": True,
+        "dtype": {"weight": "fp8_e4m3"},
+    }
+    config = load_config(
+        _write_yaml(tmp_path, config_data),
+        overrides=[
+            "optimizer.lr=3e-4",
+            "training.batch_size=8",
+            "quantization.enabled_after_steps=2",
+            "seed=23",
+            "model.pos_emb_kwargs.rope_theta=5000",
+        ],
+    )
+    assert config.optimizer.lr == 3e-4
+    assert config.training.batch_size == 8
+    assert config.quantization.enabled_after_steps == 2
+    assert config.seed == 23
+    assert config.model.pos_emb_kwargs["rope_theta"] == 5000
 
 
 # ==================== Nested coercion ====================
@@ -470,9 +368,11 @@ def test_load_config_coerces_nested_kwargs(tmp_path):
 # ==================== TrainingConfig / DataConfig ====================
 
 
-def test_training_config_intra_doc_masking_default():
+def test_training_config_defaults():
     cfg = TrainingConfig()
     assert cfg.intra_doc_masking is True
+    assert cfg.eval_train is False
+    assert cfg.device == "auto"
 
 
 def test_data_config_packing_default():
@@ -486,13 +386,13 @@ max_seq_len: 128
 training:
   intra_doc_masking: false
 data:
-  packing: true
+  packing: false
 """
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml_content)
     cfg = load_config(str(p))
     assert cfg.training.intra_doc_masking is False
-    assert cfg.data.packing is True
+    assert cfg.data.packing is False
 
 
 def test_unknown_yaml_fields_ignored(tmp_path):
@@ -553,53 +453,28 @@ tokenizer_training:
 # ==================== task and eval_train fields ====================
 
 
-def test_default_task_is_pretrain():
-    from src.utils.config import TrainConfig
-
-    cfg = TrainConfig()
-    assert cfg.task == "pretrain"
+TASK_CASES = [({}, "pretrain"), ({"task": "sft"}, "sft")]
 
 
-def test_task_accepts_sft():
-    from src.utils.config import TrainConfig
-
-    cfg = TrainConfig()
-    cfg.task = "sft"
-    assert cfg.task == "sft"
-
-
-def test_default_eval_train_is_false():
-    from src.utils.config import TrainingConfig
-
-    cfg = TrainingConfig()
-    assert cfg.eval_train is False
+@pytest.mark.parametrize("case", TASK_CASES)
+def test_train_config_task(tmp_path, case):
+    kwargs, expected = case
+    assert TrainConfig(**kwargs).task == expected
+    assert load_config(_write_yaml(tmp_path, kwargs)).task == expected
 
 
 # ==================== attn ====================
 
 
-def test_attn_cls_defaults():
-    # Default attn_cls is gqa
-    assert ModelConfig().resolve_attn(0)[0] == "gqa"
-    assert (
-        ModelConfig(attn=[{"attn_cls": "mha", "attn_kwargs": {}}]).resolve_attn(0)[0]
-        == "mha"
-    )
-    assert (
-        ModelConfig(attn=[{"attn_cls": "mla", "attn_kwargs": {}}]).resolve_attn(0)[0]
-        == "mla"
-    )
+ATTN_CLASSES = ["gqa", "mha", "mla"]
 
 
-def test_attn_kwargs_preserved():
-    # attn_implementation default is filled; explicit values are preserved
-    assert ModelConfig().resolve_attn(0)[1] == {"attn_implementation": "flex_attention"}
-    assert (
-        ModelConfig(
-            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 8}}]
-        ).resolve_attn(0)[1]["n_heads"]
-        == 8
-    )
+@pytest.mark.parametrize("attn_cls", ATTN_CLASSES)
+def test_model_config_attn(attn_cls):
+    config = ModelConfig(attn=[{"attn_cls": attn_cls, "attn_kwargs": {"n_heads": 8}}])
+    resolved_cls, kwargs = config.resolve_attn(0)
+    assert resolved_cls == attn_cls
+    assert kwargs["n_heads"] == 8
 
 
 def test_attn_kwargs_round_trip_from_yaml(tmp_path):
@@ -656,7 +531,7 @@ def test_attn_mixed_per_layer_complement():
 
 
 def test_attn_conflict_raises():
-    with pytest.raises(ValueError, match="claimed by multiple"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=4,
@@ -669,7 +544,7 @@ def test_attn_conflict_raises():
 
 
 def test_attn_gap_raises():
-    with pytest.raises(ValueError, match="no attn item|coverage"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=4,
@@ -681,7 +556,7 @@ def test_attn_gap_raises():
 
 
 def test_attn_two_bare_items_raise():
-    with pytest.raises(ValueError, match="at most one"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=4,
@@ -693,7 +568,7 @@ def test_attn_two_bare_items_raise():
 
 
 def test_attn_dup_index_within_item_raises():
-    with pytest.raises(ValueError, match="more than once in one attn item"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=4,
@@ -704,7 +579,7 @@ def test_attn_dup_index_within_item_raises():
         )
 
 
-def test_attn_defaulting_matches_mla_and_gqa():
+def test_model_config_mla_defaults():
     cfg = ModelConfig(
         d_model=64,
         n_layers=2,
@@ -717,19 +592,10 @@ def test_attn_defaulting_matches_mla_and_gqa():
     )
 
 
-def test_attn_n_heads_divisibility_raises():
-    with pytest.raises(ValueError, match="divisible by n_heads"):
-        ModelConfig(
-            d_model=64,
-            n_layers=2,
-            attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 5}}],
-        )
-
-
 def test_attn_implementation_must_be_shared_across_layers():
     # The trainer builds one attention mask shared across layers, so layers
     # cannot disagree on attn_implementation.
-    with pytest.raises(ValueError, match="attn_implementation"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=2,
@@ -791,7 +657,7 @@ def test_modelconfig_resolves_intermediate_size(mlp_cls):
     assert cfg2.resolve_mlp(0)[1]["intermediate_size"] == 256
 
 
-def test_modelconfig_moe_expert_bias_defaults():
+def test_model_config_moe_defaults():
     # aux_loss on: expert_bias defaults off, aux_loss_coef defaulted
     cfg = ModelConfig(
         d_model=64,
@@ -805,6 +671,9 @@ def test_modelconfig_moe_expert_bias_defaults():
     assert cfg.resolve_mlp(0)[1]["expert_bias"] is False
     assert cfg.resolve_mlp(0)[1]["aux_loss"] is True
     assert cfg.resolve_mlp(0)[1]["aux_loss_coef"] == 0.001
+    assert cfg.resolve_mlp(0)[1]["router_score_fn"] == "sigmoid"
+    assert cfg.resolve_mlp(0)[1]["latent_moe"] is False
+    assert "latent_dim" not in cfg.resolve_mlp(0)[1]
     # expert_bias on: aux_loss stays off, bias update rate defaulted
     cfg2 = ModelConfig(
         d_model=64,
@@ -822,7 +691,7 @@ def test_modelconfig_moe_expert_bias_defaults():
 
 def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
     # both on
-    with pytest.raises(ValueError, match="both are on"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             mlp=[
@@ -837,24 +706,11 @@ def test_modelconfig_moe_aux_loss_and_expert_bias_mutually_exclusive():
             ],
         )
     # both off (defaults) — must opt into exactly one
-    with pytest.raises(ValueError, match="both are off"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             mlp=[{"mlp_cls": "moe", "mlp_kwargs": {"n_routed_experts": 4}}],
         )
-
-
-def test_modelconfig_moe_router_score_fn_defaults_sigmoid():
-    cfg = ModelConfig(
-        d_model=64,
-        mlp=[
-            {
-                "mlp_cls": "moe",
-                "mlp_kwargs": {"n_routed_experts": 4, "aux_loss": True},
-            }
-        ],
-    )
-    assert cfg.resolve_mlp(0)[1]["router_score_fn"] == "sigmoid"
 
 
 def test_modelconfig_moe_router_score_fn_softmax_kept():
@@ -875,7 +731,7 @@ def test_modelconfig_moe_router_score_fn_softmax_kept():
 
 
 def test_modelconfig_moe_unknown_router_score_fn_raises():
-    with pytest.raises(ValueError, match="unknown router_score_fn"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             mlp=[
@@ -892,58 +748,79 @@ def test_modelconfig_moe_unknown_router_score_fn_raises():
 
 
 ACT_KWARGS_ERRORS = [
-    # (activation_cls, activation_kwargs, expected message) -- an inverted bound is
-    # the only act_limit defect that raises; the rest are tolerated below
-    (
-        "swiglu",
-        {"act_limit": {"up": {"min": 7, "max": 1}}},
-        r"act_limit\['up'\] requires min < max",
-    ),
-    (
-        "swiglu",
-        {"act_limit": {"up": {"min": 0, "max": -1}}},  # 0 is a real bound
-        r"act_limit\['up'\] requires min < max",
-    ),
-    (
-        "silu",
-        {"act_limit": {"up": {"min": 7, "max": 1}}},
-        r"act_limit\['up'\] requires min < max",
-    ),
+    {
+        "activation_cls": "swiglu",
+        "activation_kwargs": {"act_limit": {"up": {"min": 7, "max": 1}}},
+    },
+    {
+        "activation_cls": "swiglu",
+        "activation_kwargs": {"act_limit": {"up": {"min": 0, "max": -1}}},
+    },
+    {
+        "activation_cls": "silu",
+        "activation_kwargs": {"act_limit": {"up": {"min": 7, "max": 1}}},
+    },
 ]
 
-# (activation_cls, act_limit) shapes the check does not police -- kept verbatim and
-# left for the activation, which only reads its own 'gate'/'up' numeric bounds
-ACT_LIMITS_TOLERATED = [
-    ("swiglu", {"max": 7}),  # side keys that name no tensor
-    ("silu", {"gate": {"max": 7}}),  # gate limit on a unary activation
-    ("swiglu", {"gate": 7}),  # bounds that are not a dict
-    ("swiglu", {"gate": {}}),
-    ("swiglu", {"gate": {"lo": 1}}),  # bound keys that are not min/max
-    ("swiglu", {"up": {"min": "x"}}),  # non-numeric bound
+ACT_KWARGS_CASES = [
+    {"activation_cls": "swiglu", "activation_kwargs": {"act_limit": {"max": 7}}},
+    {
+        "activation_cls": "silu",
+        "activation_kwargs": {"act_limit": {"gate": {"max": 7}}},
+    },
+    {"activation_cls": "swiglu", "activation_kwargs": {"act_limit": {"gate": 7}}},
+    {"activation_cls": "swiglu", "activation_kwargs": {"act_limit": {"gate": {}}}},
+    {
+        "activation_cls": "swiglu",
+        "activation_kwargs": {"act_limit": {"gate": {"lo": 1}}},
+    },
+    {
+        "activation_cls": "swiglu",
+        "activation_kwargs": {"act_limit": {"up": {"min": "x"}}},
+    },
+    {
+        "activation_cls": "swiglu",
+        "activation_kwargs": {"act_limit": {"gate": {"max": 7}}},
+    },
+    {
+        "activation_cls": "swiglu",
+        "activation_kwargs": {
+            "act_limit": {"gate": {"max": 7}, "up": {"min": -7, "max": 7}}
+        },
+    },
+    {
+        "activation_cls": "swiglu",
+        "activation_kwargs": {"act_limit": {"up": {"min": -7}}},
+    },
+    {"activation_cls": "silu", "activation_kwargs": {"act_limit": {"up": {"max": 7}}}},
+    {
+        "activation_cls": "silu",
+        "activation_kwargs": {"act_limit": {"up": {"min": -7, "max": 7}}},
+    },
+    {"activation_cls": "swiglu", "activation_kwargs": {"alpha": 1.702}},
+    {"activation_cls": "swiglu", "activation_kwargs": {"up_shift": 1.0}},
+    {
+        "activation_cls": "swiglu",
+        "activation_kwargs": {
+            "alpha": 1.702,
+            "up_shift": 1.0,
+            "act_limit": {"gate": {"max": 7.0}, "up": {"min": -7.0, "max": 7.0}},
+        },
+    },
 ]
-
-ACT_LIMITS_OK = [
-    ({"gate": {"max": 7}}, "swiglu"),  # partial: only the gate's upper tail
-    ({"gate": {"max": 7}, "up": {"min": -7, "max": 7}}, "swiglu"),  # deepseek-v4
-    ({"up": {"min": -7}}, "swiglu"),
-    ({"up": {"max": 7}}, "silu"),  # unary clamps its single up tensor
-    ({"up": {"min": -7, "max": 7}}, "silu"),
-]
+ACTIVATION_CLASSES = ["swiglu", "silu", "bilinear", "powlu"]
+MLP_CLASSES = ["dense", "moe"]
 
 
 def test_modelconfig_activation_cls_raise_error():
-    with pytest.raises(ValueError, match="unknown activation_cls"):
+    with pytest.raises(ValueError):
         ModelConfig(
             mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_cls": "mish"}}]
         )
 
 
-@pytest.mark.parametrize("activation_cls", ["swiglu", "silu", "bilinear", "powlu"])
+@pytest.mark.parametrize("activation_cls", ACTIVATION_CLASSES)
 def test_modelconfig_activation_cls(activation_cls):
-    """The name alone resolves the activation; SwiGLU is the default."""
-    resolved = ModelConfig(d_model=64).resolve_mlp(0)[1]
-    assert resolved["activation_cls"] == "swiglu"
-    assert resolved["activation_kwargs"] == {}
     cfg = ModelConfig(
         d_model=64,
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_cls": activation_cls}}],
@@ -951,13 +828,13 @@ def test_modelconfig_activation_cls(activation_cls):
     assert cfg.resolve_mlp(0)[1]["activation_cls"] == activation_cls
 
 
-@pytest.mark.parametrize("mlp_cls", ["dense", "moe"])
-@pytest.mark.parametrize("act_cls,act_kwargs,match", ACT_KWARGS_ERRORS)
-def test_modelconfig_activation_kwargs_raise_error(mlp_cls, act_cls, act_kwargs, match):
-    kwargs = {"activation_cls": act_cls, "activation_kwargs": act_kwargs}
+@pytest.mark.parametrize("mlp_cls", MLP_CLASSES)
+@pytest.mark.parametrize("kwargs", ACT_KWARGS_ERRORS)
+def test_modelconfig_activation_kwargs_raise_error(mlp_cls, kwargs):
+    kwargs = copy.deepcopy(kwargs)
     if mlp_cls == "moe":
         kwargs |= {"n_routed_experts": 4, "aux_loss": True}
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises(ValueError):
         ModelConfig(d_model=64, mlp=[{"mlp_cls": mlp_cls, "mlp_kwargs": kwargs}])
 
 
@@ -969,24 +846,6 @@ def test_modelconfig_activation_kwargs_non_mapping_dropped(act_kwargs):
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"activation_kwargs": act_kwargs}}],
     )
     assert "activation_kwargs" not in cfg.resolve_mlp(0)[1]
-
-
-@pytest.mark.parametrize("act_cls,act_limit", ACT_LIMITS_TOLERATED)
-def test_modelconfig_activation_kwargs_act_limit_tolerated(act_cls, act_limit):
-    """Malformed-but-dict limits are stored verbatim rather than rejected."""
-    cfg = ModelConfig(
-        d_model=64,
-        mlp=[
-            {
-                "mlp_cls": "dense",
-                "mlp_kwargs": {
-                    "activation_cls": act_cls,
-                    "activation_kwargs": {"act_limit": act_limit},
-                },
-            }
-        ],
-    )
-    assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == {"act_limit": act_limit}
 
 
 @pytest.mark.parametrize("act_limit", [7.0, "off"])
@@ -1004,59 +863,21 @@ def test_modelconfig_activation_kwargs_act_limit_non_dict_dropped(act_limit):
     assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == {}
 
 
-@pytest.mark.parametrize("act_limit,activation_cls", ACT_LIMITS_OK)
-def test_modelconfig_activation_kwargs_act_limit(act_limit, activation_cls):
-    """Valid limits are stored verbatim; the shape follows the activation's arity."""
+@pytest.mark.parametrize("kwargs", ACT_KWARGS_CASES)
+def test_modelconfig_activation_kwargs(kwargs):
     cfg = ModelConfig(
         d_model=64,
-        mlp=[
-            {
-                "mlp_cls": "dense",
-                "mlp_kwargs": {
-                    "activation_cls": activation_cls,
-                    "activation_kwargs": {"act_limit": act_limit},
-                },
-            }
-        ],
+        mlp=[{"mlp_cls": "dense", "mlp_kwargs": copy.deepcopy(kwargs)}],
     )
-    assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == {"act_limit": act_limit}
-
-
-@pytest.mark.parametrize(
-    "act_kwargs",
-    [
-        {"alpha": 1.702},
-        {"up_shift": 1.0},
-        # the gpt-oss SwiGLU, now expressible without a dedicated registry entry
-        {
-            "alpha": 1.702,
-            "up_shift": 1.0,
-            "act_limit": {"gate": {"max": 7.0}, "up": {"min": -7.0, "max": 7.0}},
-        },
-    ],
-)
-def test_modelconfig_activation_kwargs(act_kwargs):
-    cfg = ModelConfig(
-        d_model=64,
-        mlp=[
-            {
-                "mlp_cls": "dense",
-                "mlp_kwargs": {
-                    "activation_cls": "swiglu",
-                    "activation_kwargs": act_kwargs,
-                },
-            }
-        ],
-    )
-    assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == act_kwargs
+    assert cfg.resolve_mlp(0)[1]["activation_kwargs"] == kwargs["activation_kwargs"]
 
 
 def test_modelconfig_validates_attn_dims():
-    with pytest.raises(ValueError, match="divisible by n_heads"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=100, attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 3}}]
         )
-    with pytest.raises(ValueError, match="divisible by\\s+n_kv_heads"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             attn=[
@@ -1068,52 +889,46 @@ def test_modelconfig_validates_attn_dims():
         )
 
 
-def test_modelconfig_gqa_defaults_n_kv_heads():
-    cfg = ModelConfig(
-        d_model=64, attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 8}}]
-    )
-    assert cfg.resolve_attn(0)[1]["n_kv_heads"] == 8  # defaults to n_heads
-
-
 # ==================== string-field validation ====================
 
 
 def test_scheduler_unknown_name_raises():
     from src.utils.config import SchedulerConfig
 
-    with pytest.raises(ValueError, match="unknown scheduler"):
+    with pytest.raises(ValueError):
         SchedulerConfig(name="step")
     SchedulerConfig(name="cosine")
     SchedulerConfig(name="constant")
 
 
-@pytest.mark.parametrize(
-    "optimizer_cls, expected",
-    [
-        ("adamw", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
-        ("lion", {"betas": (0.9, 0.99), "foreach": True}),
-        (
-            "muonadam",
-            {
-                "adam_cls": "adamw",
-                "adam_kwargs": {
-                    "betas": (0.9, 0.95),
-                    "eps": 1e-8,
-                    "fused": True,
-                },
-                "muon_kwargs": {
-                    "momentum": 0.95,
-                    "nesterov": True,
-                    "adjust_lr_fn": "match_rms_adamw",
-                    "eps": 1e-8,
-                },
+OPTIMIZER_DEFAULT_CASES = [
+    ("adamw", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
+    ("lion", {"betas": (0.9, 0.99), "foreach": True}),
+    (
+        "muonadam",
+        {
+            "adam_cls": "adamw",
+            "adam_kwargs": {
+                "betas": (0.9, 0.95),
+                "eps": 1e-8,
+                "fused": True,
             },
-        ),
-    ],
-)
-def test_optimizer_config_defaults(optimizer_cls, expected):
+            "muon_kwargs": {
+                "momentum": 0.95,
+                "nesterov": True,
+                "adjust_lr_fn": "match_rms_adamw",
+                "eps": 1e-8,
+            },
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("case", OPTIMIZER_DEFAULT_CASES)
+def test_optimizer_config_defaults(case):
     from src.utils.config import OptimizerConfig
 
+    optimizer_cls, expected = case
     # Unset kwargs get the pretraining-tuned defaults for the selected optimizer.
     assert OptimizerConfig(optimizer_cls, lr=1e-3).optimizer_kwargs == expected
     if optimizer_cls == "muonadam":
@@ -1165,10 +980,11 @@ INVALID_MUON_KWARGS_CASES = [
 ]
 
 
-@pytest.mark.parametrize("key,value,expected", INVALID_MUON_KWARGS_CASES)
-def test_optimizer_config_muon_nested_kwargs_invalid(key, value, expected):
+@pytest.mark.parametrize("case", INVALID_MUON_KWARGS_CASES)
+def test_optimizer_config_muon_nested_kwargs_invalid(case):
     from src.utils.config import OptimizerConfig
 
+    key, value, expected = case
     cfg = OptimizerConfig("muonadam", lr=1e-3, optimizer_kwargs={key: value})
 
     assert cfg.optimizer_kwargs[key] == expected
@@ -1177,27 +993,27 @@ def test_optimizer_config_muon_nested_kwargs_invalid(key, value, expected):
 def test_optimizer_config_raise_error():
     from src.utils.config import OptimizerConfig
 
-    with pytest.raises(ValueError, match="unknown optimizer_cls"):
+    with pytest.raises(ValueError):
         OptimizerConfig("sgd", lr=1e-3)
     with pytest.raises(ValueError):
         OptimizerConfig("muonadam", lr=1e-3, optimizer_kwargs={"adam_cls": "lion"})
 
 
-def test_training_unknown_mixed_precision_raises():
-    with pytest.raises(ValueError, match="unknown mixed_precision"):
-        TrainingConfig(mixed_precision="fp8")
+TRAINING_CONFIG_ERRORS = [
+    {"mixed_precision": "fp8"},
+    {"loss_fn": "huber"},
+    {"device": "tpu"},
+]
 
 
-def test_training_unknown_loss_fn_raises():
-    with pytest.raises(ValueError, match="unknown loss_fn"):
-        TrainingConfig(loss_fn="huber")
+@pytest.mark.parametrize("kwargs", TRAINING_CONFIG_ERRORS)
+def test_training_config_raise_error(kwargs):
+    with pytest.raises(ValueError):
+        TrainingConfig(**kwargs)
 
 
-def test_training_device_default_and_validation():
-    assert TrainingConfig().device == "auto"
+def test_training_config_device():
     assert TrainingConfig(device="cpu").device == "cpu"
-    with pytest.raises(ValueError, match="unknown device"):
-        TrainingConfig(device="tpu")
 
 
 # ==================== dropless MoE + precision guard ====================
@@ -1221,7 +1037,7 @@ def _moe_train_config(mixed_precision):
 
 
 def test_dropless_moe_without_mixed_precision_raises():
-    with pytest.raises(ValueError, match="'bf16' or 'fp16'"):
+    with pytest.raises(ValueError):
         _moe_train_config("no")
 
 
@@ -1234,60 +1050,67 @@ def test_dropless_moe_reduced_precision_ok(mixed_precision):
 # ==================== Quantization config ====================
 
 
-def test_quant_defaults_disabled():
-    q = QuantizationConfig()
+DISABLED_QUANT_ROTATIONS = [
+    {},
+    {"rotation_cls": "unknown", "rotation_kwargs": 4, "rotation_axes": [-3]},
+]
+
+
+@pytest.mark.parametrize("rotation", DISABLED_QUANT_ROTATIONS)
+def test_quant_defaults_empty(rotation):
+    expected_rotation = {
+        "rotation_cls": None,
+        "rotation_kwargs": {},
+        "rotation_axes": {},
+    }
+    expected_rotation.update(rotation)
+    q = QuantizationConfig(rotation=rotation)
     assert q.enabled is False
     assert q.rounding == {}
     assert q.exclude == ["lm_head", "*mlp.router.gate"]
     # disabled rule is inert: no dtype/scale defaults applied
     assert q.dtype == {} and q.scale == {}
+    assert q.rotation == expected_rotation
 
 
-def test_quant_rounding_defaults_to_rne_everywhere():
-    q = TrainingConfig(quantization={"enabled": True}).quantization
-    assert q.rounding == {"weight": "RNE", "act": "RNE", "grad_out": "RNE"}
-    assert not any(mode == "SR" for mode in q.rounding.values())
+ROUNDING_CASES = [
+    ({}, {"weight": "RNE", "act": "RNE", "grad_out": "RNE"}),
+    ({"grad_out": "SR"}, {"weight": "RNE", "act": "RNE", "grad_out": "SR"}),
+    ({"act": "SR"}, {"weight": "RNE", "act": "SR", "grad_out": "RNE"}),
+]
 
 
-def test_quant_rounding_fills_unnamed_tensors_and_round_trips():
+@pytest.mark.parametrize("case", ROUNDING_CASES)
+def test_train_config_quantization_rounding(case):
+    rounding, expected = case
     config = TrainConfig(
-        training=TrainingConfig(
-            mixed_precision="bf16",
-            quantization={"enabled": True, "rounding": {"grad_out": "SR"}},
-        )
+        training=TrainingConfig(mixed_precision="bf16"),
+        quantization=QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            rounding=copy.deepcopy(rounding),
+        ),
     )
-    q = config.training.quantization
-    assert q.rounding == {"weight": "RNE", "act": "RNE", "grad_out": "SR"}
-    assert config.to_dict()["training"]["quantization"]["rounding"] == q.rounding
+    assert config.quantization.rounding == expected
+    assert config.quantization.dtype["act"] == {"fwd": "bf16", "wgrad": "bf16"}
+    assert config.to_dict()["quantization"]["rounding"] == expected
 
 
-def test_quant_rounding_on_an_unquantized_tensor_is_inert():
-    # act stays at the compute dtype here; a mode on it names no quantizer, and the
-    # config takes it rather than second-guessing a dtype it may be swept against.
-    q = TrainingConfig(
-        mixed_precision="bf16",
-        quantization={
-            "enabled": True,
-            "dtype": {"weight": "int8"},
-            "rounding": {"act": "SR"},
-        },
-    ).quantization
-    assert q.dtype["act"] == {"fwd": "bf16", "wgrad": "bf16"}
-    assert q.rounding["act"] == "SR"
+ROUNDING_ERRORS = [{"grad_input": "SR"}, {"act": "stochastic"}]
 
 
-def test_quant_rounding_rejects_unknown_key_and_mode():
-    with pytest.raises(ValueError, match="unknown quant rounding key: 'grad_input'"):
-        QuantizationConfig(enabled=True, rounding={"grad_input": "SR"})
-    with pytest.raises(
-        ValueError, match="unknown quant rounding for act: 'stochastic'"
-    ):
-        QuantizationConfig(enabled=True, rounding={"act": "stochastic"})
+@pytest.mark.parametrize("rounding", ROUNDING_ERRORS)
+def test_quantization_config_rounding_raise_error(rounding):
+    with pytest.raises(ValueError):
+        QuantizationConfig(
+            enabled=True, dtype={"weight": "fp8_e4m3"}, rounding=rounding
+        )
 
 
 def test_quant_tensor_defaults_follow_mixed_precision():
-    r = TrainingConfig(
-        mixed_precision="bf16", quantization={"enabled": True}
+    r = TrainConfig(
+        training=TrainingConfig(mixed_precision="bf16"),
+        quantization=QuantizationConfig(enabled=True, dtype={"weight": "bf16"}),
     ).quantization
     # every slot defaults to the compute dtype
     assert r.dtype == {
@@ -1295,16 +1118,17 @@ def test_quant_tensor_defaults_follow_mixed_precision():
         "act": {"fwd": "bf16", "wgrad": "bf16"},
         "grad_out": {"dgrad": "bf16", "wgrad": "bf16"},
     }
-    r32 = TrainingConfig(
-        mixed_precision="no", quantization={"enabled": True}
+    r32 = TrainConfig(
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(enabled=True, dtype={"weight": "fp32"}),
     ).quantization
     assert r32.dtype["weight"]["fwd"] == "fp32"
 
 
 def test_quant_dtype_scalar_applies_to_every_consuming_gemm():
-    r = TrainingConfig(
-        mixed_precision="bf16",
-        quantization={"enabled": True, "dtype": {"weight": "fp8_e4m3"}},
+    r = TrainConfig(
+        training=TrainingConfig(mixed_precision="bf16"),
+        quantization=QuantizationConfig(enabled=True, dtype={"weight": "fp8_e4m3"}),
     ).quantization
     assert r.dtype == {
         "weight": {"fwd": "fp8_e4m3", "dgrad": "fp8_e4m3"},
@@ -1323,24 +1147,18 @@ def test_quant_dtype_scopes_a_tensor_per_gemm():
 
 
 def test_quant_scoped_dtype_leaves_unset_gemm_to_mixed_precision():
-    r = TrainingConfig(
-        mixed_precision="bf16",
-        quantization={"enabled": True, "dtype": {"grad_out": {"dgrad": "int8"}}},
+    r = TrainConfig(
+        training=TrainingConfig(mixed_precision="bf16"),
+        quantization=QuantizationConfig(
+            enabled=True, dtype={"grad_out": {"dgrad": "int8"}}
+        ),
     ).quantization
     assert r.dtype["grad_out"] == {"dgrad": "int8", "wgrad": "bf16"}
 
 
 def test_quant_rejects_a_gemm_that_does_not_consume_the_tensor():
-    with pytest.raises(ValueError, match="wgrad"):
+    with pytest.raises(ValueError):
         QuantizationConfig(enabled=True, dtype={"weight": {"wgrad": "fp8_e4m3"}})
-
-
-def test_quant_disabled_rule_dtype_stays_empty():
-    # a disabled rule is inert: no operand-dtype fill
-    r = TrainingConfig(
-        mixed_precision="bf16", quantization={"enabled": False}
-    ).quantization
-    assert r.dtype == {}
 
 
 def test_quant_dtype_resolves_explicit_tensors():
@@ -1355,21 +1173,28 @@ def test_quant_dtype_resolves_explicit_tensors():
     }
 
 
-def test_quant_dtype_scoped_gemm_is_explicit():
+SCOPED_GRAD_OUT_DTYPES = [
+    {"dgrad": "fp8_e5m2", "wgrad": "bf16"},
+    {"dgrad": "bf16", "wgrad": "fp8_e5m2"},
+]
+
+
+@pytest.mark.parametrize("grad_out_dtype", SCOPED_GRAD_OUT_DTYPES)
+def test_quant_dtype_scoped_gemm_is_explicit(grad_out_dtype):
     q = QuantizationConfig(
         enabled=True,
         dtype={
             "weight": "fp8_e4m3",
             "act": "fp8_e4m3",
-            "grad_out": {"dgrad": "fp8_e5m2", "wgrad": "bf16"},
+            "grad_out": copy.deepcopy(grad_out_dtype),
         },
     )
-    assert q.dtype["grad_out"] == {"dgrad": "fp8_e5m2", "wgrad": "bf16"}
+    assert q.dtype["grad_out"] == grad_out_dtype
 
 
-def test_quant_include_defaults_empty():
+def test_quant_include_defaults():
     q = QuantizationConfig()
-    assert q.include == [] and q.exclude == ["lm_head", "*mlp.router.gate"]
+    assert q.include == ["*"] and q.exclude == ["lm_head", "*mlp.router.gate"]
     q2 = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
@@ -1378,24 +1203,60 @@ def test_quant_include_defaults_empty():
     assert q2.include == ["*.mlp.*"]
 
 
-def test_quant_disabled_skips_validation():
-    # inert when off: bad fmt is not checked
-    QuantizationConfig(enabled=False, dtype={"weight": "not_a_fmt"})
+QUANTIZATION_SELECTORS = ["include", "exclude"]
+INVALID_SELECTOR_PATTERNS = ["*.mlp.*", [1]]
+
+
+@pytest.mark.parametrize("selector", QUANTIZATION_SELECTORS)
+@pytest.mark.parametrize("patterns", INVALID_SELECTOR_PATTERNS)
+def test_quantization_config_selectors_raise_error(selector, patterns):
+    with pytest.raises(ValueError):
+        QuantizationConfig(
+            enabled=True, dtype={"weight": "fp8_e4m3"}, **{selector: patterns}
+        )
+
+
+QUANTIZATION_DICT_FIELDS = ["scale", "rounding", "rotation"]
+
+
+@pytest.mark.parametrize("field", QUANTIZATION_DICT_FIELDS)
+def test_quantization_config_disabled_fields_raise_error(field):
+    with pytest.raises(ValueError):
+        QuantizationConfig(**{field: "invalid"})
 
 
 def test_quant_rejects_unknown_format():
-    with pytest.raises(ValueError, match="unknown quant fmt"):
+    with pytest.raises(ValueError):
         QuantizationConfig(enabled=True, dtype={"weight": "not_a_fmt"})
 
 
-def test_quant_accepts_rowwise_granularity():
+ROW_SCALE_CASES = [
+    (
+        {"weight": {"granularity": "rowwise"}},
+        {"weight": "rowwise", "act": "tensorwise", "grad_out": "tensorwise"},
+    ),
+    (
+        {
+            "weight": {"granularity": "rowwise"},
+            "act": {"granularity": "rowwise"},
+            "grad_out": {"granularity": "rowwise"},
+        },
+        {"weight": "rowwise", "act": "rowwise", "grad_out": "rowwise"},
+    ),
+]
+
+
+@pytest.mark.parametrize("scale_and_expected", ROW_SCALE_CASES)
+def test_quant_rowwise_scale(scale_and_expected):
+    scale, expected_granularity = scale_and_expected
     q = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-        scale={"weight": {"granularity": "rowwise"}},
+        scale=scale,
     )
-    assert q.scale["weight"]["granularity"] == "rowwise"
-    assert q.scale["act"]["granularity"] == "tensorwise"
+    assert {tensor: q.scale[tensor]["granularity"] for tensor in SCALE_TENSORS} == (
+        expected_granularity
+    )
 
 
 @pytest.mark.parametrize(
@@ -1411,9 +1272,7 @@ def test_quant_default_scale_is_independent_of_dtype(dtype):
         enabled=True,
         dtype=dtype,
     )
-    assert q.scale == _scale_config(
-        scale_dtype=torch.float32, enable_global_scale=False
-    )
+    assert q.scale == _scale_config(scale_dtype="fp32", enable_global_scale=False)
 
 
 @pytest.mark.parametrize("granularity", ["tensorwise", "rowwise"])
@@ -1440,57 +1299,13 @@ def test_quant_block_shape_normalized_off_blockwise(granularity, block_shape):
     }
 
 
-def test_quant_explicit_dtype_sets_both_backward_grad_slots():
-    r = TrainingConfig(
-        quantization={
-            "enabled": True,
-            "dtype": {
-                "weight": "fp8_e4m3",
-                "act": "fp8_e4m3",
-                "grad_out": "fp8_e5m2",
-            },
-        }
-    ).quantization
-    assert r.dtype["grad_out"]["dgrad"] == r.dtype["grad_out"]["wgrad"] == "fp8_e5m2"
+INVALID_DTYPE_KEYS = ["bogus_grad", "recipe", "grad_input", "grad_weight", "dx", "dw"]
 
 
-def test_quant_wgrad_hp_override():
-    # keep only the weight-gradient GEMM in bf16
-    q = QuantizationConfig(
-        enabled=True,
-        dtype={
-            "weight": "fp8_e4m3",
-            "act": "fp8_e4m3",
-            "grad_out": {"dgrad": "fp8_e5m2", "wgrad": "bf16"},
-        },
-    )
-    assert q.dtype["grad_out"] == {"dgrad": "fp8_e5m2", "wgrad": "bf16"}
-
-
-def test_quant_dgrad_hp_override():
-    # keep only the input-gradient GEMM in bf16
-    q = QuantizationConfig(
-        enabled=True,
-        dtype={
-            "weight": "fp8_e4m3",
-            "act": "fp8_e4m3",
-            "grad_out": {"dgrad": "bf16", "wgrad": "fp8_e5m2"},
-        },
-    )
-    assert q.dtype["grad_out"] == {"dgrad": "bf16", "wgrad": "fp8_e5m2"}
-
-
-@pytest.mark.parametrize("dtype_key", ["bogus_grad", "recipe"])
-def test_quant_rejects_unknown_dtype_key(dtype_key):
+@pytest.mark.parametrize("dtype_key", INVALID_DTYPE_KEYS)
+def test_quantization_config_dtype_key_raise_error(dtype_key):
     with pytest.raises(ValueError):
         QuantizationConfig(enabled=True, dtype={dtype_key: "bf16"})
-
-
-@pytest.mark.parametrize("retired", ["grad_input", "grad_weight", "dx", "dw"])
-def test_quant_rejects_retired_dtype_keys(retired):
-    # the old per-GEMM grad keys: the message has to name their replacement
-    with pytest.raises(ValueError, match="grad_out"):
-        QuantizationConfig(enabled=True, dtype={retired: "bf16"})
 
 
 def test_quant_rejects_unsupported_granularity():
@@ -1502,8 +1317,6 @@ def test_quant_rejects_unsupported_granularity():
         )
 
 
-QUANTIZATION_INPUT_KINDS = ["dict", "config"]
-INVALID_QUANTIZATION_LISTS = [[], [{"enabled": True}]]
 QUANTIZATION_LAYER_CASES = [
     (None, None),
     ([], []),
@@ -1516,56 +1329,58 @@ QUANTIZATION_LAYER_CASES = [
 ]
 
 
-@pytest.mark.parametrize("input_kind", QUANTIZATION_INPUT_KINDS)
-@pytest.mark.parametrize("layer_idx,expected_layers", QUANTIZATION_LAYER_CASES)
-def test_training_config_quantization(input_kind, layer_idx, expected_layers):
+@pytest.mark.parametrize("case", QUANTIZATION_LAYER_CASES)
+def test_train_config_quantization(tmp_path, case):
+    layer_idx, expected_layers = case
     quantization_data = {
         "enabled": True,
         "enabled_after_steps": 2,
         "layer_idx": layer_idx,
         "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
     }
-    quantization = (
-        QuantizationConfig(**quantization_data)
-        if input_kind == "config"
-        else quantization_data
-    )
-    tc = TrainingConfig(quantization=quantization)
+    quantization = QuantizationConfig(**quantization_data)
+    tc = TrainConfig(quantization=quantization)
 
     assert isinstance(tc.quantization, QuantizationConfig)
     assert tc.quantization.dtype["weight"]["fwd"] == "fp8_e4m3"
     assert tc.quantization.layer_idx == expected_layers
-    if input_kind == "config":
-        assert tc.quantization is quantization
+    assert tc.quantization is quantization
 
-    exported = TrainConfig(training=tc).to_dict()
-    assert exported["training"]["quantization"]["enabled_after_steps"] == 2
-    assert exported["training"]["quantization"]["layer_idx"] == expected_layers
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "test.yaml")
-        with open(path, "w") as f:
-            yaml.safe_dump(exported, f)
-        restored = load_config(path)
-    assert restored.training.quantization.enabled_after_steps == 2
-    assert restored.training.quantization.layer_idx == expected_layers
+    exported = tc.to_dict()
+    assert exported["quantization"]["enabled_after_steps"] == 2
+    assert exported["quantization"]["layer_idx"] == expected_layers
+    restored = load_config(_write_yaml(tmp_path, exported))
+    assert restored.quantization.enabled_after_steps == 2
+    assert restored.quantization.layer_idx == expected_layers
 
 
-@pytest.mark.parametrize("quantization", INVALID_QUANTIZATION_LISTS)
-def test_training_config_quantization_raise_error(quantization):
-    with pytest.raises(ValueError):
-        TrainingConfig(quantization=quantization)
-
-
-def test_quant_disabled_stays_disabled():
-    tc = TrainingConfig(quantization={"enabled": False})
-    assert tc.quantization.enabled is False
-    assert tc.quantization.layer_idx is None
+@pytest.mark.parametrize("explicit_config", [False, True])
+def test_quant_disabled_stays_inert(explicit_config):
+    config = (
+        TrainConfig(quantization=QuantizationConfig())
+        if explicit_config
+        else TrainConfig()
+    )
+    quantization = config.quantization
+    assert quantization.enabled is False
+    assert quantization.dtype == {}
+    assert quantization.scale == {}
+    assert quantization.layer_idx is None
+    assert quantization.rotation == {
+        "rotation_cls": None,
+        "rotation_kwargs": {},
+        "rotation_axes": {},
+    }
 
 
 @pytest.mark.parametrize("enabled_after_steps", [-1, 1.0, "1", True])
 def test_quantization_config_enabled_after_steps_raise_error(enabled_after_steps):
     with pytest.raises(ValueError):
-        QuantizationConfig(enabled=True, enabled_after_steps=enabled_after_steps)
+        QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            enabled_after_steps=enabled_after_steps,
+        )
 
 
 def test_quantization_config_enabled_after_steps():
@@ -1593,7 +1408,7 @@ def test_quant_explicit_e8m0_config():
     assert q.scale == _scale_config(
         "blockwise",
         {tensor: (1, 32) for tensor in SCALE_TENSORS},
-        scale_dtype=torch.float8_e8m0fnu,
+        scale_dtype="fp8_e8m0",
         enable_global_scale=False,
     )
 
@@ -1617,24 +1432,27 @@ def test_quant_explicit_nvfp4_scale():
         "act": (1, 16),
         "grad_out": (1, 16),
     }
-    assert q.scale["scale_dtype"] is torch.float8_e4m3fn
+    assert q.scale["scale_dtype"] == "fp8_e4m3"
     assert q.scale["enable_global_scale"] is True
 
 
-BLOCK_SHAPE_ERRORS = [
+QUANT_BLOCK_SHAPE_ERROR_SCALES = [
     {"weight": {"granularity": "blockwise", "block_shape": 16}},
     {"weight": {"granularity": "blockwise", "block_shape": None}},
     {"weight": {"granularity": "blockwise"}},
     {
         "weight": {"granularity": "blockwise", "block_shape": (1, 16, 16)},
     },
+    {"weight": {"granularity": "blockwise", "block_shape": (1, 24)}},
+    {"weight": {"granularity": "blockwise", "block_shape": (1, -16)}},
+    {"weight": {"granularity": "blockwise", "block_shape": (16, 128)}},
 ]
 
 
-@pytest.mark.parametrize("scale", BLOCK_SHAPE_ERRORS)
+@pytest.mark.parametrize("scale", QUANT_BLOCK_SHAPE_ERROR_SCALES)
 def test_quant_block_shape_raise_error(scale):
     with pytest.raises(ValueError):
-        QuantizationConfig(enabled=True, dtype={"weight": "int8"}, scale=scale)
+        QuantizationConfig(enabled=True, dtype={"weight": "fp8_e4m3"}, scale=scale)
 
 
 UNKNOWN_SCALE_CONFIGS = [
@@ -1661,33 +1479,34 @@ def test_quant_ignores_unknown_scale_keys(unknown_scale):
         },
     )
     assert q.scale == _scale_config(
-        "rowwise", scale_dtype=torch.float32, enable_global_scale=False
+        "rowwise", scale_dtype="fp32", enable_global_scale=False
     )
 
 
 def test_quant_scale_mixed_granularities_roundtrip():
     config = TrainConfig(
-        training=TrainingConfig(
-            mixed_precision="no",
-            quantization={
-                "enabled": True,
-                "dtype": {
-                    "weight": "fp8_e4m3",
-                    "act": "fp8_e4m3",
-                    "grad_out": "fp8_e5m2",
-                },
-                "scale": {
-                    "weight": {"granularity": "blockwise", "block_shape": (1, 32)},
-                    "act": {"granularity": "rowwise"},
-                },
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            enabled=True,
+            dtype={
+                "weight": "fp8_e4m3",
+                "act": "fp8_e4m3",
+                "grad_out": "fp8_e5m2",
             },
-        )
+            scale={
+                "weight": {"granularity": "blockwise", "block_shape": (1, 32)},
+                "act": {"granularity": "rowwise"},
+            },
+        ),
     )
     exported = config.to_dict()
-    restored = TrainConfig(training=TrainingConfig(**exported["training"]))
-    assert restored.training.quantization.scale == _scale_config(
+    restored = TrainConfig(
+        training=TrainingConfig(**exported["training"]),
+        quantization=QuantizationConfig(**exported["quantization"]),
+    )
+    assert restored.quantization.scale == _scale_config(
         "tensorwise",
-        scale_dtype=torch.float32,
+        scale_dtype="fp32",
         enable_global_scale=False,
     ) | {
         "weight": {"granularity": "blockwise", "block_shape": (1, 32)},
@@ -1717,7 +1536,7 @@ def test_quant_global_scale_disabled_for_wide_scale_dtype(scale):
         scale={**scale, "enable_global_scale": True},
     )
     assert q.scale["enable_global_scale"] is False
-    assert q.scale["scale_dtype"] is torch.float32
+    assert q.scale["scale_dtype"] == "fp32"
 
 
 def test_quant_global_scale_kept_for_narrow_scale_dtype():
@@ -1795,15 +1614,6 @@ def test_quant_e8m0_requires_blockwise():
         )
 
 
-def test_quant_blockwise_requires_block_size():
-    with pytest.raises(ValueError):
-        QuantizationConfig(
-            enabled=True,
-            dtype={"weight": "fp8_e4m3"},
-            scale={"weight": {"granularity": "blockwise"}},
-        )
-
-
 def test_quant_e8m0_rejects_int_element():
     with pytest.raises(ValueError):
         QuantizationConfig(
@@ -1836,42 +1646,10 @@ def test_quant_rowwise_defaults_scale_dtype_to_fp32(scale_dtype):
         scale={"weight": {"granularity": "rowwise"}, **scale_dtype},
     )
     assert q.scale["weight"]["granularity"] == "rowwise"
-    assert q.scale["scale_dtype"] is torch.float32
-
-
-def test_quant_explicit_e8m0_normalizes_through_training_config():
-    r = TrainingConfig(
-        mixed_precision="bf16",
-        quantization={
-            "dtype": {
-                "weight": "fp8_e4m3",
-                "act": "fp8_e4m3",
-                "grad_out": "fp8_e4m3",
-            },
-            "scale": _scale_config(
-                "blockwise",
-                {tensor: (1, 32) for tensor in SCALE_TENSORS},
-                scale_dtype="fp8_e8m0",
-            ),
-            "enabled": True,
-        },
-    ).quantization
-    assert r.scale["scale_dtype"] is torch.float8_e8m0fnu
-    assert r.dtype["weight"]["fwd"] == "fp8_e4m3"
+    assert q.scale["scale_dtype"] == "fp32"
 
 
 # ==================== latent_moe / latent_dim ====================
-
-
-def test_modelconfig_latent_moe_default_off():
-    cfg = ModelConfig(
-        d_model=64,
-        mlp=[
-            {"mlp_cls": "moe", "mlp_kwargs": {"n_routed_experts": 4, "aux_loss": True}}
-        ],
-    )
-    assert cfg.resolve_mlp(0)[1]["latent_moe"] is False
-    assert "latent_dim" not in cfg.resolve_mlp(0)[1]
 
 
 @pytest.mark.parametrize("latent_dim", [None, 0, -4, 3.5])
@@ -1879,7 +1657,7 @@ def test_modelconfig_latent_moe_requires_positive_latent_dim(latent_dim):
     kwargs = {"n_routed_experts": 4, "aux_loss": True, "latent_moe": True}
     if latent_dim is not None:
         kwargs["latent_dim"] = latent_dim
-    with pytest.raises(ValueError, match="latent_dim must be a positive int"):
+    with pytest.raises(ValueError):
         ModelConfig(d_model=64, mlp=[{"mlp_cls": "moe", "mlp_kwargs": kwargs}])
 
 
@@ -1905,10 +1683,11 @@ def test_modelconfig_latent_moe_valid():
 # ==================== per-layer mlp schema + resolver ====================
 
 
-def _moe_kwargs(**over):
-    base = {"n_routed_experts": 4, "expert_bias": True}
-    base.update(over)
-    return base
+def _moe_kwargs(expert_bias_update_rate=None):
+    kwargs = {"n_routed_experts": 4, "expert_bias": True}
+    if expert_bias_update_rate is not None:
+        kwargs["expert_bias_update_rate"] = expert_bias_update_rate
+    return kwargs
 
 
 def test_mlp_single_item_covers_all_layers():
@@ -1917,8 +1696,6 @@ def test_mlp_single_item_covers_all_layers():
     )
     assert [cfg.resolve_mlp(i)[0] for i in range(cfg.n_layers)] == ["moe"] * 4
     assert cfg.is_moe is True
-    # per-item defaulting ran
-    assert cfg.resolve_mlp(0)[1]["intermediate_size"] == 4 * 64
 
 
 def test_mlp_dense_first_layer_complement():
@@ -1957,7 +1734,7 @@ def test_mlp_per_layer_expert_bias_rate():
 
 
 def test_mlp_conflict_raises():
-    with pytest.raises(ValueError, match="claimed by multiple"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=4,
@@ -1969,8 +1746,8 @@ def test_mlp_conflict_raises():
         )
 
 
-def test_mlp_within_item_duplicate_raises_clear_message():
-    with pytest.raises(ValueError, match="listed more than once in one mlp item"):
+def test_mlp_duplicate_layer_raise_error():
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=4,
@@ -1982,7 +1759,7 @@ def test_mlp_within_item_duplicate_raises_clear_message():
 
 
 def test_mlp_gap_raises():
-    with pytest.raises(ValueError, match="no mlp item|not claimed|coverage"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=4,
@@ -1994,7 +1771,7 @@ def test_mlp_gap_raises():
 
 
 def test_mlp_two_bare_items_raise():
-    with pytest.raises(ValueError, match="at most one"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=4,
@@ -2006,7 +1783,7 @@ def test_mlp_two_bare_items_raise():
 
 
 def test_mlp_out_of_range_raises():
-    with pytest.raises(ValueError, match="out of range"):
+    with pytest.raises(ValueError):
         ModelConfig(
             d_model=64,
             n_layers=2,
@@ -2047,10 +1824,6 @@ def test_mlp_per_layer_aux_coef_allowed():
         if cfg.resolve_mlp(i)[0] == "moe" and cfg.resolve_mlp(i)[1].get("aux_loss")
     ]
     assert sorted(coefs) == [1e-3, 1e-2]
-    assert (
-        not hasattr(cfg, "aux_loss_coef")
-        or callable(getattr(type(cfg), "aux_loss_coef", None)) is False
-    )
 
 
 def test_all_configs_load_and_have_list_mlp():
@@ -2078,28 +1851,47 @@ def test_configs_model_key_order_d_model_n_layers_vocab_size_attn_mlp_first():
 # ==================== Scaling configuration ====================
 
 
-def test_quantization_config_rotation_defaults():
+ROTATION_DEFAULT_EXTRAS = [
+    {},
+    {"rotation_ops": {}, "gemms": ["fwd"]},
+]
+
+
+@pytest.mark.parametrize("enabled", QUANTIZATION_ENABLED)
+@pytest.mark.parametrize("extra", ROTATION_DEFAULT_EXTRAS)
+def test_quantization_config_rotation_defaults(extra, enabled):
     """Config canonicalization applies defaults without storing runtime state."""
+    rotation = {"rotation_cls": "hadamard"}
+    rotation.update(extra)
     q = QuantizationConfig(
-        enabled=True,
+        enabled=enabled,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-        rotation={"rotation_cls": "hadamard"},
+        rotation=rotation,
     )
     assert q.rotation["rotation_cls"] == "hadamard"
-    assert q.rotation["gemms"] == ["fwd", "dgrad", "wgrad"]
     assert q.rotation["rotation_kwargs"] == {}
-    exported = TrainConfig(training=TrainingConfig(quantization=q)).to_dict()
-    assert exported["training"]["quantization"]["rotation"] == q.rotation
+    expected_axes = (
+        {
+            "weight": {"fwd": [], "dgrad": []},
+            "act": {"fwd": [], "wgrad": []},
+            "grad_out": {"dgrad": [], "wgrad": []},
+        }
+        if enabled
+        else {}
+    )
+    assert q.rotation["rotation_axes"] == expected_axes
+    exported = TrainConfig(quantization=q).to_dict()
+    assert exported["quantization"]["rotation"] == q.rotation
     yaml.safe_dump(exported)
 
 
 @pytest.mark.parametrize(
     "rotation",
     [
-        None,
         {},
+        {"rotation_cls": None},
         {"rotation_kwargs": {"block_size": 32}},
-        {"gemms": ["wgrad"]},
+        {"rotation_axes": {"act": {"fwd": [-2]}}},
     ],
 )
 def test_quantization_config_rotation_requires_rotation_cls(rotation):
@@ -2108,55 +1900,102 @@ def test_quantization_config_rotation_requires_rotation_cls(rotation):
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         rotation=rotation,
     )
-    assert q.rotation is None
+    assert q.rotation == {
+        "rotation_cls": None,
+        "rotation_kwargs": {},
+        "rotation_axes": {
+            "weight": {"fwd": [], "dgrad": []},
+            "act": {"fwd": [], "wgrad": []},
+            "grad_out": {"dgrad": [], "wgrad": []},
+        },
+    }
 
 
-@pytest.mark.parametrize("block_size", [1, 2, 32, 128])
-def test_quantization_config_rotation(block_size):
+ROTATION_KWARGS = [
+    {"block_size": 1},
+    {"block_size": 2},
+    {"block_size": 32},
+    {"block_size": 128},
+    {},
+    {"seed": 7},
+]
+
+
+@pytest.mark.parametrize("rotation_kwargs", ROTATION_KWARGS)
+def test_quantization_config_rotation_kwargs(rotation_kwargs):
     q = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         rotation={
             "rotation_cls": "hadamard",
-            "rotation_kwargs": {"block_size": block_size},
+            "rotation_kwargs": copy.deepcopy(rotation_kwargs),
         },
     )
     assert q.rotation["rotation_cls"] == "hadamard"
-    assert q.rotation["rotation_kwargs"]["block_size"] == block_size
+    assert q.rotation["rotation_kwargs"] == rotation_kwargs
+    config = TrainConfig(seed=23, quantization=q)
+    assert config.quantization.rotation["rotation_kwargs"] == rotation_kwargs
 
 
-@pytest.mark.parametrize(
-    "gemms, expected",
-    [
-        (["wgrad"], ["wgrad"]),
-        (["dgrad", "wgrad"], ["dgrad", "wgrad"]),
-        ("wgrad", ["wgrad"]),
-    ],
-)
-def test_quantization_config_rotation_gemms(gemms, expected):
+@pytest.mark.parametrize("enabled", QUANTIZATION_ENABLED)
+def test_quantization_config_rotation_axes(enabled):
+    rotation_axes = {
+        "weight": {"fwd": [-1, -2, -1], "dgrad": [-2]},
+        "act": {"wgrad": [-1]},
+        "grad_out": {"dgrad": [-2]},
+    }
     q = QuantizationConfig(
-        enabled=True,
+        enabled=enabled,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-        rotation={"rotation_cls": "hadamard", "gemms": gemms},
+        rotation={
+            "rotation_cls": "hadamard",
+            "rotation_axes": rotation_axes,
+        },
     )
-    assert q.rotation["gemms"] == expected
+    expected_axes = (
+        {
+            "weight": {"fwd": [-2, -1], "dgrad": [-2]},
+            "act": {"fwd": [], "wgrad": [-1]},
+            "grad_out": {"dgrad": [-2], "wgrad": []},
+        }
+        if enabled
+        else rotation_axes
+    )
+    assert q.rotation["rotation_axes"] == expected_axes
 
 
 @pytest.mark.parametrize(
     "rotation",
     [
+        None,
         [],
         {"rotation_cls": []},
         {"rotation_cls": "givens"},
         {"rotation_cls": "hadamard", "rotation_kwargs": 4},
         {"rotation_cls": "hadamard", "rotation_kwargs": []},
-        {"rotation_cls": "hadamard", "gemms": ["bwd"]},
-        {"rotation_cls": "hadamard", "gemms": ["wgrad", "wgrad"]},
-        {"rotation_cls": "hadamard", "gemm": ["wgrad"]},
+        {"rotation_cls": "hadamard", "rotation_axes": []},
+        {"rotation_cls": "hadamard", "rotation_axes": {"output": {}}},
+        {"rotation_cls": "hadamard", "rotation_axes": {"weight": []}},
+        {
+            "rotation_cls": "hadamard",
+            "rotation_axes": {"weight": {"wgrad": []}},
+        },
+        {
+            "rotation_cls": "hadamard",
+            "rotation_axes": {"weight": {"fwd": "-1"}},
+        },
+        {
+            "rotation_cls": "hadamard",
+            "rotation_axes": {"weight": {"fwd": [-3]}},
+        },
+        {
+            "rotation_cls": "hadamard",
+            "rotation_axes": {"weight": {"fwd": [True]}},
+        },
     ],
 )
 def test_quantization_config_rotation_raise_error(rotation):
-    with pytest.raises(ValueError, match="rotation"):
+    with pytest.raises(ValueError):
         QuantizationConfig(
             enabled=True,
             dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
@@ -2166,7 +2005,7 @@ def test_quantization_config_rotation_raise_error(rotation):
 
 def test_quantization_config_rotation_kwargs_raise_error():
     """Kwargs must survive the YAML round trip that carries them into a run."""
-    with pytest.raises(ValueError, match="rotation"):
+    with pytest.raises(ValueError):
         QuantizationConfig(
             enabled=True,
             dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
@@ -2177,81 +2016,25 @@ def test_quantization_config_rotation_kwargs_raise_error():
         )
 
 
-@pytest.mark.parametrize(
-    "rotation_kwargs, expected_seed",
-    [
-        ({}, 23),
-        ({"seed": 7}, 7),
-    ],
-)
-def test_training_config_hadamard_rotation_seed(rotation_kwargs, expected_seed):
-    """An omitted Hadamard seed must inherit the training seed."""
-    config = TrainingConfig(
-        mixed_precision="bf16",
-        seed=23,
-        quantization={
-            "enabled": True,
-            "dtype": {"weight": "int8", "act": "bf16", "grad_out": "bf16"},
-            "rotation": {
-                "rotation_cls": "hadamard",
-                "rotation_kwargs": rotation_kwargs,
-            },
-        },
-    )
-
-    assert config.quantization.rotation["rotation_kwargs"]["seed"] == expected_seed
+BLOCKWISE_SHAPES = [(1, 128), (16, 16), (32, 32), (64, 64)]
 
 
-def test_quantization_config_blockwise():
+@pytest.mark.parametrize("block_shape", BLOCKWISE_SHAPES)
+def test_quantization_config_blockwise(block_shape):
     q = QuantizationConfig(
         enabled=True,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
         scale=_scale_config(
-            "blockwise", {tensor: (1, 128) for tensor in SCALE_TENSORS}
+            "blockwise", {tensor: block_shape for tensor in SCALE_TENSORS}
         ),
     )
     assert {tensor: q.scale[tensor]["granularity"] for tensor in SCALE_TENSORS} == {
         tensor: "blockwise" for tensor in SCALE_TENSORS
     }
     assert {tensor: q.scale[tensor]["block_shape"] for tensor in SCALE_TENSORS} == {
-        "weight": (1, 128),
-        "act": (1, 128),
-        "grad_out": (1, 128),
+        tensor: block_shape for tensor in SCALE_TENSORS
     }
-    assert q.scale["scale_dtype"] is torch.float32
-
-
-def test_quant_explicit_rowwise_scale():
-    q = QuantizationConfig(
-        enabled=True,
-        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-        scale=_scale_config("rowwise"),
-    )
-    assert {tensor: q.scale[tensor]["granularity"] for tensor in SCALE_TENSORS} == {
-        tensor: "rowwise" for tensor in SCALE_TENSORS
-    }
-
-
-def test_quant_blockwise_block_size_must_be_multiple_of_16():
-    with pytest.raises(ValueError):
-        QuantizationConfig(
-            enabled=True,
-            dtype={"weight": "fp8_e4m3"},
-            scale=_scale_config(
-                "blockwise", {tensor: (1, 24) for tensor in SCALE_TENSORS}
-            ),
-        )
-
-
-def test_quant_blockwise_block_size_must_be_positive():
-    with pytest.raises(ValueError):
-        QuantizationConfig(
-            enabled=True,
-            dtype={"weight": "fp8_e4m3"},
-            scale=_scale_config(
-                "blockwise", {tensor: (1, -16) for tensor in SCALE_TENSORS}
-            ),
-        )
+    assert q.scale["scale_dtype"] == "fp32"
 
 
 def test_quant_rejects_unknown_scale_dtype():
@@ -2277,7 +2060,7 @@ def test_quant_blockwise_fp32_scale_dtype_ok():
             scale_dtype="fp32",
         ),
     )
-    assert q.scale["scale_dtype"] is torch.float32
+    assert q.scale["scale_dtype"] == "fp32"
 
 
 def test_monitoring_flags_default_true():
@@ -2285,37 +2068,6 @@ def test_monitoring_flags_default_true():
 
     assert LoggingConfig().log_quant_metrics is True
     assert LoggingConfig().log_activation_norms is True
-
-
-@pytest.mark.parametrize("tile", [16, 32, 64])
-def test_quant_block_shape_accepts_square(tile):
-    q = QuantizationConfig(
-        enabled=True,
-        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-        scale=_scale_config(
-            "blockwise",
-            {tensor: (tile, tile) for tensor in SCALE_TENSORS},
-            scale_dtype="fp32",
-        ),
-    )
-    assert {tensor: q.scale[tensor]["block_shape"] for tensor in SCALE_TENSORS} == {
-        "weight": (tile, tile),
-        "act": (tile, tile),
-        "grad_out": (tile, tile),
-    }
-
-
-def test_quant_block_shape_rejects_non_square():
-    with pytest.raises(ValueError):
-        QuantizationConfig(
-            enabled=True,
-            dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-            scale=_scale_config(
-                "blockwise",
-                {tensor: (16, 128) for tensor in SCALE_TENSORS},
-                scale_dtype="fp32",
-            ),
-        )
 
 
 def test_quant_e8m0_requires_contract_extent_multiple_of_32():

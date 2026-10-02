@@ -16,7 +16,12 @@ from src.metrics.functional import compute_activation_norm
 from src.metrics.quant import set_quantization_monitoring_status
 from src.quant.convert import apply_quantization, enable_quantization
 from src.quant.moe import QuantizedSparseMoEBlock
-from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+from src.utils.config import (
+    ModelConfig,
+    QuantizationConfig,
+    TrainConfig,
+    TrainingConfig,
+)
 from tests.fast.layers.helper import make_attn_mask
 
 
@@ -134,7 +139,7 @@ def test_buffers_follow_the_model_not_the_ambient_default_device():
 
 
 # ---------------------------------------------------------------------------
-# Quantization accumulators: one per tensor, not one per GEMM operand
+# Quantization accumulators: one per quantized GEMM operand
 # ---------------------------------------------------------------------------
 
 
@@ -144,12 +149,12 @@ def _quantized_linear(dtype):
     model.proj = torch.nn.Linear(D_MODEL, D_MODEL, bias=False)
     cfg = TrainConfig(
         model=_block_cfg(),
-        training=TrainingConfig(
-            mixed_precision="no",
-            quantization={
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            **{
                 "enabled": True,
                 "dtype": dtype,
-            },
+            }
         ),
     )
     apply_quantization(model, cfg)
@@ -166,15 +171,15 @@ def _fold(module, x):
         set_quantization_monitoring_status(False)
 
 
-def test_one_accumulator_per_quantized_tensor():
-    """Keyed by tensor, so a tensor consumed by two GEMMs still gets one site, and a
-    tensor left in the compute dtype gets none."""
+def test_one_accumulator_per_quantized_gemm_operand():
+    """A quantized tensor receives one site for each GEMM that consumes it."""
     proj = _quantized_linear({"weight": "int8", "act": "bf16", "grad_out": "bf16"})
-    assert set(proj.quant_stats) == {"weight"}
-    assert proj.quant_stats["weight"].key == "weight/proj"
+    assert set(proj.quant_stats) == {"fwd/weight", "dgrad/weight"}
+    assert proj.quant_stats["fwd/weight"].key == "fwd/weight/proj"
+    assert proj.quant_stats["dgrad/weight"].key == "dgrad/weight/proj"
 
 
-def test_grad_out_site_exists_when_only_one_gemm_quantizes_it():
+def test_gemm_operand_site_exists_when_only_one_gemm_quantizes_it():
     proj = _quantized_linear(
         {
             "weight": "bf16",
@@ -182,11 +187,11 @@ def test_grad_out_site_exists_when_only_one_gemm_quantizes_it():
             "grad_out": {"dgrad": "int8", "wgrad": "bf16"},
         }
     )
-    assert set(proj.quant_stats) == {"grad_out"}
+    assert set(proj.quant_stats) == {"dgrad/grad_out"}
 
 
-def test_grad_out_site_holds_only_the_quantized_gemms_fold():
-    """dgrad quantized, wgrad not: the site sees exactly one operand's elements."""
+def test_gemm_operand_site_holds_its_own_fold():
+    """A dgrad-only format folds only its own grad_out operand."""
     proj = _quantized_linear(
         {
             "weight": "bf16",
@@ -197,11 +202,11 @@ def test_grad_out_site_holds_only_the_quantized_gemms_fold():
     x = torch.randn(4, D_MODEL, requires_grad=True)
     _fold(proj, x)
     # grad_out is (4, D_MODEL); only the dgrad GEMM folded it
-    assert proj.quant_stats["grad_out"].numel.item() == 4 * D_MODEL
+    assert proj.quant_stats["dgrad/grad_out"].numel.item() == 4 * D_MODEL
 
 
-def test_both_gemms_pool_into_one_tensor_site():
-    """Same tensor quantized in both its GEMMs: the sums add, they do not overwrite."""
+def test_gemm_operand_sites_do_not_pool_two_tensor_uses():
+    """Dgrad and wgrad record separate grad_out QDQ errors."""
     proj = _quantized_linear(
         {
             "weight": "bf16",
@@ -211,11 +216,12 @@ def test_both_gemms_pool_into_one_tensor_site():
     )
     x = torch.randn(4, D_MODEL, requires_grad=True)
     _fold(proj, x)
-    assert proj.quant_stats["grad_out"].numel.item() == 2 * 4 * D_MODEL
+    for key in ("dgrad/grad_out", "wgrad/grad_out"):
+        assert proj.quant_stats[key].numel.item() == 4 * D_MODEL
 
 
 def test_moe_monitoring_installs_per_projection_stats():
-    """One site per (projection, quantized tensor), reachable by the reset/read walk.
+    """One site per (projection, GEMM, quantized tensor), reachable by the reset/read walk.
 
     The seam itself is a method keyed on training mode, so installing monitoring has
     nothing to rebind and cannot strand a block on the wrong GEMM.
@@ -229,12 +235,12 @@ def test_moe_monitoring_installs_per_projection_stats():
     )
     cfg = TrainConfig(
         model=_block_cfg(),
-        training=TrainingConfig(
-            mixed_precision="no",
-            quantization={
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            **{
                 "enabled": True,
                 "dtype": {"weight": "int8", "act": "int8", "grad_out": "int8"},
-            },
+            }
         ),
     )
     apply_quantization(model, cfg)
@@ -249,12 +255,19 @@ def test_moe_monitoring_installs_per_projection_stats():
     assert {
         site.key for sites in moe.quant_stats.values() for site in sites.values()
     } == {
-        f"{tensor}/moe.expert_{projection}"
-        for tensor in ("weight", "act", "grad_out")
+        f"{op}/{tensor}/moe.expert_{projection}"
+        for op, tensor in (
+            ("fwd", "act"),
+            ("fwd", "weight"),
+            ("dgrad", "grad_out"),
+            ("dgrad", "weight"),
+            ("wgrad", "grad_out"),
+            ("wgrad", "act"),
+        )
         for projection in ("gate", "up", "down")
     }
     # children, so reset_quantization_stats and the metric read reach them
-    assert len(moe._quant_stats) == 9
+    assert len(moe._quant_stats) == 18
     for sites in moe.quant_stats.values():
         for stats in sites.values():
             assert stats.numel.shape == (1,)

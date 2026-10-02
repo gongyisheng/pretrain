@@ -35,10 +35,11 @@ def apply_rotation_on_axes(
     out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Apply a rotation to the given matrix axes."""
+    out_dtype = tensor.dtype if out_dtype is None else out_dtype
     if rotation is not None:
         for axis in axes:
             tensor = rotation(tensor, axis, out_dtype)
-    return tensor if out_dtype is None else tensor.to(out_dtype)
+    return tensor.to(out_dtype)
 
 
 def transpose_rotation_axes(axes: tuple[int, ...] | list[int]) -> tuple[int, ...]:
@@ -154,7 +155,7 @@ def build_rotation_key(
 
 
 def build_rotation(rotation_cfg: dict | None, seed: int = 42) -> Rotation | None:
-    if rotation_cfg is None:
+    if rotation_cfg is None or rotation_cfg["rotation_cls"] is None:
         return None
     try:
         rotation_kwargs = dict(rotation_cfg["rotation_kwargs"])

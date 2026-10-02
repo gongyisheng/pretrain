@@ -104,13 +104,14 @@ def _cfg(quantization):
             vocab_size=64,
             attn=[{"attn_cls": "gqa", "attn_kwargs": {"n_heads": 2}}],
         ),
-        training=TrainingConfig(mixed_precision="bf16", quantization=quantization),
+        training=TrainingConfig(mixed_precision="bf16"),
+        quantization=QuantizationConfig(**quantization),
     )
 
 
 APPLY_CASES = [
     # (quantization, swapped fqns, untouched fqns)
-    ({"enabled": False}, (), ("attn.q_proj", "mlp.down_proj")),
+    ({}, (), ("attn.q_proj", "mlp.down_proj")),
     # fp8 and mxfp8 both swap with no hardware preflight, and lm_head is excluded
     # by default while the embedding is never a candidate at all.
     (
@@ -206,7 +207,7 @@ def test_apply_quantization_layer_idx(layer_idx, selected_layers, mlp_cls, scope
             mlp=[{"mlp_cls": mlp_cls, "mlp_kwargs": mlp_kwargs}],
             tie_word_embeddings=False,
         ),
-        training=TrainingConfig(quantization=quantization),
+        quantization=QuantizationConfig(**quantization),
     )
     model = build_model(config)
     original_modules = dict(model.named_modules())
@@ -251,7 +252,7 @@ def test_apply_quantization_layer_idx(layer_idx, selected_layers, mlp_cls, scope
         assert torch.equal(parameter, original_values[name])
     if layer_idx is not None:
         assert model.lm_head is original_modules["lm_head"]
-    if config.training.quantization.layer_idx == []:
+    if config.quantization.layer_idx == []:
         assert not hasattr(model, "quant_rotations")
     else:
         assert len(model.quant_rotations) == 1
@@ -312,7 +313,7 @@ def test_enable_quantization(model_kind, first_name, second_name):
             rotation={
                 "rotation_cls": "hadamard",
                 "rotation_kwargs": {"block_size": 16, "seed": 1},
-                "gemms": ["fwd"],
+                "rotation_axes": {"weight": {"fwd": [-1], "dgrad": [-1]}},
             },
         )
     )
@@ -360,15 +361,22 @@ def test_enable_quantization(model_kind, first_name, second_name):
 
 
 def test_apply_quantization_accepts_a_bare_config_namespace():
-    # the converter only reads config.training.quantization, so a plain namespace of
-    # an already-built config is enough — nothing else on TrainConfig is consulted
+    # The converter needs only the quantization rule and rotation seed.
     model = nn.Sequential(nn.Linear(64, 64))
     rule = QuantizationConfig(
-        enabled=True, dtype=dict(INT8_W8A16_DTYPES), include=["0"]
+        enabled=True,
+        dtype=dict(INT8_W8A16_DTYPES),
+        include=["0"],
+        rotation={
+            "rotation_cls": "hadamard",
+            "rotation_kwargs": {"block_size": 16},
+            "rotation_axes": {"weight": {"fwd": [-1]}},
+        },
     )
-    config = SimpleNamespace(training=SimpleNamespace(quantization=rule))
+    config = SimpleNamespace(quantization=rule, seed=7)
     apply_quantization(model, config)
     assert isinstance(model[0], QuantizedLinear)
+    assert model[0].rotation.seed == 7
 
 
 def test_apply_quantization_owns_rotation_once_at_model_root():
@@ -380,11 +388,11 @@ def test_apply_quantization_owns_rotation_once_at_model_root():
             rotation={
                 "rotation_cls": "hadamard",
                 "rotation_kwargs": {"block_size": 16, "random_sign": True},
-                "gemms": ["fwd"],
+                "rotation_axes": {"weight": {"fwd": [-1], "dgrad": [-1]}},
             },
         )
     )
-    cfg = config.training.quantization
+    cfg = config.quantization
     key = build_rotation_key(cfg.rotation, cfg.include, cfg.exclude)
 
     apply_quantization(model, config)
@@ -396,6 +404,63 @@ def test_apply_quantization_owns_rotation_once_at_model_root():
     assert model.mlp["down_proj"].rotation is root_rotation
     rotation_state = [k for k in model.state_dict() if "sign_vector" in k]
     assert rotation_state == [f"quant_rotations.{key}.sign_vector"]
+
+
+def test_apply_quantization_preserves_rotation_axes_per_module():
+    model = _Dense()
+    config = _cfg(
+        _spec(
+            INT8_W8A16_DTYPES,
+            rotation={
+                "rotation_cls": "hadamard",
+                "rotation_kwargs": {"block_size": 16, "seed": 3},
+                "rotation_axes": {
+                    "weight": {"fwd": [-2, -1], "dgrad": [-1]},
+                    "act": {"fwd": [-1], "wgrad": [-2]},
+                    "grad_out": {"dgrad": [-1], "wgrad": [-2]},
+                },
+            },
+        )
+    )
+
+    apply_quantization(model, config)
+
+    q_proj = model.attn["q_proj"]
+    down_proj = model.mlp["down_proj"]
+    root_rotation = next(iter(model.quant_rotations.values()))
+
+    axes = config.quantization.rotation["rotation_axes"]
+    for module in (q_proj, down_proj):
+        assert module.quantization_config.rotation["rotation_axes"] == axes
+    assert q_proj.rotation is down_proj.rotation is root_rotation
+
+
+def test_apply_quantization_preserves_rotation_axes_per_moe_projection():
+    model = _MoE()
+    config = _cfg(
+        _spec(
+            INT8_W8A16_DTYPES,
+            rotation={
+                "rotation_cls": "hadamard",
+                "rotation_kwargs": {"block_size": 16, "seed": 5},
+                "rotation_axes": {
+                    "weight": {"fwd": [-2, -1], "dgrad": [-1]},
+                    "act": {"fwd": [-1], "wgrad": [-2]},
+                    "grad_out": {"dgrad": [-1], "wgrad": [-2]},
+                },
+            },
+        )
+    )
+
+    apply_quantization(model, config)
+
+    root_rotation = next(iter(model.quant_rotations.values()))
+
+    assert (
+        model.mlp.quantization_config.rotation["rotation_axes"]
+        == config.quantization.rotation["rotation_axes"]
+    )
+    assert model.mlp.rotation is root_rotation
 
 
 def test_apply_quantization_without_rotation_leaves_state_dict_clean():
