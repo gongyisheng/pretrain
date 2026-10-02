@@ -1,0 +1,47 @@
+#!/bin/bash
+# Select a free GPU with nvidia-smi, then set CUDA_VISIBLE_DEVICES before running.
+# Usage: nohup bash experiments/fp8_lm_head/run.sh > logs/fp8_lm_head.log 2>&1 &
+
+set -e
+cd "$(dirname "$0")/../.."
+
+configs=(qwen3_77m_bf16)
+for granularity in blockwise1d blockwise2d; do
+    for block_size in 32; do
+        configs+=("qwen3_77m_fp8_w8a16_${granularity}_${block_size}")
+    done
+done
+
+for block_size in 16 64 128; do
+    configs+=("qwen3_77m_fp8_w8a16_blockwise2d_${block_size}")
+done
+
+for granularity in blockwise1d blockwise2d; do
+    block_sizes=(32)
+    if [[ "${granularity}" == "blockwise1d" ]]; then
+        block_sizes=(16 32 64 128)
+    fi
+    for block_size in "${block_sizes[@]}"; do
+        configs+=("qwen3_77m_fp8_w8a8_act_${granularity}_${block_size}")
+    done
+done
+
+for granularity in blockwise1d blockwise2d; do
+    block_sizes=(32)
+    if [[ "${granularity}" == "blockwise1d" ]]; then
+        block_sizes=(16 32 64 128)
+    fi
+    for block_size in "${block_sizes[@]}"; do
+        configs+=("qwen3_77m_fp8_w8a8g8_grad_${granularity}_${block_size}")
+    done
+done
+
+for config in "${configs[@]}"; do
+    echo "=== ${config} ==="
+    echo "Started at: $(date)"
+    uv run python scripts/train.py --config "experiments/fp8_lm_head/${config}.yaml"
+    echo "Finished at: $(date)"
+    echo ""
+done
+
+echo "=== fp8_lm_head runs complete ==="
