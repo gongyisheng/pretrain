@@ -383,13 +383,15 @@ def test_quantized_grouped_mm_records_stats(
     if with_stats:
         assert a_stats.numel.shape == (1,)
         assert b_stats.numel.shape == (1,)
+        # FP4 uses 16-row alignment: 48 input rows plus three 16-row slots.
+        expected_padded_rows = 96
         expected_a_numel = (
-            160 * src_a.shape[-2]
+            expected_padded_rows * src_a.shape[-2]
             if with_padding and layout == "ragged_k"
             else src_a.numel()
         )
         expected_b_numel = (
-            160 * src_b.shape[-1]
+            expected_padded_rows * src_b.shape[-1]
             if with_padding and layout == "ragged_k"
             else src_b.numel()
         )
