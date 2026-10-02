@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from src.kernel.ops.quantize import pack_e2m1_rne
 from src.metrics.quant import accumulate_quantization_sums
 from src.quant.constants import EPS, _FP4_E2M1_VALUES
-from src.quant.rotation import Rotation
 from src.quant.utils import (
     is_fp4,
     is_fp8,
@@ -270,27 +269,6 @@ def _check_e2m1_dims(
         torch._assert(valid, message)
 
 
-def _check_rotation_dims(
-    contract_dim: int,
-    ragged_dim: int | None,
-    offs: torch.Tensor | None,
-    rotation: Rotation,
-) -> None:
-    """Require ragged contraction groups to begin on rotation-block boundaries."""
-    if ragged_dim != contract_dim:
-        return
-    aligned = torch.all(offs.remainder(rotation.alignment) == 0)
-    if torch.compiler.is_compiling():
-        # Fullgraph requires an asynchronous assertion.
-        torch._assert_async(
-            aligned, "ragged contraction boundaries must align with rotation blocks"
-        )
-    else:
-        torch._assert(
-            aligned, "ragged contraction boundaries must align with rotation blocks"
-        )
-
-
 def _quantize_segmented_contraction(
     xf: torch.Tensor,
     contract_dim: int,
@@ -482,18 +460,13 @@ def quantize_operand(
     offs: torch.Tensor | None = None,
     ragged_dim: int | None = None,
     stochastic_rounding: bool = False,
-    rotation: Rotation | None = None,
     return_quantization_stats: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """Return quantized codes, scales, optional global scale, and optional stats."""
     _check_dims(x, contract_dim, ragged_dim, offs)
     if is_fp4(fmt):
         _check_e2m1_dims(x, contract_dim, ragged_dim, offs)
-    if rotation is not None:
-        _check_rotation_dims(contract_dim, ragged_dim, offs, rotation)
-    # Rotation retains fp32 values.
-    xf = x.float() if rotation is None else rotation(x, contract_dim, torch.float32)
-    rotated_source = xf if return_quantization_stats else None
+    xf = x.float()
     granularity = scale_cfg["granularity"]
     block_outer, block_size = scale_cfg["block_shape"]
     scale_dtype = scale_cfg["scale_dtype"]
@@ -558,7 +531,6 @@ def quantize_operand(
         scale_cfg,
         offs=offs,
         ragged_dim=ragged_dim,
-        rotation=rotation,
         global_scale=detached_global_scale,
     )
     stats = torch.stack(
@@ -567,7 +539,6 @@ def quantize_operand(
             codes.detach(),
             dequantized,
             contract_dim=contract_dim,
-            rotated_source=rotated_source.detach(),
         ),
         dim=-1,
     ).detach()
@@ -581,15 +552,12 @@ def dequantize_operand(
     scale_cfg: dict,
     offs: torch.Tensor | None = None,
     ragged_dim: int | None = None,
-    rotation: Rotation | None = None,
     global_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dequantize `xq` in fp32 using `quantize_operand`'s scale layout."""
     if xq.dtype is torch.uint8:
         xq = _unpack_e2m1(xq, contract_dim)
     _check_dims(xq, contract_dim, ragged_dim, offs)
-    if rotation is not None:
-        _check_rotation_dims(contract_dim, ragged_dim, offs, rotation)
     block_size = scale_cfg["block_shape"][1]
     qf, sf = xq.float(), scale.float()
     if ragged_dim == contract_dim and offs is not None:
@@ -604,8 +572,5 @@ def dequantize_operand(
             length,
         )
     if global_scale is not None:
-        # Restore the global factor before inverse rotation.
         deq = deq * _global_divisor(global_scale, deq, offs, ragged_dim)
-    if rotation is not None:
-        deq = rotation.inverse(deq, contract_dim)
     return deq

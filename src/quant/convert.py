@@ -17,7 +17,7 @@ def enable_quantization(model: nn.Module) -> None:
 
 def apply_quantization(model: nn.Module, config) -> nn.Module:
     """Convert eligible modules before optimizer construction."""
-    quantization_config = config.training.quantization
+    quantization_config = config.quantization
     if not quantization_config.enabled:
         return model
     if quantization_config.layer_idx == []:
@@ -30,13 +30,13 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
         return model
 
     rotation = None
-    if quantization_config.rotation is not None:
+    if quantization_config.rotation["rotation_cls"] is not None:
         key = build_rotation_key(
             quantization_config.rotation,
             quantization_config.include,
             quantization_config.exclude,
         )
-        rotation = build_rotation(quantization_config.rotation)
+        rotation = build_rotation(quantization_config.rotation, config.seed)
         model.quant_rotations = nn.ModuleDict({key: rotation})
         print(f"quant: rotation {key} <- {quantization_config.rotation}")
 

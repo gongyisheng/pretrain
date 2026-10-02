@@ -1,3 +1,4 @@
+# todo: test refactory
 import pytest
 import torch
 import torch.nn as nn
@@ -8,9 +9,14 @@ from src.metrics.quant import QuantizationStats, set_quantization_monitoring_sta
 from src.model import build_model
 from src.quant.convert import apply_quantization, enable_quantization
 from src.quant.linear import QuantizedLinear, quantized_mm
-from src.quant.rotation import build_rotation
-from src.quant.utils import is_fp4
-from src.utils.config import ModelConfig, TrainConfig, TrainingConfig
+from src.quant.rotation import apply_rotation_on_axes, build_rotation
+from src.quant.utils import is_fp4, is_quantized, resolve_scale
+from src.utils.config import (
+    ModelConfig,
+    QuantizationConfig,
+    TrainConfig,
+    TrainingConfig,
+)
 from tests.fast.helper import cuda_capability_at_least, cuda_sm89_or_newer
 from tests.fast.quant.helper import (
     ALL_FORMATS,
@@ -42,11 +48,65 @@ PASSTHROUGH_DTYPES = [
     ("bf16", torch.bfloat16),
 ]
 OUT_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+INT4_W8A16_DGRAD_W8_DTYPES = {
+    "weight": {"fwd": "int4", "dgrad": "int8"},
+    "act": "bf16",
+    "grad_out": "bf16",
+}
+INT4_W8A8G8_DTYPES = {
+    "weight": "int4",
+    "act": "int8",
+    "grad_out": "int8",
+}
+LINEAR_FORWARD_DTYPES = FORWARD_DTYPES + [INT4_W8A8G8_DTYPES]
+LINEAR_BACKWARD_DTYPES = BACKWARD_DTYPES + [
+    INT4_W8A16_DGRAD_W8_DTYPES,
+    INT4_W8A8G8_DTYPES,
+]
 # Canonical rotation config shared by quantized modules and their oracles.
 ROTATION_CFG = {
     "rotation_cls": "hadamard",
     "rotation_kwargs": {"block_size": 32, "random_sign": True, "seed": 42},
+    "rotation_axes": {
+        "weight": {"fwd": [-1], "dgrad": [-1]},
+        "act": {"fwd": [-2, -1], "wgrad": [-2, -1]},
+        "grad_out": {"dgrad": [-2], "wgrad": [-2]},
+    },
 }
+TWO_AXIS_WEIGHT_ROTATION_CFG = {
+    "rotation_cls": "hadamard",
+    "rotation_kwargs": {"block_size": 32, "random_sign": True, "seed": 42},
+    "rotation_axes": {
+        "weight": {"fwd": [-2, -1], "dgrad": [-2, -1]},
+        "act": {"fwd": [-1]},
+        "grad_out": {"dgrad": [-1]},
+    },
+}
+INPUT_FEATURE_ROTATION_CFG = {
+    "rotation_cls": "hadamard",
+    "rotation_kwargs": {"block_size": 16, "random_sign": True, "seed": 42},
+    "rotation_axes": {
+        "weight": {"fwd": [-1], "dgrad": [-1]},
+        "act": {"fwd": [-1]},
+    },
+}
+WEIGHT_FEATURE_ROTATION_CFG = {
+    "rotation_cls": "hadamard",
+    "rotation_kwargs": {"block_size": 16, "random_sign": True, "seed": 42},
+    "rotation_axes": {"weight": {"fwd": [-1], "dgrad": [-1]}},
+}
+FORWARD_ROTATION_CONFIGS = [
+    None,
+    ROTATION_CFG,
+    TWO_AXIS_WEIGHT_ROTATION_CFG,
+    INPUT_FEATURE_ROTATION_CFG,
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 32, "random_sign": True, "seed": 42},
+        "rotation_axes": {"weight": {"fwd": [-2]}},
+    },
+    WEIGHT_FEATURE_ROTATION_CFG,
+]
 # worst errors 3.04e-4 forward, 9.12e-4 dgrad, and 7.09e-4 wgrad
 LINEAR_REL_TOL = 3e-3
 # worst errors 1.316e-3
@@ -55,10 +115,29 @@ MM_PRECISION_SHAPE = (256, 512, 128)
 NVFP4_MM_PRECISION_SHAPE = (32, 32, 16)
 MM_PRECISION_DEVICES = ["cpu", "cuda"]
 MM_PRECISION_BIASES = [False, True]
-MM_PRECISION_ROTATIONS = [None, ROTATION_CFG]
 COMPILE_SCALE_TRIPLES = scale_combinations([BLOCKWISE1D_128, BLOCKWISE2D_128], 3)
 COMPILE_SCALE_TRIPLES.append((TENSORWISE, BLOCKWISE1D_128, ROWWISE))
 COMPILE_SCALE_TRIPLES.append((TENSORWISE, TENSORWISE, TENSORWISE))
+COMPILE_DTYPES = [
+    {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+    INT4_W8A16_DTYPES,
+]
+COMPILE_INT4_REL_BOUND = 9.5e-2
+# Worst QDQ-oracle relative errors across the full rotation grid are 2.54e-7,
+# 6.34e-4, and 5.01e-3. These are 3.94x, 3.95x, and 4.99x margins.
+ROTATION_ORACLE_REL_TOL = {
+    torch.float32: 1e-6,
+    torch.float16: 2.5e-3,
+    torch.bfloat16: 2.5e-2,
+}
+
+
+def _axes(cfg, tensor, gemm):
+    return tuple(cfg.rotation["rotation_axes"][tensor][gemm])
+
+
+def _transposed_axes(axes):
+    return tuple(-3 - axis for axis in axes)
 
 
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
@@ -93,7 +172,6 @@ def test_quantized_mm_raise_error():
 @pytest.mark.parametrize("b_fmt", ALL_FORMATS)
 @pytest.mark.parametrize("a_scale,b_scale", SCALE_PAIRS)
 @pytest.mark.parametrize("bias", MM_PRECISION_BIASES)
-@pytest.mark.parametrize("rotation_cfg", MM_PRECISION_ROTATIONS)
 def test_quantized_mm_precision(
     device,
     a_fmt,
@@ -101,7 +179,6 @@ def test_quantized_mm_precision(
     a_scale,
     b_scale,
     bias,
-    rotation_cfg,
 ):
     """Compare each format pair with its dequantization oracle."""
     has_fp4 = is_fp4(a_fmt) or is_fp4(b_fmt)
@@ -119,8 +196,6 @@ def test_quantized_mm_precision(
     a = torch.randn(n_rows, contraction_size, device=device)
     b = torch.randn(contraction_size, n_columns, device=device)
     bias_t = torch.randn(n_columns, device=device) if bias else None
-    # Share one rotation so the oracle and GEMM use the same baked-in sign vector.
-    rotation = build_rotation(rotation_cfg)
     out = quantized_mm(
         a,
         b,
@@ -130,11 +205,8 @@ def test_quantized_mm_precision(
         a_scale,
         b_scale,
         bias=bias_t,
-        rotation=rotation,
     )
-    ref = roundtrip(a, -1, a_fmt, a_scale, rotation=rotation) @ roundtrip(
-        b, -2, b_fmt, b_scale, rotation=rotation
-    )
+    ref = roundtrip(a, -1, a_fmt, a_scale) @ roundtrip(b, -2, b_fmt, b_scale)
     if bias:
         ref = ref + bias_t
     # Full grids peak at 4.58e-5 generic and 5.73e-6 FP4 (6.55x and 3.50x).
@@ -222,13 +294,15 @@ QUANTIZATION_ENABLED = [False, True]
 @pytest.mark.parametrize("enabled", QUANTIZATION_ENABLED)
 def test_quantized_linear_forward_enabled_after_steps(enabled_after_steps, enabled):
     torch.manual_seed(0)
-    cfg = TrainingConfig(
-        mixed_precision="no",
-        quantization={
-            "enabled": True,
-            "enabled_after_steps": enabled_after_steps,
-            "dtype": INT4_W8A16_DTYPES,
-        },
+    cfg = TrainConfig(
+        training=TrainingConfig(mixed_precision="no"),
+        quantization=QuantizationConfig(
+            **{
+                "enabled": True,
+                "enabled_after_steps": enabled_after_steps,
+                "dtype": INT4_W8A16_DTYPES,
+            }
+        ),
     ).quantization
     q = QuantizedLinear.from_module(nn.Linear(4, 3), cfg)
     if enabled:
@@ -257,18 +331,20 @@ def test_quantized_linear_forward_enabled_after_steps(enabled_after_steps, enabl
 
 
 @cuda_sm89_or_newer
-@pytest.mark.parametrize("rotation_cfg", [None, ROTATION_CFG])
-@pytest.mark.parametrize("act_scale,weight_scale", SCALE_PAIRS)
-@pytest.mark.parametrize("dtype", FORWARD_DTYPES)
+@pytest.mark.parametrize("rotation_cfg", FORWARD_ROTATION_CONFIGS)
+@pytest.mark.parametrize("scale_pair", SCALE_PAIRS)
+@pytest.mark.parametrize("dtype", LINEAR_FORWARD_DTYPES)
 @pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("compute_dtype", OUT_DTYPES)
 def test_quantized_linear_forward_precision(
     dtype,
-    act_scale,
-    weight_scale,
+    scale_pair,
     bias,
     rotation_cfg,
+    compute_dtype,
 ):
-    """Match the quantized result to its rounded bf16 oracle."""
+    """Match quantized forward results to direct and restored QDQ oracles."""
+    act_scale, weight_scale = scale_pair
     skip_unsupported_dtype_scale(dtype, act_scale)
     skip_unsupported_dtype_scale(dtype, weight_scale)
     act_fmt, weight_fmt = (
@@ -280,7 +356,7 @@ def test_quantized_linear_forward_precision(
     ):
         pytest.skip("fused FP4 requires CUDA SM100 or newer")
     torch.manual_seed(0)
-    lin = nn.Linear(256, 128, bias=bias).cuda().to(torch.bfloat16)
+    lin = nn.Linear(256, 128, bias=bias).cuda().to(compute_dtype)
     cfg = rule(
         dtype,
         {
@@ -290,46 +366,85 @@ def test_quantized_linear_forward_precision(
         },
         rotation=rotation_cfg,
     )
-    rotation = build_rotation(rotation_cfg)
-    q = QuantizedLinear.from_module(lin, cfg, rotation=rotation)
+    q = QuantizedLinear.from_module(lin, cfg, rotation=build_rotation(rotation_cfg))
     enable_quantization(q)
-    x = torch.randn(2, 128, 256, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(2, 128, 256, device="cuda", dtype=compute_dtype)
 
     out = q(x)
-    # Flatten batch dimensions to match the GEMM.
-    ref2d = mm_ref(
-        x.flatten(0, -2),
-        lin.weight.t(),
-        act_fmt,
-        weight_fmt,
-        act_scale,
-        weight_scale,
-        rotation=rotation,
-    )
-    if bias:
-        ref2d = ref2d + lin.bias.float()
-    ref = ref2d.to(torch.bfloat16).unflatten(0, x.shape[:-1])
-    assert out.shape == (2, 128, 128) and out.dtype == torch.bfloat16
+    x2d = x.flatten(0, -2)
+    act_axes = _axes(cfg, "act", "fwd")
+    weight_axes = _axes(cfg, "weight", "fwd")
+    assert out.shape == (2, 128, 128) and out.dtype == compute_dtype
     tolerance = LINEAR_REL_TOL
     if "fp4_e2m1_4over6" in (act_fmt, weight_fmt) and uses_fp4_gemm(
         act_fmt, weight_fmt, act_scale
     ):
         tolerance = FP4_4OVER6_FORWARD_REL_TOL
-    assert rel(out, ref) < tolerance
+    if (-1 in act_axes) == (-1 in weight_axes):
+        ref2d = mm_ref(
+            apply_rotation_on_axes(x2d, q.rotation, act_axes),
+            apply_rotation_on_axes(lin.weight, q.rotation, weight_axes).t(),
+            act_fmt,
+            weight_fmt,
+            act_scale,
+            weight_scale,
+        ).to(x.dtype)
+        if q.rotation is not None and -2 in act_axes:
+            ref2d = q.rotation.inverse(ref2d, -2)
+        if q.rotation is not None and -2 in weight_axes:
+            ref2d = q.rotation.inverse(ref2d, -1)
+        if bias:
+            ref2d = ref2d + lin.bias.to(ref2d.dtype)
+        ref = ref2d.to(compute_dtype).unflatten(0, x.shape[:-1])
+        assert rel(out, ref) < tolerance
+
+    if q.rotation is not None:
+        transposed_weight_axes = _transposed_axes(weight_axes)
+        ref_a = roundtrip(
+            apply_rotation_on_axes(x2d, q.rotation, act_axes),
+            -1,
+            act_fmt,
+            resolve_scale(cfg.scale, "act"),
+        ).to(x.dtype)
+        ref_b = roundtrip(
+            apply_rotation_on_axes(lin.weight.t(), q.rotation, transposed_weight_axes),
+            -2,
+            weight_fmt,
+            resolve_scale(cfg.scale, "weight"),
+        ).to(x.dtype)
+        for axis in reversed(act_axes):
+            ref_a = q.rotation.inverse(ref_a, axis)
+        for axis in reversed(transposed_weight_axes):
+            ref_b = q.rotation.inverse(ref_b, axis)
+        ref2d = ref_a @ ref_b
+        if bias:
+            ref2d = ref2d + lin.bias.to(ref2d.dtype)
+        ref = ref2d.to(compute_dtype).unflatten(0, x.shape[:-1])
+        assert rel(out, ref) < ROTATION_ORACLE_REL_TOL[compute_dtype]
 
 
-# 250 exercises the wgrad contraction pad.
+# Keep unaligned tokens when no token axis is rotated.
 N_TOKENS = [256, 250]
-BACKWARD_ROTATION_GEMMS = [
+BACKWARD_ROTATION_CONFIGS = [
     None,
-    ("wgrad",),
-    ("fwd", "dgrad", "wgrad"),
+    {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 32, "random_sign": True, "seed": 42},
+        "rotation_axes": {
+            "act": {"wgrad": [-2]},
+            "grad_out": {"wgrad": [-2]},
+        },
+    },
+    ROTATION_CFG,
+    TWO_AXIS_WEIGHT_ROTATION_CFG,
+    INPUT_FEATURE_ROTATION_CFG,
+    WEIGHT_FEATURE_ROTATION_CFG,
 ]
 
 
 @cuda_sm89_or_newer
-@pytest.mark.parametrize("rotation_gemms", BACKWARD_ROTATION_GEMMS)
-@pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
+@pytest.mark.parametrize("rotation_config", BACKWARD_ROTATION_CONFIGS)
+@pytest.mark.parametrize("dtype", LINEAR_BACKWARD_DTYPES)
 @pytest.mark.parametrize("act_scale,weight_scale,grad_out_scale", SCALE_TRIPLES)
 @pytest.mark.parametrize("n_tokens", N_TOKENS)
 @pytest.mark.parametrize("bias", [False, True])
@@ -340,12 +455,20 @@ def test_quantized_linear_backward_precision(
     grad_out_scale,
     n_tokens,
     bias,
-    rotation_gemms,
+    rotation_config,
 ):
-    """Backward matches unrotated, Wgrad-only, and all-GEMM oracles.
-
-    The unrotated cells retain non-divisible token counts to exercise Wgrad padding.
-    """
+    """Backward matches unrotated and tensor-rotation axis oracles."""
+    if (
+        rotation_config is not None
+        and any(
+            -2 in axes
+            for tensor, gemms in rotation_config["rotation_axes"].items()
+            if tensor in ("act", "grad_out")
+            for axes in gemms.values()
+        )
+        and n_tokens % rotation_config["rotation_kwargs"]["block_size"]
+    ):
+        pytest.skip("Token rotation requires a multiple of the rotation block size")
     skip_unsupported_dtype_scale(dtype, act_scale)
     skip_unsupported_dtype_scale(dtype, weight_scale)
     skip_unsupported_dtype_scale(dtype, grad_out_scale)
@@ -371,23 +494,10 @@ def test_quantized_linear_backward_precision(
     )
     if wgrad_uses_fp4 and n_tokens % 16:
         pytest.skip("FP4 Wgrad requires a contraction extent divisible by 16")
-    if (
-        rotation_gemms is not None
-        and n_tokens % ROTATION_CFG["rotation_kwargs"]["block_size"]
-    ):
-        pytest.skip(
-            f"rotation block {ROTATION_CFG['rotation_kwargs']['block_size']} does not divide "
-            f"the {n_tokens}-token contraction"
-        )
     torch.manual_seed(0)
     lin = nn.Linear(256, 128, bias=bias).cuda().to(torch.bfloat16)
     if bias:
         lin.bias = nn.Parameter(lin.bias.float())
-    rotation = (
-        None
-        if rotation_gemms is None
-        else {**ROTATION_CFG, "gemms": list(rotation_gemms)}
-    )
     cfg = rule(
         dtype,
         {
@@ -395,10 +505,9 @@ def test_quantized_linear_backward_precision(
             "act": act_scale,
             "grad_out": grad_out_scale,
         },
-        rotation=rotation,
+        rotation=rotation_config,
     )
-    rotation = build_rotation(rotation)
-    q = QuantizedLinear.from_module(lin, cfg, rotation=rotation)
+    q = QuantizedLinear.from_module(lin, cfg, rotation=build_rotation(rotation_config))
     enable_quantization(q)
 
     x = torch.randn(
@@ -409,29 +518,39 @@ def test_quantized_linear_backward_precision(
     g = torch.randn_like(out)
     out.backward(g)
 
-    # dx = g @ W and dW = gᵀ @ X, with separate GEMM formats. Each GEMM's oracle
-    # is rotated only when the config scopes the rotation to it.
     g2d, x2d = g.flatten(0, -2), x.detach().flatten(0, -2)
-    effective = set(rotation_gemms or ())
-    rotated = {"dgrad": "dgrad" in effective, "wgrad": "wgrad" in effective}
+    act_wgrad_axes = _axes(cfg, "act", "wgrad")
+    weight_dgrad_axes = _axes(cfg, "weight", "dgrad")
+    grad_out_dgrad_axes = _axes(cfg, "grad_out", "dgrad")
+    grad_out_wgrad_axes = _axes(cfg, "grad_out", "wgrad")
+    rotated_g = apply_rotation_on_axes(g2d, q.rotation, grad_out_dgrad_axes)
+    rotated_weight = apply_rotation_on_axes(lin.weight, q.rotation, weight_dgrad_axes)
     dx_ref = mm_ref(
-        g2d,
-        lin.weight,
+        rotated_g,
+        rotated_weight,
         operand_fmt(dtype, "grad_out", "dgrad"),
         operand_fmt(dtype, "weight", "dgrad"),
         grad_out_scale,
         weight_scale,
-        rotation=rotation if rotated["dgrad"] else None,
     )
+    dx_ref = dx_ref.to(x.dtype)
+    if q.rotation is not None and -2 in grad_out_dgrad_axes:
+        dx_ref = q.rotation.inverse(dx_ref, -2)
+    if q.rotation is not None and -1 in weight_dgrad_axes:
+        dx_ref = q.rotation.inverse(dx_ref, -1)
     dw_ref = mm_ref(
-        g2d.t(),
-        x2d,
+        apply_rotation_on_axes(g2d, q.rotation, grad_out_wgrad_axes).t(),
+        apply_rotation_on_axes(x2d, q.rotation, act_wgrad_axes),
         operand_fmt(dtype, "grad_out", "wgrad"),
         operand_fmt(dtype, "act", "wgrad"),
         grad_out_scale,
         act_scale,
-        rotation=rotation if rotated["wgrad"] else None,
     )
+    dw_ref = dw_ref.to(x.dtype)
+    if q.rotation is not None and -1 in grad_out_wgrad_axes:
+        dw_ref = q.rotation.inverse(dw_ref, -1)
+    if q.rotation is not None and -1 in act_wgrad_axes:
+        dw_ref = q.rotation.inverse(dw_ref, -1)
     expected = [
         (x.grad, dx_ref.unflatten(0, x.shape[:-1])),
         (q.weight.grad, dw_ref),
@@ -443,6 +562,13 @@ def test_quantized_linear_backward_precision(
         assert grad.shape == like.shape
         # Compare in the gradient's master dtype.
         assert rel(grad, ref.to(grad.dtype)) < LINEAR_REL_TOL
+    if (
+        not act_wgrad_axes
+        and not grad_out_wgrad_axes
+        and not is_quantized(operand_fmt(dtype, "act", "wgrad"))
+        and not is_quantized(operand_fmt(dtype, "grad_out", "wgrad"))
+    ):
+        torch.testing.assert_close(q.weight.grad, g2d.t() @ x2d, atol=0, rtol=0)
     if bias:
         assert q.bias.grad.dtype == torch.float32
         assert q.bias.grad.shape == q.bias.shape
@@ -497,9 +623,19 @@ def test_quantized_linear_stochastic_rounding(tensor, gemms, enable_sr):
 @cuda_sm89_or_newer
 def test_quantized_linear_autocast():
     torch.manual_seed(0)
-    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.float32)  # fp32 master
+    rotation_cfg = {
+        "rotation_cls": "hadamard",
+        "rotation_kwargs": {"block_size": 128, "random_sign": True, "seed": 42},
+        "rotation_axes": {
+            "weight": {"fwd": [-1], "dgrad": [-1]},
+            "act": {"fwd": [-1]},
+        },
+    }
+    lin = nn.Linear(128, 96, bias=False).cuda().to(torch.float32)
     q = QuantizedLinear.from_module(
-        lin, rule({"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"})
+        lin,
+        rule(INT4_W8A16_DTYPES, rotation=rotation_cfg),
+        rotation=build_rotation(rotation_cfg),
     )
     enable_quantization(q)
     x = torch.randn(64, 128, device="cuda", dtype=torch.float32, requires_grad=True)
@@ -516,7 +652,9 @@ def test_quantized_linear_autocast():
 @pytest.mark.parametrize("with_stats", [False, True])
 @pytest.mark.parametrize("rotation_cfg", [None, ROTATION_CFG])
 @pytest.mark.parametrize("act_scale,weight_scale,grad_out_scale", COMPILE_SCALE_TRIPLES)
+@pytest.mark.parametrize("dtype", COMPILE_DTYPES)
 def test_quantized_linear_compiles_fullgraph(
+    dtype,
     rotation_cfg,
     act_scale,
     weight_scale,
@@ -526,7 +664,7 @@ def test_quantized_linear_compiles_fullgraph(
     torch.manual_seed(0)
     lin = nn.Linear(256, 128, bias=False).cuda().to(torch.bfloat16)
     cfg = rule(
-        {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
+        dtype,
         {
             "weight": weight_scale,
             "act": act_scale,
@@ -558,23 +696,32 @@ def test_quantized_linear_compiles_fullgraph(
         set_quantization_monitoring_status(False)
         torch.compiler.reset()
 
-    assert torch.equal(compiled_out, eager_out)
-    assert torch.equal(compiled_x.grad, eager_x.grad)
-    assert torch.equal(compiled.weight.grad, eager.weight.grad)
+    for compiled_tensor, eager_tensor in (
+        (compiled_out, eager_out),
+        (compiled_x.grad, eager_x.grad),
+        (compiled.weight.grad, eager.weight.grad),
+    ):
+        if dtype == INT4_W8A16_DTYPES:
+            assert rel(compiled_tensor, eager_tensor) < COMPILE_INT4_REL_BOUND
+        else:
+            assert torch.equal(compiled_tensor, eager_tensor)
     assert compiled_out.shape == (64, 128) and torch.isfinite(compiled_out).all()
     assert (
         compiled.weight.grad is not None and torch.isfinite(compiled.weight.grad).all()
     )
     assert compiled_x.grad is not None and torch.isfinite(compiled_x.grad).all()
     if with_stats:
-        for tensor, numel in (
-            ("weight", lin.weight.numel()),
-            ("act", eager_x.numel()),
-            ("grad_out", eager_out.numel()),
-        ):
-            eager_stats = eager.quant_stats[tensor]
-            compiled_stats = compiled.quant_stats[tensor]
-            assert eager_stats.numel.item() == compiled_stats.numel.item() == 2 * numel
+        assert eager.quant_stats.keys() == compiled.quant_stats.keys()
+        numel_by_tensor = {
+            "weight": lin.weight.numel(),
+            "act": eager_x.numel(),
+            "grad_out": eager_out.numel(),
+        }
+        for key, eager_stats in eager.quant_stats.items():
+            compiled_stats = compiled.quant_stats[key]
+            tensor = key.rsplit("/", maxsplit=1)[1]
+            numel = numel_by_tensor[tensor]
+            assert eager_stats.numel.item() == compiled_stats.numel.item() == numel
             assert torch.equal(compiled_stats.under, eager_stats.under)
             assert torch.equal(compiled_stats.nonzero, eager_stats.nonzero)
 
@@ -604,9 +751,9 @@ def test_quantized_linear_trains_a_full_model(layer_idx):
             norm_cls="rmsnorm",
             pos_emb_cls="rope",
         ),
-        training=TrainingConfig(
-            mixed_precision="bf16",
-            quantization={
+        training=TrainingConfig(mixed_precision="bf16"),
+        quantization=QuantizationConfig(
+            **{
                 "enabled": True,
                 "layer_idx": layer_idx,
                 "dtype": {
@@ -614,7 +761,7 @@ def test_quantized_linear_trains_a_full_model(layer_idx):
                     "act": "fp8_e4m3",
                     "grad_out": "fp8_e5m2",
                 },
-            },
+            }
         ),
     )
     model = build_model(config)

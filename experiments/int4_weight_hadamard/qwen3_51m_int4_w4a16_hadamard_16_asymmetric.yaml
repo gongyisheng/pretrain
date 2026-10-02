@@ -17,56 +17,60 @@ model:
     mlp_kwargs:
       intermediate_size: 1536
       dropout: 0.0
-  tie_word_embeddings: false
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
     rope_theta: 10000.0
   dropout_embd: 0.0
-
 data:
   dataset: openwebtext
   tokenizer_path: tokenizers/custom_bpe_50k
   data_dir: data/
   val_split: 0.01
   num_workers: 4
-
 quantization:
   enabled: true
   dtype:
-    weight: fp8_e4m3
-    act: fp8_e4m3
-    grad_out: fp8_e4m3
+    weight: int4
+    act: bf16
+    grad_out: bf16
   scale:
     weight:
       granularity: blockwise
-      block_shape: [32, 32]
-    act:
-      granularity: blockwise
-      block_shape: [1, 32]
-    grad_out:
-      granularity: blockwise
-      block_shape: [1, 32]
-    scale_dtype: fp32
-    enable_global_scale: false
+      block_shape: [16, 16]
+    scale_dtype: fp8_e4m3
+    enable_global_scale: true
   rounding:
     weight: RNE
     act: RNE
     grad_out: RNE
-  include: [lm_head]
-  exclude: []
-
+  rotation:
+    rotation_cls: hadamard
+    rotation_kwargs:
+      block_size: 16
+      random_sign: true
+    rotation_axes:
+      weight:
+        fwd: [-1]
+        dgrad: [-2]
+      act:
+        fwd: []
+        wgrad: []
+      grad_out:
+        dgrad: []
+        wgrad: []
+  include: ['*mlp.*']
+  exclude: [lm_head]
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/fp8_lm_head/qwen3_77m_fp8_w8a8g8_grad_blockwise1d_32/
+  checkpoint_dir: checkpoints/int4_weight_hadamard/qwen3_51m_int4_w4a16_hadamard_16_asymmetric/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
-
 optimizer:
   optimizer_cls: muonadam
   lr: 5e-4
@@ -87,8 +91,7 @@ scheduler:
   name: cosine
   warmup_steps: 1500
   min_lr: 5e-5
-
 logging:
-  wandb_project: pretrain-fp8-lm-head
-  wandb_run_name: qwen3-77m-fp8-w8a8g8-grad-blockwise1d-32
+  wandb_project: pretrain-int4-weight-hadamard
+  wandb_run_name: qwen3-51m-int4-w4a16-hadamard-16-asymmetric
   log_every: 10

@@ -75,6 +75,36 @@ def test_build_rotation_raise_error():
         )
 
 
+BUILD_ROTATION_CASES = [
+    ({"block_size": 8, "seed": 1}, None, 42),
+    ({"block_size": 8, "seed": 1}, 7, 7),
+]
+BUILD_ROTATION_CLASSES = [None, "hadamard"]
+
+
+@pytest.mark.parametrize("rotation_cls", BUILD_ROTATION_CLASSES)
+@pytest.mark.parametrize("rotation_case", BUILD_ROTATION_CASES)
+def test_build_rotation(rotation_case, rotation_cls):
+    rotation_kwargs, seed, expected_seed = rotation_case
+    rotation_config = {
+        "rotation_cls": rotation_cls,
+        "rotation_kwargs": rotation_kwargs.copy(),
+    }
+
+    rotation = (
+        build_rotation(rotation_config)
+        if seed is None
+        else build_rotation(rotation_config, seed)
+    )
+    if rotation_cls is None:
+        assert rotation is None
+    else:
+        expected = HadamardRotation(block_size=8, seed=expected_seed)
+        assert rotation.seed == expected_seed
+        assert torch.equal(rotation.sign_vector, expected.sign_vector)
+    assert rotation_config["rotation_kwargs"] == rotation_kwargs
+
+
 @pytest.mark.parametrize("shape", ROTATION_SHAPES)
 @pytest.mark.parametrize("contract_dim", CONTRACT_DIMS)
 def test_hadamard_rotation_inverse(shape, contract_dim):
@@ -170,19 +200,29 @@ def test_hadamard_rotation_apply_raise_error(
 
 BASE_ROTATION = {
     "rotation_cls": "hadamard",
-    "rotation_kwargs": {"block_size": 16, "seed": 1},
-    "gemms": ["fwd"],
+    "rotation_kwargs": {"block_size": 16, "seed": 42},
+    "rotation_axes": {"weight": {"fwd": [-1], "dgrad": [-1]}},
 }
 BASE_INCLUDE = ["*attn*", "*mlp*"]
 BASE_EXCLUDE = ["lm_head", "*router*"]
 DEFAULT_RANDOM_SIGN_ROTATION = {
     **BASE_ROTATION,
-    "rotation_kwargs": {"block_size": 16, "seed": 1, "random_sign": True},
+    "rotation_kwargs": {"block_size": 16, "seed": 42, "random_sign": True},
 }
-MULTI_GEMM_ROTATION = {**BASE_ROTATION, "gemms": ["fwd", "wgrad"]}
+OMITTED_SEED_ROTATION = {
+    **BASE_ROTATION,
+    "rotation_kwargs": {"block_size": 16},
+}
+MULTI_TENSOR_ROTATION = {
+    **BASE_ROTATION,
+    "rotation_axes": {
+        "weight": {"fwd": [-1], "dgrad": [-1]},
+        "act": {"fwd": [-2], "wgrad": [-2]},
+    },
+}
 BLOCK_32_ROTATION = {
     **BASE_ROTATION,
-    "rotation_kwargs": {"block_size": 32, "seed": 1},
+    "rotation_kwargs": {"block_size": 32, "seed": 42},
 }
 SEED_2_ROTATION = {
     **BASE_ROTATION,
@@ -190,12 +230,13 @@ SEED_2_ROTATION = {
 }
 UNSIGNED_ROTATION = {
     **BASE_ROTATION,
-    "rotation_kwargs": {"block_size": 16, "seed": 1, "random_sign": False},
+    "rotation_kwargs": {"block_size": 16, "seed": 42, "random_sign": False},
 }
 ROTATION_KEY_ROTATION_CASES = [
     (BASE_ROTATION, True),
     (DEFAULT_RANDOM_SIGN_ROTATION, True),
-    (MULTI_GEMM_ROTATION, True),
+    (OMITTED_SEED_ROTATION, True),
+    (MULTI_TENSOR_ROTATION, True),
     (BLOCK_32_ROTATION, False),
     (SEED_2_ROTATION, False),
     (UNSIGNED_ROTATION, False),

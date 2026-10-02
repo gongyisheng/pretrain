@@ -1,4 +1,5 @@
 max_seq_len: 1024
+seed: 42
 
 model:
   d_model: 512
@@ -36,7 +37,6 @@ training:
   device: cuda
   mixed_precision: bf16
   enable_torch_compile: true
-  seed: 42
   grad_clip: 1.0
   checkpoint_dir: checkpoints/adamc/qwen3_51m_adamw_steps_200k/
   checkpoint_every: 20000

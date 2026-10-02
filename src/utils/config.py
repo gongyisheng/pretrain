@@ -1,8 +1,7 @@
 import dataclasses
 import json
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Union
-import torch
+from typing import Dict, List, Optional
 import yaml
 
 from src.layers.activation import ACT_REGISTRY
@@ -16,7 +15,6 @@ from src.quant.constants import (
     GEMM_OPS_BY_TENSOR,
     GEMM_TENSORS,
     QUANT_ROUNDING,
-    GEMM_OPS,
 )
 from src.quant.rotation import ROTATION_REGISTRY
 from src.training.loss import LOSS_REGISTRY
@@ -28,14 +26,10 @@ from src.training.optimizer import (
 
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 _DEVICES = frozenset({"auto", "cuda", "cpu"})
-_SCALE_DTYPES = {
-    "fp32": torch.float32,
-    "fp8_e8m0": torch.float8_e8m0fnu,
-    "fp8_e4m3": torch.float8_e4m3fn,
-}
+_SCALE_DTYPES = frozenset({"fp32", "fp8_e8m0", "fp8_e4m3"})
 
 
-def _check_one_of(label: str, value, options) -> None:
+def _check_value(label, value, options) -> None:
     """Raise unless value names one of options."""
     try:
         known = value in options
@@ -45,6 +39,20 @@ def _check_one_of(label: str, value, options) -> None:
         raise ValueError(
             f"unknown {label}: {value!r}; expected one of {sorted(options)}"
         )
+
+
+def _check_type(label, value, expected_type) -> None:
+    """Raise unless value has the expected type."""
+    if not isinstance(value, expected_type):
+        raise ValueError(f"{label} must be a {expected_type.__name__}, got {value!r}")
+
+
+def _check_include_exclude(label, include, exclude) -> None:
+    """Raise unless include and exclude are lists of strings."""
+    for selector, patterns in (("include", include), ("exclude", exclude)):
+        _check_type(f"{label} {selector}", patterns, list)
+        for pattern in patterns:
+            _check_type(f"{label} {selector} pattern", pattern, str)
 
 
 @dataclass
@@ -102,7 +110,7 @@ class ModelConfig:
         for item in self.attn:
             if "attn_cls" not in item:
                 raise ValueError("each model.attn item requires 'attn_cls'")
-            _check_one_of("attn_cls", item["attn_cls"], ATTN_REGISTRY)
+            _check_value("attn_cls", item["attn_cls"], ATTN_REGISTRY)
             item.setdefault("attn_kwargs", {})
             self._set_default_attn_kwargs(item["attn_cls"], item["attn_kwargs"])
 
@@ -184,7 +192,7 @@ class ModelConfig:
         """Fill defaults/validation for one MLP item's kwargs, keyed on mlp_cls."""
         kwargs.setdefault("intermediate_size", 4 * self.d_model)
         activation_cls = kwargs.setdefault("activation_cls", "swiglu")
-        _check_one_of("activation_cls", activation_cls, ACT_REGISTRY)
+        _check_value("activation_cls", activation_cls, ACT_REGISTRY)
         activation_kwargs = kwargs.setdefault("activation_kwargs", {})
         if not isinstance(activation_kwargs, dict):
             del kwargs["activation_kwargs"]
@@ -212,7 +220,7 @@ class ModelConfig:
             kwargs.setdefault("n_shared_experts", 0)
             kwargs.setdefault("bias", False)
             kwargs.setdefault("router_score_fn", "sigmoid")
-            _check_one_of(
+            _check_value(
                 "router_score_fn", kwargs["router_score_fn"], MOE_ROUTER_SCORE_FNS
             )
             # aux_loss (Switch) and expert_bias (arXiv:2408.15664) are mutually
@@ -250,7 +258,7 @@ class ModelConfig:
         for item in self.mlp:
             if "mlp_cls" not in item:
                 raise ValueError("each model.mlp item requires 'mlp_cls'")
-            _check_one_of("mlp_cls", item["mlp_cls"], MLP_REGISTRY)
+            _check_value("mlp_cls", item["mlp_cls"], MLP_REGISTRY)
             item.setdefault("mlp_kwargs", {})
             self._set_default_mlp_kwargs(item["mlp_cls"], item["mlp_kwargs"])
 
@@ -333,20 +341,28 @@ class TokenizerTrainingConfig:
 @dataclass
 class QuantizationConfig:
     enabled: bool = False
-    enabled_after_steps: int = 0
     # {tensor: fmt} or {tensor: {gemm: fmt}}, resolved to the latter by __post_init__
     dtype: dict = field(default_factory=dict)
     # {tensor: {granularity, block_shape}, scale_dtype, enable_global_scale}
     scale: dict = field(default_factory=dict)
     rounding: dict = field(default_factory=dict)  # {tensor: "RNE" | "SR"}
-    rotation: Optional[dict] = None
+    rotation: dict = field(default_factory=dict)
     layer_idx: Optional[List[int]] = None
-    include: List[str] = field(default_factory=list)
+    enabled_after_steps: int = 0
+    include: List[str] = field(default_factory=lambda: ["*"])
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
     def __post_init__(self):
+        _check_type("quant enabled", self.enabled, bool)
+        _check_type("quant scale", self.scale, dict)
+        _check_type("quant rounding", self.rounding, dict)
+        _check_type("quant rotation", self.rotation, dict)
+        self.rotation.setdefault("rotation_cls", None)
+        self.rotation.setdefault("rotation_kwargs", {})
+        self.rotation.setdefault("rotation_axes", {})
         if not self.enabled:
             return
+        _check_include_exclude("quant", self.include, self.exclude)
         if (
             not isinstance(self.enabled_after_steps, int)
             or isinstance(self.enabled_after_steps, bool)
@@ -357,8 +373,6 @@ class QuantizationConfig:
             self.layer_idx = list(
                 dict.fromkeys(layer for layer in self.layer_idx if layer >= 0)
             )
-        if not isinstance(self.scale, dict):
-            raise ValueError(f"quant scale must be a dict, got {self.scale!r}")
         self._post_init_dtype()
         self._post_init_scale()
         self._post_init_rounding()
@@ -367,7 +381,7 @@ class QuantizationConfig:
     def _post_init_dtype(self):
         """Expand {tensor: fmt} to {tensor: {gemm: fmt}}."""
         for tensor, value in self.dtype.items():
-            _check_one_of("quant dtype key", tensor, GEMM_OPS_BY_TENSOR)
+            _check_value("quant dtype key", tensor, GEMM_OPS_BY_TENSOR)
             gemms = GEMM_OPS_BY_TENSOR[tensor]
             per_gemm = (
                 dict(value) if isinstance(value, dict) else dict.fromkeys(gemms, value)
@@ -378,7 +392,7 @@ class QuantizationConfig:
                         f"quant dtype {tensor!r} cannot be scoped to {gemm!r}: "
                         f"only {list(gemms)} consume it"
                     )
-                _check_one_of(f"quant fmt for {tensor}.{gemm}", fmt, QUANT_FORMATS)
+                _check_value(f"quant fmt for {tensor}.{gemm}", fmt, QUANT_FORMATS)
             self.dtype[tensor] = per_gemm
 
     def _post_init_scale(self):
@@ -386,19 +400,18 @@ class QuantizationConfig:
         scale_dtype = self.scale.get("scale_dtype")
         if scale_dtype is None:
             scale_dtype = "fp32"
-        _check_one_of("quant scale_dtype", scale_dtype, _SCALE_DTYPES)
+        _check_value("quant scale_dtype", scale_dtype, _SCALE_DTYPES)
 
         resolved_scale = {}
         for tensor in GEMM_TENSORS:
             scale = self.scale.get(tensor, {})
-            if not isinstance(scale, dict):
-                raise ValueError(f"quant scale.{tensor} must be a dict, got {scale!r}")
+            _check_type(f"quant scale.{tensor}", scale, dict)
             tensor_scale = {
                 "granularity": scale.get("granularity", "tensorwise"),
                 "block_shape": scale.get("block_shape"),
             }
             granularity = tensor_scale["granularity"]
-            _check_one_of(
+            _check_value(
                 f"quant granularity for {tensor}", granularity, QUANT_GRANULARITY
             )
             if granularity != "blockwise":
@@ -460,11 +473,7 @@ class QuantizationConfig:
                         )
 
         enable_global_scale = self.scale.get("enable_global_scale", False)
-        if not isinstance(enable_global_scale, bool):
-            raise ValueError(
-                "quant scale 'enable_global_scale' must be a bool, got "
-                f"{enable_global_scale!r}"
-            )
+        _check_type("quant scale 'enable_global_scale'", enable_global_scale, bool)
         # Full arithmetic scale dtypes absorb a global factor. E8M0's exponent
         # range makes normalization overflow fp32, so neither needs one.
         if enable_global_scale and (
@@ -475,42 +484,35 @@ class QuantizationConfig:
 
         self.scale = {
             **resolved_scale,
-            "scale_dtype": _SCALE_DTYPES[scale_dtype],
+            "scale_dtype": scale_dtype,
             "enable_global_scale": enable_global_scale,
         }
 
     def _post_init_rounding(self):
         """Validate the named rounding modes and default the rest to RNE."""
         for tensor, mode in self.rounding.items():
-            _check_one_of("quant rounding key", tensor, GEMM_OPS_BY_TENSOR)
-            _check_one_of(f"quant rounding for {tensor}", mode, QUANT_ROUNDING)
+            _check_value("quant rounding key", tensor, GEMM_OPS_BY_TENSOR)
+            _check_value(f"quant rounding for {tensor}", mode, QUANT_ROUNDING)
         self.rounding = {t: self.rounding.get(t, "RNE") for t in GEMM_TENSORS}
 
     def _post_init_rotation(self):
-        """Canonicalize rotation to {rotation_cls, rotation_kwargs, gemms}."""
-        if self.rotation is None:
-            return
-        if not isinstance(self.rotation, dict):
-            raise ValueError(
-                "quant 'rotation' must be {rotation_cls, rotation_kwargs, gemms}, "
-                f"got {self.rotation!r}"
-            )
-        if "rotation_cls" not in self.rotation:
-            self.rotation = None
-            return
-        unknown = set(self.rotation) - {"rotation_cls", "rotation_kwargs", "gemms"}
-        if unknown:
-            raise ValueError(f"unknown quant rotation keys: {sorted(unknown)}")
-
+        """Canonicalize rotation to per-tensor, per-GEMM matrix axes."""
         rotation_cls = self.rotation["rotation_cls"]
-        _check_one_of("rotation_cls", rotation_cls, ROTATION_REGISTRY)
+        resolved_axes = {
+            tensor: {gemm: [] for gemm in gemms}
+            for tensor, gemms in GEMM_OPS_BY_TENSOR.items()
+        }
+        if rotation_cls is None:
+            self.rotation = {
+                "rotation_cls": None,
+                "rotation_kwargs": {},
+                "rotation_axes": resolved_axes,
+            }
+            return
+        _check_value("rotation_cls", rotation_cls, ROTATION_REGISTRY)
 
-        rotation_kwargs = self.rotation.get("rotation_kwargs", {})
-        if not isinstance(rotation_kwargs, dict):
-            raise ValueError(
-                f"quant rotation 'rotation_kwargs' must be a dict, "
-                f"got {rotation_kwargs!r}"
-            )
+        rotation_kwargs = self.rotation["rotation_kwargs"]
+        _check_type("quant rotation 'rotation_kwargs'", rotation_kwargs, dict)
         rotation_kwargs = dict(rotation_kwargs)
         # build_rotation_key serializes these to derive a stable identity, and the
         # config itself must survive the YAML round trip.
@@ -522,23 +524,29 @@ class QuantizationConfig:
                 f"values, got {rotation_kwargs!r}"
             ) from error
 
-        gemms = self.rotation.get("gemms", list(GEMM_OPS))
-        if isinstance(gemms, str):
-            gemms = [gemms]
-        if not isinstance(gemms, list) or not gemms:
-            raise ValueError(
-                f"quant rotation 'gemms' must be a non-empty list of "
-                f"{list(GEMM_OPS)}, got {gemms!r}"
-            )
-        for gemm in gemms:
-            _check_one_of("rotation gemm", gemm, GEMM_OPS)
-        if len(set(gemms)) != len(gemms):
-            raise ValueError(f"quant rotation 'gemms' has duplicates: {gemms!r}")
+        rotation_axes = self.rotation["rotation_axes"]
+        _check_type("quant rotation 'rotation_axes'", rotation_axes, dict)
+        for tensor, gemm_axes in rotation_axes.items():
+            _check_value("quant rotation tensor", tensor, GEMM_OPS_BY_TENSOR)
+            _check_type(f"quant rotation '{tensor}'", gemm_axes, dict)
+            for gemm, axes in gemm_axes.items():
+                _check_value(
+                    f"quant rotation GEMM for {tensor}",
+                    gemm,
+                    GEMM_OPS_BY_TENSOR[tensor],
+                )
+                _check_type(f"quant rotation axes for {tensor}.{gemm}", axes, list)
+                for axis in axes:
+                    _check_type(f"quant rotation axis for {tensor}.{gemm}", axis, int)
+                    _check_value(
+                        f"quant rotation axis for {tensor}.{gemm}", axis, (-2, -1)
+                    )
+                resolved_axes[tensor][gemm] = sorted(set(axes))
 
         self.rotation = {
             "rotation_cls": rotation_cls,
             "rotation_kwargs": rotation_kwargs,
-            "gemms": gemms,
+            "rotation_axes": resolved_axes,
         }
 
 
@@ -554,7 +562,6 @@ class TrainingConfig:
     label_smoothing: float = 0.0  # for CE loss only
     enable_torch_compile: bool = True
     use_deterministic_algo: bool = False
-    seed: int = 42
     grad_clip: float = 1.0
     checkpoint_dir: str = "checkpoints/"
     checkpoint_every: int = 5000
@@ -564,32 +571,11 @@ class TrainingConfig:
     eval_train: bool = False  # for SFT
     eval_generate: bool = False
     intra_doc_masking: bool = True
-    quantization: Union[QuantizationConfig, dict] = field(
-        default_factory=QuantizationConfig
-    )
 
     def __post_init__(self):
-        _check_one_of("device", self.device, _DEVICES)
-        _check_one_of("mixed_precision", self.mixed_precision, _MIXED_PRECISION)
-        _check_one_of("loss_fn", self.loss_fn, LOSS_REGISTRY)
-        if isinstance(self.quantization, dict):
-            self.quantization = QuantizationConfig(**self.quantization)
-        if not isinstance(self.quantization, QuantizationConfig):
-            raise ValueError("quantization must be a dict or QuantizationConfig")
-        amp_dtype = "fp32" if self.mixed_precision == "no" else self.mixed_precision
-        if self.quantization.enabled:
-            for tensor, gemms in GEMM_OPS_BY_TENSOR.items():
-                for gemm in gemms:
-                    self.quantization.dtype.setdefault(tensor, {}).setdefault(
-                        gemm, amp_dtype
-                    )
-            if (
-                self.quantization.rotation
-                and self.quantization.rotation["rotation_cls"] == "hadamard"
-            ):
-                self.quantization.rotation["rotation_kwargs"].setdefault(
-                    "seed", self.seed
-                )
+        _check_value("device", self.device, _DEVICES)
+        _check_value("mixed_precision", self.mixed_precision, _MIXED_PRECISION)
+        _check_value("loss_fn", self.loss_fn, LOSS_REGISTRY)
 
 
 @dataclass
@@ -618,7 +604,7 @@ class OptimizerConfig:
         kwargs.setdefault("eps", 1e-8)
 
     def __post_init__(self):
-        _check_one_of("optimizer_cls", self.optimizer_cls, OPTIMIZER_REGISTRY)
+        _check_value("optimizer_cls", self.optimizer_cls, OPTIMIZER_REGISTRY)
         kwargs = self.optimizer_kwargs
         if self.optimizer_cls in ADAM_OPTIMIZER_REGISTRY:
             self._post_init_adam(kwargs)
@@ -626,7 +612,7 @@ class OptimizerConfig:
             self._post_init_lion(kwargs)
         elif self.optimizer_cls == "muonadam":
             adam_cls = kwargs.setdefault("adam_cls", "adamw")
-            _check_one_of("adam_cls", adam_cls, ADAM_OPTIMIZER_REGISTRY)
+            _check_value("adam_cls", adam_cls, ADAM_OPTIMIZER_REGISTRY)
             adam_kwargs = kwargs.setdefault("adam_kwargs", {})
             muon_kwargs = kwargs.setdefault("muon_kwargs", {})
             if not isinstance(adam_kwargs, dict):
@@ -646,7 +632,7 @@ class SchedulerConfig:
     min_lr: float = 5e-5
 
     def __post_init__(self):
-        _check_one_of("scheduler", self.name, SCHEDULER_REGISTRY)
+        _check_value("scheduler", self.name, SCHEDULER_REGISTRY)
 
 
 @dataclass
@@ -668,8 +654,10 @@ class LoggingConfig:
 class TrainConfig:
     task: str = "pretrain"  # "pretrain" | "sft"
     max_seq_len: int = 1024
+    seed: int = 42
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    quantization: QuantizationConfig = field(default_factory=QuantizationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     tokenizer_training: TokenizerTrainingConfig = field(
         default_factory=TokenizerTrainingConfig
@@ -679,9 +667,22 @@ class TrainConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def __post_init__(self):
-        self._validate_moe_compile_precision()
+        self._post_init_quantization_training_config()
+        self._post_init_model_training_config()
 
-    def _validate_moe_compile_precision(self):
+    def _post_init_quantization_training_config(self):
+        if self.quantization.enabled:
+            amp_dtype = (
+                "fp32"
+                if self.training.mixed_precision == "no"
+                else self.training.mixed_precision
+            )
+            for tensor, gemms in GEMM_OPS_BY_TENSOR.items():
+                tensor_dtypes = self.quantization.dtype.setdefault(tensor, {})
+                for gemm in gemms:
+                    tensor_dtypes.setdefault(gemm, amp_dtype)
+
+    def _post_init_model_training_config(self):
         m = self.model
         if m.is_moe and self.training.mixed_precision not in ("bf16", "fp16"):
             raise ValueError(
@@ -690,14 +691,7 @@ class TrainConfig:
             )
 
     def to_dict(self):
-        config = asdict(self)
-        scale = config["training"]["quantization"]["scale"]
-        scale_dtype = scale.get("scale_dtype")
-        for name, dtype in _SCALE_DTYPES.items():
-            if scale_dtype is dtype:
-                scale["scale_dtype"] = name
-                break
-        return config
+        return asdict(self)
 
 
 def _apply_overrides(config: TrainConfig, overrides: List[str]):
@@ -775,8 +769,12 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
     config = TrainConfig(
         task=raw.get("task", "pretrain"),
         max_seq_len=raw.get("max_seq_len", 1024),
+        seed=raw.get("seed", 42),
         model=ModelConfig(**_coerce_types(ModelConfig, raw.get("model", {}))),
         data=DataConfig(**_coerce_types(DataConfig, raw.get("data", {}))),
+        quantization=QuantizationConfig(
+            **_coerce_types(QuantizationConfig, raw.get("quantization", {}))
+        ),
         tokenizer_training=TokenizerTrainingConfig(
             **_coerce_types(TokenizerTrainingConfig, raw.get("tokenizer_training", {}))
         ),
@@ -798,7 +796,6 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         config.model.residual_kwargs,
         config.tokenizer_training.method_kwargs,
         config.optimizer.optimizer_kwargs,
-        config.training.quantization.scale,
     ):
         _coerce_kwargs(kw)
     for item in config.model.attn:

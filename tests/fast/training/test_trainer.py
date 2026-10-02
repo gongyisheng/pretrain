@@ -11,6 +11,7 @@ from src.utils.config import (
     LoggingConfig,
     ModelConfig,
     OptimizerConfig,
+    QuantizationConfig,
     SchedulerConfig,
     TrainConfig,
     TrainingConfig,
@@ -225,11 +226,11 @@ def _tiny_fp8_config(tmp_dir, enabled_after_steps=0):
         eval_every=100,
         eval_steps=2,
         enable_torch_compile=False,
-        quantization={
-            "enabled": True,
-            "enabled_after_steps": enabled_after_steps,
-            "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
-        },
+    )
+    cfg.quantization = QuantizationConfig(
+        enabled=True,
+        enabled_after_steps=enabled_after_steps,
+        dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
     )
     cfg.logging.log_quant_metrics = True
     cfg.logging.log_every = 1

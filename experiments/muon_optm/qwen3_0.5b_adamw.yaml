@@ -1,4 +1,5 @@
 max_seq_len: 1024
+seed: 42
 
 model:
   d_model: 1024
@@ -30,7 +31,6 @@ training:
   gradient_accumulation_steps: 32
   max_steps: 50000
   mixed_precision: bf16
-  seed: 42
   grad_clip: 1.0
   checkpoint_dir: checkpoints/muon/qwen3_0.5b_adamw/
   checkpoint_every: 5000

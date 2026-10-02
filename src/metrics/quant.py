@@ -32,11 +32,9 @@ def accumulate_quantization_sums(
     codes: torch.Tensor,
     dequantized_tensor: torch.Tensor,
     contract_dim: int | None = None,
-    rotated_source: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return five global FP32 sums."""
     source = source_tensor.float()
-    mask_source = source if rotated_source is None else rotated_source.float()
     dequantized = dequantized_tensor.float()
     if codes.dtype is torch.uint8:
         if contract_dim not in (-2, -1):
@@ -51,7 +49,7 @@ def accumulate_quantization_sums(
         zero_codes = codes.float() == 0
     squares = source.square()
     err_squares = (source - dequantized).square()
-    nonzero_mask = mask_source != 0
+    nonzero_mask = source != 0
     underflows = (nonzero_mask & zero_codes).float()
 
     src_sq = squares.sum().reshape(1)

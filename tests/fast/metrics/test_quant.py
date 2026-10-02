@@ -172,15 +172,14 @@ def test_outlier_inflated_scale_shows_up_as_underflow():
     assert m["underflow_rate"] > 0.9
 
 
-def test_record_operand_rotation_aligns_underflow_with_codes():
-    source = torch.ones(1, 4)
+def test_record_operand_uses_quantized_coordinates():
     rotation = HadamardRotation(block_size=4, random_sign=False)
+    source = rotation(torch.ones(1, 4), -1, torch.float32)
     codes, scale, global_scale, quantization_stats = quantize_operand(
         source,
         -1,
         "int8",
         _TENSORWISE,
-        rotation=rotation,
         return_quantization_stats=True,
     )
     stats = QuantizationStats("act/x", source.device)
@@ -196,7 +195,6 @@ def test_record_operand_rotation_aligns_underflow_with_codes():
         scale,
         -1,
         _TENSORWISE,
-        rotation=rotation,
         global_scale=global_scale,
     )
     assert stats.err_sq.item() == pytest.approx(

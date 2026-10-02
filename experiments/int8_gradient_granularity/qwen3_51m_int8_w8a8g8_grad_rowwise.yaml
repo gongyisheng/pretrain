@@ -1,4 +1,6 @@
 max_seq_len: 1024
+seed: 42
+
 model:
   d_model: 512
   n_layers: 8
@@ -26,33 +28,32 @@ data:
   data_dir: data/
   val_split: 0.01
   num_workers: 4
+quantization:
+  enabled: true
+  dtype:
+    weight: int8
+    act: int8
+    grad_out: int8
+  scale:
+    weight:
+      granularity: blockwise
+      block_shape: [32, 32]
+    act:
+      granularity: blockwise
+      block_shape: [1, 32]
+    grad_out:
+      granularity: rowwise
+    scale_dtype: fp32
+  rounding:
+    weight: RNE
+    act: RNE
+    grad_out: RNE
+  exclude: [lm_head]
 training:
   batch_size: 128
   gradient_accumulation_steps: 2
   max_steps: 50000
   mixed_precision: bf16
-  seed: 42
-  quantization:
-    enabled: true
-    dtype:
-      weight: int8
-      act: int8
-      grad_out: int8
-    scale:
-      weight:
-        granularity: blockwise
-        block_shape: [32, 32]
-      act:
-        granularity: blockwise
-        block_shape: [1, 32]
-      grad_out:
-        granularity: rowwise
-      scale_dtype: fp32
-    rounding:
-      weight: RNE
-      act: RNE
-      grad_out: RNE
-    exclude: [lm_head]
   grad_clip: 1.0
   checkpoint_dir: checkpoints/int8_gradient_granularity/qwen3_51m_int8_w8a8g8_grad_rowwise/
   checkpoint_every: 5000

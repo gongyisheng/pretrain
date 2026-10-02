@@ -13,7 +13,7 @@ from src.quant.constants import (
 )
 from src.quant.quantize import dequantize_operand, quantize_operand
 from src.quant.utils import is_fp4, is_quantized, scaled_mm_op
-from src.utils.config import TrainingConfig
+from src.utils.config import QuantizationConfig
 
 E4M3 = "fp8_e4m3"
 FP8_FORMATS = sorted(_FP8_FORMATS)
@@ -376,16 +376,12 @@ SCALE_DTYPE_NAMES = {
 }
 
 
-def roundtrip(x, contract_dim, fmt, scale_cfg, rotation=None):
+def roundtrip(x, contract_dim, fmt, scale_cfg):
     """Return a quantized operand after dequantization."""
     if not is_quantized(fmt):
         return x
-    xq, scale, g, _ = quantize_operand(
-        x, contract_dim, fmt, scale_cfg, rotation=rotation
-    )
-    return dequantize_operand(
-        xq, scale, contract_dim, scale_cfg, rotation=rotation, global_scale=g
-    )
+    xq, scale, g, _ = quantize_operand(x, contract_dim, fmt, scale_cfg)
+    return dequantize_operand(xq, scale, contract_dim, scale_cfg, global_scale=g)
 
 
 def fused_op_exists(a_fmt, b_fmt, scale_cfg):
@@ -405,7 +401,7 @@ def uses_fp4_gemm(a_fmt, b_fmt, scale_cfg):
     return is_fp4(a_fmt) and is_fp4(b_fmt) and fused_op_exists(a_fmt, b_fmt, scale_cfg)
 
 
-def mm_ref(a, b, a_fmt, b_fmt, a_scale, b_scale, rotation=None):
+def mm_ref(a, b, a_fmt, b_fmt, a_scale, b_scale):
     """Reference GEMM with fused and fallback precision behavior.
 
     Fused GEMMs accumulate in fp32. The fallback first restores operand dtype, then
@@ -417,8 +413,8 @@ def mm_ref(a, b, a_fmt, b_fmt, a_scale, b_scale, rotation=None):
     )
     dtype = torch.float32 if fused else a.dtype
     return (
-        roundtrip(a, -1, a_fmt, a_scale, rotation=rotation).to(dtype).float()
-        @ roundtrip(b, -2, b_fmt, b_scale, rotation=rotation).to(dtype).float()
+        roundtrip(a, -1, a_fmt, a_scale).to(dtype).float()
+        @ roundtrip(b, -2, b_fmt, b_scale).to(dtype).float()
     )
 
 
@@ -490,4 +486,4 @@ def rule(dtype, scale_cfg=None, rounding=None, rotation=None):
         spec["rounding"] = dict(rounding)
     if rotation is not None:
         spec["rotation"] = dict(rotation)
-    return TrainingConfig(mixed_precision="no", quantization=spec).quantization
+    return QuantizationConfig(**spec)

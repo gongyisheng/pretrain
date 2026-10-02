@@ -5,6 +5,7 @@ from src.quant.constants import _FP4_FORMATS, _FP8_FORMATS, _INT8_FORMATS
 from src.quant.utils import (
     is_fp4,
     is_fp8,
+    resolve_scale,
     scaled_grouped_mm_op,
     scaled_mm_op,
     should_quantize,
@@ -23,6 +24,7 @@ PASSTHROUGH_FORMATS = ["fp32", "fp16", "bf16"]
 RECIPES = ["fp8", "mxfp8", "nvfp4"]
 
 DTYPE_BY_FORMAT = {
+    "fp32": torch.float32,
     "fp8_e4m3": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
     "fp8_e8m0": torch.float8_e8m0fnu,
@@ -32,9 +34,9 @@ DTYPE_BY_FORMAT = {
     **{fmt: torch.int8 for fmt in INT8_FORMATS},
 }
 
-# Recipes are not operand dtypes. Nor are compute dtypes, which must reach the
-# dtype helpers loudly instead of becoming an unquantized passthrough.
+# Recipes and passthrough formats are not operand dtypes.
 NON_ELEMENT_FORMATS = PASSTHROUGH_FORMATS + RECIPES
+UNSUPPORTED_DTYPE_FORMATS = ["fp16", "bf16"] + RECIPES
 
 # _FP8_FORMATS was derived from the dtype map, so adding the int entries there
 # would have silently made is_fp8 true for them.
@@ -61,10 +63,30 @@ def test_str_to_qmax(fmt, expected):
     assert str_to_qmax(fmt) == expected
 
 
-@pytest.mark.parametrize("fmt", NON_ELEMENT_FORMATS)
+@pytest.mark.parametrize("fmt", UNSUPPORTED_DTYPE_FORMATS)
 def test_str_to_dtype_raise_error(fmt):
     with pytest.raises(KeyError):
         str_to_dtype(fmt)
+
+
+@pytest.mark.parametrize(
+    ("scale_dtype", "expected_dtype"),
+    [
+        ("fp32", torch.float32),
+        ("fp8_e8m0", torch.float8_e8m0fnu),
+        ("fp8_e4m3", torch.float8_e4m3fn),
+    ],
+)
+def test_resolve_scale_converts_scale_dtype(scale_dtype, expected_dtype):
+    scale = resolve_scale(
+        {
+            "weight": {"granularity": "tensorwise", "block_shape": (0, 0)},
+            "scale_dtype": scale_dtype,
+            "enable_global_scale": False,
+        },
+        "weight",
+    )
+    assert scale["scale_dtype"] is expected_dtype
 
 
 @pytest.mark.parametrize("fmt", IS_FP8_BY_FORMAT)

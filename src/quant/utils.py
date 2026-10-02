@@ -52,7 +52,7 @@ def resolve_scale(scale_cfg: dict, tensor: str) -> dict:
     return {
         "granularity": tensor_scale["granularity"],
         "block_shape": tensor_scale["block_shape"],
-        "scale_dtype": scale_cfg["scale_dtype"],
+        "scale_dtype": str_to_dtype(scale_cfg["scale_dtype"]),
         "enable_global_scale": scale_cfg["enable_global_scale"],
     }
 
