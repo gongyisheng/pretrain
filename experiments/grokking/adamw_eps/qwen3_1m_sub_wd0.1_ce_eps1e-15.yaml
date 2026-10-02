@@ -1,6 +1,7 @@
 task: sft
 max_seq_len: 6
 seed: 42
+
 model:
   d_model: 128
   n_layers: 4
