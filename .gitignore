@@ -38,7 +38,8 @@ docs/superpowers
 /wandb/
 
 # logs
-logs/
+logs/*
+!/logs/.gitkeep
 nohup.out
 *.log
 tmp/
