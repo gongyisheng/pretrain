@@ -38,7 +38,6 @@ def apply_quantization(model: nn.Module, config) -> nn.Module:
         )
         rotation = build_rotation(quantization_config.rotation, config.seed)
         model.quant_rotations = nn.ModuleDict({key: rotation})
-        print(f"quant: rotation {key} <- {quantization_config.rotation}")
 
     embedding_weight_ids = {
         id(module.weight)
