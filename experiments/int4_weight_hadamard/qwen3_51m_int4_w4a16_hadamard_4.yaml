@@ -59,7 +59,6 @@ quantization:
       grad_out:
         dgrad: []
         wgrad: []
-  include: ['*mlp.*']
   exclude: [lm_head]
 training:
   batch_size: 16

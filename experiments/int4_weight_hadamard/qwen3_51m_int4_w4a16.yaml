@@ -44,7 +44,6 @@ quantization:
     weight: RNE
     act: RNE
     grad_out: RNE
-  include: ['*mlp.*']
   exclude: [lm_head]
 training:
   batch_size: 16
