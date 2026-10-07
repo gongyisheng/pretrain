@@ -278,7 +278,7 @@ def _gqa_ref_call(gqa, x, attn_mask=None):
 MODULE_DTYPES = COMPOUND_DTYPES
 
 
-@pytest.mark.parametrize("dtype,atol", SDPA_DTYPES)
+@pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_mha_matches_ref_attn_sink(kind, device, dtype, atol):
     skip_if_unsupported("flex_attention", device)
@@ -293,7 +293,8 @@ def test_mha_matches_ref_attn_sink(kind, device, dtype, atol):
     ).to(dtype)
     with torch.no_grad():
         mha.sinks.copy_(torch.tensor([-1.25, -0.25, 0.75, 1.75]))
-    x = torch.randn(2, 8, 64, dtype=dtype)
+    x = torch.randn(2, 8, 64, dtype=dtype, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
     positions = torch.arange(8).repeat(2, 1)
     if kind == "intra_doc":
         positions[0, 3:] -= 3
@@ -302,7 +303,7 @@ def test_mha_matches_ref_attn_sink(kind, device, dtype, atol):
     rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
     out = mha(x, rope=rope, position_ids=positions, attn_mask=mask)
     out_ref = mha_ref(
-        x,
+        x_ref,
         mha.q_proj,
         mha.k_proj,
         mha.v_proj,
@@ -316,10 +317,16 @@ def test_mha_matches_ref_attn_sink(kind, device, dtype, atol):
         sinks=mha.sinks,
     )
     assert out.dtype == dtype
-    assert torch.allclose(out, out_ref, atol=atol)
+    assert torch.allclose(out, out_ref, rtol=0, atol=atol)
+    grad_output = torch.randn_like(out)
+    parameters = tuple(mha.parameters())
+    actual_grads = torch.autograd.grad(out, (x, *parameters), grad_output)
+    expected_grads = torch.autograd.grad(out_ref, (x_ref, *parameters), grad_output)
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=atol)
 
 
-@pytest.mark.parametrize("dtype,atol", SDPA_DTYPES)
+@pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_gqa_matches_ref_attn_sink(kind, device, dtype, atol):
     skip_if_unsupported("flex_attention", device)
@@ -335,7 +342,8 @@ def test_gqa_matches_ref_attn_sink(kind, device, dtype, atol):
     ).to(dtype)
     with torch.no_grad():
         gqa.sinks.copy_(torch.tensor([-1.25, -0.25, 0.75, 1.75]))
-    x = torch.randn(2, 8, 64, dtype=dtype)
+    x = torch.randn(2, 8, 64, dtype=dtype, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
     positions = torch.arange(8).repeat(2, 1)
     if kind == "intra_doc":
         positions[0, 3:] -= 3
@@ -344,7 +352,7 @@ def test_gqa_matches_ref_attn_sink(kind, device, dtype, atol):
     rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
     out = gqa(x, rope=rope, position_ids=positions, attn_mask=mask)
     out_ref = gqa_ref(
-        x,
+        x_ref,
         gqa.q_proj,
         gqa.k_proj,
         gqa.v_proj,
@@ -359,10 +367,16 @@ def test_gqa_matches_ref_attn_sink(kind, device, dtype, atol):
         sinks=gqa.sinks,
     )
     assert out.dtype == dtype
-    assert torch.allclose(out, out_ref, atol=atol)
+    assert torch.allclose(out, out_ref, rtol=0, atol=atol)
+    grad_output = torch.randn_like(out)
+    parameters = tuple(gqa.parameters())
+    actual_grads = torch.autograd.grad(out, (x, *parameters), grad_output)
+    expected_grads = torch.autograd.grad(out_ref, (x_ref, *parameters), grad_output)
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=atol)
 
 
-@pytest.mark.parametrize("dtype,atol", SDPA_DTYPES)
+@pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("kind", MASK_KIND)
 @pytest.mark.parametrize("q_lora_rank", [0, 24])
 def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
@@ -382,7 +396,8 @@ def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
     ).to(dtype)
     with torch.no_grad():
         mla.sinks.copy_(torch.tensor([-1.25, -0.25, 0.75, 1.75]))
-    x = torch.randn(2, 8, 64, dtype=dtype)
+    x = torch.randn(2, 8, 64, dtype=dtype, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
     positions = torch.arange(8).repeat(2, 1)
     if kind == "intra_doc":
         positions[0, 3:] -= 3
@@ -392,14 +407,54 @@ def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
     out = mla(x, rope=rope, position_ids=positions, attn_mask=mask)
     out_ref = mla_ref(
         mla,
-        x,
+        x_ref,
         rope=rope,
         position_ids=positions,
         attn_mask=ref_mask,
         sinks=mla.sinks,
     )
     assert out.dtype == dtype
-    assert torch.allclose(out, out_ref, atol=atol)
+    assert torch.allclose(out, out_ref, rtol=0, atol=atol)
+    grad_output = torch.randn_like(out)
+    parameters = tuple(mla.parameters())
+    actual_grads = torch.autograd.grad(out, (x, *parameters), grad_output)
+    expected_grads = torch.autograd.grad(out_ref, (x_ref, *parameters), grad_output)
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=atol)
+
+
+def test_attn_sink_forward_saturation_precision(device):
+    skip_if_unsupported("flex_attention", device)
+    mha = MultiHeadAttention(
+        d_model=16,
+        n_heads=1,
+        bias=False,
+        attn_implementation="flex_attention",
+        attn_sink=True,
+    )
+    with torch.no_grad():
+        mha.q_proj.weight.zero_()
+        mha.k_proj.weight.zero_()
+        mha.v_proj.weight.copy_(torch.eye(16))
+        mha.o_proj.weight.copy_(torch.eye(16))
+        mha.sinks.fill_(-17)
+    x = torch.ones(1, 1, 16, requires_grad=True)
+    positions = torch.zeros(1, 1, dtype=torch.long)
+    mask, _ = make_attn_mask("causal", "flex_attention", positions, x.dtype)
+    out = mha(x, attn_mask=mask)
+    actual_grad = torch.autograd.grad(out.sum(), mha.sinks)[0]
+
+    sink_logits = mha.sinks.view(1, 1, 1, 1)
+    logits = torch.zeros(1, 1, 1, 1)
+    probabilities = torch.softmax(torch.cat([logits, sink_logits], dim=-1), dim=-1)
+    expected_out = probabilities[..., :-1] @ x.view(1, 1, 1, 16)
+    expected_grad = torch.autograd.grad(expected_out.sum(), mha.sinks)[0]
+
+    torch.testing.assert_close(
+        out, expected_out.view_as(out).to(out.dtype), rtol=0, atol=3e-7
+    )
+    assert torch.count_nonzero(actual_grad)
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=3e-12)
 
 
 @pytest.mark.parametrize("attn_cls", ["mha", "gqa", "mla"])
