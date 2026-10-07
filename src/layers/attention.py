@@ -39,8 +39,8 @@ def _call_flex(q, k, v, attn_mask, sinks=None):
         out, aux = _flex_attn(
             q, k, v, block_mask=attn_mask, return_aux=AuxRequest(lse=True)
         )
-        # The zero-value sink adds exp(sink) only to the softmax denominator.
-        gate = torch.sigmoid(aux.lse - sinks.float()[None, :, None])
+        # softplus preserves sink gradients when sigmoid rounds to one in fp32.
+        gate = torch.exp(-F.softplus(sinks.float()[None, :, None] - aux.lse))
         return (out.float() * gate[..., None]).to(q.dtype)
 
 
