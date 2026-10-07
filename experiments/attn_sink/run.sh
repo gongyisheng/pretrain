@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run Qwen3 51M attention-sink ablation.
+# Usage: nohup bash experiments/attn_sink/run.sh > logs/attn_sink.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
