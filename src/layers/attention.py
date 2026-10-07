@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import AuxRequest, flex_attention
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from src.layers.norm import RMSNorm
 
@@ -20,6 +20,7 @@ def _sdpa(q, k, v, attn_mask=None, is_causal=False, sm_scale=None):
 
 
 _flex_attn = torch.compile(flex_attention)
+_create_block_mask = torch.compile(create_block_mask)
 
 
 def _call_sdpa(q, k, v, attn_mask, sinks=None):
@@ -35,13 +36,40 @@ def _call_flex(q, k, v, attn_mask, sinks=None):
     """FlexAttention path: ``attn_mask`` must be a ``BlockMask``."""
     if sinks is None:
         return _flex_attn(q, k, v, block_mask=attn_mask)
-    else:
-        out, aux = _flex_attn(
-            q, k, v, block_mask=attn_mask, return_aux=AuxRequest(lse=True)
+
+    key_length = k.shape[-2]
+    k = torch.cat([k, torch.zeros_like(k[..., :1, :])], dim=-2)
+    v = torch.cat([v, torch.zeros_like(v[..., :1, :])], dim=-2)
+
+    if attn_mask is not None and attn_mask.shape[-1] == key_length:
+        batch_size, n_heads, query_length, _ = attn_mask.shape
+        base_mask_mod = attn_mask.mask_mod
+
+        def sink_mask_mod(b, h, q_idx, kv_idx):
+            safe_q_idx = q_idx.clamp(max=query_length - 1)
+            safe_kv_idx = kv_idx.clamp(max=key_length - 1)
+            real_index = (q_idx < query_length) & (kv_idx < key_length)
+            return (kv_idx == key_length) | (
+                real_index & base_mask_mod(b, h, safe_q_idx, safe_kv_idx)
+            )
+
+        attn_mask = _create_block_mask(
+            sink_mask_mod,
+            B=batch_size,
+            H=n_heads,
+            Q_LEN=query_length,
+            KV_LEN=key_length + 1,
+            device=q.device,
+            BLOCK_SIZE=attn_mask.BLOCK_SIZE,
         )
-        # softplus preserves sink gradients when sigmoid rounds to one in fp32.
-        gate = torch.exp(-F.softplus(sinks.float()[None, :, None] - aux.lse))
-        return (out.float() * gate[..., None]).to(q.dtype)
+
+    # Accumulate sink gradients per query to avoid contention on shared heads.
+    sink_logits = sinks[None, :, None].expand(q.shape[:3]).contiguous()
+
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(kv_idx == key_length, sink_logits[b, h, q_idx], score)
+
+    return _flex_attn(q, k, v, score_mod=score_mod, block_mask=attn_mask)
 
 
 _ATTN_IMPL = {
