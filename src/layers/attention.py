@@ -1,3 +1,6 @@
+import importlib
+import inspect
+import types
 from typing import TYPE_CHECKING
 
 import torch
@@ -20,6 +23,7 @@ def _sdpa(q, k, v, attn_mask=None, is_causal=False, sm_scale=None):
 
 
 _flex_attn = torch.compile(flex_attention)
+_flex_attention_patched = False
 
 
 def _call_sdpa(q, k, v, attn_mask, sinks=None):
@@ -28,6 +32,142 @@ def _call_sdpa(q, k, v, attn_mask, sinks=None):
         raise ValueError("attn_sink is not supported by sdpa backend")
     is_causal = attn_mask is None
     return _sdpa(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
+
+
+def _patch_flex_attention():
+    """Install before compilation; only ATTN_SINK_FP32_OUTPUT calls change behavior."""
+    global _flex_attention_patched
+    if _flex_attention_patched:
+        return
+    if torch.__version__.split("+")[0] != "2.12.1":
+        raise RuntimeError("Attention sink precision requires PyTorch 2.12.1")
+
+    from torch._higher_order_ops.utils import registered_hop_fake_fns
+    from torch._inductor.ir import FixedLayout
+    from torch._inductor.lowering import lowerings, to_dtype
+
+    lowering_module = importlib.import_module(
+        "torch._inductor.kernel.flex.flex_attention"
+    )
+    forward_op = torch.ops.higher_order.flex_attention
+    backward_op = torch.ops.higher_order.flex_attention_backward
+    original_fake = registered_hop_fake_fns[forward_op]
+    original_forward = lowerings[forward_op]
+    original_backward = lowerings[backward_op]
+    raw_forward = inspect.unwrap(lowering_module.flex_attention)
+
+    def output_layout(device, dtype, size, stride=None, offset=0, is_pinned=False):
+        return FixedLayout(device, torch.float32, size, stride, offset, is_pinned)
+
+    # Only this forward lowerer's output layout changes; Q/K/V keep their dtype.
+    forward_globals = raw_forward.__globals__.copy()
+    forward_globals["FixedLayout"] = output_layout
+    fp32_forward = types.FunctionType(
+        raw_forward.__code__,
+        forward_globals,
+        raw_forward.__name__,
+        raw_forward.__defaults__,
+        raw_forward.__closure__,
+    )
+
+    def fake_forward(
+        query,
+        key,
+        value,
+        score_mod,
+        block_mask,
+        scale,
+        kernel_options,
+        score_mod_other_buffers=(),
+        mask_mod_other_buffers=(),
+    ):
+        result = original_fake(
+            query,
+            key,
+            value,
+            score_mod,
+            block_mask,
+            scale,
+            kernel_options,
+            score_mod_other_buffers,
+            mask_mod_other_buffers,
+        )
+        if result is NotImplemented:
+            return result
+        if kernel_options.get("ATTN_SINK_FP32_OUTPUT", False):
+            output, logsumexp, max_scores = result
+            return output.float(), logsumexp, max_scores
+        return result
+
+    def lower_forward(
+        query,
+        key,
+        value,
+        subgraph,
+        block_mask,
+        scale,
+        kernel_options,
+        score_mod_other_buffers,
+        mask_mod_other_buffers,
+    ):
+        options = kernel_options.copy()
+        use_fp32 = options.pop("ATTN_SINK_FP32_OUTPUT", False)
+        function = fp32_forward if use_fp32 else original_forward
+        return function(
+            query,
+            key,
+            value,
+            subgraph,
+            block_mask,
+            scale,
+            options,
+            score_mod_other_buffers,
+            mask_mod_other_buffers,
+        )
+
+    def lower_backward(
+        query,
+        key,
+        value,
+        output,
+        logsumexp,
+        grad_output,
+        grad_logsumexp,
+        forward_graph,
+        joint_graph,
+        block_mask,
+        scale,
+        kernel_options,
+        score_mod_other_buffers,
+        mask_mod_other_buffers,
+    ):
+        options = kernel_options.copy()
+        if options.pop("ATTN_SINK_FP32_OUTPUT", False):
+            # FP32 output * low-precision dO promotes delta to FP32; dO GEMMs
+            # still use the original dtype and need no template changes.
+            grad_output = to_dtype(grad_output, query.get_dtype())
+        return original_backward(
+            query,
+            key,
+            value,
+            output,
+            logsumexp,
+            grad_output,
+            grad_logsumexp,
+            forward_graph,
+            joint_graph,
+            block_mask,
+            scale,
+            options,
+            score_mod_other_buffers,
+            mask_mod_other_buffers,
+        )
+
+    registered_hop_fake_fns[forward_op] = fake_forward
+    lowerings[forward_op] = lower_forward
+    lowerings[backward_op] = lower_backward
+
+    _flex_attention_patched = True
 
 
 def _call_flex(q, k, v, attn_mask, sinks=None):
@@ -45,9 +185,18 @@ def _call_flex(q, k, v, attn_mask, sinks=None):
     def score_mod(score, b, h, q_idx, kv_idx):
         return torch.where(kv_idx == key_length, sink_logits[b, h, q_idx], score)
 
-    # TODO: attn sink:
-    # Check how often real-key LSE - sink >= 18 during training;
-    # FP32 backward cancellation can erase tiny Q/K gradients.
+    if q.is_cuda and q.dtype in (torch.float16, torch.bfloat16):
+        # Save the output before rounding so backward computes delta in FP32.
+        return _flex_attn(
+            q,
+            k,
+            v,
+            score_mod=score_mod,
+            block_mask=attn_mask,
+            kernel_options={"BACKEND": "TRITON", "ATTN_SINK_FP32_OUTPUT": True},
+        ).to(q.dtype)
+
+    # FP32 softmax can still lose tiny Q/K gradients at extreme sink logit gaps.
     return _flex_attn(q, k, v, score_mod=score_mod, block_mask=attn_mask)
 
 
@@ -85,6 +234,8 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
+        if attn_implementation == "flex_attention" and attn_sink:
+            _patch_flex_attention()
         self._attn_fn = _ATTN_IMPL[attn_implementation]
 
     @classmethod
@@ -192,6 +343,8 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.d_head)
             self.k_norm = RMSNorm(self.d_head)
 
+        if attn_implementation == "flex_attention" and attn_sink:
+            _patch_flex_attention()
         self._attn_fn = _ATTN_IMPL[attn_implementation]
 
     @classmethod
@@ -330,6 +483,8 @@ class MultiHeadLatentAttention(nn.Module):
         self.o_proj = nn.Linear(n_heads * v_head_dim, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout)
         self.sinks = nn.Parameter(torch.zeros(n_heads)) if attn_sink else None
+        if attn_implementation == "flex_attention" and attn_sink:
+            _patch_flex_attention()
         self._attn_fn = _ATTN_IMPL[attn_implementation]
 
     @classmethod
