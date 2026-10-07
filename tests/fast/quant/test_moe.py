@@ -1378,8 +1378,9 @@ def test_quantized_sparse_moe_block_trains_a_full_model(bias, rotation, quantiza
 
     ids = torch.randint(0, 128, (2, 64), device="cuda")
     position_ids = torch.arange(64, device="cuda").unsqueeze(0).expand(2, 64)
+    attn_masks = [None] * config.model.n_layers
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        logits, _ = model(ids, position_ids)
+        logits, _ = model(ids, position_ids, attn_masks)
         loss = logits.float().log_softmax(-1).mean().neg()
     loss.backward()
 

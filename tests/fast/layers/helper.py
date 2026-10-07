@@ -30,7 +30,11 @@ def skip_if_unsupported(impl: str, device: str) -> None:
 
 
 def make_attn_mask(
-    kind: str, impl: str, position_ids: torch.Tensor, dtype: torch.dtype
+    kind: str,
+    impl: str,
+    position_ids: torch.Tensor,
+    dtype: torch.dtype,
+    attn_sink: bool = False,
 ):
     """Build the mask the kernel consumes plus a matching reference-side dense mask.
 
@@ -41,12 +45,20 @@ def make_attn_mask(
     B, S = position_ids.shape
     if kind == "causal":
         kernel_mask = build_causal_attention_mask(
-            B, S, position_ids.device, attn_implementation=impl
+            B,
+            S,
+            position_ids.device,
+            attn_implementation=impl,
+            attn_sink=attn_sink,
         )
         ref_mask = None
     elif kind == "intra_doc":
         kernel_mask = build_intra_doc_attention_mask(
-            position_ids, position_ids.device, dtype, attn_implementation=impl
+            position_ids,
+            position_ids.device,
+            dtype,
+            attn_implementation=impl,
+            attn_sink=attn_sink,
         )
         ref_mask = build_intra_doc_attention_mask(
             position_ids, position_ids.device, dtype, attn_implementation="sdpa"

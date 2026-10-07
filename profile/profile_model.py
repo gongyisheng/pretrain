@@ -66,18 +66,30 @@ def main():
     input_ids = torch.randint(0, vocab_size, (B, S), device=device)
     labels = torch.randint(0, vocab_size, (B, S), device=device)
     position_ids = torch.arange(S, device=device).unsqueeze(0).expand(B, S)
-    attn_mask = build_causal_attention_mask(
-        B,
-        S,
-        device,
-        attn_implementation=config.model.attn_implementation,
-    )
+    layer_sinks = [
+        config.model.resolve_attn(i)[1]["attn_sink"]
+        for i in range(config.model.n_layers)
+    ]
+    regular_mask = sink_mask = None
+    for attn_sink in set(layer_sinks):
+        attn_mask = build_causal_attention_mask(
+            B,
+            S,
+            device,
+            attn_implementation=config.model.attn_implementation,
+            attn_sink=attn_sink,
+        )
+        if attn_sink:
+            sink_mask = attn_mask
+        else:
+            regular_mask = attn_mask
+    attn_masks = [sink_mask if attn_sink else regular_mask for attn_sink in layer_sinks]
 
     def step():
         torch.cuda.nvtx.range_push("forward")
         with torch.amp.autocast(device, dtype=amp_dtype, enabled=use_amp):
             logits, aux_loss = model(
-                input_ids, position_ids=position_ids, attn_mask=attn_mask
+                input_ids, position_ids=position_ids, attn_masks=attn_masks
             )
             loss = compute_loss(
                 logits,

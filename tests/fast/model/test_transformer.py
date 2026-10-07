@@ -144,7 +144,9 @@ def test_gpt2_style_forward_shape_and_no_aux(impl, device):
     x = torch.randint(0, 256, (2, 16))
     pos = _pos(2, 16)
     attn_mask, _ = make_attn_mask("causal", impl, pos, torch.float32)
-    logits, aux = model(x, position_ids=pos, attn_mask=attn_mask)
+    logits, aux = model(
+        x, position_ids=pos, attn_masks=[attn_mask] * model.config.n_layers
+    )
     assert logits.shape == (2, 16, model.padded_vocab_size)
     assert aux is None
 
@@ -161,7 +163,9 @@ def test_qwen3_style_forward_no_aux(impl, device):
     x = torch.randint(0, 256, (2, 8))
     pos = _pos(2, 8)
     attn_mask, _ = make_attn_mask("causal", impl, pos, torch.float32)
-    logits, aux = model(x, position_ids=pos, attn_mask=attn_mask)
+    logits, aux = model(
+        x, position_ids=pos, attn_masks=[attn_mask] * model.config.n_layers
+    )
     assert logits.shape == (2, 8, model.padded_vocab_size)
     assert aux is None
 
@@ -173,7 +177,9 @@ def test_moe_forward_returns_aux(impl, device):
     x = torch.randint(0, 256, (2, 8))
     pos = _pos(2, 8)
     attn_mask, _ = make_attn_mask("causal", impl, pos, torch.float32)
-    logits, aux = model(x, position_ids=pos, attn_mask=attn_mask)
+    logits, aux = model(
+        x, position_ids=pos, attn_masks=[attn_mask] * model.config.n_layers
+    )
     assert logits.shape == (2, 8, model.padded_vocab_size)
     assert aux is not None
     assert aux.ndim == 0
@@ -204,25 +210,57 @@ def test_forward_meta_empty_for_dense():
 
 
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
-def test_intra_doc_blocks_cross_doc(impl, device):
+@pytest.mark.parametrize("first_attn_sink", [False, True])
+@pytest.mark.parametrize("second_attn_sink", [False, True])
+def test_transformer_lm_forward_intra_doc(
+    impl, first_attn_sink, second_attn_sink, device
+):
     """Intra-doc mask: modifying doc0 tokens must not change doc1 outputs."""
     skip_if_unsupported(impl, device)
+    if impl == "sdpa" and (first_attn_sink or second_attn_sink):
+        pytest.skip("attn_sink requires flex_attention")
+
     torch.manual_seed(0)
-    model = build_model(_qwen3_cfg(impl))
+    model = build_model(
+        _cfg(
+            attn=[
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {
+                        "n_heads": 4,
+                        "n_kv_heads": 2,
+                        "qk_norm": True,
+                        "attn_implementation": impl,
+                        "attn_sink": attn_sink,
+                    },
+                    "layer_idx": [layer_idx],
+                }
+                for layer_idx, attn_sink in enumerate(
+                    (first_attn_sink, second_attn_sink)
+                )
+            ]
+        )
+    )
     model.eval()
 
     x = torch.randint(1, 256, (1, 8))
     x[0, 3] = 0  # eot: doc0=[0..3], doc1=[4..7]
     position_ids = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])
-    attn_mask, _ = make_attn_mask("intra_doc", impl, position_ids, torch.float32)
+    attn_masks = [
+        make_attn_mask(
+            "intra_doc", impl, position_ids, torch.float32, attn_sink=attn_sink
+        )[0]
+        for attn_sink in (first_attn_sink, second_attn_sink)
+    ]
 
-    base, _ = model(x, position_ids=position_ids, attn_mask=attn_mask)
+    base, _ = model(x, position_ids=position_ids, attn_masks=attn_masks)
+
     x2 = x.clone()
     x2[0, :3] = torch.randint(1, 256, (3,))
-    modified, _ = model(x2, position_ids=position_ids, attn_mask=attn_mask)
+    modified, _ = model(x2, position_ids=position_ids, attn_masks=attn_masks)
 
-    assert torch.allclose(base[0, 4:], modified[0, 4:], atol=1e-4)
-    assert not torch.allclose(base[0, :3], modified[0, :3], atol=1e-4)
+    assert torch.equal(base[0, 4:], modified[0, 4:])
+    assert not torch.equal(base[0, :3], modified[0, :3])
 
 
 def test_transformer_matches_hf_qwen3_with_copied_weights():
@@ -308,7 +346,9 @@ def test_transformer_matches_hf_qwen3_with_copied_weights():
     input_ids = torch.randint(0, vocab_size, (B, S))
     position_ids = torch.arange(S).unsqueeze(0).expand(B, -1)
 
-    our_logits, _ = ours(input_ids, position_ids=position_ids)
+    our_logits, _ = ours(
+        input_ids, position_ids=position_ids, attn_masks=[None] * n_layers
+    )
     hf_logits = hf(input_ids=input_ids, position_ids=position_ids).logits
 
     assert our_logits.shape == hf_logits.shape
@@ -351,7 +391,7 @@ def test_mixed_dense_first_moe_rest_builds_and_counts():
     # only the 3 MoE layers expose forward_meta
     x = torch.randint(0, 256, (2, 8))
     pos = torch.arange(8).unsqueeze(0).expand(2, 8)
-    model(x, position_ids=pos)
+    model(x, position_ids=pos, attn_masks=[None] * cfg.n_layers)
     assert len(model.forward_meta()) == 3
 
 
@@ -379,7 +419,7 @@ def test_mixed_attn_builds_and_counts():
     )
     x = torch.randint(0, 256, (2, 8))
     pos = torch.arange(8).unsqueeze(0).expand(2, 8)
-    model(x, position_ids=pos)  # forward runs with the shared rope
+    model(x, position_ids=pos, attn_masks=[None] * cfg.n_layers)
 
 
 def test_mixed_attn_rope_headdim_mismatch_raises():

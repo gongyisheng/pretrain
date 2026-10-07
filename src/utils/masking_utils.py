@@ -32,10 +32,13 @@ def build_intra_doc_attention_mask(
     device: torch.device,
     dtype: torch.dtype,
     attn_implementation: str,
+    attn_sink: bool = False,
 ):
-    """Build a causal attention mask restricted to each document."""
+    """Build a document-causal mask with an optional always-visible sink key."""
+    if attn_sink and attn_implementation != "flex_attention":
+        raise ValueError("attn_sink requires flex_attention implementation")
     if attn_implementation == "flex_attention":
-        return _build_attention_mask_for_flex_attn(position_ids, device)
+        return _build_attention_mask_for_flex_attn(position_ids, device, attn_sink)
     return _build_attention_mask_for_sdpa(position_ids, device, dtype)
 
 
@@ -44,13 +47,16 @@ def build_causal_attention_mask(
     S: int,
     device: torch.device,
     attn_implementation: str,
+    attn_sink: bool = False,
 ):
-    """Build a causal attention mask without document separation."""
+    """Build a causal mask with an optional always-visible sink key."""
+    if attn_sink and attn_implementation != "flex_attention":
+        raise ValueError("attn_sink requires flex_attention implementation")
     if attn_implementation == "sdpa":
         return None
     # Sequential positions treat each sequence as one document.
     causal_pos = torch.arange(S, device=device).unsqueeze(0).expand(B, S)
-    return _build_attention_mask_for_flex_attn(causal_pos, device)
+    return _build_attention_mask_for_flex_attn(causal_pos, device, attn_sink)
 
 
 def _build_attention_mask_for_sdpa(
@@ -73,13 +79,22 @@ _create_block_mask_compiled = torch.compile(create_block_mask)
 
 
 def _build_attention_mask_for_flex_attn(
-    position_ids: torch.Tensor, device: torch.device
+    position_ids: torch.Tensor, device: torch.device, attn_sink: bool
 ):
     B, S = position_ids.shape
     # This offset is constant within each document.
     adj = torch.arange(S, device=device).unsqueeze(0) - position_ids
 
     def mask_mod(b, h, q_idx, kv_idx):
+        if attn_sink:
+            safe_q_idx = q_idx.clamp(max=S - 1)
+            safe_kv_idx = kv_idx.clamp(max=S - 1)
+            real_index = (q_idx < S) & (kv_idx < S)
+            return (kv_idx == S) | (
+                real_index
+                & (q_idx >= kv_idx)
+                & (adj[b, safe_q_idx] == adj[b, safe_kv_idx])
+            )
         return (q_idx >= kv_idx) & (adj[b, q_idx] == adj[b, kv_idx])
 
     return _create_block_mask_compiled(
@@ -87,6 +102,6 @@ def _build_attention_mask_for_flex_attn(
         B=B,
         H=None,
         Q_LEN=S,
-        KV_LEN=S,
+        KV_LEN=S + int(attn_sink),
         device=device,
     )

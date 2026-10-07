@@ -299,7 +299,9 @@ def test_mha_matches_ref_attn_sink(kind, device, dtype, atol):
     if kind == "intra_doc":
         positions[0, 3:] -= 3
         positions[1, 5:] -= 5
-    mask, ref_mask = make_attn_mask(kind, "flex_attention", positions, dtype)
+    mask, ref_mask = make_attn_mask(
+        kind, "flex_attention", positions, dtype, attn_sink=True
+    )
     rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
     out = mha(x, rope=rope, position_ids=positions, attn_mask=mask)
     out_ref = mha_ref(
@@ -348,7 +350,9 @@ def test_gqa_matches_ref_attn_sink(kind, device, dtype, atol):
     if kind == "intra_doc":
         positions[0, 3:] -= 3
         positions[1, 5:] -= 5
-    mask, ref_mask = make_attn_mask(kind, "flex_attention", positions, dtype)
+    mask, ref_mask = make_attn_mask(
+        kind, "flex_attention", positions, dtype, attn_sink=True
+    )
     rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
     out = gqa(x, rope=rope, position_ids=positions, attn_mask=mask)
     out_ref = gqa_ref(
@@ -402,7 +406,9 @@ def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
     if kind == "intra_doc":
         positions[0, 3:] -= 3
         positions[1, 5:] -= 5
-    mask, ref_mask = make_attn_mask(kind, "flex_attention", positions, dtype)
+    mask, ref_mask = make_attn_mask(
+        kind, "flex_attention", positions, dtype, attn_sink=True
+    )
     rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
     out = mla(x, rope=rope, position_ids=positions, attn_mask=mask)
     out_ref = mla_ref(
@@ -440,7 +446,9 @@ def test_attn_sink_forward_saturation_precision(device):
         mha.sinks.fill_(-17)
     x = torch.ones(1, 1, 16, requires_grad=True)
     positions = torch.zeros(1, 1, dtype=torch.long)
-    mask, _ = make_attn_mask("causal", "flex_attention", positions, x.dtype)
+    mask, _ = make_attn_mask(
+        "causal", "flex_attention", positions, x.dtype, attn_sink=True
+    )
     out = mha(x, attn_mask=mask)
     actual_grad = torch.autograd.grad(out.sum(), mha.sinks)[0]
 
@@ -479,11 +487,15 @@ def test_multi_head_attention_forward_sink_mask(kind, sequence_length, device):
     x = x.expand(-1, -1, 16)
     position_ids = torch.arange(sequence_length).unsqueeze(0)
     if kind == "causal":
-        mask, _ = make_attn_mask("causal", "flex_attention", position_ids, x.dtype)
+        mask, _ = make_attn_mask(
+            "causal", "flex_attention", position_ids, x.dtype, attn_sink=True
+        )
         attend = torch.ones(sequence_length, sequence_length, dtype=torch.bool).tril()
     else:
         position_ids[:, sequence_length // 2 :] -= sequence_length // 2
-        mask, _ = make_attn_mask("intra_doc", "flex_attention", position_ids, x.dtype)
+        mask, _ = make_attn_mask(
+            "intra_doc", "flex_attention", position_ids, x.dtype, attn_sink=True
+        )
         doc_offsets = position_ids - torch.arange(sequence_length).unsqueeze(0)
         attend = (doc_offsets.T == doc_offsets).squeeze(0)
         attend &= torch.ones(sequence_length, sequence_length, dtype=torch.bool).tril()
@@ -519,7 +531,9 @@ def test_multi_head_attention_forward_sink_precision(
     position_ids = torch.arange(3).unsqueeze(0)
     mask = None
     if use_mask:
-        mask, _ = make_attn_mask("causal", "flex_attention", position_ids, x.dtype)
+        mask, _ = make_attn_mask(
+            "causal", "flex_attention", position_ids, x.dtype, attn_sink=True
+        )
     attention = torch.compile(mha) if compile_attention else mha
     with torch.autocast("cuda", dtype=torch.bfloat16):
         out = attention(x, attn_mask=mask)
@@ -543,7 +557,7 @@ def test_attention_forward_sink_raise_error(attn_cls):
     module = ATTN_REGISTRY[attn_cls](
         64, 4, attn_implementation="sdpa", attn_sink=True, **kwargs
     )
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         module(torch.randn(1, 8, 64))
 
 

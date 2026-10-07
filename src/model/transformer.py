@@ -122,7 +122,7 @@ class TransformerLM(nn.Module):
             "active_non_emb": active_non_emb,
         }
 
-    def forward(self, idx, position_ids, attn_mask=None, return_logits=True):
+    def forward(self, idx, position_ids, attn_masks, return_logits=True):
         x = self.token_emb(idx)
         if self.pos_emb is not None:
             x = self.pos_emb(x)
@@ -130,9 +130,13 @@ class TransformerLM(nn.Module):
 
         aux_total = None
         ctx = []
-        for block in self.blocks:
+        for layer_idx, block in enumerate(self.blocks):
             x, ctx, aux_loss = block(
-                x, ctx, rope=self.rope, position_ids=position_ids, attn_mask=attn_mask
+                x,
+                ctx,
+                rope=self.rope,
+                position_ids=position_ids,
+                attn_mask=attn_masks[layer_idx],
             )
             if aux_loss is not None:
                 aux_total = aux_loss if aux_total is None else aux_total + aux_loss
