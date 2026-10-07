@@ -429,7 +429,8 @@ def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
         torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=atol)
 
 
-def test_attn_sink_forward_saturation_precision(device):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_attn_sink_forward_saturation_precision(dtype, device):
     skip_if_unsupported("flex_attention", device)
     mha = MultiHeadAttention(
         d_model=16,
@@ -447,10 +448,12 @@ def test_attn_sink_forward_saturation_precision(device):
     x = torch.ones(1, 1, 16, requires_grad=True)
     positions = torch.zeros(1, 1, dtype=torch.long)
     mask, _ = make_attn_mask(
-        "causal", "flex_attention", positions, x.dtype, attn_sink=True
+        "intra_doc", "flex_attention", positions, dtype, attn_sink=True
     )
-    out = mha(x, attn_mask=mask)
-    actual_grad = torch.autograd.grad(out.sum(), mha.sinks)[0]
+    attention = torch.compile(mha)
+    with torch.autocast("cuda", dtype=dtype):
+        out = attention(x, attn_mask=mask)
+    actual_grad = torch.autograd.grad(out.float().sum(), mha.sinks)[0]
 
     sink_logits = mha.sinks.view(1, 1, 1, 1)
     logits = torch.zeros(1, 1, 1, 1)
@@ -459,10 +462,60 @@ def test_attn_sink_forward_saturation_precision(device):
     expected_grad = torch.autograd.grad(expected_out.sum(), mha.sinks)[0]
 
     torch.testing.assert_close(
-        out, expected_out.view_as(out).to(out.dtype), rtol=0, atol=3e-7
+        out, expected_out.view_as(out).to(out.dtype), rtol=0, atol=0
     )
+    assert out.dtype == dtype
     assert torch.count_nonzero(actual_grad)
     torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=3e-12)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_attn_sink_backward_saturation_precision(dtype, device):
+    skip_if_unsupported("flex_attention", device)
+    mha = MultiHeadAttention(16, 1, attn_sink=True)
+    with torch.no_grad():
+        for projection in [mha.q_proj, mha.k_proj, mha.v_proj, mha.o_proj]:
+            projection.weight.copy_(torch.eye(16))
+        mha.sinks.fill_(-5)
+    x = torch.ones(1, 128, 16)
+    positions = torch.arange(128).unsqueeze(0)
+    positions[:, 64:] -= 64
+    mask, _ = make_attn_mask(
+        "intra_doc", "flex_attention", positions, dtype, attn_sink=True
+    )
+    attention = torch.compile(mha)
+    with torch.autocast("cuda", dtype=dtype):
+        output = attention(x, attn_mask=mask)
+        # Each document's first token has exactly one visible real key.
+        loss = output[positions == 0].float().sum()
+    query_grad, key_grad, sink_grad = torch.autograd.grad(
+        loss, (mha.q_proj.weight, mha.k_proj.weight, mha.sinks)
+    )
+
+    probabilities = torch.tensor([9, 0], dtype=torch.float32).softmax(0)
+    real_probability, sink_probability = probabilities.unbind()
+    documents = (positions == 0).sum()
+    expected_grad = 4 * real_probability * sink_probability * documents
+    expected_sink_grad = -4 * expected_grad
+    assert output.dtype == dtype
+    for grad in [query_grad, key_grad]:
+        assert grad.dtype == torch.float32
+        assert torch.count_nonzero(grad) == grad.numel()
+        torch.testing.assert_close(
+            grad, expected_grad.expand_as(grad), rtol=0, atol=5e-5
+        )
+    torch.testing.assert_close(
+        sink_grad,
+        expected_sink_grad.expand_as(sink_grad),
+        rtol=0,
+        atol=2e-7,
+    )
+    torch.testing.assert_close(
+        output[positions == 0],
+        real_probability.to(dtype).expand_as(output[positions == 0]),
+        rtol=0,
+        atol=0,
+    )
 
 
 @pytest.mark.parametrize("sequence_length", [127, 128, 129])
