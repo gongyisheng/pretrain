@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import AuxRequest, flex_attention
+from torch.nn.attention.flex_attention import flex_attention
 
 from src.layers.norm import RMSNorm
 
@@ -23,25 +23,32 @@ _flex_attn = torch.compile(flex_attention)
 
 
 def _call_sdpa(q, k, v, attn_mask, sinks=None):
-    """SDPA path: ``attn_mask`` is either ``None`` (→ ``is_causal=True``) or a
-    dense additive or boolean tensor."""
+    """Accept a dense mask or None for causal attention."""
     if sinks is not None:
-        raise NotImplementedError("attn_sink is not supported by sdpa backend")
+        raise ValueError("attn_sink is not supported by sdpa backend")
     is_causal = attn_mask is None
     return _sdpa(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
 
 
 def _call_flex(q, k, v, attn_mask, sinks=None):
-    """FlexAttention path: ``attn_mask`` must be a ``BlockMask``."""
+    """Accept a BlockMask whose KV length includes the sink when enabled."""
     if sinks is None:
         return _flex_attn(q, k, v, block_mask=attn_mask)
-    else:
-        out, aux = _flex_attn(
-            q, k, v, block_mask=attn_mask, return_aux=AuxRequest(lse=True)
-        )
-        # softplus preserves sink gradients when sigmoid rounds to one in fp32.
-        gate = torch.exp(-F.softplus(sinks.float()[None, :, None] - aux.lse))
-        return (out.float() * gate[..., None]).to(q.dtype)
+
+    key_length = k.shape[-2]
+    k = torch.cat([k, torch.zeros_like(k[..., :1, :])], dim=-2)
+    v = torch.cat([v, torch.zeros_like(v[..., :1, :])], dim=-2)
+
+    # Accumulate sink gradients per query to avoid contention on shared heads.
+    sink_logits = sinks[None, :, None].expand(q.shape[:3]).contiguous()
+
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(kv_idx == key_length, sink_logits[b, h, q_idx], score)
+
+    # TODO: attn sink:
+    # Check how often real-key LSE - sink >= 18 during training;
+    # FP32 backward cancellation can erase tiny Q/K gradients.
+    return _flex_attn(q, k, v, score_mod=score_mod, block_mask=attn_mask)
 
 
 _ATTN_IMPL = {

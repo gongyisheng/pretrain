@@ -314,24 +314,11 @@ class Trainer:
                 with torch.amp.autocast(
                     self.device, dtype=self.amp_dtype, enabled=self.use_amp
                 ):
-                    if self.config.training.intra_doc_masking:
-                        mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                        attn_mask = build_intra_doc_attention_mask(
-                            position_ids,
-                            self.device,
-                            mask_dtype,
-                            attn_implementation=self.config.model.attn_implementation,
-                        )
-                    else:
-                        B, S = position_ids.shape
-                        attn_mask = build_causal_attention_mask(
-                            B,
-                            S,
-                            self.device,
-                            attn_implementation=self.config.model.attn_implementation,
-                        )
+                    attn_masks = self._build_attention_masks(
+                        position_ids, self.config.training.intra_doc_masking
+                    )
                     logits, aux_loss = self.model(
-                        input_ids, position_ids=position_ids, attn_mask=attn_mask
+                        input_ids, position_ids=position_ids, attn_masks=attn_masks
                     )
                     ce_loss = compute_loss(
                         logits,
@@ -419,6 +406,36 @@ class Trainer:
         pbar.close()
         self.logger.finish()
 
+    def _build_attention_masks(self, position_ids, intra_doc_masking):
+        layer_sinks = [
+            self.config.model.resolve_attn(i)[1]["attn_sink"]
+            for i in range(self.config.model.n_layers)
+        ]
+        regular_mask = sink_mask = None
+        for attn_sink in set(layer_sinks):
+            if intra_doc_masking:
+                attn_mask = build_intra_doc_attention_mask(
+                    position_ids,
+                    self.device,
+                    self.amp_dtype if self.use_amp else torch.float32,
+                    self.config.model.attn_implementation,
+                    attn_sink=attn_sink,
+                )
+            else:
+                batch_size, sequence_length = position_ids.shape
+                attn_mask = build_causal_attention_mask(
+                    batch_size,
+                    sequence_length,
+                    self.device,
+                    self.config.model.attn_implementation,
+                    attn_sink=attn_sink,
+                )
+            if attn_sink:
+                sink_mask = attn_mask
+            else:
+                regular_mask = attn_mask
+        return [sink_mask if attn_sink else regular_mask for attn_sink in layer_sinks]
+
     def _forward_batch(self, batch, model=None):
         """Move a (input_ids, position_ids, labels) batch to device, build the
         attention mask, and run a forward pass under autocast. Returns
@@ -430,24 +447,11 @@ class Trainer:
         with torch.amp.autocast(
             self.device, dtype=self.amp_dtype, enabled=self.use_amp
         ):
-            if self.config.training.intra_doc_masking:
-                mask_dtype = self.amp_dtype if self.use_amp else torch.float32
-                attn_mask = build_intra_doc_attention_mask(
-                    position_ids,
-                    self.device,
-                    mask_dtype,
-                    attn_implementation=self.config.model.attn_implementation,
-                )
-            else:
-                B, S = position_ids.shape
-                attn_mask = build_causal_attention_mask(
-                    B,
-                    S,
-                    self.device,
-                    attn_implementation=self.config.model.attn_implementation,
-                )
+            attn_masks = self._build_attention_masks(
+                position_ids, self.config.training.intra_doc_masking
+            )
             logits, aux_loss = (model if model is not None else self.model)(
-                input_ids, position_ids=position_ids, attn_mask=attn_mask
+                input_ids, position_ids=position_ids, attn_masks=attn_masks
             )
         return logits, labels, aux_loss
 
@@ -528,18 +532,13 @@ class Trainer:
         gen = torch.Generator(device=self.device)
         gen.manual_seed(self.config.seed)
         pos_ids = torch.arange(S, device=self.device).unsqueeze(0)
-        attn_mask = build_causal_attention_mask(
-            B,
-            S,
-            self.device,
-            attn_implementation=self.config.model.attn_implementation,
-        )
+        attn_masks = self._build_attention_masks(pos_ids, False)
         for pos in range(S - 1):
             with torch.amp.autocast(
                 self.device, dtype=self.amp_dtype, enabled=self.use_amp
             ):
                 logits, _ = self.eager_model(
-                    idx, position_ids=pos_ids, attn_mask=attn_mask
+                    idx, position_ids=pos_ids, attn_masks=attn_masks
                 )
             probs = F.softmax(logits[:, pos, :], dim=-1)
             idx[0, pos + 1] = torch.multinomial(probs, num_samples=1, generator=gen)

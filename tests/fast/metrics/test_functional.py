@@ -169,7 +169,8 @@ def _populate_grads(model, vocab_size: int, impl: str):
     idx = torch.randint(0, vocab_size, (1, 16))
     position_ids = torch.arange(16).unsqueeze(0)
     attn_mask, _ = make_attn_mask("causal", impl, position_ids, torch.float32)
-    out = model(idx, position_ids=position_ids, attn_mask=attn_mask)
+    attn_masks = [attn_mask] * model.config.n_layers
+    out = model(idx, position_ids=position_ids, attn_masks=attn_masks)
     # MoE models return (logits, aux_loss)
     logits = out[0] if isinstance(out, tuple) else out
     logits.sum().backward()

@@ -1,5 +1,6 @@
 import pytest
 import torch
+from torch.nn.attention.flex_attention import create_mask
 
 from src.utils.masking_utils import (
     build_causal_attention_mask,
@@ -10,6 +11,7 @@ from tests.fast.layers.helper import ATTN_IMPLEMENTATION, skip_if_unsupported
 
 
 EOT = 0  # token ID used as end-of-text in these tests
+SEQ_LENGTHS = [1, 127, 128, 129]
 
 
 # ==================== build_position_ids ====================
@@ -307,27 +309,117 @@ def test_causal_flex_matches_sdpa_is_causal(device):
     assert torch.allclose(out_sdpa, out_flex, atol=1e-5)
 
 
-# ==================== Misc ====================
-
-
-@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
-def test_build_intra_doc_attention_mask_runs(impl, device):
-    """Smoke test: both backends accept the standard call signature."""
-    skip_if_unsupported(impl, device)
-    pos = torch.tensor([[0, 1, 0, 1]])
-    mask = build_intra_doc_attention_mask(
-        pos, pos.device, torch.float32, attn_implementation=impl
+def _create_mask_tensor(
+    mask, batch_size: int, sequence_length: int, device: torch.device
+) -> torch.Tensor:
+    return create_mask(
+        mask.mask_mod,
+        B=batch_size,
+        H=None,
+        Q_LEN=sequence_length,
+        KV_LEN=mask.shape[-1],
+        device=device,
     )
-    assert mask is not None
 
 
+@pytest.mark.parametrize("sequence_length", SEQ_LENGTHS)
+@pytest.mark.parametrize("attn_sink", [False, True])
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
-def test_build_causal_attention_mask_runs(impl, device):
+def test_build_causal_attention_mask_runs(impl, attn_sink, sequence_length, device):
     skip_if_unsupported(impl, device)
+    batch_size = 2
+    if impl == "sdpa" and attn_sink:
+        pytest.skip("attn_sink requires flex_attention")
+
     mask = build_causal_attention_mask(
-        2, 8, torch.device(device), attn_implementation=impl
+        batch_size,
+        sequence_length,
+        torch.device(device),
+        attn_implementation=impl,
+        attn_sink=attn_sink,
     )
     if impl == "sdpa":
-        assert mask is None  # sentinel for is_causal=True
+        assert mask is None
+        return
+
+    attend = torch.ones(
+        batch_size,
+        sequence_length,
+        sequence_length,
+        dtype=torch.bool,
+        device=device,
+    ).tril()
+    if attn_sink:
+        attend = torch.cat([attend, torch.ones_like(attend[..., :1])], dim=-1)
+    assert torch.equal(
+        _create_mask_tensor(mask, batch_size, sequence_length, torch.device(device)),
+        attend.unsqueeze(1),
+    )
+
+
+def test_build_causal_attention_mask_raise_error():
+    with pytest.raises(ValueError):
+        build_causal_attention_mask(
+            2,
+            8,
+            torch.device("cpu"),
+            attn_implementation="sdpa",
+            attn_sink=True,
+        )
+
+
+@pytest.mark.parametrize("sequence_length", SEQ_LENGTHS)
+@pytest.mark.parametrize("packing", [True, False])
+@pytest.mark.parametrize("attn_sink", [False, True])
+@pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
+def test_build_intra_doc_attention_mask_runs(
+    impl, attn_sink, packing, sequence_length, device
+):
+    skip_if_unsupported(impl, device)
+    batch_size = 2
+    position_ids = torch.arange(sequence_length, device=device).repeat(batch_size, 1)
+    split = max(sequence_length // 2, 1)
+    if packing:
+        position_ids[0, split:] -= split
+        position_ids[1, max(sequence_length // 3, 1) :] -= max(sequence_length // 3, 1)
     else:
-        assert mask is not None
+        position_ids[0, split:] = -1
+        position_ids[1, max(sequence_length // 3, 1) :] = -1
+
+    if impl == "sdpa" and attn_sink:
+        pytest.skip("attn_sink requires flex_attention")
+
+    mask = build_intra_doc_attention_mask(
+        position_ids,
+        position_ids.device,
+        torch.float32,
+        attn_implementation=impl,
+        attn_sink=attn_sink,
+    )
+    indices = torch.arange(sequence_length, device=position_ids.device)
+    document_offsets = position_ids - indices
+    attend = (document_offsets.unsqueeze(2) == document_offsets.unsqueeze(1)) & (
+        indices.unsqueeze(1) >= indices
+    )
+    if impl == "sdpa":
+        assert torch.equal(mask.eq(0), attend.unsqueeze(1))
+        return
+
+    if attn_sink:
+        attend = torch.cat([attend, torch.ones_like(attend[..., :1])], dim=-1)
+    assert torch.equal(
+        _create_mask_tensor(mask, batch_size, sequence_length, torch.device(device)),
+        attend.unsqueeze(1),
+    )
+
+
+def test_build_intra_doc_attention_mask_raise_error():
+    position_ids = torch.tensor([[0, 1, 0, 1]])
+    with pytest.raises(ValueError):
+        build_intra_doc_attention_mask(
+            position_ids,
+            position_ids.device,
+            torch.float32,
+            attn_implementation="sdpa",
+            attn_sink=True,
+        )
