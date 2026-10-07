@@ -69,6 +69,9 @@ def _call_flex(q, k, v, attn_mask, sinks=None):
     def score_mod(score, b, h, q_idx, kv_idx):
         return torch.where(kv_idx == key_length, sink_logits[b, h, q_idx], score)
 
+    # TODO: attn sink:
+    # Check how often real-key LSE - sink >= 18 during training;
+    # FP32 backward cancellation can erase tiny Q/K gradients.
     return _flex_attn(q, k, v, score_mod=score_mod, block_mask=attn_mask)
 
 
