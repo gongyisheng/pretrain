@@ -278,6 +278,147 @@ def _gqa_ref_call(gqa, x, attn_mask=None):
 MODULE_DTYPES = COMPOUND_DTYPES
 
 
+@pytest.mark.parametrize("dtype,atol", SDPA_DTYPES)
+@pytest.mark.parametrize("kind", MASK_KIND)
+def test_mha_matches_ref_attn_sink(kind, device, dtype, atol):
+    skip_if_unsupported("flex_attention", device)
+    torch.manual_seed(17)
+    mha = MultiHeadAttention(
+        d_model=64,
+        n_heads=4,
+        qk_norm=True,
+        bias=True,
+        attn_implementation="flex_attention",
+        attn_sink=True,
+    ).to(dtype)
+    with torch.no_grad():
+        mha.sinks.copy_(torch.tensor([-1.25, -0.25, 0.75, 1.75]))
+    x = torch.randn(2, 8, 64, dtype=dtype)
+    positions = torch.arange(8).repeat(2, 1)
+    if kind == "intra_doc":
+        positions[0, 3:] -= 3
+        positions[1, 5:] -= 5
+    mask, ref_mask = make_attn_mask(kind, "flex_attention", positions, dtype)
+    rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
+    out = mha(x, rope=rope, position_ids=positions, attn_mask=mask)
+    out_ref = mha_ref(
+        x,
+        mha.q_proj,
+        mha.k_proj,
+        mha.v_proj,
+        mha.o_proj,
+        mha.n_heads,
+        q_norm=getattr(mha, "q_norm", None),
+        k_norm=getattr(mha, "k_norm", None),
+        rope=rope,
+        position_ids=positions,
+        attn_mask=ref_mask,
+        sinks=mha.sinks,
+    )
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+
+
+@pytest.mark.parametrize("dtype,atol", SDPA_DTYPES)
+@pytest.mark.parametrize("kind", MASK_KIND)
+def test_gqa_matches_ref_attn_sink(kind, device, dtype, atol):
+    skip_if_unsupported("flex_attention", device)
+    torch.manual_seed(17)
+    gqa = GroupedQueryAttention(
+        d_model=64,
+        n_heads=4,
+        n_kv_heads=2,
+        qk_norm=True,
+        bias=True,
+        attn_implementation="flex_attention",
+        attn_sink=True,
+    ).to(dtype)
+    with torch.no_grad():
+        gqa.sinks.copy_(torch.tensor([-1.25, -0.25, 0.75, 1.75]))
+    x = torch.randn(2, 8, 64, dtype=dtype)
+    positions = torch.arange(8).repeat(2, 1)
+    if kind == "intra_doc":
+        positions[0, 3:] -= 3
+        positions[1, 5:] -= 5
+    mask, ref_mask = make_attn_mask(kind, "flex_attention", positions, dtype)
+    rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
+    out = gqa(x, rope=rope, position_ids=positions, attn_mask=mask)
+    out_ref = gqa_ref(
+        x,
+        gqa.q_proj,
+        gqa.k_proj,
+        gqa.v_proj,
+        gqa.o_proj,
+        gqa.n_heads,
+        gqa.n_kv_heads,
+        q_norm=getattr(gqa, "q_norm", None),
+        k_norm=getattr(gqa, "k_norm", None),
+        rope=rope,
+        position_ids=positions,
+        attn_mask=ref_mask,
+        sinks=gqa.sinks,
+    )
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+
+
+@pytest.mark.parametrize("dtype,atol", SDPA_DTYPES)
+@pytest.mark.parametrize("kind", MASK_KIND)
+@pytest.mark.parametrize("q_lora_rank", [0, 24])
+def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
+    skip_if_unsupported("flex_attention", device)
+    torch.manual_seed(17)
+    mla = MultiHeadLatentAttention(
+        d_model=64,
+        n_heads=4,
+        qk_nope_head_dim=8,
+        qk_rope_head_dim=16,
+        v_head_dim=16,
+        kv_lora_rank=32,
+        q_lora_rank=q_lora_rank,
+        bias=True,
+        attn_implementation="flex_attention",
+        attn_sink=True,
+    ).to(dtype)
+    with torch.no_grad():
+        mla.sinks.copy_(torch.tensor([-1.25, -0.25, 0.75, 1.75]))
+    x = torch.randn(2, 8, 64, dtype=dtype)
+    positions = torch.arange(8).repeat(2, 1)
+    if kind == "intra_doc":
+        positions[0, 3:] -= 3
+        positions[1, 5:] -= 5
+    mask, ref_mask = make_attn_mask(kind, "flex_attention", positions, dtype)
+    rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
+    out = mla(x, rope=rope, position_ids=positions, attn_mask=mask)
+    out_ref = mla_ref(
+        mla,
+        x,
+        rope=rope,
+        position_ids=positions,
+        attn_mask=ref_mask,
+        sinks=mla.sinks,
+    )
+    assert out.dtype == dtype
+    assert torch.allclose(out, out_ref, atol=atol)
+
+
+@pytest.mark.parametrize("attn_cls", ["mha", "gqa", "mla"])
+def test_attention_forward_sink_raise_error(attn_cls):
+    kwargs = {"n_kv_heads": 2} if attn_cls == "gqa" else {}
+    if attn_cls == "mla":
+        kwargs.update(
+            qk_nope_head_dim=8,
+            qk_rope_head_dim=16,
+            v_head_dim=16,
+            kv_lora_rank=32,
+        )
+    module = ATTN_REGISTRY[attn_cls](
+        64, 4, attn_implementation="sdpa", attn_sink=True, **kwargs
+    )
+    with pytest.raises(NotImplementedError):
+        module(torch.randn(1, 8, 64))
+
+
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 @pytest.mark.parametrize("kind", MASK_KIND)

@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention
+from torch.nn.attention.flex_attention import AuxRequest, flex_attention
 
 from src.layers.norm import RMSNorm
 
@@ -22,16 +22,26 @@ def _sdpa(q, k, v, attn_mask=None, is_causal=False, sm_scale=None):
 _flex_attn = torch.compile(flex_attention)
 
 
-def _call_sdpa(q, k, v, attn_mask):
+def _call_sdpa(q, k, v, attn_mask, sinks=None):
     """SDPA path: ``attn_mask`` is either ``None`` (→ ``is_causal=True``) or a
-    dense additive tensor."""
+    dense additive or boolean tensor."""
+    if sinks is not None:
+        raise NotImplementedError("attn_sink is not supported by sdpa backend")
     is_causal = attn_mask is None
     return _sdpa(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
 
 
-def _call_flex(q, k, v, attn_mask):
+def _call_flex(q, k, v, attn_mask, sinks=None):
     """FlexAttention path: ``attn_mask`` must be a ``BlockMask``."""
-    return _flex_attn(q, k, v, block_mask=attn_mask)
+    if sinks is None:
+        return _flex_attn(q, k, v, block_mask=attn_mask)
+    else:
+        out, aux = _flex_attn(
+            q, k, v, block_mask=attn_mask, return_aux=AuxRequest(lse=True)
+        )
+        # The zero-value sink adds exp(sink) only to the softmax denominator.
+        gate = torch.sigmoid(aux.lse - sinks.float()[None, :, None])
+        return (out.float() * gate[..., None]).to(q.dtype)
 
 
 _ATTN_IMPL = {
@@ -49,6 +59,7 @@ class MultiHeadAttention(nn.Module):
         qk_norm: bool = False,
         bias: bool = False,
         attn_implementation: str = "flex_attention",
+        attn_sink: bool = False,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -61,6 +72,7 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model, bias=bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout)
+        self.sinks = nn.Parameter(torch.zeros(n_heads)) if attn_sink else None
 
         if qk_norm:
             self.q_norm = RMSNorm(self.d_head)
@@ -95,6 +107,7 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         bias: bool = False,
         qk_norm: bool = False,
+        attn_sink: bool = False,
         **_: object,
     ) -> int:
         head_dim = d_model // n_heads
@@ -104,7 +117,7 @@ class MultiHeadAttention(nn.Module):
             qkv += (n_heads + 2 * n_kv) * head_dim
         o = d_model * d_model + (d_model if bias else 0)
         qk = (2 * head_dim) if qk_norm else 0  # q_norm + k_norm RMSNorm(head_dim)
-        return qkv + o + qk
+        return qkv + o + qk + (n_heads if attn_sink else 0)
 
     def forward(
         self,
@@ -135,7 +148,7 @@ class MultiHeadAttention(nn.Module):
             q = rope(q, position_ids=position_ids)
             k = rope(k, position_ids=position_ids)
 
-        out = self._attn_fn(q, k, v, attn_mask)
+        out = self._attn_fn(q, k, v, attn_mask, self.sinks)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
 
@@ -150,6 +163,7 @@ class GroupedQueryAttention(nn.Module):
         qk_norm: bool = False,
         bias: bool = False,
         attn_implementation: str = "flex_attention",
+        attn_sink: bool = False,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -165,6 +179,7 @@ class GroupedQueryAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=bias)
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout)
+        self.sinks = nn.Parameter(torch.zeros(n_heads)) if attn_sink else None
 
         if qk_norm:
             self.q_norm = RMSNorm(self.d_head)
@@ -201,6 +216,7 @@ class GroupedQueryAttention(nn.Module):
         n_kv_heads: int | None = None,
         bias: bool = False,
         qk_norm: bool = False,
+        attn_sink: bool = False,
         **_: object,
     ) -> int:
         n_kv = n_kv_heads or n_heads
@@ -210,7 +226,7 @@ class GroupedQueryAttention(nn.Module):
             qkv += (n_heads + 2 * n_kv) * head_dim
         o = d_model * d_model + (d_model if bias else 0)
         qk = (2 * head_dim) if qk_norm else 0  # q_norm + k_norm RMSNorm(head_dim)
-        return qkv + o + qk
+        return qkv + o + qk + (n_heads if attn_sink else 0)
 
     def forward(
         self,
@@ -258,7 +274,7 @@ class GroupedQueryAttention(nn.Module):
             .reshape(B, self.n_heads, S, self.d_head)
         )
 
-        out = self._attn_fn(q, k, v, attn_mask)
+        out = self._attn_fn(q, k, v, attn_mask, self.sinks)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
 
@@ -278,6 +294,7 @@ class MultiHeadLatentAttention(nn.Module):
         dropout: float = 0.0,
         bias: bool = False,
         attn_implementation: str = "flex_attention",
+        attn_sink: bool = False,
     ):
         super().__init__()
         self.n_heads = n_heads
@@ -305,6 +322,7 @@ class MultiHeadLatentAttention(nn.Module):
         )
         self.o_proj = nn.Linear(n_heads * v_head_dim, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout)
+        self.sinks = nn.Parameter(torch.zeros(n_heads)) if attn_sink else None
         self._attn_fn = _ATTN_IMPL[attn_implementation]
 
     @classmethod
@@ -358,6 +376,7 @@ class MultiHeadLatentAttention(nn.Module):
         kv_lora_rank: int,
         q_lora_rank: int = 0,
         bias: bool = False,
+        attn_sink: bool = False,
         **_: object,
     ) -> int:
         qk_head = qk_nope_head_dim + qk_rope_head_dim
@@ -381,7 +400,7 @@ class MultiHeadLatentAttention(nn.Module):
             n_heads * (qk_nope_head_dim + v_head_dim)
         )
         o = (n_heads * v_head_dim) * d_model + b(d_model)
-        return q + kv_a + kv_b + o
+        return q + kv_a + kv_b + o + (n_heads if attn_sink else 0)
 
     def forward(
         self,
@@ -420,7 +439,7 @@ class MultiHeadLatentAttention(nn.Module):
         q = torch.cat([q_nope, q_rope], dim=-1)
         k = torch.cat([k_nope, k_rope.expand(B, H, S, self.qk_rope_head_dim)], dim=-1)
 
-        out = self._attn_fn(q, k, v, attn_mask)
+        out = self._attn_fn(q, k, v, attn_mask, self.sinks)
         out = out.transpose(1, 2).reshape(B, S, H * self.v_head_dim)
         return self.attn_dropout(self.o_proj(out))
 

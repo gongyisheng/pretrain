@@ -475,6 +475,39 @@ def test_model_config_attn(attn_cls):
     resolved_cls, kwargs = config.resolve_attn(0)
     assert resolved_cls == attn_cls
     assert kwargs["n_heads"] == 8
+    assert kwargs["attn_sink"] is False
+
+
+@pytest.mark.parametrize("attn_cls", ATTN_CLASSES)
+def test_model_config_attn_sink(tmp_path, attn_cls):
+    cfg = ModelConfig(
+        d_model=64,
+        attn=[
+            {
+                "attn_cls": attn_cls,
+                "attn_kwargs": {"n_heads": 4, "attn_sink": True},
+            }
+        ],
+    )
+    assert cfg.resolve_attn(0)[1]["attn_sink"] is True
+
+    config_data = copy.deepcopy(MINIMAL_CONFIG)
+    config_data["model"]["attn"][0]["attn_cls"] = attn_cls
+    config_data["model"]["attn"][0]["attn_kwargs"]["attn_sink"] = True
+    config = load_config(_write_yaml(tmp_path, config_data))
+    exported = config.to_dict()
+    assert exported["model"]["attn"][0]["attn_kwargs"]["attn_sink"] is True
+    assert load_config(_write_yaml(tmp_path, exported)).to_dict() == exported
+
+
+@pytest.mark.parametrize("attn_cls", ATTN_CLASSES)
+def test_model_config_attn_sink_raise_error(tmp_path, attn_cls):
+    kwargs = {"attn_implementation": "sdpa", "attn_sink": True, "n_heads": 4}
+    attn = [{"attn_cls": attn_cls, "attn_kwargs": kwargs}]
+    with pytest.raises(ValueError):
+        ModelConfig(attn=attn)
+    with pytest.raises(ValueError):
+        load_config(_write_yaml(tmp_path, {"model": {"attn": attn}}))
 
 
 def test_attn_kwargs_round_trip_from_yaml(tmp_path):
@@ -517,7 +550,11 @@ def test_attn_mixed_per_layer_complement():
         d_model=64,
         n_layers=4,
         attn=[
-            {"attn_cls": "mha", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
+            {
+                "attn_cls": "mha",
+                "attn_kwargs": {"n_heads": 4, "attn_sink": True},
+                "layer_idx": [0],
+            },
             {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}},
         ],
     )
@@ -528,6 +565,12 @@ def test_attn_mixed_per_layer_complement():
         "gqa",
     ]
     assert cfg.attn[1]["layer_idx"] == [1, 2, 3]
+    assert [cfg.resolve_attn(layer)[1]["attn_sink"] for layer in range(4)] == [
+        True,
+        False,
+        False,
+        False,
+    ]
 
 
 def test_attn_conflict_raises():

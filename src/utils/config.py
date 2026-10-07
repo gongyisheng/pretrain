@@ -81,8 +81,11 @@ class ModelConfig:
     def _set_default_attn_kwargs(self, attn_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one attn item's kwargs, keyed on attn_cls."""
         kwargs.setdefault("attn_implementation", "flex_attention")
+        if kwargs["attn_implementation"] == "sdpa" and kwargs.get("attn_sink", False):
+            raise ValueError("attn_sink requires flex_attention implementation")
         n_heads = kwargs.get("n_heads")
         if n_heads is not None:
+            kwargs.setdefault("attn_sink", False)
             # MLA sets its head dims explicitly, so d_model need not divide n_heads.
             if attn_cls in ("mha", "gqa") and self.d_model % n_heads != 0:
                 raise ValueError(
