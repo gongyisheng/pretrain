@@ -256,6 +256,7 @@ def sdpa_ref(
     attn_mask: torch.Tensor | None = None,
     is_causal: bool = False,
     scale: float | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Eager scaled-dot-product attention, matching streaming SDPA's precision pattern.
 
@@ -276,9 +277,13 @@ def sdpa_ref(
         logits = logits.masked_fill(~causal, float("-inf"))
     if attn_mask is not None:
         logits = logits + attn_mask.float()
-    attn = logits.softmax(dim=-1).to(
-        dtype
-    )  # softmax in fp32, cast back before second GEMM
+    if sinks is None:
+        attn = logits.softmax(dim=-1).to(dtype)
+    else:
+        normalizer = torch.logaddexp(
+            logits.logsumexp(dim=-1, keepdim=True), sinks.float().view(1, -1, 1, 1)
+        )
+        attn = (logits - normalizer).exp().to(dtype)
     return attn @ v
 
 
@@ -294,6 +299,7 @@ def mha_ref(
     rope: nn.Module | None = None,
     position_ids: torch.Tensor | None = None,
     attn_mask: torch.Tensor | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Eager MHA: q/k/v projections → optional qk_norm → optional rope → sdpa_ref → o_proj."""
     B, S, _ = x.shape
@@ -307,7 +313,9 @@ def mha_ref(
     if rope is not None:
         q = rope(q, position_ids=position_ids)
         k = rope(k, position_ids=position_ids)
-    attn = sdpa_ref(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
+    attn = sdpa_ref(
+        q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None), sinks=sinks
+    )
     return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
 
 
@@ -324,6 +332,7 @@ def gqa_ref(
     rope: nn.Module | None = None,
     position_ids: torch.Tensor | None = None,
     attn_mask: torch.Tensor | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Eager GQA: GQA-shaped projections → optional qk_norm → optional rope → KV expansion → sdpa_ref → o_proj."""
     B, S, _ = x.shape
@@ -340,7 +349,9 @@ def gqa_ref(
         k = rope(k, position_ids=position_ids)
     k = k.repeat_interleave(n_groups, dim=1)
     v = v.repeat_interleave(n_groups, dim=1)
-    attn = sdpa_ref(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
+    attn = sdpa_ref(
+        q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None), sinks=sinks
+    )
     return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
 
 
@@ -350,6 +361,7 @@ def mla_ref(
     rope: nn.Module | None = None,
     position_ids: torch.Tensor | None = None,
     attn_mask: torch.Tensor | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Eager MLA: latent Q/KV compression → decoupled rope → sdpa_ref → o_proj.
 
@@ -384,7 +396,9 @@ def mla_ref(
 
     q = torch.cat([q_nope, q_rope], dim=-1)
     k = torch.cat([k_nope, k_rope.expand(B, H, S, rdim)], dim=-1)
-    attn = sdpa_ref(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
+    attn = sdpa_ref(
+        q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None), sinks=sinks
+    )
     return m.o_proj(attn.transpose(1, 2).reshape(B, S, H * vdim))
 
 
