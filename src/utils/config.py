@@ -19,6 +19,7 @@ from src.quant.constants import (
 from src.quant.rotation import ROTATION_REGISTRY
 from src.training.loss import LOSS_REGISTRY
 from src.training.optimizer import (
+    MUON_OPTIMIZER_REGISTRY,
     ADAM_OPTIMIZER_REGISTRY,
     OPTIMIZER_REGISTRY,
     SCHEDULER_REGISTRY,
@@ -614,18 +615,20 @@ class OptimizerConfig:
         elif self.optimizer_cls == "lion":
             self._post_init_lion(kwargs)
         elif self.optimizer_cls == "muonadam":
-            adam_cls = kwargs.setdefault("adam_cls", "adamw")
-            _check_value("adam_cls", adam_cls, ADAM_OPTIMIZER_REGISTRY)
-            adam_kwargs = kwargs.setdefault("adam_kwargs", {})
+            muon_cls = kwargs.setdefault("muon_cls", "muon")
+            _check_value("muon_cls", muon_cls, MUON_OPTIMIZER_REGISTRY)
             muon_kwargs = kwargs.setdefault("muon_kwargs", {})
-            if not isinstance(adam_kwargs, dict):
-                adam_kwargs = {}
-                kwargs["adam_kwargs"] = adam_kwargs
             if not isinstance(muon_kwargs, dict):
                 muon_kwargs = {}
                 kwargs["muon_kwargs"] = muon_kwargs
-            self._post_init_adam(adam_kwargs)
             self._post_init_muon(muon_kwargs)
+            adam_cls = kwargs.setdefault("adam_cls", "adamw")
+            _check_value("adam_cls", adam_cls, ADAM_OPTIMIZER_REGISTRY)
+            adam_kwargs = kwargs.setdefault("adam_kwargs", {})
+            if not isinstance(adam_kwargs, dict):
+                adam_kwargs = {}
+                kwargs["adam_kwargs"] = adam_kwargs
+            self._post_init_adam(adam_kwargs)
 
 
 @dataclass
