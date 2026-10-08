@@ -24,7 +24,7 @@ E8M0 power-of-two scale rounding may increase validation loss relative to FP32 s
 
 All runs use OpenWebText, sequence length 1024, batch size 16, gradient accumulation 16 (effective batch 256), 50K steps, seed 42, bf16 mixed precision, Muon with `match_rms_adamw`, lr=5e-4, weight decay=0.1, and a cosine schedule (1500 warmup, min lr=5e-5). They explicitly use `checkpoint_every: 5000`, `eval_every: 100`, and `eval_steps: 100`. The lm head remains bf16; embeddings, norms, attention, residuals, loss, and optimizer state also stay bf16/fp32.
 
-W&B names are `qwen3-51m-bf16` and `qwen3-51m-fp8-{w8a16,w8a8,w8a8g8}-scale-{fp32,e8m0}`; checkpoints use `checkpoints/mxfp8_scale_dtype/<run_name_with_underscores>/`.
+W&B names are `qwen3-51m-bf16` and `qwen3-51m-fp8-{w8a16,w8a8,w8a8g8}-scale-{fp32,e8m0}`; checkpoints use `checkpoints/mxfp8/<run_name_with_underscores>/`.
 
 W8A16 quantizes weights only: forward and input-gradient GEMMs use the one-sided fake-quantization fallback, while the weight-gradient GEMM stays bf16. W8A8 supports two-FP8 GEMMs in forward, but its backward GEMMs still contain one bf16 operand and use the fallback. W8A8G8 quantizes both operands of all three eligible linear GEMMs. Native MXFP8 execution requires a supported GPU and backend.
 
@@ -33,12 +33,12 @@ W8A16 quantizes weights only: forward and input-gradient GEMMs use the one-sided
 The script runs BF16, then nested loops over `{W8A16, W8A8, W8A8G8}` and `{FP32, E8M0}` scale types.
 
 ```bash
-nohup bash experiments/mxfp8_scale_dtype/run.sh > logs/mxfp8_scale_dtype_51m.log 2>&1 &
+nohup bash experiments/mxfp8/run.sh > logs/mxfp8_51m.log 2>&1 &
 ```
 
 ## Results
 
-W&B project: `pretrain-mxfp8-scale-dtype`.
+W&B project: `pretrain-mxfp8`.
 
 Report validation loss as the mean and standard deviation of the final 10 evaluations. For each recipe, the primary comparison is mean validation loss with E8M0 scales minus that with FP32 scales; a positive difference indicates a loss penalty from switching scale dtype.
 

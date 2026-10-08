@@ -1,6 +1,6 @@
 #!/bin/bash
 # Qwen3-51M BF16 baseline plus W8A16, W8A8, and W8A8G8 FP32/E8M0 pairs.
-# Usage: nohup bash experiments/mxfp8_scale_dtype/run.sh > logs/mxfp8_scale_dtype_51m.log 2>&1 &
+# Usage: nohup bash experiments/mxfp8/run.sh > logs/mxfp8_51m.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
@@ -19,7 +19,7 @@ done
 for config in "${configs[@]}"; do
     echo "=== ${config} ==="
     echo "Started at: $(date)"
-    uv run python scripts/train.py --config "experiments/mxfp8_scale_dtype/${config}.yaml"
+    uv run python scripts/train.py --config "experiments/mxfp8/${config}.yaml"
     echo "Finished at: $(date)"
     echo ""
 done

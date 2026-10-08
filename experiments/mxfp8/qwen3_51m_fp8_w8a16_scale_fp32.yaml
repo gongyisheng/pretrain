@@ -53,7 +53,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/mxfp8_scale_dtype/qwen3_51m_fp8_w8a16_scale_fp32/
+  checkpoint_dir: checkpoints/mxfp8/qwen3_51m_fp8_w8a16_scale_fp32/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -80,7 +80,7 @@ scheduler:
   min_lr: 5e-5
 
 logging:
-  wandb_project: pretrain-mxfp8-scale-dtype
+  wandb_project: pretrain-mxfp8
   wandb_run_name: qwen3-51m-fp8-w8a16-scale-fp32
   log_every: 10
   log_quant_metrics: true
