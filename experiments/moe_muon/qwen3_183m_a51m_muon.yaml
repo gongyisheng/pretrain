@@ -38,7 +38,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/moe_muon_optm/qwen3_183m_a51m_muon/
+  checkpoint_dir: checkpoints/moe_muon/qwen3_183m_a51m_muon/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -63,6 +63,6 @@ scheduler:
   warmup_steps: 1500
   min_lr: 1e-4
 logging:
-  wandb_project: pretrain-moe-muon-optm
+  wandb_project: pretrain-moe-muon
   wandb_run_name: qwen3-183m-a51m-muon
   log_every: 100

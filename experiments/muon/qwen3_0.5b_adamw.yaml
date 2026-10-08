@@ -2,14 +2,14 @@ max_seq_len: 1024
 seed: 42
 
 model:
-  d_model: 512
-  n_layers: 8
+  d_model: 1024
+  n_layers: 28
   vocab_size: 50257
   attn:
   - attn_cls: gqa
     attn_kwargs:
-      n_heads: 8
-      n_kv_heads: 4
+      n_heads: 16
+      n_kv_heads: 8
       qk_norm: true
   mlp:
   - mlp_cls: dense
@@ -27,38 +27,31 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 16
-  gradient_accumulation_steps: 16
+  batch_size: 8
+  gradient_accumulation_steps: 32
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/muon/qwen3_57m_muon/
+  checkpoint_dir: checkpoints/muon/qwen3_0.5b_adamw/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 200
 
 optimizer:
-  optimizer_cls: muonadam
-  lr: 5e-4
+  optimizer_cls: adamw
+  lr: 2e-4
   weight_decay: 0.1
   optimizer_kwargs:
-    adam_cls: adamw
-    adam_kwargs:
-      betas:
-      - 0.9
-      - 0.95
-      eps: 1e-8
-    muon_kwargs:
-      momentum: 0.95
-      nesterov: true
-      adjust_lr_fn: match_rms_adamw
-      eps: 1e-8
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1e-8
 scheduler:
   name: cosine
   warmup_steps: 1500
-  min_lr: 5e-5
+  min_lr: 2e-5
 
 logging:
-  wandb_project: pretrain-muon-optm
-  wandb_run_name: qwen3-57m-muon
+  wandb_project: pretrain-muon
+  wandb_run_name: qwen3-0.5b-adamw
   log_every: 100
