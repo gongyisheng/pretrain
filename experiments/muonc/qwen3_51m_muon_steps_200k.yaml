@@ -1,0 +1,72 @@
+max_seq_len: 1024
+seed: 42
+
+model:
+  d_model: 512
+  n_layers: 8
+  vocab_size: 50257
+  attn:
+  - attn_cls: gqa
+    attn_kwargs:
+      n_heads: 8
+      n_kv_heads: 4
+      qk_norm: true
+      dropout: 0.0
+  mlp:
+  - mlp_cls: dense
+    mlp_kwargs:
+      intermediate_size: 1536
+      dropout: 0.0
+  norm_cls: rmsnorm
+  pos_emb_cls: rope
+  pos_emb_kwargs:
+    rope_theta: 10000.0
+  dropout_embd: 0.0
+
+data:
+  dataset: openwebtext
+  tokenizer_path: tokenizers/custom_bpe_50k
+  data_dir: data/
+  val_split: 0.01
+  num_workers: 4
+
+training:
+  batch_size: 16
+  gradient_accumulation_steps: 4
+  max_steps: 200000
+  device: cuda
+  mixed_precision: bf16
+  enable_torch_compile: true
+  grad_clip: 1.0
+  checkpoint_dir: checkpoints/muonc/qwen3_51m_muon_steps_200k/
+  checkpoint_every: 20000
+  eval_every: 100
+  eval_steps: 100
+
+optimizer:
+  optimizer_cls: muonadam
+  lr: 2.5e-4
+  weight_decay: 0.1
+  optimizer_kwargs:
+    muon_cls: muon
+    muon_kwargs:
+      momentum: 0.95
+      nesterov: true
+      adjust_lr_fn: match_rms_adamw
+      eps: 1e-8
+    adam_cls: adamw
+    adam_kwargs:
+      betas:
+      - 0.9
+      - 0.95
+      eps: 1e-8
+
+scheduler:
+  name: cosine
+  warmup_steps: 6000
+  min_lr: 2.5e-5
+
+logging:
+  wandb_project: pretrain-muonc
+  wandb_run_name: qwen3-51m-muon-steps-200k
+  log_every: 50

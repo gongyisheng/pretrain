@@ -316,20 +316,26 @@ def test_load_config_optimizer_defaults(tmp_path):
     }
 
 
-def test_load_config_optimizer_nested_kwargs(tmp_path):
+@pytest.mark.parametrize("muon_cls", ["muon", "muonc"])
+@pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
+def test_load_config_optimizer_nested_kwargs(tmp_path, muon_cls, adam_cls):
     raw = copy.deepcopy(MINIMAL_CONFIG)
     raw["optimizer"] = {
         "optimizer_cls": "muonadam",
         "lr": 1e-3,
         "weight_decay": 0.1,
         "optimizer_kwargs": {
-            "adam_kwargs": {"eps": "1e-7"},
+            "muon_cls": muon_cls,
             "muon_kwargs": {"eps": "1e-6"},
+            "adam_cls": adam_cls,
+            "adam_kwargs": {"eps": "1e-7"},
         },
     }
     config = load_config(_write_yaml(tmp_path, raw)).optimizer
-    assert config.optimizer_kwargs["adam_kwargs"]["eps"] == 1e-7
+    assert config.optimizer_kwargs["muon_cls"] == muon_cls
     assert config.optimizer_kwargs["muon_kwargs"]["eps"] == 1e-6
+    assert config.optimizer_kwargs["adam_cls"] == adam_cls
+    assert config.optimizer_kwargs["adam_kwargs"]["eps"] == 1e-7
 
 
 def test_load_config_overrides(tmp_path):
@@ -946,21 +952,23 @@ def test_scheduler_unknown_name_raises():
 
 OPTIMIZER_DEFAULT_CASES = [
     ("adamw", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
+    ("adamc", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
     ("lion", {"betas": (0.9, 0.99), "foreach": True}),
     (
         "muonadam",
         {
-            "adam_cls": "adamw",
-            "adam_kwargs": {
-                "betas": (0.9, 0.95),
-                "eps": 1e-8,
-                "fused": True,
-            },
+            "muon_cls": "muon",
             "muon_kwargs": {
                 "momentum": 0.95,
                 "nesterov": True,
                 "adjust_lr_fn": "match_rms_adamw",
                 "eps": 1e-8,
+            },
+            "adam_cls": "adamw",
+            "adam_kwargs": {
+                "betas": (0.9, 0.95),
+                "eps": 1e-8,
+                "fused": True,
             },
         },
     ),
@@ -982,22 +990,24 @@ def test_optimizer_config_defaults(case):
         assert cfg.optimizer_kwargs == {**expected, key: "set"}
 
 
-def test_optimizer_config_muon_nested_kwargs():
+@pytest.mark.parametrize("muon_cls", ["muon", "muonc"])
+@pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
+def test_optimizer_config_muon_nested_kwargs(muon_cls, adam_cls):
     from src.utils.config import OptimizerConfig
 
     cfg = OptimizerConfig(
         "muonadam",
         lr=1e-3,
         optimizer_kwargs={
-            "adam_cls": "adamc",
-            "adam_kwargs": {"betas": (0.8, 0.9), "fused": False},
+            "muon_cls": muon_cls,
             "muon_kwargs": {"momentum": 0.8, "ns_steps": 3},
+            "adam_cls": adam_cls,
+            "adam_kwargs": {"betas": (0.8, 0.9), "fused": False},
         },
     )
 
     assert cfg.optimizer_kwargs == {
-        "adam_cls": "adamc",
-        "adam_kwargs": {"betas": (0.8, 0.9), "eps": 1e-8, "fused": False},
+        "muon_cls": muon_cls,
         "muon_kwargs": {
             "momentum": 0.8,
             "ns_steps": 3,
@@ -1005,11 +1015,12 @@ def test_optimizer_config_muon_nested_kwargs():
             "adjust_lr_fn": "match_rms_adamw",
             "eps": 1e-8,
         },
+        "adam_cls": adam_cls,
+        "adam_kwargs": {"betas": (0.8, 0.9), "eps": 1e-8, "fused": False},
     }
 
 
 INVALID_MUON_KWARGS_CASES = [
-    ("adam_kwargs", "invalid", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
     (
         "muon_kwargs",
         None,
@@ -1020,6 +1031,7 @@ INVALID_MUON_KWARGS_CASES = [
             "eps": 1e-8,
         },
     ),
+    ("adam_kwargs", "invalid", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
 ]
 
 
@@ -1038,6 +1050,8 @@ def test_optimizer_config_raise_error():
 
     with pytest.raises(ValueError):
         OptimizerConfig("sgd", lr=1e-3)
+    with pytest.raises(ValueError):
+        OptimizerConfig("muonadam", lr=1e-3, optimizer_kwargs={"muon_cls": "adamc"})
     with pytest.raises(ValueError):
         OptimizerConfig("muonadam", lr=1e-3, optimizer_kwargs={"adam_cls": "lion"})
 
