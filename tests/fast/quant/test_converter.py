@@ -7,7 +7,11 @@ import torch.nn as nn
 
 from src.layers.mlp import SparseMoEBlock
 from src.model import build_model
-from src.quant.convert import apply_quantization, enable_quantization
+from src.quant.convert import (
+    apply_quantization,
+    disable_quantization,
+    enable_quantization,
+)
 from src.quant.linear import QuantizedLinear
 from src.quant.moe import QuantizedSparseMoEBlock
 from src.quant.rotation import build_rotation_key
@@ -343,6 +347,10 @@ def test_enable_quantization(model_kind, first_name, second_name):
     enable_quantization(model)
     assert first.quantization_enabled
     assert second.quantization_enabled
+    disable_quantization(model)
+    disable_quantization(model)
+    assert not first.quantization_enabled
+    assert not second.quantization_enabled
     assert first.rotation is rotation
     torch.testing.assert_close(rotation.sign_vector, sign_vector, rtol=0, atol=0)
     assert tuple(id(parameter) for parameter in model.parameters()) == tuple(

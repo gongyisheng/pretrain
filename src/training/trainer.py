@@ -16,7 +16,11 @@ from src.model import build_model
 from src.data.bpe import BpeTrainer
 from src.data.dataset import PretrainDataset, SFTDataset
 from src.data.tokenizer import load_tokenizer
-from src.quant.convert import apply_quantization, enable_quantization
+from src.quant.convert import (
+    apply_quantization,
+    disable_quantization,
+    enable_quantization,
+)
 from src.metrics.collector import MetricsCollector, TokenizerMetricsCollector
 from src.metrics.convert import (
     apply_activation_monitoring,
@@ -219,6 +223,7 @@ class Trainer:
 
     def train(self):
         training_cfg = self.config.training
+        quantization_cfg = self.config.quantization
         self.model.train()
 
         train_iter = iter(self.train_loader)
@@ -241,10 +246,19 @@ class Trainer:
         )
         while self.step < stop_at:
             if (
-                self.config.quantization.enabled
-                and self.step == self.config.quantization.enabled_after_steps
+                quantization_cfg.enabled
+                and self.step == quantization_cfg.enabled_after_steps
+                and (
+                    quantization_cfg.enabled_before_steps is None
+                    or self.step < quantization_cfg.enabled_before_steps
+                )
             ):
                 enable_quantization(self.eager_model)
+            if (
+                quantization_cfg.enabled
+                and self.step == quantization_cfg.enabled_before_steps
+            ):
+                disable_quantization(self.eager_model)
             self.optimizer.zero_grad(set_to_none=True)
             self.metrics.train_step_begin(self.model, self.step)
 
@@ -578,11 +592,15 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.scaler.load_state_dict(checkpoint["grad_scaler"])
         self.step = checkpoint["step"]
-        if (
-            self.config.quantization.enabled
-            and self.step >= self.config.quantization.enabled_after_steps
-        ):
-            enable_quantization(self.eager_model)
+        quantization_cfg = self.config.quantization
+        if quantization_cfg.enabled:
+            if quantization_cfg.enabled_after_steps <= self.step and (
+                quantization_cfg.enabled_before_steps is None
+                or self.step < quantization_cfg.enabled_before_steps
+            ):
+                enable_quantization(self.eager_model)
+            else:
+                disable_quantization(self.eager_model)
         self.metrics.total_tokens = checkpoint.get(
             "total_tokens", self.step * self.metrics.tokens_per_step
         )

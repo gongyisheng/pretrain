@@ -353,6 +353,7 @@ class QuantizationConfig:
     rotation: dict = field(default_factory=dict)
     layer_idx: Optional[List[int]] = None
     enabled_after_steps: int = 0
+    enabled_before_steps: Optional[int] = None
     include: List[str] = field(default_factory=lambda: ["*"])
     exclude: List[str] = field(default_factory=lambda: ["lm_head", "*mlp.router.gate"])
 
@@ -373,6 +374,14 @@ class QuantizationConfig:
             or self.enabled_after_steps < 0
         ):
             raise ValueError("quant enabled_after_steps must be a nonnegative integer")
+        if self.enabled_before_steps is not None and (
+            not isinstance(self.enabled_before_steps, int)
+            or isinstance(self.enabled_before_steps, bool)
+            or self.enabled_before_steps < 0
+        ):
+            raise ValueError(
+                "quant enabled_before_steps must be a nonnegative integer or None"
+            )
         if self.layer_idx is not None:
             self.layer_idx = list(
                 dict.fromkeys(layer for layer in self.layer_idx if layer >= 0)
@@ -711,19 +720,21 @@ def _apply_overrides(config: TrainConfig, overrides: List[str]):
         current = (
             obj.get(field_name) if isinstance(obj, dict) else getattr(obj, field_name)
         )
-        if isinstance(current, bool):
+        if value.lower() in ("null", "~"):
+            value = None
+        elif isinstance(current, bool):
             value = value.lower() in ("true", "1", "yes")
         elif isinstance(current, int):
             value = int(value)
         elif isinstance(current, float):
             value = float(value)
         elif current is None:
-            # Optional field: try float, then int, then leave as string
+            # Optional field: try int, then float, then leave as string
             try:
-                value = float(value)
+                value = int(value)
             except ValueError:
                 try:
-                    value = int(value)
+                    value = float(value)
                 except ValueError:
                     pass
         if isinstance(obj, dict):

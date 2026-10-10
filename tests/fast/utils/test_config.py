@@ -350,6 +350,8 @@ def test_load_config_overrides(tmp_path):
             "optimizer.lr=3e-4",
             "training.batch_size=8",
             "quantization.enabled_after_steps=2",
+            "quantization.enabled_before_steps=3",
+            "optimizer.lr_mult.token_emb=3e-4",
             "seed=23",
             "model.pos_emb_kwargs.rope_theta=5000",
         ],
@@ -357,8 +359,18 @@ def test_load_config_overrides(tmp_path):
     assert config.optimizer.lr == 3e-4
     assert config.training.batch_size == 8
     assert config.quantization.enabled_after_steps == 2
+    assert config.quantization.enabled_before_steps == 3
+    assert isinstance(config.quantization.enabled_before_steps, int)
+    assert config.optimizer.lr_mult["token_emb"] == 3e-4
     assert config.seed == 23
     assert config.model.pos_emb_kwargs["rope_theta"] == 5000
+
+    config_data["quantization"]["enabled_before_steps"] = 3
+    config = load_config(
+        _write_yaml(tmp_path, config_data),
+        overrides=["quantization.enabled_before_steps=null"],
+    )
+    assert config.quantization.enabled_before_steps is None
 
 
 # ==================== Nested coercion ====================
@@ -1392,6 +1404,7 @@ def test_train_config_quantization(tmp_path, case):
     quantization_data = {
         "enabled": True,
         "enabled_after_steps": 2,
+        "enabled_before_steps": 4,
         "layer_idx": layer_idx,
         "dtype": {"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
     }
@@ -1405,9 +1418,11 @@ def test_train_config_quantization(tmp_path, case):
 
     exported = tc.to_dict()
     assert exported["quantization"]["enabled_after_steps"] == 2
+    assert exported["quantization"]["enabled_before_steps"] == 4
     assert exported["quantization"]["layer_idx"] == expected_layers
     restored = load_config(_write_yaml(tmp_path, exported))
     assert restored.quantization.enabled_after_steps == 2
+    assert restored.quantization.enabled_before_steps == 4
     assert restored.quantization.layer_idx == expected_layers
 
 
@@ -1440,8 +1455,27 @@ def test_quantization_config_enabled_after_steps_raise_error(enabled_after_steps
         )
 
 
-def test_quantization_config_enabled_after_steps():
+@pytest.mark.parametrize("enabled_before_steps", [-1, 1.0, "1", True])
+def test_quantization_config_enabled_before_steps_raise_error(enabled_before_steps):
+    with pytest.raises(ValueError):
+        QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            enabled_before_steps=enabled_before_steps,
+        )
+
+
+def test_quantization_config_enabled_steps():
     assert QuantizationConfig().enabled_after_steps == 0
+    assert QuantizationConfig().enabled_before_steps is None
+    assert (
+        QuantizationConfig(
+            enabled=True,
+            dtype={"weight": "fp8_e4m3"},
+            enabled_before_steps=0,
+        ).enabled_before_steps
+        == 0
+    )
 
 
 # ---- mxfp8 / blockwise scaling (Option B: element format ⟂ scale scheme) ----
