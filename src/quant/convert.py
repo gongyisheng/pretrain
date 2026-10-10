@@ -15,6 +15,13 @@ def enable_quantization(model: nn.Module) -> None:
             module.quantization_enabled = True
 
 
+def disable_quantization(model: nn.Module) -> None:
+    """Disable all quantized modules in the model."""
+    for module in model.modules():
+        if isinstance(module, (QuantizedLinear, QuantizedSparseMoEBlock)):
+            module.quantization_enabled = False
+
+
 def apply_quantization(model: nn.Module, config) -> nn.Module:
     """Convert eligible modules before optimizer construction."""
     quantization_config = config.quantization

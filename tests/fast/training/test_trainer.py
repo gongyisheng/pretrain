@@ -210,9 +210,12 @@ def test_quant_metrics_without_quantization(mock_memmap):
         )
 
 
-def _tiny_fp8_config(tmp_dir, enabled_after_steps=0):
-    """_tiny_config, but on cuda with a tensorwise fp8 quant rule (mirrors
-    tests/fast/quant/test_converter.py's `_cfg`) and quant metrics on."""
+def _tiny_quant_config(
+    tmp_dir,
+    enabled_after_steps=0,
+    enabled_before_steps=None,
+):
+    """Tiny CUDA trainer with quantization and quantization metrics enabled."""
     cfg = _tiny_config(tmp_dir)
     cfg.training = TrainingConfig(
         batch_size=4,
@@ -230,6 +233,7 @@ def _tiny_fp8_config(tmp_dir, enabled_after_steps=0):
     cfg.quantization = QuantizationConfig(
         enabled=True,
         enabled_after_steps=enabled_after_steps,
+        enabled_before_steps=enabled_before_steps,
         dtype={"weight": "fp8_e4m3", "act": "fp8_e4m3", "grad_out": "fp8_e5m2"},
     )
     cfg.logging.log_quant_metrics = True
@@ -237,16 +241,19 @@ def _tiny_fp8_config(tmp_dir, enabled_after_steps=0):
     return cfg
 
 
-QUANT_METRIC_DELAYS = [0, 1]
+QUANT_METRIC_AFTER_STEPS = [0, 1]
+QUANT_METRIC_BEFORE_STEPS = [None, 0, 1]
 
 
-@pytest.mark.parametrize("enabled_after_steps", QUANT_METRIC_DELAYS)
-def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap, enabled_after_steps):
-    """log_quant_metrics=True with an FP8 quantization rule: at least one train-quant/
-    key from the diagnostic pass reaches the logger."""
+@pytest.mark.parametrize("enabled_after_steps", QUANT_METRIC_AFTER_STEPS)
+@pytest.mark.parametrize("enabled_before_steps", QUANT_METRIC_BEFORE_STEPS)
+def test_quant_metrics_enabled_dispatches_quant_keys(
+    mock_memmap, enabled_after_steps, enabled_before_steps
+):
+    """Quantization metrics appear only during active training steps."""
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
-        cfg = _tiny_fp8_config(tmp, enabled_after_steps)
+        cfg = _tiny_quant_config(tmp, enabled_after_steps, enabled_before_steps)
 
         trainer = Trainer(cfg, wandb_enabled=False)
         logged = []
@@ -254,20 +261,32 @@ def test_quant_metrics_enabled_dispatches_quant_keys(mock_memmap, enabled_after_
             lambda step, metrics: logged.append(metrics)
         )
         trainer.train()
-        if enabled_after_steps:
-            assert not any(k.startswith("train-quant/") for k in logged[0])
-        assert any(k.startswith("train-quant/") for metrics in logged for k in metrics)
+        assert [
+            any(key.startswith("train-quant/") for key in metrics) for metrics in logged
+        ] == [
+            enabled_after_steps <= step
+            and (enabled_before_steps is None or step < enabled_before_steps)
+            for step in range(cfg.training.max_steps)
+        ]
 
 
-QUANTIZATION_DELAYS = [0, 1, 3]
+QUANTIZATION_AFTER_STEPS = [0, 1, 3]
+QUANTIZATION_BEFORE_STEPS = [None, 0, 2, 3]
 
 
-@pytest.mark.parametrize("enabled_after_steps", QUANTIZATION_DELAYS)
-def test_trainer_train_enabled_after_steps(mock_memmap, enabled_after_steps):
+@pytest.mark.parametrize("enabled_after_steps", QUANTIZATION_AFTER_STEPS)
+@pytest.mark.parametrize("enabled_before_steps", QUANTIZATION_BEFORE_STEPS)
+def test_trainer_train_quantization_window(
+    mock_memmap, enabled_after_steps, enabled_before_steps
+):
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
-        cfg = _tiny_fp8_config(tmp, enabled_after_steps=enabled_after_steps)
-        cfg.training.max_steps = 3
+        cfg = _tiny_quant_config(
+            tmp,
+            enabled_after_steps=enabled_after_steps,
+            enabled_before_steps=enabled_before_steps,
+        )
+        cfg.training.max_steps = 4
         cfg.training.gradient_accumulation_steps = 2
         trainer = Trainer(cfg, wandb_enabled=False)
         modules = [
@@ -283,19 +302,35 @@ def test_trainer_train_enabled_after_steps(mock_memmap, enabled_after_steps):
             )
         )
         trainer.train()
-        assert phases == [(False,) * len(modules)] * (2 * enabled_after_steps) + [
-            (True,) * len(modules)
-        ] * (2 * (cfg.training.max_steps - enabled_after_steps))
+        assert phases == [
+            (
+                enabled_after_steps <= step
+                and (enabled_before_steps is None or step < enabled_before_steps),
+            )
+            * len(modules)
+            for step in range(cfg.training.max_steps)
+            for _ in range(cfg.training.gradient_accumulation_steps)
+        ]
 
 
-RESUME_PHASE_STEPS = [(2, False), (3, True), (4, True)]
+RESUME_AFTER_STEPS = [1, 3]
+RESUME_BEFORE_STEPS = [None, 3]
+RESUME_STEPS = [2, 3, 4]
 
 
-@pytest.mark.parametrize("step,enabled", RESUME_PHASE_STEPS)
-def test_trainer_resume_enabled_after_steps(mock_memmap, step, enabled):
+@pytest.mark.parametrize("enabled_after_steps", RESUME_AFTER_STEPS)
+@pytest.mark.parametrize("enabled_before_steps", RESUME_BEFORE_STEPS)
+@pytest.mark.parametrize("step", RESUME_STEPS)
+def test_trainer_resume_quantization_window(
+    mock_memmap, enabled_after_steps, enabled_before_steps, step
+):
     with tempfile.TemporaryDirectory() as tmp:
         _seed_data(mock_memmap, tmp)
-        cfg = _tiny_fp8_config(tmp, enabled_after_steps=3)
+        cfg = _tiny_quant_config(
+            tmp,
+            enabled_after_steps=enabled_after_steps,
+            enabled_before_steps=enabled_before_steps,
+        )
         cfg.training.max_steps = step + 1
         cfg.training.early_stop = step
         cfg.training.checkpoint_every = step
@@ -309,7 +344,12 @@ def test_trainer_resume_enabled_after_steps(mock_memmap, step, enabled):
             if isinstance(module, QuantizedLinear)
         ]
         assert modules and all(
-            module.quantization_enabled is enabled for module in modules
+            module.quantization_enabled
+            is (
+                enabled_after_steps <= step
+                and (enabled_before_steps is None or step < enabled_before_steps)
+            )
+            for module in modules
         )
         cfg.training.early_stop = step + 1
         resumed.train()
@@ -349,7 +389,7 @@ def test_quant_diagnostics_do_not_change_training(mock_memmap):
     for log_quant_metrics in (False, True):
         with tempfile.TemporaryDirectory() as tmp:
             _seed_data(mock_memmap, tmp)
-            cfg = _tiny_fp8_config(tmp)
+            cfg = _tiny_quant_config(tmp)
             cfg.model.dropout_embd = 0.1
             cfg.training.max_steps = 4
             cfg.logging.log_quant_metrics = log_quant_metrics
