@@ -1,16 +1,18 @@
 #!/bin/bash
 # Compare W4A16 while keeping selected Transformer blocks in bf16.
+# Usage: nohup bash experiments/int4_weight_selective_layers/run.sh > logs/int4_weight_selective_layers.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 models=(qwen3_51m)
-variants=(bf16 int4_w4a16_no_skip int4_w4a16_skip_7 int4_w4a16_skip_6_7 int4_w4a16_skip_0_7)
+skip_variants=(no_skip skip_7 skip_6_7 skip_0_7)
 configs=()
 
 for model in "${models[@]}"; do
-    for variant in "${variants[@]}"; do
-        configs+=("${model}_${variant}")
+    configs+=("${model}_bf16")
+    for skip_variant in "${skip_variants[@]}"; do
+        configs+=("${model}_int4_w4a16_${skip_variant}")
     done
 done
 
