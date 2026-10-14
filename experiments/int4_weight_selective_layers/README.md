@@ -1,10 +1,10 @@
 # Int4 Weight Selective Layers
 
-Test whether retaining selected transformer blocks in bf16 improves W4A16 pretraining quality. The sweep holds the Qwen3-51M recipe fixed and compares quantizing every block with retaining the final block, the final two blocks, or both the first and final blocks in bf16.
+Test whether retaining selected transformer blocks in bf16 improves W4A16 pretraining quality. The sweep holds the Qwen3-51M recipe fixed and compares quantizing every block with retaining the final block, the final two blocks, the first and final blocks, or the first and final two blocks in bf16.
 
 ## Hypothesis
 
-Final transformer blocks may be more sensitive to weight quantization than earlier blocks. Keeping them in bf16 may recover validation quality; `skip_0_7` tests whether protecting the first block helps more than protecting the penultimate block. This adapts the final-block sensitivity observed in the [NVFP4 paper](https://arxiv.org/html/2509.25149v2#A5.SS2) to INT4 weight-only training.
+Final transformer blocks may be more sensitive to weight quantization than earlier blocks. Keeping them in bf16 may recover validation quality; `skip_0_7` tests whether protecting the first block helps more than protecting the penultimate block, while `skip_0_6_7` measures the incremental effect of also protecting the first block when the final two are already bf16. This adapts the final-block sensitivity observed in the [NVFP4 paper](https://arxiv.org/html/2509.25149v2#A5.SS2) to INT4 weight-only training.
 
 ## Setup
 
@@ -15,6 +15,7 @@ Final transformer blocks may be more sensitive to weight quantization than earli
 | [qwen3_51m_int4_w4a16_skip_7.yaml](qwen3_51m_int4_w4a16_skip_7.yaml) | 0–6 | 7 | 16×16, fp8_e4m3, global | 50,931,200 |
 | [qwen3_51m_int4_w4a16_skip_6_7.yaml](qwen3_51m_int4_w4a16_skip_6_7.yaml) | 0–5 | 6–7 | 16×16, fp8_e4m3, global | 50,931,200 |
 | [qwen3_51m_int4_w4a16_skip_0_7.yaml](qwen3_51m_int4_w4a16_skip_0_7.yaml) | 1–6 | 0, 7 | 16×16, fp8_e4m3, global | 50,931,200 |
+| [qwen3_51m_int4_w4a16_skip_0_6_7.yaml](qwen3_51m_int4_w4a16_skip_0_6_7.yaml) | 1–5 | 0, 6–7 | 16×16, fp8_e4m3, global | 50,931,200 |
 
 All runs use Qwen3-51M: width 512, eight GQA blocks with 8 query and 4 KV heads, QK normalization, and a SwiGLU MLP with intermediate size 1536. They train on OpenWebText with `tokenizers/custom_bpe_50k`, sequence length 1024, batch size 16, gradient accumulation 16, seed 42, 50,000 optimizer steps, MuonAdam with `match_rms_adamw`, learning rate 5e-4, 1,500 warmup steps, and bf16 mixed precision. Checkpoints run every 5,000 steps; evaluation runs every 100 steps for 100 batches.
 
@@ -41,6 +42,7 @@ Replace `1` with a free GPU index. Extra arguments are forwarded to each trainin
 | W4A16, skip 7 | Not run | Not run | Not run | Not run |
 | W4A16, skip 6–7 | Not run | Not run | Not run | Not run |
 | W4A16, skip 0 and 7 | Not run | Not run | Not run | Not run |
+| W4A16, skip 0, 6–7 | Not run | Not run | Not run | Not run |
 
 ## Notes
 
