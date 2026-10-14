@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 models=(qwen3_51m)
-skip_variants=(no_skip skip_7 skip_6_7 skip_0_7 skip_0_6_7)
+skip_variants=(no_skip skip_0 skip_7 skip_0_1 skip_0_7 skip_6_7 skip_0_1_7 skip_0_6_7)
 configs=()
 
 for model in "${models[@]}"; do
