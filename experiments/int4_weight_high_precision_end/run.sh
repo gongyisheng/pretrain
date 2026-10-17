@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 models=(qwen3_51m)
-skip_variants=(no_skip skip_0_6_7)
+skip_variants=(no_skip skip_0_7)
 end_steps=(49500 49000 47500 45000 40000)
 configs=()
 

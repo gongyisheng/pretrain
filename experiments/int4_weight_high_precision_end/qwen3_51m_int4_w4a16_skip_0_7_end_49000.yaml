@@ -32,7 +32,7 @@ data:
 quantization:
   enabled: true
   enabled_after_steps: 0
-  enabled_before_steps: 47500
+  enabled_before_steps: 49000
   dtype:
     weight: int4
     act: bf16
@@ -56,14 +56,14 @@ quantization:
       weight:
         fwd: [-1, -2]
         dgrad: [-1, -2]
-  exclude: [lm_head, 'blocks.0.*', 'blocks.6.*', 'blocks.7.*']
+  exclude: [lm_head, 'blocks.0.*', 'blocks.7.*']
 training:
   batch_size: 16
   gradient_accumulation_steps: 16
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int4_weight_high_precision_end/qwen3_51m_int4_w4a16_skip_0_6_7_end_47500/
+  checkpoint_dir: checkpoints/int4_weight_high_precision_end/qwen3_51m_int4_w4a16_skip_0_7_end_49000/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -89,5 +89,5 @@ scheduler:
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-int4-weight-high-precision-end
-  wandb_run_name: qwen3-51m-int4-w4a16-skip-0-6-7-end-47500
+  wandb_run_name: qwen3-51m-int4-w4a16-skip-0-7-end-49000
   log_every: 10
