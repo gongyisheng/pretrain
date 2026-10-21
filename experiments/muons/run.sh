@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run the Qwen3-51M Muon/MuonS comparison.
+# Usage: nohup bash experiments/muons/run.sh > logs/muons.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
