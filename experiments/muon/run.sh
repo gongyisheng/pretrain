@@ -1,6 +1,6 @@
 #!/bin/bash
-# Run the qwen3 0.5B muon experiments: AdamW baseline then Muon.
-# Usage: nohup bash experiments/muon/run_0.5b.sh > logs/muon_0.5b.log 2>&1 &
+# Run the qwen3 57M Muon experiment: AdamW baseline then Muon.
+# Usage: nohup bash experiments/muon/run.sh > logs/muon.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 optimizers=("adamw" "muon")
 configs=()
 for opt in "${optimizers[@]}"; do
-    configs+=("qwen3_0.5b_${opt}")
+    configs+=("qwen3_57m_${opt}")
 done
 
 for config in "${configs[@]}"; do
@@ -19,4 +19,4 @@ for config in "${configs[@]}"; do
     echo ""
 done
 
-echo "=== All muon qwen3 0.5b runs complete ==="
+echo "=== All muon qwen3 57m runs complete ==="

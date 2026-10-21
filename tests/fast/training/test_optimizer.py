@@ -28,6 +28,8 @@ from src.training.optimizer import (
     CosineWarmupScheduler,
 )
 
+MUON_CLASSES = ["muon", "muonc", "muons"]
+
 
 # --------------------------------------------------------------------------- #
 # Shared helpers                                                              #
@@ -356,7 +358,7 @@ def test_build_optimizer_adamc_raise_error():
 
 
 def test_build_optimizer_adamc_corrects_moe_weights():
-    cfg = _make_moe_cfg()
+    cfg = _make_moe_cfg(False)
     cfg.optimizer = OptimizerConfig("adamc", lr=1e-3, weight_decay=0.1)
     model = build_model(cfg)
     optimizer = build_optimizer(model, cfg)
@@ -505,7 +507,7 @@ def test_build_optimizer_dispatches_to_lion():
     assert 0.0 in wds and cfg.optimizer.weight_decay in wds
 
 
-@pytest.mark.parametrize("muon_cls", ["muon", "muonc"])
+@pytest.mark.parametrize("muon_cls", MUON_CLASSES)
 def test_build_optimizer_muon_nested_kwargs(muon_cls):
     cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
     cfg.optimizer.optimizer_kwargs["muon_cls"] = muon_cls
@@ -543,8 +545,8 @@ def test_build_optimizer_muon_ignores_unknown_kwargs():
     assert isinstance(opt, MuonAdamOptimizer)
 
 
-def _make_moe_cfg() -> TrainConfig:
-    cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
+def _make_moe_cfg(tie: bool) -> TrainConfig:
+    cfg = _make_cfg(tie=tie, optimizer_cls="muonadam")
     cfg.model = ModelConfig(
         d_model=cfg.model.d_model,
         n_layers=cfg.model.n_layers,
@@ -556,6 +558,7 @@ def _make_moe_cfg() -> TrainConfig:
             }
         ],
         tie_word_embeddings=cfg.model.tie_word_embeddings,
+        pos_emb_cls="learned",
         mlp=[
             {
                 "mlp_cls": "moe",
@@ -574,11 +577,12 @@ def _make_moe_cfg() -> TrainConfig:
     return cfg
 
 
-@pytest.mark.parametrize("muon_cls", ["muon", "muonc"])
+@pytest.mark.parametrize("muon_cls", MUON_CLASSES)
 @pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
 @pytest.mark.parametrize("lr_mult", [0.0, 0.5])
-def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult):
-    cfg = _make_moe_cfg()
+@pytest.mark.parametrize("tie", [False, True])
+def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
+    cfg = _make_moe_cfg(tie)
     cfg.optimizer.lr_mult = {"router": lr_mult, "q_proj": lr_mult, "expert_": lr_mult}
     cfg.optimizer.optimizer_kwargs.update(muon_cls=muon_cls, adam_cls=adam_cls)
     cfg.optimizer.optimizer_kwargs["adam_kwargs"]["fused"] = False
@@ -586,7 +590,7 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult):
     opt = build_optimizer(model, cfg)
 
     assert isinstance(opt, MuonAdamOptimizer)
-    assert type(opt.muon) is (MuonOptimizer if muon_cls == "muon" else MuonCOptimizer)
+    assert type(opt.muon) is (MuonCOptimizer if muon_cls == "muonc" else MuonOptimizer)
     assert type(opt.adam) is (AdamWOptimizer if adam_cls == "adamw" else AdamCOptimizer)
     assert opt.muon.param_groups[0]["ns_steps"] == 5
     assert opt.muon.param_groups[0]["ns_coefficients"] == (3.4445, -4.7750, 2.0315)
@@ -611,14 +615,23 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult):
     for projection in ("gate_proj", "up_proj"):
         shared = params[f"blocks.0.mlp.shared_expert.{projection}.weight"]
         assert id(shared) in muon_ids
-    assert id(router) in adam_ids
-    assert id(model.token_emb.weight) in adam_ids
-    assert id(model.lm_head.weight) in adam_ids
+    expected_matrix_ids = {
+        id(param)
+        for param in model.parameters()
+        if param.requires_grad and param.ndim >= 2
+    }
+    selected_ids = muon_ids if muon_cls == "muons" else adam_ids
+    assert id(router) in selected_ids
+    assert id(model.token_emb.weight) in selected_ids
+    assert id(model.lm_head.weight) in selected_ids
+    assert id(model.pos_emb.embedding.weight) in selected_ids
+    if muon_cls == "muons":
+        assert muon_ids == expected_matrix_ids
     assert groups_by_param[id(q_proj)]["use_corrected_weight_decay"] == (
         muon_cls == "muonc"
     )
     assert groups_by_param[id(router)]["use_corrected_weight_decay"] == (
-        adam_cls == "adamc"
+        muon_cls != "muons" and adam_cls == "adamc"
     )
     assert not groups_by_param[id(model.token_emb.weight)]["use_corrected_weight_decay"]
     assert not groups_by_param[id(model.lm_head.weight)]["use_corrected_weight_decay"]
@@ -638,7 +651,10 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult):
     for name, param in params.items():
         if id(param) in muon_ids:
             assert param.ndim >= 2
-            assert "router" not in name and "emb" not in name and "lm_head" not in name
+            if muon_cls != "muons":
+                assert (
+                    "router" not in name and "emb" not in name and "lm_head" not in name
+                )
 
     for group in opt.param_groups:
         if group["use_corrected_weight_decay"]:
@@ -784,7 +800,7 @@ def test_muon_rejects_1d_param():
         MuonOptimizer([p], lr=1e-3)
 
 
-@pytest.mark.parametrize("muon_cls", ["muon", "muonc"])
+@pytest.mark.parametrize("muon_cls", MUON_CLASSES)
 @pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
 def test_muonadamoptimizer_state_dict(muon_cls, adam_cls, device):
     cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
@@ -830,14 +846,22 @@ def test_muonadamoptimizer_state_dict(muon_cls, adam_cls, device):
         assert group.get("max_lr") == restored_group.get("max_lr")
 
 
-@pytest.mark.parametrize("selector", ["muon_cls", "adam_cls"])
-def test_muonadamoptimizer_load_state_dict_raise_error(selector):
+CHECKPOINT_MISMATCH_CASES = [
+    ("muon_cls", "muon", "muons"),
+    ("muon_cls", "muon", "muonc"),
+    ("muon_cls", "muons", "muon"),
+    ("adam_cls", "adamw", "adamc"),
+]
+
+
+@pytest.mark.parametrize("case", CHECKPOINT_MISMATCH_CASES)
+def test_muonadamoptimizer_load_state_dict_raise_error(case):
+    selector, saved_value, configured_value = case
     base_cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
+    base_cfg.optimizer.optimizer_kwargs[selector] = saved_value
     state = build_optimizer(build_model(base_cfg), base_cfg).state_dict()
     mismatched_cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
-    mismatched_cfg.optimizer.optimizer_kwargs[selector] = (
-        "muonc" if selector == "muon_cls" else "adamc"
-    )
+    mismatched_cfg.optimizer.optimizer_kwargs[selector] = configured_value
 
     with pytest.raises(ValueError):
         build_optimizer(build_model(mismatched_cfg), mismatched_cfg).load_state_dict(

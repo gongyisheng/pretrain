@@ -15,6 +15,8 @@ from src.utils.config import (
     QuantizationConfig,
 )
 
+MUON_CLASSES = ["muon", "muonc", "muons"]
+
 
 SCALE_TENSORS = ("weight", "act", "grad_out")
 QUANTIZATION_ENABLED = [False, True]
@@ -316,7 +318,7 @@ def test_load_config_optimizer_defaults(tmp_path):
     }
 
 
-@pytest.mark.parametrize("muon_cls", ["muon", "muonc"])
+@pytest.mark.parametrize("muon_cls", MUON_CLASSES)
 @pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
 def test_load_config_optimizer_nested_kwargs(tmp_path, muon_cls, adam_cls):
     raw = copy.deepcopy(MINIMAL_CONFIG)
@@ -1002,7 +1004,7 @@ def test_optimizer_config_defaults(case):
         assert cfg.optimizer_kwargs == {**expected, key: "set"}
 
 
-@pytest.mark.parametrize("muon_cls", ["muon", "muonc"])
+@pytest.mark.parametrize("muon_cls", MUON_CLASSES)
 @pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
 def test_optimizer_config_muon_nested_kwargs(muon_cls, adam_cls):
     from src.utils.config import OptimizerConfig

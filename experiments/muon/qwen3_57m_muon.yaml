@@ -35,7 +35,7 @@ training:
   checkpoint_dir: checkpoints/muon/qwen3_57m_muon/
   checkpoint_every: 5000
   eval_every: 100
-  eval_steps: 200
+  eval_steps: 100
 
 optimizer:
   optimizer_cls: muonadam
