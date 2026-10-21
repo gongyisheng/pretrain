@@ -38,16 +38,23 @@ quantization:
   scale:
     weight:
       granularity: blockwise
-      block_shape: [1, 16]
-    act:
-      granularity: blockwise
-      block_shape: [1, 16]
-    grad_out:
-      granularity: blockwise
-      block_shape: [1, 16]
+      block_shape: [16, 16]
+    scale_dtype: fp8_e4m3
+    enable_global_scale: true
+  rotation:
+    rotation_cls: hadamard
+    rotation_kwargs:
+      block_size: 16
+      random_sign: true
+    rotation_axes:
+      weight:
+        fwd: [-1, -2]
+        dgrad: [-1, -2]
   rounding:
-    weight: SR
-  exclude: [lm_head]
+    weight: RNE
+  exclude: [lm_head, 'blocks.0.*', 'blocks.7.*']
+  enabled_after_steps: 0
+  enabled_before_steps: 45000
 
 training:
   batch_size: 16
@@ -55,7 +62,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int4_stochastic_rounding/qwen3_51m_int4_w4a16_sr/
+  checkpoint_dir: checkpoints/int4_weight_stochastic_rounding/qwen3_51m_int4_w4a16_rne/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -82,7 +89,7 @@ scheduler:
   min_lr: 5e-5
 
 logging:
-  wandb_project: pretrain-int4-stochastic-rounding
-  wandb_run_name: qwen3-51m-int4-w4a16-sr
+  wandb_project: pretrain-int4-weight-stochastic-rounding
+  wandb_run_name: qwen3-51m-int4-w4a16-rne
   log_every: 10
   log_quant_metrics: true

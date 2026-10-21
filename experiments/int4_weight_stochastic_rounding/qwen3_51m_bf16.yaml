@@ -36,7 +36,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/int4_stochastic_rounding/qwen3_51m_bf16/
+  checkpoint_dir: checkpoints/int4_weight_stochastic_rounding/qwen3_51m_bf16/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -63,6 +63,6 @@ scheduler:
   min_lr: 5e-5
 
 logging:
-  wandb_project: pretrain-int4-stochastic-rounding
+  wandb_project: pretrain-int4-weight-stochastic-rounding
   wandb_run_name: qwen3-51m-bf16
   log_every: 10
