@@ -130,6 +130,11 @@ def _is_muon_param(name: str, param: torch.nn.Parameter) -> bool:
     )
 
 
+def _is_muons_param(param: torch.nn.Parameter) -> bool:
+    """Select every matrix parameter."""
+    return param.ndim >= 2
+
+
 def _is_corrected_weight_decay_param(name: str, param: torch.nn.Parameter) -> bool:
     """Select matrix weights other than embeddings and the output head."""
     return param.ndim >= 2 and "emb" not in name and "lm_head" not in name
@@ -315,13 +320,15 @@ class MuonCOptimizer(MuonOptimizer):
 MUON_OPTIMIZER_REGISTRY = {
     "muon": MuonOptimizer,
     "muonc": MuonCOptimizer,
+    "muons": MuonOptimizer,
 }
 
 
 class MuonAdamOptimizer:
-    """Muon or MuonC for hidden matrices, AdamW or AdamC for other weights.
+    """Muon or MuonC for selected matrices, AdamW or AdamC for other weights.
 
     Muon: https://kellerjordan.github.io/posts/muon/
+    MuonS: https://openreview.net/forum?id=ppmyFtr9EW
     """
 
     def __init__(
@@ -411,9 +418,10 @@ def build_optimizer(
     """
     optimizer_cls = config.optimizer.optimizer_cls
     use_muonadam_optm = optimizer_cls == "muonadam"
-    use_muonc_optm = (
-        use_muonadam_optm and config.optimizer.optimizer_kwargs["muon_cls"] == "muonc"
+    muon_cls = (
+        config.optimizer.optimizer_kwargs["muon_cls"] if use_muonadam_optm else None
     )
+    use_muonc_optm = muon_cls == "muonc"
     use_adamc_optm = optimizer_cls == "adamc" or (
         use_muonadam_optm and config.optimizer.optimizer_kwargs["adam_cls"] == "adamc"
     )
@@ -430,7 +438,12 @@ def build_optimizer(
                 matched = key
                 break
         is_no_decay = param.ndim < 2 or "ln" in param_name or "bias" in param_name
-        use_muon = use_muonadam_optm and _is_muon_param(param_name, param)
+        if muon_cls in ("muon", "muonc"):
+            use_muon = _is_muon_param(param_name, param)
+        elif muon_cls == "muons":
+            use_muon = _is_muons_param(param)
+        else:
+            use_muon = False
         use_corrected_weight_decay = (
             (use_muonc_optm if use_muon else use_adamc_optm)
             and not is_no_decay
