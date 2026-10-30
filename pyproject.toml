@@ -9,7 +9,7 @@ py-modules = []
 name = "pretrain"
 version = "0.1.0"
 description = "Pretraining experiments — different architectures, datasets, hyperparameters"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.12.1,<2.13",
     "tokenizers>=0.22",
