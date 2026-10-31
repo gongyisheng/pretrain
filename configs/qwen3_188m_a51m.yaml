@@ -56,7 +56,7 @@ optimizer:
     adam_kwargs:
       betas:
       - 0.9
-      - 0.95
+      - 0.99
       eps: 1e-8
     muon_kwargs:
       momentum: 0.95
