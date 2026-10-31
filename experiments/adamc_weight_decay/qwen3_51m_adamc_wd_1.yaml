@@ -32,7 +32,7 @@ data:
 
 training:
   batch_size: 16
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 16
   max_steps: 200000
   device: cuda
   mixed_precision: bf16
