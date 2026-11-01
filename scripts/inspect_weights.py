@@ -4,7 +4,7 @@ Usage:
     uv run python scripts/inspect_weights.py --ckpt <checkpoint.pt>
     uv run python scripts/inspect_weights.py --ckpt <checkpoint.pt> --mode svd --sort srank
     uv run python scripts/inspect_weights.py --ckpt checkpoints/grokking/qwen3_1m_sub_wd0.5_ce_fp64_lion_ls1e-5/step_30000.pt
-    uv run python scripts/inspect_weights.py --ckpt checkpoints/gqa/qwen3_57m_kv8/step_5000.pt --mode svd
+    uv run python scripts/inspect_weights.py --ckpt checkpoints/gqa_n_kv_heads/qwen3_51m_kv8/step_5000.pt --mode svd
 
 Modes:
     basic  max / min / mean / std / rms / p1 / p10 / p50 / p90 / p99 for every float tensor.
