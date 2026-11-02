@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run the d_model versus width sweep.
+# Usage: nohup bash experiments/d_model_x_width/run.sh > logs/d_model_x_width.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
