@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-muon_momenta=(0.8 0.9 0.95 0.99)
+muon_momenta=(0.8 0.9 0.95 0.99 0.999)
 
 for muon_momentum in "${muon_momenta[@]}"; do
     config="qwen3_51m_muon_momentum_${muon_momentum}"

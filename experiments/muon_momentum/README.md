@@ -2,7 +2,7 @@
 
 ## Hypothesis
 
-Muon momentum may improve validation loss and BPB relative to the baseline `0.95` when varied across `0.8`, `0.9`, `0.95`, and `0.99`, with AdamW companion β₁/β₂ fixed at `(0.9, 0.99)`.
+Muon momentum may improve validation loss and BPB relative to the baseline `0.95` when varied across `0.8`, `0.9`, `0.95`, `0.99`, and `0.999`, with AdamW companion β₁/β₂ fixed at `(0.9, 0.99)`.
 
 ## Setup
 
@@ -12,6 +12,7 @@ Muon momentum may improve validation loss and BPB relative to the baseline `0.95
 | `qwen3_51m_muon_momentum_0.9` | 0.9 | 50.93M |
 | `qwen3_51m_muon_momentum_0.95` | 0.95 | 50.93M |
 | `qwen3_51m_muon_momentum_0.99` | 0.99 | 50.93M |
+| `qwen3_51m_muon_momentum_0.999` | 0.999 | 50.93M |
 
 The parameter count is 50,931,264, computed with `TransformerLM.compute_parameters`. All runs use the dense Qwen3 51M model from `configs/qwen3_51m.yaml`, OpenWebText, the custom 50K BPE tokenizer, and a 1% validation split.
 
@@ -21,7 +22,7 @@ All other settings match the base configuration: sequence length 1024, effective
 
 ## Run
 
-The runner executes all four momenta sequentially and forwards CLI arguments to each run. Checkpoints go under `checkpoints/muon_momentum/<config stem>/`; W&B uses project `pretrain-muon-momentum` and run names `qwen3-51m-muon-momentum-<value>`.
+The runner executes all five momenta sequentially and forwards CLI arguments to each run. Checkpoints go under `checkpoints/muon_momentum/<config stem>/`; W&B uses project `pretrain-muon-momentum` and run names `qwen3-51m-muon-momentum-<value>`.
 
 Check GPU usage, then replace `<free-index>` with a free device index:
 
@@ -51,6 +52,7 @@ CUDA_VISIBLE_DEVICES=<free-index> uv run python scripts/train.py \
 | 0.9 | — | — | Pending |
 | 0.95 | — | — | Pending |
 | 0.99 | — | — | Pending |
+| 0.999 | — | — | Pending |
 
 ## Notes
 
