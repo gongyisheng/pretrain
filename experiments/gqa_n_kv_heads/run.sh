@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run the GQA KV-head-count sweep.
+# Usage: nohup bash experiments/gqa_n_kv_heads/run.sh > logs/gqa_n_kv_heads.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
