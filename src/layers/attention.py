@@ -172,8 +172,28 @@ def _patch_flex_attention():
 
 def _call_flex(q, k, v, attn_mask, sinks=None):
     """Accept a BlockMask whose KV length includes the sink when enabled."""
+    kernel_options = {}
+    if (
+        q.is_cuda
+        and q.shape[-1] >= 128
+        and torch.cuda.get_device_capability(q)[0] == 12
+    ):
+        kernel_options = {
+            "fwd_BLOCK_M": 16,
+            "fwd_BLOCK_N": 32,
+        }
+        if q.dtype in (torch.float16, torch.bfloat16):
+            kernel_options.update(
+                {
+                    "bwd_BLOCK_M1": 32,
+                    "bwd_BLOCK_N1": 32,
+                    "bwd_BLOCK_M2": 32,
+                    "bwd_BLOCK_N2": 32,
+                }
+            )
+
     if sinks is None:
-        return _flex_attn(q, k, v, block_mask=attn_mask)
+        return _flex_attn(q, k, v, block_mask=attn_mask, kernel_options=kernel_options)
 
     key_length = k.shape[-2]
     k = torch.cat([k, torch.zeros_like(k[..., :1, :])], dim=-2)
@@ -193,11 +213,22 @@ def _call_flex(q, k, v, attn_mask, sinks=None):
             v,
             score_mod=score_mod,
             block_mask=attn_mask,
-            kernel_options={"BACKEND": "TRITON", "ATTN_SINK_FP32_OUTPUT": True},
+            kernel_options={
+                **kernel_options,
+                "BACKEND": "TRITON",
+                "ATTN_SINK_FP32_OUTPUT": True,
+            },
         ).to(q.dtype)
 
     # FP32 softmax can still lose tiny Q/K gradients at extreme sink logit gaps.
-    return _flex_attn(q, k, v, score_mod=score_mod, block_mask=attn_mask)
+    return _flex_attn(
+        q,
+        k,
+        v,
+        score_mod=score_mod,
+        block_mask=attn_mask,
+        kernel_options=kernel_options,
+    )
 
 
 _ATTN_IMPL = {

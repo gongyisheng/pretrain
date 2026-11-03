@@ -276,6 +276,51 @@ def _gqa_ref_call(gqa, x, attn_mask=None):
 
 
 MODULE_DTYPES = COMPOUND_DTYPES
+COMPILED_GQA_WIDE_HEAD_DTYPES = COMPOUND_DTYPES
+
+
+@pytest.mark.parametrize("attn_sink", [False, True])
+@pytest.mark.parametrize("dtype,atol", COMPILED_GQA_WIDE_HEAD_DTYPES)
+def test_gqa_compiled_backward_wide_heads(attn_sink, device, dtype, atol):
+    skip_if_unsupported("flex_attention", device)
+    torch.manual_seed(17)
+    gqa = GroupedQueryAttention(
+        d_model=512,
+        n_heads=2,
+        n_kv_heads=1,
+        dropout=0.0,
+        attn_implementation="flex_attention",
+        attn_sink=attn_sink,
+    ).to(dtype)
+    x = torch.randn(1, 128, 512, dtype=dtype, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
+    positions = torch.arange(128).unsqueeze(0)
+    positions[:, 64:] -= 64
+    mask, ref_mask = make_attn_mask(
+        "intra_doc", "flex_attention", positions, dtype, attn_sink=attn_sink
+    )
+
+    out = torch.compile(gqa)(x, attn_mask=mask)
+    out_ref = gqa_ref(
+        x_ref,
+        gqa.q_proj,
+        gqa.k_proj,
+        gqa.v_proj,
+        gqa.o_proj,
+        gqa.n_heads,
+        gqa.n_kv_heads,
+        attn_mask=ref_mask,
+        sinks=gqa.sinks,
+    )
+    grad_output = torch.randn_like(out)
+    actual_grad = torch.autograd.grad(out, x, grad_output)[0]
+    expected_grad = torch.autograd.grad(out_ref, x_ref, grad_output)[0]
+
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all()
+    assert torch.isfinite(actual_grad).all()
+    torch.testing.assert_close(out, out_ref, rtol=0, atol=atol)
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=atol)
 
 
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
