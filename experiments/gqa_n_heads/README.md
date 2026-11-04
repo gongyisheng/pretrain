@@ -15,7 +15,6 @@ All configurations copy `configs/qwen3_51m.yaml`, changing only the query/KV hea
 | [qwen3_51m_h8.yaml](qwen3_51m_h8.yaml) | 8 | 4 | 64 | 50,931,264 |
 | [qwen3_51m_h16.yaml](qwen3_51m_h16.yaml) | 16 | 8 | 32 | 50,930,816 |
 | [qwen3_51m_h32.yaml](qwen3_51m_h32.yaml) | 32 | 16 | 16 | 50,930,688 |
-| [qwen3_51m_h64.yaml](qwen3_51m_h64.yaml) | 64 | 32 | 8 | 50,930,816 |
 
 Fixed settings:
 
@@ -35,7 +34,7 @@ nvidia-smi
 CUDA_VISIBLE_DEVICES=<free-device> bash experiments/gqa_n_heads/run.sh
 ```
 
-Replace `<free-device>` with the available GPU index before running. The runner trains all six configurations sequentially in ascending head-count order and forwards additional arguments to `scripts/train.py`.
+Replace `<free-device>` with the available GPU index before running. The runner trains all five configurations sequentially in ascending head-count order and forwards additional arguments to `scripts/train.py`.
 
 Checkpoints are isolated under `checkpoints/gqa_n_heads/qwen3_51m_h<N>/`. W&B uses project `pretrain-gqa-n-heads` and run names `qwen3-51m-h<N>`.
 
@@ -50,7 +49,6 @@ Training has not been launched; all results are pending.
 | 8 (baseline) | Pending | Pending | Pending | Pending |
 | 16 | Pending | Pending | Pending | Pending |
 | 32 | Pending | Pending | Pending | Pending |
-| 64 | Pending | Pending | Pending | Pending |
 
 ## Notes
 

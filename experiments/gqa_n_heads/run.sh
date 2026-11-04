@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-n_heads_values=(2 4 8 16 32 64)
+n_heads_values=(2 4 8 16 32)
 
 for n_heads in "${n_heads_values[@]}"; do
     config="qwen3_51m_h${n_heads}"
