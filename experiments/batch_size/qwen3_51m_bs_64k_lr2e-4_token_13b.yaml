@@ -13,7 +13,8 @@ model:
       qk_norm: true
   mlp:
   - mlp_cls: dense
-    mlp_kwargs: {}
+    mlp_kwargs:
+      intermediate_size: 1536
   norm_cls: rmsnorm
   pos_emb_cls: rope
   pos_emb_kwargs:
@@ -25,29 +26,29 @@ data:
   val_split: 0.01
   num_workers: 4
 training:
-  batch_size: 8
-  gradient_accumulation_steps: 128
-  max_steps: 50000
+  batch_size: 16
+  gradient_accumulation_steps: 4
+  max_steps: 200000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/batch_size/qwen3_bs_1m_step_50k/
+  checkpoint_dir: checkpoints/batch_size/qwen3_51m_bs_64k_lr2e-4_token_13b/
   checkpoint_every: 5000
-  eval_every: 1000
-  eval_steps: 200
+  eval_every: 100
+  eval_steps: 100
 optimizer:
   optimizer_cls: adamw
-  lr: 6e-4
+  lr: 2e-4
   weight_decay: 0.1
   optimizer_kwargs:
     betas:
     - 0.9
-    - 0.95
+    - 0.99
     eps: 1e-8
 scheduler:
   name: cosine
-  warmup_steps: 1000
-  min_lr: 6e-5
+  warmup_steps: 4000
+  min_lr: 5e-5
 logging:
   wandb_project: pretrain-batch-size
-  wandb_run_name: qwen3-57m-bs-1m-step-50k
+  wandb_run_name: qwen3-51m-bs-64k-lr2e-4-token-13b
   log_every: 10
