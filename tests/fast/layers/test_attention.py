@@ -1129,7 +1129,6 @@ def test_gqa_compute_flops_qk_norm():
         ),
     ],
 )
-
 @pytest.mark.parametrize("attn_gate", ATTN_GATES)
 def test_compute_parameters_matches_module(cls, kwargs, attn_gate):
     d_model = 64
