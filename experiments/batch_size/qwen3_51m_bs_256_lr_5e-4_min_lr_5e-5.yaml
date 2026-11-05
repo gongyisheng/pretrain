@@ -27,17 +27,17 @@ data:
   num_workers: 4
 training:
   batch_size: 16
-  gradient_accumulation_steps: 64
-  max_steps: 12500
+  gradient_accumulation_steps: 16
+  max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/batch_size/qwen3_51m_bs_1m_lr2e-3_token_13b/
+  checkpoint_dir: checkpoints/batch_size/qwen3_51m_bs_256_lr_5e-4_min_lr_5e-5/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
 optimizer:
   optimizer_cls: adamw
-  lr: 2e-3
+  lr: 5e-4
   weight_decay: 0.1
   optimizer_kwargs:
     betas:
@@ -46,9 +46,9 @@ optimizer:
     eps: 1e-8
 scheduler:
   name: cosine
-  warmup_steps: 250
+  warmup_steps: 1500
   min_lr: 5e-5
 logging:
   wandb_project: pretrain-batch-size
-  wandb_run_name: qwen3-51m-bs-1m-lr2e-3-token-13b
+  wandb_run_name: qwen3-51m-bs-256-lr-5e-4-min-lr-5e-5
   log_every: 10

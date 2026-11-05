@@ -1,70 +1,69 @@
-# Batch Size
-
-Measure how effective batch size (tokens per gradient step) affects final validation loss, holding all other hyperparameters fixed.
+# Batch Size × Learning Rate × Minimum Learning Rate
 
 ## Hypothesis
 
-Larger batch sizes reduce gradient noise, leading to faster initial convergence but potentially worse generalization. With a fixed learning rate and step budget, smaller batches see more parameter updates over the same token budget, which may yield lower final loss.
+At a fixed 13.1B-token budget, the best peak and minimum learning rates may depend on effective batch size. A proportional minimum (`0.1 × lr`) may behave differently from a fixed `1e-5` floor.
 
 ## Setup
 
-Fixed: Qwen3 57M architecture, `seq_len=1024`, `lr=6e-4`, 50K steps.
-
-The hardware batch size stays at 8 across all runs — only `gradient_accumulation_steps` varies to control the effective batch size.
-
-| Config | batch_size | grad_accum | Tokens/step |
-|---|---|---|---|
-| qwen3_57m_bs_16k | 8 | 2 | ~16K |
-| qwen3_57m_bs_64k | 8 | 8 | ~64K |
-| qwen3_57m_bs_256k | 8 | 32 | ~256K |
-| qwen3_57m_bs_1m | 8 | 128 | ~1M |
-
-Note: total tokens seen = `tokens/step × max_steps`. Larger batches therefore process far more tokens total, but take the same number of optimizer steps.
+Sweep effective batch sizes of 64, 256, and 1024 sequences. For each batch size, sweep peak learning rates `1e-4`, `2e-4`, `5e-4`, `1e-3`, `2e-3`, and `5e-3`, with a minimum learning rate of either 10% of the peak or fixed at `1e-5`. This yields 33 unique runs because both minimum-LR choices are `1e-5` at peak LR `1e-4`.
 
 ## Run
 
+Check `nvidia-smi`, then replace `0` below with a free GPU index and run the full sweep:
+
 ```bash
+export CUDA_VISIBLE_DEVICES=0
+mkdir -p logs
 nohup bash experiments/batch_size/run.sh > logs/batch_size.log 2>&1 &
 ```
 
-Or a single run:
+Run one configuration:
 
 ```bash
-uv run python scripts/train.py --config experiments/batch_size/qwen3_57m_bs_64k.yaml
+uv run python scripts/train.py --config experiments/batch_size/qwen3_51m_bs_256_lr_1e-3_min_lr_1e-4.yaml
 ```
-
-## W&B
-
-Project: `pretrain-batch-size`. Compare runs by `val/loss` vs `train/step`.
 
 ## Results
 
-TODO
+| Configuration | Final `val/loss` |
+|---|---:|
+| qwen3_51m_bs_64_lr_1e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_2e-4_min_lr_2e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_2e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_5e-4_min_lr_5e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_5e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_1e-3_min_lr_1e-4.yaml | Pending |
+| qwen3_51m_bs_64_lr_1e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_2e-3_min_lr_2e-4.yaml | Pending |
+| qwen3_51m_bs_64_lr_2e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_5e-3_min_lr_5e-4.yaml | Pending |
+| qwen3_51m_bs_64_lr_5e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_1e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_2e-4_min_lr_2e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_2e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_5e-4_min_lr_5e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_5e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_1e-3_min_lr_1e-4.yaml | Pending |
+| qwen3_51m_bs_256_lr_1e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_2e-3_min_lr_2e-4.yaml | Pending |
+| qwen3_51m_bs_256_lr_2e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_5e-3_min_lr_5e-4.yaml | Pending |
+| qwen3_51m_bs_256_lr_5e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_1e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_2e-4_min_lr_2e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_2e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_5e-4_min_lr_5e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_5e-4_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_1e-3_min_lr_1e-4.yaml | Pending |
+| qwen3_51m_bs_1024_lr_1e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_2e-3_min_lr_2e-4.yaml | Pending |
+| qwen3_51m_bs_1024_lr_2e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_5e-3_min_lr_5e-4.yaml | Pending |
+| qwen3_51m_bs_1024_lr_5e-3_min_lr_1e-5.yaml | Pending |
 
 ## Notes
 
-### Effective batch size
+This experiment is inspired by [Step Law](https://arxiv.org/abs/2503.04715).
 
-Effective batch size (in tokens) = `batch_size × gradient_accumulation_steps × seq_len`. This is the number of tokens the model sees per optimizer step. In this experiment, we fix `batch_size=8` and `seq_len=1024`, then vary `gradient_accumulation_steps` to sweep over effective batch sizes from ~16K to ~1M tokens/step.
-
-Recommended effective batch size for our experiments: **512K tokens/step** (`batch_size=8, grad_accum=64`). Effective batch sizes smaller than this show training instability. Sources of instability include:
-
-1. **Dataset** — a single bad batch has outsized impact when the effective batch size is small, since each batch contributes a larger fraction of the gradient.
-2. **cuBLAS non-determinism** — cuBLAS uses non-deterministic algorithms by default, introducing small numerical differences across runs. At small batch sizes these fluctuations are not averaged out. Enabling deterministic training (`os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'`) resolves this.
-
-### How other LLMs choose their batch sizes
-
-**GPT-2** (Radford et al., 2019) trained GPT-2 124M with a batch size of 512 and sequence length 1024, giving an effective batch size of ~512K tokens/step. Larger GPT-2 variants (345M, 762M, 1.5B) all used the same batch size.
-
-**GPT-3** (Brown et al., 2020) scaled effective batch size with model size:
-
-| Model | Params | Tokens/step |
-|---|---|---|
-| Small | 125M | 0.5M |
-| Medium | 350M | 0.5M |
-| Large | 760M | 0.5M |
-| XL | 1.3B | 1M |
-| 2.7B | 2.7B | 1M |
-| 6.7B | 6.7B | 2M |
-| 13B | 13B | 2M |
-| 175B | 175B | 3.2M |
+Runs log to W&B project `pretrain-batch-size`. Compare `val/loss` against `train/total_tokens`; all configurations share the same total-token budget.
