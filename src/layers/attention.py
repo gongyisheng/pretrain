@@ -247,6 +247,7 @@ class MultiHeadAttention(nn.Module):
         bias: bool = False,
         attn_implementation: str = "flex_attention",
         attn_sink: bool = False,
+        attn_gate: str | None = None,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -260,6 +261,10 @@ class MultiHeadAttention(nn.Module):
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout)
         self.sinks = nn.Parameter(torch.zeros(n_heads)) if attn_sink else None
+        self.attn_gate = attn_gate
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else d_model
+            self.gate_proj = nn.Linear(d_model, gate_dim, bias=bias)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.d_head)
@@ -277,7 +282,10 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         bias: bool = False,
         qk_norm: bool = False,
-        **_: object,
+        dropout: float = 0.0,
+        attn_implementation: str = "flex_attention",
+        attn_sink: bool = False,
+        attn_gate: str | None = None,
     ) -> int:
         head_dim = d_model // n_heads
         n_kv = n_heads
@@ -287,7 +295,11 @@ class MultiHeadAttention(nn.Module):
         o = 2 * d_model * d_model + (d_model if bias else 0)
         attn_matmul = 4 * n_heads * head_dim * max_seq_len
         qk = (3 * (n_heads + n_kv) * head_dim) if qk_norm else 0
-        return qkv + o + attn_matmul + qk
+        gate = 0
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else d_model
+            gate = 2 * d_model * gate_dim + (gate_dim if bias else 0)
+        return qkv + o + attn_matmul + qk + gate
 
     @classmethod
     def compute_parameters(
@@ -296,8 +308,10 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         bias: bool = False,
         qk_norm: bool = False,
+        dropout: float = 0.0,
+        attn_implementation: str = "flex_attention",
         attn_sink: bool = False,
-        **_: object,
+        attn_gate: str | None = None,
     ) -> int:
         head_dim = d_model // n_heads
         n_kv = n_heads
@@ -306,7 +320,11 @@ class MultiHeadAttention(nn.Module):
             qkv += (n_heads + 2 * n_kv) * head_dim
         o = d_model * d_model + (d_model if bias else 0)
         qk = (2 * head_dim) if qk_norm else 0  # q_norm + k_norm RMSNorm(head_dim)
-        return qkv + o + qk + (n_heads if attn_sink else 0)
+        gate = 0
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else d_model
+            gate = d_model * gate_dim + (gate_dim if bias else 0)
+        return qkv + o + qk + (n_heads if attn_sink else 0) + gate
 
     def forward(
         self,
@@ -338,6 +356,9 @@ class MultiHeadAttention(nn.Module):
             k = rope(k, position_ids=position_ids)
 
         out = self._attn_fn(q, k, v, attn_mask, self.sinks)
+        if self.attn_gate is not None:
+            gate = self.gate_proj(x).sigmoid().reshape(B, S, self.n_heads, -1)
+            out = out * gate.transpose(1, 2)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
 
@@ -353,6 +374,7 @@ class GroupedQueryAttention(nn.Module):
         bias: bool = False,
         attn_implementation: str = "flex_attention",
         attn_sink: bool = False,
+        attn_gate: str | None = None,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -369,6 +391,10 @@ class GroupedQueryAttention(nn.Module):
         self.o_proj = nn.Linear(d_model, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout)
         self.sinks = nn.Parameter(torch.zeros(n_heads)) if attn_sink else None
+        self.attn_gate = attn_gate
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else d_model
+            self.gate_proj = nn.Linear(d_model, gate_dim, bias=bias)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.d_head)
@@ -387,7 +413,10 @@ class GroupedQueryAttention(nn.Module):
         n_kv_heads: int | None = None,
         bias: bool = False,
         qk_norm: bool = False,
-        **_: object,
+        dropout: float = 0.0,
+        attn_implementation: str = "flex_attention",
+        attn_sink: bool = False,
+        attn_gate: str | None = None,
     ) -> int:
         n_kv = n_kv_heads or n_heads
         head_dim = d_model // n_heads
@@ -397,7 +426,11 @@ class GroupedQueryAttention(nn.Module):
         o = 2 * d_model * d_model + (d_model if bias else 0)
         attn_matmul = 4 * n_heads * head_dim * max_seq_len
         qk = (3 * (n_heads + n_kv) * head_dim) if qk_norm else 0
-        return qkv + o + attn_matmul + qk
+        gate = 0
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else d_model
+            gate = 2 * d_model * gate_dim + (gate_dim if bias else 0)
+        return qkv + o + attn_matmul + qk + gate
 
     @classmethod
     def compute_parameters(
@@ -407,8 +440,10 @@ class GroupedQueryAttention(nn.Module):
         n_kv_heads: int | None = None,
         bias: bool = False,
         qk_norm: bool = False,
+        dropout: float = 0.0,
+        attn_implementation: str = "flex_attention",
         attn_sink: bool = False,
-        **_: object,
+        attn_gate: str | None = None,
     ) -> int:
         n_kv = n_kv_heads or n_heads
         head_dim = d_model // n_heads
@@ -417,7 +452,11 @@ class GroupedQueryAttention(nn.Module):
             qkv += (n_heads + 2 * n_kv) * head_dim
         o = d_model * d_model + (d_model if bias else 0)
         qk = (2 * head_dim) if qk_norm else 0  # q_norm + k_norm RMSNorm(head_dim)
-        return qkv + o + qk + (n_heads if attn_sink else 0)
+        gate = 0
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else d_model
+            gate = d_model * gate_dim + (gate_dim if bias else 0)
+        return qkv + o + qk + (n_heads if attn_sink else 0) + gate
 
     def forward(
         self,
@@ -466,6 +505,9 @@ class GroupedQueryAttention(nn.Module):
         )
 
         out = self._attn_fn(q, k, v, attn_mask, self.sinks)
+        if self.attn_gate is not None:
+            gate = self.gate_proj(x).sigmoid().reshape(B, S, self.n_heads, -1)
+            out = out * gate.transpose(1, 2)
         out = out.transpose(1, 2).reshape(B, S, H)
         return self.attn_dropout(self.o_proj(out))
 
@@ -486,6 +528,7 @@ class MultiHeadLatentAttention(nn.Module):
         bias: bool = False,
         attn_implementation: str = "flex_attention",
         attn_sink: bool = False,
+        attn_gate: str | None = None,
     ):
         super().__init__()
         self.n_heads = n_heads
@@ -514,6 +557,11 @@ class MultiHeadLatentAttention(nn.Module):
         self.o_proj = nn.Linear(n_heads * v_head_dim, d_model, bias=bias)
         self.attn_dropout = nn.Dropout(dropout)
         self.sinks = nn.Parameter(torch.zeros(n_heads)) if attn_sink else None
+        self.attn_gate = attn_gate
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else n_heads * v_head_dim
+            self.gate_proj = nn.Linear(d_model, gate_dim, bias=bias)
+
         if attn_implementation == "flex_attention" and attn_sink:
             _patch_flex_attention()
         self._attn_fn = _ATTN_IMPL[attn_implementation]
@@ -530,7 +578,10 @@ class MultiHeadLatentAttention(nn.Module):
         kv_lora_rank: int,
         q_lora_rank: int = 0,
         bias: bool = False,
-        **_: object,
+        dropout: float = 0.0,
+        attn_implementation: str = "flex_attention",
+        attn_sink: bool = False,
+        attn_gate: str | None = None,
     ) -> int:
         qk_head = qk_nope_head_dim + qk_rope_head_dim
         b = lambda out: out if bias else 0  # noqa: E731
@@ -556,7 +607,11 @@ class MultiHeadLatentAttention(nn.Module):
         attn_matmul = (
             2 * n_heads * qk_head * max_seq_len + 2 * n_heads * v_head_dim * max_seq_len
         )
-        return q + kv_a + kv_b + o + attn_matmul
+        gate = 0
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else n_heads * v_head_dim
+            gate = 2 * d_model * gate_dim + (gate_dim if bias else 0)
+        return q + kv_a + kv_b + o + attn_matmul + gate
 
     @classmethod
     def compute_parameters(
@@ -569,8 +624,10 @@ class MultiHeadLatentAttention(nn.Module):
         kv_lora_rank: int,
         q_lora_rank: int = 0,
         bias: bool = False,
+        dropout: float = 0.0,
+        attn_implementation: str = "flex_attention",
         attn_sink: bool = False,
-        **_: object,
+        attn_gate: str | None = None,
     ) -> int:
         qk_head = qk_nope_head_dim + qk_rope_head_dim
         b = lambda out: out if bias else 0  # noqa: E731
@@ -593,7 +650,11 @@ class MultiHeadLatentAttention(nn.Module):
             n_heads * (qk_nope_head_dim + v_head_dim)
         )
         o = (n_heads * v_head_dim) * d_model + b(d_model)
-        return q + kv_a + kv_b + o + (n_heads if attn_sink else 0)
+        gate = 0
+        if attn_gate is not None:
+            gate_dim = n_heads if attn_gate == "headwise" else n_heads * v_head_dim
+            gate = d_model * gate_dim + (gate_dim if bias else 0)
+        return q + kv_a + kv_b + o + (n_heads if attn_sink else 0) + gate
 
     def forward(
         self,
@@ -633,6 +694,9 @@ class MultiHeadLatentAttention(nn.Module):
         k = torch.cat([k_nope, k_rope.expand(B, H, S, self.qk_rope_head_dim)], dim=-1)
 
         out = self._attn_fn(q, k, v, attn_mask, self.sinks)
+        if self.attn_gate is not None:
+            gate = self.gate_proj(x).sigmoid().reshape(B, S, self.n_heads, -1)
+            out = out * gate.transpose(1, 2)
         out = out.transpose(1, 2).reshape(B, S, H * self.v_head_dim)
         return self.attn_dropout(self.o_proj(out))
 

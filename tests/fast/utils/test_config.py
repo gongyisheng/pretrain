@@ -120,7 +120,10 @@ def test_model_config_defaults():
     assert cfg.residual_cls == "standard"
     # __post_init__ fills component defaults: attn_implementation for attn,
     # intermediate_size (4*d_model) and the activation pair for mlp.
-    assert cfg.resolve_attn(0)[1] == {"attn_implementation": "flex_attention"}
+    assert cfg.resolve_attn(0)[1] == {
+        "attn_gate": None,
+        "attn_implementation": "flex_attention",
+    }
     assert cfg.resolve_mlp(0)[1] == {
         "intermediate_size": 4 * 768,
         "activation_cls": "swiglu",
@@ -496,6 +499,75 @@ def test_model_config_attn(attn_cls):
     assert resolved_cls == attn_cls
     assert kwargs["n_heads"] == 8
     assert kwargs["attn_sink"] is False
+    assert kwargs["attn_gate"] is None
+
+
+ATTN_GATES = [None, "headwise", "elementwise"]
+INVALID_ATTN_GATES = ["", "sigmoid", True, False, 3, [], {}]
+
+
+@pytest.mark.parametrize("attn_cls", ATTN_CLASSES)
+@pytest.mark.parametrize("attn_gate", ATTN_GATES)
+def test_model_config_attn_gate(tmp_path, attn_cls, attn_gate):
+    data = copy.deepcopy(MINIMAL_CONFIG)
+    data["model"]["attn"] = [
+        {
+            "attn_cls": attn_cls,
+            "attn_kwargs": {"n_heads": 4, "attn_gate": attn_gate},
+        }
+    ]
+    config = load_config(_write_yaml(tmp_path, data))
+    assert config.model.resolve_attn(0)[1]["attn_gate"] == attn_gate
+    exported = config.to_dict()
+    assert exported["model"]["attn"][0]["attn_kwargs"]["attn_gate"] == attn_gate
+    assert load_config(_write_yaml(tmp_path, exported)).to_dict() == exported
+
+
+@pytest.mark.parametrize("attn_cls", ATTN_CLASSES)
+@pytest.mark.parametrize("attn_gate", INVALID_ATTN_GATES)
+def test_model_config_attn_gate_raise_error(tmp_path, attn_cls, attn_gate):
+    attn = [{"attn_cls": attn_cls, "attn_kwargs": {"attn_gate": attn_gate}}]
+    with pytest.raises(ValueError):
+        ModelConfig(attn=copy.deepcopy(attn))
+    with pytest.raises(ValueError):
+        load_config(_write_yaml(tmp_path, {"model": {"attn": attn}}))
+
+
+def test_model_config_attn_gate_per_layer(tmp_path):
+    data = {
+        "model": {
+            "d_model": 64,
+            "n_layers": 4,
+            "attn": [
+                {
+                    "attn_cls": "mha",
+                    "attn_kwargs": {"n_heads": 4, "attn_gate": "elementwise"},
+                    "layer_idx": [0],
+                },
+                {
+                    "attn_cls": "mla",
+                    "attn_kwargs": {"n_heads": 4, "qk_rope_head_dim": 16},
+                    "layer_idx": [1],
+                },
+                {
+                    "attn_cls": "gqa",
+                    "attn_kwargs": {"n_heads": 4, "attn_gate": "headwise"},
+                },
+            ],
+        }
+    }
+    config = load_config(_write_yaml(tmp_path, data))
+    assert [config.model.resolve_attn(i)[1]["attn_gate"] for i in range(4)] == [
+        "elementwise",
+        None,
+        "headwise",
+        "headwise",
+    ]
+    exported = config.to_dict()
+    assert (
+        load_config(_write_yaml(tmp_path, exported)).to_dict()["model"]
+        == exported["model"]
+    )
 
 
 @pytest.mark.parametrize("attn_cls", ATTN_CLASSES)

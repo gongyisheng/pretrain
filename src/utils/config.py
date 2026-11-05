@@ -84,6 +84,9 @@ class ModelConfig:
         kwargs.setdefault("attn_implementation", "flex_attention")
         if kwargs["attn_implementation"] == "sdpa" and kwargs.get("attn_sink", False):
             raise ValueError("attn_sink requires flex_attention implementation")
+        kwargs.setdefault("attn_gate", None)
+        if kwargs["attn_gate"] not in (None, "headwise", "elementwise"):
+            raise ValueError("attn_gate must be None, 'headwise', or 'elementwise'")
         n_heads = kwargs.get("n_heads")
         if n_heads is not None:
             kwargs.setdefault("attn_sink", False)

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.layers.attention import GroupedQueryAttention
+from src.layers.attention import ATTN_REGISTRY, GroupedQueryAttention
 from src.layers.mlp import DenseMLPBlock
 from src.model import build_model
 from src.model.transformer import TransformerLM
@@ -401,25 +401,81 @@ def test_mixed_attn_builds_and_counts():
         n_layers=4,
         vocab_size=256,
         attn=[
-            {"attn_cls": "mha", "attn_kwargs": {"n_heads": 4}, "layer_idx": [0]},
-            {"attn_cls": "gqa", "attn_kwargs": {"n_heads": 4, "n_kv_heads": 2}},
+            {
+                "attn_cls": "mha",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "attn_gate": None,
+                    "attn_implementation": "sdpa",
+                },
+                "layer_idx": [0],
+            },
+            {
+                "attn_cls": "mla",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "qk_rope_head_dim": 16,
+                    "v_head_dim": 32,
+                    "attn_gate": "elementwise",
+                    "attn_implementation": "sdpa",
+                },
+                "layer_idx": [1],
+            },
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "n_kv_heads": 2,
+                    "attn_gate": "headwise",
+                    "attn_implementation": "sdpa",
+                },
+            },
         ],
         mlp=[{"mlp_cls": "dense", "mlp_kwargs": {"intermediate_size": 128}}],
         pos_emb_cls="rope",
     )
     model = TransformerLM(cfg, max_seq_len=32)
-    from src.layers.attention import GroupedQueryAttention, MultiHeadAttention
-
-    assert isinstance(model.blocks[0].attn, MultiHeadAttention)
-    assert all(
-        isinstance(model.blocks[i].attn, GroupedQueryAttention) for i in (1, 2, 3)
-    )
+    for index, block in enumerate(model.blocks):
+        cls, kwargs = cfg.resolve_attn(index)
+        assert isinstance(block.attn, ATTN_REGISTRY[cls])
+        if kwargs["attn_gate"] is None:
+            assert "gate_proj" not in dict(block.attn.named_modules())
+        else:
+            assert isinstance(block.attn.gate_proj, torch.nn.Linear)
     assert model.compute_parameters(cfg, max_seq_len=32)["total"] == sum(
         p.numel() for p in model.parameters()
     )
+    ungated_cfg = ModelConfig(
+        **{
+            **TrainConfig(model=cfg).to_dict()["model"],
+            "attn": [
+                {**item, "attn_kwargs": {**item["attn_kwargs"], "attn_gate": None}}
+                for item in cfg.attn
+            ],
+        }
+    )
+    gate_parameters = sum(
+        parameter.numel()
+        for name, parameter in model.named_parameters()
+        if ".attn.gate_proj." in name
+    )
+    assert (
+        model.compute_parameters(cfg, 32)["total"]
+        - model.compute_parameters(ungated_cfg, 32)["total"]
+        == gate_parameters
+    )
+    assert (
+        model.compute_flops(cfg, 32) - model.compute_flops(ungated_cfg, 32)
+        == 2 * gate_parameters
+    )
     x = torch.randint(0, 256, (2, 8))
-    pos = torch.arange(8).unsqueeze(0).expand(2, 8)
-    model(x, position_ids=pos, attn_masks=[None] * cfg.n_layers)
+    positions = torch.arange(8).unsqueeze(0).expand(2, 8)
+    logits, _ = model(x, position_ids=positions, attn_masks=[None] * cfg.n_layers)
+    assert logits.shape == (2, 8, 256)
+    logits.square().mean().backward()
+    for block in model.blocks:
+        if hasattr(block.attn, "gate_proj"):
+            assert torch.count_nonzero(block.attn.gate_proj.weight.grad)
 
 
 def test_mixed_attn_rope_headdim_mismatch_raises():
