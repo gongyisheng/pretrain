@@ -300,6 +300,7 @@ def mha_ref(
     position_ids: torch.Tensor | None = None,
     attn_mask: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
+    gate_proj: nn.Linear | None = None,
 ) -> torch.Tensor:
     """Eager MHA: q/k/v projections → optional qk_norm → optional rope → sdpa_ref → o_proj."""
     B, S, _ = x.shape
@@ -316,7 +317,11 @@ def mha_ref(
     attn = sdpa_ref(
         q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None), sinks=sinks
     )
-    return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
+    values = attn.transpose(1, 2)
+    if gate_proj is not None:
+        gates = gate_proj(x).sigmoid().reshape(B, S, n_heads, -1)
+        values = values * gates
+    return o_proj(values.reshape(B, S, n_heads * d_head))
 
 
 def gqa_ref(
@@ -333,6 +338,7 @@ def gqa_ref(
     position_ids: torch.Tensor | None = None,
     attn_mask: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
+    gate_proj: nn.Linear | None = None,
 ) -> torch.Tensor:
     """Eager GQA: GQA-shaped projections → optional qk_norm → optional rope → KV expansion → sdpa_ref → o_proj."""
     B, S, _ = x.shape
@@ -352,54 +358,66 @@ def gqa_ref(
     attn = sdpa_ref(
         q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None), sinks=sinks
     )
-    return o_proj(attn.transpose(1, 2).reshape(B, S, n_heads * d_head))
+    values = attn.transpose(1, 2)
+    if gate_proj is not None:
+        gates = gate_proj(x).sigmoid().reshape(B, S, n_heads, -1)
+        values = values * gates
+    return o_proj(values.reshape(B, S, n_heads * d_head))
 
 
 def mla_ref(
-    m,
     x: torch.Tensor,
+    q_proj: nn.Linear | None,
+    kv_a_proj: nn.Linear,
+    kv_b_proj: nn.Linear,
+    o_proj: nn.Linear,
+    n_heads: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
+    kv_a_norm: nn.Module,
+    q_a_proj: nn.Linear | None = None,
+    q_a_norm: nn.Module | None = None,
+    q_b_proj: nn.Linear | None = None,
     rope: nn.Module | None = None,
     position_ids: torch.Tensor | None = None,
     attn_mask: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
+    gate_proj: nn.Linear | None = None,
 ) -> torch.Tensor:
-    """Eager MLA: latent Q/KV compression → decoupled rope → sdpa_ref → o_proj.
-
-    `m` is a MultiHeadLatentAttention module; its projections/norms are reused so
-    this pins the attention math (fused SDPA vs eager fp32 sdpa_ref) through the
-    MLA assembly. Scale defaults to 1/sqrt(qk_head_dim) inside sdpa_ref.
-    """
+    """Eager MLA: latent Q/KV compression → decoupled rope → sdpa_ref → o_proj."""
     B, S, _ = x.shape
-    H, nope, rdim, vdim = (
-        m.n_heads,
-        m.qk_nope_head_dim,
-        m.qk_rope_head_dim,
-        m.v_head_dim,
-    )
-
-    if m.q_lora_rank > 0:
-        q = m.q_b_proj(m.q_a_norm(m.q_a_proj(x)))
+    if q_a_proj is not None:
+        q = q_b_proj(q_a_norm(q_a_proj(x)))
     else:
-        q = m.q_proj(x)
-    q = q.view(B, S, H, nope + rdim).transpose(1, 2)
-    q_nope, q_rope = q.split([nope, rdim], dim=-1)
+        q = q_proj(x)
+    q = q.view(B, S, n_heads, qk_nope_head_dim + qk_rope_head_dim).transpose(1, 2)
+    q_nope, q_rope = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
 
-    compressed = m.kv_a_proj(x)
-    c_kv, k_rope = compressed.split([m.kv_lora_rank, rdim], dim=-1)
-    k_rope = k_rope.view(B, S, 1, rdim).transpose(1, 2)
-    kv = m.kv_b_proj(m.kv_a_norm(c_kv)).view(B, S, H, nope + vdim).transpose(1, 2)
-    k_nope, v = kv.split([nope, vdim], dim=-1)
+    compressed = kv_a_proj(x)
+    c_kv, k_rope = compressed.split([kv_b_proj.in_features, qk_rope_head_dim], dim=-1)
+    k_rope = k_rope.view(B, S, 1, qk_rope_head_dim).transpose(1, 2)
+    kv = (
+        kv_b_proj(kv_a_norm(c_kv))
+        .view(B, S, n_heads, qk_nope_head_dim + v_head_dim)
+        .transpose(1, 2)
+    )
+    k_nope, v = kv.split([qk_nope_head_dim, v_head_dim], dim=-1)
 
     if rope is not None:
         q_rope = rope(q_rope, position_ids=position_ids)
         k_rope = rope(k_rope, position_ids=position_ids)
 
     q = torch.cat([q_nope, q_rope], dim=-1)
-    k = torch.cat([k_nope, k_rope.expand(B, H, S, rdim)], dim=-1)
+    k = torch.cat([k_nope, k_rope.expand(B, n_heads, S, qk_rope_head_dim)], dim=-1)
     attn = sdpa_ref(
         q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None), sinks=sinks
     )
-    return m.o_proj(attn.transpose(1, 2).reshape(B, S, H * vdim))
+    values = attn.transpose(1, 2)
+    if gate_proj is not None:
+        gates = gate_proj(x).sigmoid().reshape(B, S, n_heads, -1)
+        values = values * gates
+    return o_proj(values.reshape(B, S, n_heads * v_head_dim))
 
 
 # ---------------------------- Dense MLP ----------------------

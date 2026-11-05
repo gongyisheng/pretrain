@@ -30,6 +30,15 @@ from tests.fast.layers._refs import (
 )
 
 
+ATTN_GATES = [None, "headwise", "elementwise"]
+ENABLED_ATTN_GATES = ["headwise", "elementwise"]
+ATTN_BIASES = [False, True]
+MLA_Q_LORA_RANKS = [0, 24]
+# CPU/CUDA maxima times 4.3, rounded up; forward and backward have separate bounds.
+GATED_ATTN_FORWARD_ATOL = 5.2e-7
+GATED_ATTN_BACKWARD_ATOL = 1.24e-5
+
+
 # ====================== F.scaled_dot_product_attention vs sdpa_ref ======================
 # Pins down attention's math (q·k/√d → mask → softmax → ·v) so a future change
 # in the SDPA backend (flash, mem-efficient, math) that drifts from the spec
@@ -373,6 +382,58 @@ def test_mha_matches_ref_attn_sink(kind, device, dtype, atol):
         torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=atol)
 
 
+@pytest.mark.parametrize("attn_gate", ENABLED_ATTN_GATES)
+def test_mha_matches_ref_attn_gate(attn_gate):
+    torch.manual_seed(37)
+    mha = MultiHeadAttention(
+        d_model=64,
+        n_heads=4,
+        qk_norm=True,
+        bias=True,
+        attn_implementation="sdpa",
+        attn_gate=attn_gate,
+    ).to(torch.float32)
+    gate_dim = 4 if attn_gate == "headwise" else 64
+    assert mha.gate_proj.in_features == 64
+    assert mha.gate_proj.out_features == gate_dim
+    assert mha.gate_proj.bias is not None
+    x = torch.randn(2, 8, 64, dtype=torch.float32, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
+    positions = torch.arange(8).repeat(2, 1)
+    positions[0, 3:] -= 3
+    positions[1, 5:] -= 5
+    mask, ref_mask = make_attn_mask("intra_doc", "sdpa", positions, torch.float32)
+    rope = RoPE(d_head=16, max_seq_len=8).to(torch.float32)
+    out = mha(x, rope=rope, position_ids=positions, attn_mask=mask)
+    out_ref = mha_ref(
+        x_ref,
+        mha.q_proj,
+        mha.k_proj,
+        mha.v_proj,
+        mha.o_proj,
+        mha.n_heads,
+        q_norm=mha.q_norm,
+        k_norm=mha.k_norm,
+        rope=rope,
+        position_ids=positions,
+        attn_mask=ref_mask,
+        gate_proj=mha.gate_proj,
+    )
+    assert out.dtype == torch.float32
+    grad_output = torch.randn_like(out)
+    parameters = tuple(mha.parameters())
+    actual_grads = torch.autograd.grad(out, (x, *parameters), grad_output)
+    expected_grads = torch.autograd.grad(out_ref, (x_ref, *parameters), grad_output)
+    torch.testing.assert_close(out, out_ref, rtol=0, atol=GATED_ATTN_FORWARD_ATOL)
+    for actual, expected in zip(actual_grads, expected_grads):
+        assert actual.dtype == torch.float32
+        torch.testing.assert_close(
+            actual, expected, rtol=0, atol=GATED_ATTN_BACKWARD_ATOL
+        )
+    gate_gradient = dict(zip(dict(mha.named_parameters()), actual_grads[1:]))
+    assert torch.count_nonzero(gate_gradient["gate_proj.weight"])
+
+
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("kind", MASK_KIND)
 def test_gqa_matches_ref_attn_sink(kind, device, dtype, atol):
@@ -425,9 +486,63 @@ def test_gqa_matches_ref_attn_sink(kind, device, dtype, atol):
         torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=atol)
 
 
+@pytest.mark.parametrize("attn_gate", ENABLED_ATTN_GATES)
+def test_gqa_matches_ref_attn_gate(attn_gate):
+    torch.manual_seed(37)
+    gqa = GroupedQueryAttention(
+        d_model=64,
+        n_heads=4,
+        n_kv_heads=2,
+        qk_norm=True,
+        bias=True,
+        attn_implementation="sdpa",
+        attn_gate=attn_gate,
+    ).to(torch.float32)
+    gate_dim = 4 if attn_gate == "headwise" else 64
+    assert gqa.gate_proj.in_features == 64
+    assert gqa.gate_proj.out_features == gate_dim
+    assert gqa.gate_proj.bias is not None
+    x = torch.randn(2, 8, 64, dtype=torch.float32, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
+    positions = torch.arange(8).repeat(2, 1)
+    positions[0, 3:] -= 3
+    positions[1, 5:] -= 5
+    mask, ref_mask = make_attn_mask("intra_doc", "sdpa", positions, torch.float32)
+    rope = RoPE(d_head=16, max_seq_len=8).to(torch.float32)
+    out = gqa(x, rope=rope, position_ids=positions, attn_mask=mask)
+    out_ref = gqa_ref(
+        x_ref,
+        gqa.q_proj,
+        gqa.k_proj,
+        gqa.v_proj,
+        gqa.o_proj,
+        gqa.n_heads,
+        gqa.n_kv_heads,
+        q_norm=gqa.q_norm,
+        k_norm=gqa.k_norm,
+        rope=rope,
+        position_ids=positions,
+        attn_mask=ref_mask,
+        gate_proj=gqa.gate_proj,
+    )
+    assert out.dtype == torch.float32
+    grad_output = torch.randn_like(out)
+    parameters = tuple(gqa.parameters())
+    actual_grads = torch.autograd.grad(out, (x, *parameters), grad_output)
+    expected_grads = torch.autograd.grad(out_ref, (x_ref, *parameters), grad_output)
+    torch.testing.assert_close(out, out_ref, rtol=0, atol=GATED_ATTN_FORWARD_ATOL)
+    for actual, expected in zip(actual_grads, expected_grads):
+        assert actual.dtype == torch.float32
+        torch.testing.assert_close(
+            actual, expected, rtol=0, atol=GATED_ATTN_BACKWARD_ATOL
+        )
+    gate_gradient = dict(zip(dict(gqa.named_parameters()), actual_grads[1:]))
+    assert torch.count_nonzero(gate_gradient["gate_proj.weight"])
+
+
 @pytest.mark.parametrize("dtype,atol", MODULE_DTYPES)
 @pytest.mark.parametrize("kind", MASK_KIND)
-@pytest.mark.parametrize("q_lora_rank", [0, 24])
+@pytest.mark.parametrize("q_lora_rank", MLA_Q_LORA_RANKS)
 def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
     skip_if_unsupported("flex_attention", device)
     torch.manual_seed(17)
@@ -457,8 +572,19 @@ def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
     rope = RoPE(d_head=16, max_seq_len=8).to(dtype)
     out = mla(x, rope=rope, position_ids=positions, attn_mask=mask)
     out_ref = mla_ref(
-        mla,
         x_ref,
+        getattr(mla, "q_proj", None),
+        mla.kv_a_proj,
+        mla.kv_b_proj,
+        mla.o_proj,
+        mla.n_heads,
+        mla.qk_nope_head_dim,
+        mla.qk_rope_head_dim,
+        mla.v_head_dim,
+        mla.kv_a_norm,
+        q_a_proj=getattr(mla, "q_a_proj", None),
+        q_a_norm=getattr(mla, "q_a_norm", None),
+        q_b_proj=getattr(mla, "q_b_proj", None),
         rope=rope,
         position_ids=positions,
         attn_mask=ref_mask,
@@ -472,6 +598,67 @@ def test_mla_matches_ref_attn_sink(kind, q_lora_rank, device, dtype, atol):
     expected_grads = torch.autograd.grad(out_ref, (x_ref, *parameters), grad_output)
     for actual_grad, expected_grad in zip(actual_grads, expected_grads):
         torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=atol)
+
+
+@pytest.mark.parametrize("attn_gate", ENABLED_ATTN_GATES)
+def test_mla_matches_ref_attn_gate(attn_gate):
+    torch.manual_seed(37)
+    mla = MultiHeadLatentAttention(
+        d_model=64,
+        n_heads=4,
+        qk_nope_head_dim=8,
+        qk_rope_head_dim=16,
+        v_head_dim=32,
+        kv_lora_rank=32,
+        q_lora_rank=24,
+        bias=True,
+        attn_implementation="sdpa",
+        attn_gate=attn_gate,
+    ).to(torch.float32)
+    gate_dim = 4 if attn_gate == "headwise" else 128
+    assert mla.gate_proj.in_features == 64
+    assert mla.gate_proj.out_features == gate_dim
+    assert mla.gate_proj.bias is not None
+    x = torch.randn(2, 8, 64, dtype=torch.float32, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
+    positions = torch.arange(8).repeat(2, 1)
+    positions[0, 3:] -= 3
+    positions[1, 5:] -= 5
+    mask, ref_mask = make_attn_mask("intra_doc", "sdpa", positions, torch.float32)
+    rope = RoPE(d_head=16, max_seq_len=8).to(torch.float32)
+    out = mla(x, rope=rope, position_ids=positions, attn_mask=mask)
+    out_ref = mla_ref(
+        x_ref,
+        getattr(mla, "q_proj", None),
+        mla.kv_a_proj,
+        mla.kv_b_proj,
+        mla.o_proj,
+        mla.n_heads,
+        mla.qk_nope_head_dim,
+        mla.qk_rope_head_dim,
+        mla.v_head_dim,
+        mla.kv_a_norm,
+        q_a_proj=getattr(mla, "q_a_proj", None),
+        q_a_norm=getattr(mla, "q_a_norm", None),
+        q_b_proj=getattr(mla, "q_b_proj", None),
+        rope=rope,
+        position_ids=positions,
+        attn_mask=ref_mask,
+        gate_proj=mla.gate_proj,
+    )
+    assert out.dtype == torch.float32
+    grad_output = torch.randn_like(out)
+    parameters = tuple(mla.parameters())
+    actual_grads = torch.autograd.grad(out, (x, *parameters), grad_output)
+    expected_grads = torch.autograd.grad(out_ref, (x_ref, *parameters), grad_output)
+    torch.testing.assert_close(out, out_ref, rtol=0, atol=GATED_ATTN_FORWARD_ATOL)
+    for actual, expected in zip(actual_grads, expected_grads):
+        assert actual.dtype == torch.float32
+        torch.testing.assert_close(
+            actual, expected, rtol=0, atol=GATED_ATTN_BACKWARD_ATOL
+        )
+    gate_gradient = dict(zip(dict(mla.named_parameters()), actual_grads[1:]))
+    assert torch.count_nonzero(gate_gradient["gate_proj.weight"])
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -761,7 +948,7 @@ def _make_mla(impl, dtype=None, q_lora_rank=0):
 
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 @pytest.mark.parametrize("kind", MASK_KIND)
-@pytest.mark.parametrize("q_lora_rank", [0, 24])
+@pytest.mark.parametrize("q_lora_rank", MLA_Q_LORA_RANKS)
 def test_mla_attn_mask_output_shape(kind, impl, q_lora_rank, device):
     skip_if_unsupported(impl, device)
     mla = _make_mla(impl, q_lora_rank=q_lora_rank)
@@ -827,7 +1014,7 @@ def test_mla_with_rope_output_shape(impl, device):
 @pytest.mark.parametrize("dtype,atol", COMPOUND_DTYPES)
 @pytest.mark.parametrize("impl", ATTN_IMPLEMENTATION)
 @pytest.mark.parametrize("kind", MASK_KIND)
-@pytest.mark.parametrize("q_lora_rank", [0, 24])
+@pytest.mark.parametrize("q_lora_rank", MLA_Q_LORA_RANKS)
 def test_mla_matches_ref_attn_mask(kind, impl, q_lora_rank, device, dtype, atol):
     skip_if_unsupported(impl, device)
     torch.manual_seed(0)
@@ -837,7 +1024,22 @@ def test_mla_matches_ref_attn_mask(kind, impl, q_lora_rank, device, dtype, atol)
     pos = torch.tensor([[0, 1, 0, 1]] if kind == "intra_doc" else [[0, 1, 2, 3]])
     attn_mask, ref_mask = make_attn_mask(kind, impl, pos, x.dtype)
     out = mla(x, attn_mask=attn_mask)
-    out_ref = mla_ref(mla, x, attn_mask=ref_mask)
+    out_ref = mla_ref(
+        x,
+        getattr(mla, "q_proj", None),
+        mla.kv_a_proj,
+        mla.kv_b_proj,
+        mla.o_proj,
+        mla.n_heads,
+        mla.qk_nope_head_dim,
+        mla.qk_rope_head_dim,
+        mla.v_head_dim,
+        mla.kv_a_norm,
+        q_a_proj=getattr(mla, "q_a_proj", None),
+        q_a_norm=getattr(mla, "q_a_norm", None),
+        q_b_proj=getattr(mla, "q_b_proj", None),
+        attn_mask=ref_mask,
+    )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
@@ -854,7 +1056,24 @@ def test_mla_with_rope_matches_ref(impl, device, dtype, atol):
     pos = torch.arange(8).unsqueeze(0).expand(2, -1)
     attn_mask, ref_mask = make_attn_mask("causal", impl, pos, x.dtype)
     out = mla(x, rope, position_ids=pos, attn_mask=attn_mask)
-    out_ref = mla_ref(mla, x, rope=rope, position_ids=pos, attn_mask=ref_mask)
+    out_ref = mla_ref(
+        x,
+        getattr(mla, "q_proj", None),
+        mla.kv_a_proj,
+        mla.kv_b_proj,
+        mla.o_proj,
+        mla.n_heads,
+        mla.qk_nope_head_dim,
+        mla.qk_rope_head_dim,
+        mla.v_head_dim,
+        mla.kv_a_norm,
+        q_a_proj=getattr(mla, "q_a_proj", None),
+        q_a_norm=getattr(mla, "q_a_norm", None),
+        q_b_proj=getattr(mla, "q_b_proj", None),
+        rope=rope,
+        position_ids=pos,
+        attn_mask=ref_mask,
+    )
     assert out.dtype == dtype
     assert torch.allclose(out, out_ref, atol=atol)
 
@@ -910,8 +1129,10 @@ def test_gqa_compute_flops_qk_norm():
         ),
     ],
 )
-def test_compute_parameters_matches_module(cls, kwargs):
+
+@pytest.mark.parametrize("attn_gate", ATTN_GATES)
+def test_compute_parameters_matches_module(cls, kwargs, attn_gate):
     d_model = 64
-    module = cls(d_model, **kwargs)
+    module = cls(d_model, **kwargs, attn_gate=attn_gate)
     actual = sum(p.numel() for p in module.parameters())
-    assert cls.compute_parameters(d_model, **kwargs) == actual
+    assert cls.compute_parameters(d_model, **kwargs, attn_gate=attn_gate) == actual
