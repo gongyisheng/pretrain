@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fixed-token batch-size, learning-rate, and minimum-learning-rate sweep.
-# Usage: bash experiments/batch_size/run.sh
+# Usage: nohup bash experiments/batch_size/run.sh > logs/batch_size.log 2>&1 &
 
 set -e
 cd "$(dirname "$0")/../.."
