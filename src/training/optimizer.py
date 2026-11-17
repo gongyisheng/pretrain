@@ -317,15 +317,126 @@ class MuonCOptimizer(MuonOptimizer):
                 group["weight_decay"] = weight_decay
 
 
+class MuonHOptimizer(MuonOptimizer):
+    """Muon on fixed Frobenius spheres. https://arxiv.org/abs/2606.16899"""
+
+    def __init__(
+        self,
+        params,
+        lr: float,
+        weight_decay: float = 0.0,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_coefficients=(3.4445, -4.7750, 2.0315),
+        ns_max_batch_elems: int = 8_000_000,
+        eps: float = 1e-8,
+        ns_steps: int = 5,
+        adjust_lr_fn: str | None = None,
+    ):
+        super().__init__(
+            params,
+            lr=lr,
+            weight_decay=0.0,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_coefficients=ns_coefficients,
+            ns_max_batch_elems=ns_max_batch_elems,
+            eps=eps,
+            ns_steps=ns_steps,
+            adjust_lr_fn=None,
+        )
+
+    def add_param_group(self, param_group):
+        param_group["weight_decay"] = 0.0
+        param_group["adjust_lr_fn"] = None
+        super().add_param_group(param_group)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            momentum = group["momentum"]
+            nesterov = group["nesterov"]
+
+            buckets: dict = {}
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                buckets.setdefault((tuple(p.shape), p.dtype, p.device), []).append(p)
+
+            for params in buckets.values():
+                grads = [p.grad for p in params]
+                momentum_buffers = []
+                for p in params:
+                    state = self.state[p]
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(p.grad)
+                    if "radius" not in state:
+                        state["radius"] = p.float().norm(dim=(-2, -1), keepdim=True)
+                    momentum_buffers.append(state["momentum_buffer"])
+
+                torch._foreach_lerp_(momentum_buffers, grads, 1 - momentum)
+                updates = (
+                    torch._foreach_lerp(grads, momentum_buffers, momentum)
+                    if nesterov
+                    else momentum_buffers
+                )
+
+                if lr == 0.0:
+                    continue
+
+                ortho = _newton_schulz(
+                    torch.stack(updates),
+                    group["ns_coefficients"],
+                    group["ns_max_batch_elems"],
+                    group["ns_steps"],
+                    group["eps"],
+                )
+
+                for p, direction in zip(params, ortho.unbind(0)):
+                    radius = self.state[p]["radius"]
+                    direction = direction.float()
+                    direction_norm = direction.norm(dim=(-2, -1), keepdim=True)
+                    direction = direction / direction_norm.clamp(min=group["eps"])
+                    trial = p.float() - lr * radius * direction
+                    trial_norm = trial.norm(dim=(-2, -1), keepdim=True)
+                    projected = radius * trial / trial_norm.clamp(min=group["eps"])
+                    p.copy_(
+                        torch.where(
+                            (direction_norm > 0) & (trial_norm > 0), projected, p
+                        )
+                    )
+        return loss
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # The base loader casts floating state to the parameter dtype.
+        for group, saved_group in zip(self.param_groups, state_dict["param_groups"]):
+            for param, saved_id in zip(group["params"], saved_group["params"]):
+                saved_state = state_dict["state"].get(saved_id, {})
+                if "radius" in saved_state:
+                    self.state[param]["radius"] = (
+                        saved_state["radius"]
+                        .to(device=param.device, dtype=torch.float32)
+                        .clone()
+                    )
+
+
 MUON_OPTIMIZER_REGISTRY = {
     "muon": MuonOptimizer,
     "muonc": MuonCOptimizer,
     "muons": MuonOptimizer,
+    "muonh": MuonHOptimizer,
 }
 
 
 class MuonAdamOptimizer:
-    """Muon or MuonC for selected matrices, AdamW or AdamC for other weights.
+    """Muon variants for selected matrices, AdamW or AdamC for other weights.
 
     Muon: https://kellerjordan.github.io/posts/muon/
     MuonS: https://openreview.net/forum?id=ppmyFtr9EW
@@ -438,7 +549,7 @@ def build_optimizer(
                 matched = key
                 break
         is_no_decay = param.ndim < 2 or "ln" in param_name or "bias" in param_name
-        if muon_cls in ("muon", "muonc"):
+        if muon_cls in ("muon", "muonc", "muonh"):
             use_muon = _is_muon_param(param_name, param)
         elif muon_cls == "muons":
             use_muon = _is_muons_param(param)

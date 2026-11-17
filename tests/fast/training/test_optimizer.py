@@ -21,6 +21,7 @@ from src.training.optimizer import (
     LionOptimizer,
     MuonOptimizer,
     MuonCOptimizer,
+    MuonHOptimizer,
     MuonAdamOptimizer,
     build_optimizer,
     build_scheduler,
@@ -28,7 +29,7 @@ from src.training.optimizer import (
     CosineWarmupScheduler,
 )
 
-MUON_CLASSES = ["muon", "muonc", "muons"]
+MUON_CLASSES = ["muon", "muonc", "muons", "muonh"]
 
 
 # --------------------------------------------------------------------------- #
@@ -528,7 +529,9 @@ def test_build_optimizer_muon_nested_kwargs(muon_cls):
     assert opt.muon.param_groups[0]["momentum"] == 0.8
     assert not opt.muon.param_groups[0]["nesterov"]
     assert opt.muon.param_groups[0]["ns_steps"] == 3
-    assert opt.muon.param_groups[0]["adjust_lr_fn"] == "original"
+    assert opt.muon.param_groups[0]["adjust_lr_fn"] == (
+        None if muon_cls == "muonh" else "original"
+    )
     assert opt.muon.param_groups[0]["eps"] == 1e-7
     assert opt.adam.defaults["betas"] == (0.8, 0.9)
     assert opt.adam.defaults["eps"] == 1e-7
@@ -590,7 +593,15 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
     opt = build_optimizer(model, cfg)
 
     assert isinstance(opt, MuonAdamOptimizer)
-    assert type(opt.muon) is (MuonCOptimizer if muon_cls == "muonc" else MuonOptimizer)
+    assert (
+        type(opt.muon)
+        is {
+            "muon": MuonOptimizer,
+            "muonc": MuonCOptimizer,
+            "muons": MuonOptimizer,
+            "muonh": MuonHOptimizer,
+        }[muon_cls]
+    )
     assert type(opt.adam) is (AdamWOptimizer if adam_cls == "adamw" else AdamCOptimizer)
     assert opt.muon.param_groups[0]["ns_steps"] == 5
     assert opt.muon.param_groups[0]["ns_coefficients"] == (3.4445, -4.7750, 2.0315)
@@ -657,6 +668,14 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
                 )
 
     for group in opt.param_groups:
+        if muon_cls == "muonh":
+            assert group["weight_decay"] == (
+                0.0
+                if group["use_muon"] or group["params"][0].ndim < 2
+                else cfg.optimizer.weight_decay
+            )
+            if group["use_muon"]:
+                assert group["adjust_lr_fn"] is None
         if group["use_corrected_weight_decay"]:
             assert group["lr"] == cfg.optimizer.lr * group["lr_mult"]
             assert group["max_lr"] == cfg.optimizer.lr * group["lr_mult"]
@@ -798,6 +817,192 @@ def test_muon_rejects_1d_param():
     p = torch.nn.Parameter(torch.zeros(4))
     with pytest.raises(ValueError, match="ndim>=2"):
         MuonOptimizer([p], lr=1e-3)
+
+
+MUONH_SHAPES = [(8, 5), (5, 8), (3, 8, 5)]
+MUONH_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+MUONH_RADIUS_ATOL = {
+    torch.float32: 5.8e-6,
+    torch.float16: 9.3e-3,
+    torch.bfloat16: 8.8e-2,
+}
+MUONH_NOOP_CASES = [
+    "zero_lr",
+    "missing_gradient",
+    "zero_direction",
+    "zero_radius",
+    "zero_trial",
+]
+
+
+@pytest.mark.parametrize("shape", MUONH_SHAPES)
+@pytest.mark.parametrize("dtype", MUONH_DTYPES)
+@pytest.mark.parametrize("nesterov", [False, True])
+@pytest.mark.parametrize("n_params", [1, 2])
+def test_muonhoptimizer_step_precision(shape, dtype, nesterov, n_params):
+    torch.manual_seed(8)
+    params = [
+        torch.nn.Parameter(torch.randn(shape, dtype=dtype) * (index + 1))
+        for index in range(n_params)
+    ]
+    expected = [param.detach().clone() for param in params]
+    radii = [param.float().norm(dim=(-2, -1), keepdim=True) for param in expected]
+    references = [
+        [
+            torch.nn.Parameter(matrix.clone())
+            for matrix in param.reshape(-1, *shape[-2:])
+        ]
+        for param in params
+    ]
+    reference_optimizers = [
+        MuonOptimizer(
+            [matrix],
+            lr=1 / math.sqrt(max(1, shape[-2] / shape[-1])),
+            weight_decay=0.0,
+            momentum=0.8,
+            nesterov=nesterov,
+            adjust_lr_fn="original",
+        )
+        for matrices in references
+        for matrix in matrices
+    ]
+    optimizer = MuonHOptimizer(
+        params,
+        lr=0.07,
+        momentum=0.8,
+        nesterov=nesterov,
+        ns_max_batch_elems=40,
+    )
+    for _ in range(4):
+        for param, matrices in zip(params, references):
+            param.grad = torch.randn_like(param)
+            for matrix, gradient in zip(matrices, param.grad.reshape(-1, *shape[-2:])):
+                matrix.data.zero_()
+                matrix.grad = gradient.clone()
+        for reference in reference_optimizers:
+            reference.step()
+        optimizer.step()
+        for index, (param, matrices, radius) in enumerate(
+            zip(params, references, radii)
+        ):
+            direction = -torch.stack(
+                [matrix.detach().float() for matrix in matrices]
+            ).reshape(shape)
+            direction /= direction.norm(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+            trial = expected[index].float() - 0.07 * radius * direction
+            expected[index] = (
+                radius * trial / trial.norm(dim=(-2, -1), keepdim=True)
+            ).to(dtype)
+            torch.testing.assert_close(
+                param,
+                expected[index],
+                atol=7.2e-7 if dtype == torch.float32 else 0,
+                rtol=0,
+            )
+            assert param.dtype == dtype
+            assert optimizer.state[param]["radius"].dtype == torch.float32
+            assert torch.equal(optimizer.state[param]["radius"], radius)
+            torch.testing.assert_close(
+                param.float().norm(dim=(-2, -1), keepdim=True),
+                radius,
+                atol=MUONH_RADIUS_ATOL[dtype],
+                rtol=0,
+            )
+
+
+@pytest.mark.parametrize("case", MUONH_NOOP_CASES)
+@pytest.mark.parametrize("dtype", MUONH_DTYPES)
+def test_muonhoptimizer_step_noop(case, dtype):
+    torch.manual_seed(9)
+    initial = (
+        torch.ones(3, 1, 1, dtype=dtype)
+        if case == "zero_trial"
+        else torch.randn(3, 8, 5, dtype=dtype)
+    )
+    if case == "zero_radius":
+        initial.zero_()
+    param = torch.nn.Parameter(initial)
+    optimizer = MuonHOptimizer(
+        [param],
+        lr=1.0 if case == "zero_trial" else 0.07,
+        momentum=0.0,
+        nesterov=False,
+        ns_steps=0,
+    )
+    if case in ("zero_lr", "missing_gradient", "zero_direction"):
+        param.grad = torch.randn_like(param)
+        optimizer.step()
+    before = param.detach().clone()
+    state_before = copy.deepcopy(optimizer.state[param])
+    param.grad = torch.ones_like(param)
+    if case == "zero_lr":
+        optimizer.param_groups[0]["lr"] = 0.0
+    elif case == "missing_gradient":
+        param.grad = None
+    elif case == "zero_direction":
+        param.grad.zero_()
+    optimizer.step()
+    assert torch.equal(param, before)
+    assert torch.isfinite(param).all()
+    if case == "missing_gradient":
+        for key, value in state_before.items():
+            assert torch.equal(optimizer.state[param][key], value)
+
+
+@pytest.mark.parametrize("shape", MUONH_SHAPES)
+@pytest.mark.parametrize("explicit_options", [False, True])
+def test_muonhoptimizer_add_param_group(shape, explicit_options):
+    torch.manual_seed(11)
+    initial = torch.randn(shape)
+    original = torch.nn.Parameter(initial.clone())
+    added = torch.nn.Parameter(initial.clone())
+    optimizer = MuonHOptimizer([original], lr=0.1, momentum=0.0, ns_steps=0)
+    group = {"params": [added]}
+    if explicit_options:
+        group.update(weight_decay=0.7, adjust_lr_fn="original")
+    optimizer.add_param_group(group)
+    gradient = torch.randn_like(original)
+    original.grad = gradient.clone()
+    added.grad = gradient.clone()
+    optimizer.step()
+    assert torch.equal(added, original)
+    assert not torch.equal(added, initial)
+    radius = initial.norm(dim=(-2, -1), keepdim=True)
+    assert torch.equal(optimizer.state[added]["radius"], radius)
+    torch.testing.assert_close(
+        added.norm(dim=(-2, -1), keepdim=True),
+        radius,
+        atol=5.8e-6,
+        rtol=0,
+    )
+    assert optimizer.param_groups[-1]["weight_decay"] == 0.0
+    assert optimizer.param_groups[-1]["adjust_lr_fn"] is None
+
+
+@pytest.mark.parametrize("dtype", MUONH_DTYPES)
+def test_muonhoptimizer_load_state_dict_precision(dtype):
+    torch.manual_seed(10)
+    param = torch.nn.Parameter(torch.randn(3, 8, 5, dtype=dtype))
+    optimizer = MuonHOptimizer([param], lr=0.07)
+    param.grad = torch.randn_like(param)
+    optimizer.step()
+    saved = copy.deepcopy(optimizer.state_dict())
+    for state in saved["state"].values():
+        state["radius"] = state["radius"].cpu()
+    restored_param = torch.nn.Parameter(param.detach().clone())
+    restored = MuonHOptimizer([restored_param], lr=0.07)
+    restored.load_state_dict(saved)
+    radius = restored.state[restored_param]["radius"]
+    assert radius.dtype == torch.float32
+    assert radius.device == restored_param.device
+    assert torch.equal(radius, optimizer.state[param]["radius"])
+    for _ in range(3):
+        gradient = torch.randn_like(param)
+        param.grad = gradient.clone()
+        restored_param.grad = gradient.clone()
+        optimizer.step()
+        restored.step()
+        assert torch.equal(param, restored_param)
 
 
 @pytest.mark.parametrize("muon_cls", MUON_CLASSES)

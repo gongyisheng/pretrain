@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import math
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 import yaml
@@ -28,6 +29,8 @@ from src.training.optimizer import (
 _MIXED_PRECISION = frozenset({"no", "bf16", "fp16"})
 _DEVICES = frozenset({"auto", "cuda", "cpu"})
 _SCALE_DTYPES = frozenset({"fp32", "fp8_e8m0", "fp8_e4m3"})
+INIT_METHODS = frozenset({"fixed", "lecun", "xavier", "kaiming"})
+INIT_DISTRIBUTIONS = frozenset({"normal", "uniform"})
 
 
 def _check_value(label, value, options) -> None:
@@ -74,10 +77,26 @@ class ModelConfig:
     dropout_embd: float = 0.0
     tie_word_embeddings: bool = True
     lm_head_bias: bool = False
+    init_method: str = "fixed"
+    init_distribution: str = "normal"
+    init_std: float = 0.02
 
     def __post_init__(self):
+        self._validate_init()
         self._post_init_attn()
         self._post_init_mlp()
+
+    def _validate_init(self) -> None:
+        _check_value("init_method", self.init_method, INIT_METHODS)
+        _check_value("init_distribution", self.init_distribution, INIT_DISTRIBUTIONS)
+        if (
+            isinstance(self.init_std, bool)
+            or not isinstance(self.init_std, (int, float))
+            or not math.isfinite(self.init_std)
+            or self.init_std <= 0
+        ):
+            raise ValueError("init_std must be a finite positive number")
+        self.init_std = float(self.init_std)
 
     def _set_default_attn_kwargs(self, attn_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one attn item's kwargs, keyed on attn_cls."""
@@ -634,6 +653,8 @@ class OptimizerConfig:
                 muon_kwargs = {}
                 kwargs["muon_kwargs"] = muon_kwargs
             self._post_init_muon(muon_kwargs)
+            if muon_cls == "muonh":
+                muon_kwargs["adjust_lr_fn"] = None
             adam_cls = kwargs.setdefault("adam_cls", "adamw")
             _check_value("adam_cls", adam_cls, ADAM_OPTIMIZER_REGISTRY)
             adam_kwargs = kwargs.setdefault("adam_kwargs", {})
@@ -824,5 +845,6 @@ def load_config(path: str, overrides: Optional[List[str]] = None) -> TrainConfig
         _coerce_kwargs(item["mlp_kwargs"])
     if overrides:
         _apply_overrides(config, overrides)
+        config.model._validate_init()
 
     return config

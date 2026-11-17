@@ -7,6 +7,8 @@ import torch
 import yaml
 
 from src.utils.config import (
+    INIT_DISTRIBUTIONS,
+    INIT_METHODS,
     ModelConfig,
     TrainConfig,
     load_config,
@@ -15,11 +17,42 @@ from src.utils.config import (
     QuantizationConfig,
 )
 
-MUON_CLASSES = ["muon", "muonc", "muons"]
+MUON_CLASSES = ["muon", "muonc", "muons", "muonh"]
 
 
 SCALE_TENSORS = ("weight", "act", "grad_out")
 QUANTIZATION_ENABLED = [False, True]
+INITIALIZATION_METHODS = sorted(INIT_METHODS)
+INITIALIZATION_DISTRIBUTIONS = sorted(INIT_DISTRIBUTIONS)
+INVALID_INITIALIZATION = [
+    ("init_method", "unknown"),
+    ("init_method", []),
+    ("init_method", None),
+    ("init_distribution", "unknown"),
+    ("init_distribution", []),
+    ("init_distribution", None),
+    ("init_std", 0),
+    ("init_std", -0.1),
+    ("init_std", float("nan")),
+    ("init_std", float("inf")),
+    ("init_std", -float("inf")),
+    ("init_std", True),
+    ("init_std", "0.02"),
+    ("init_std", None),
+    ("init_std", []),
+]
+INVALID_INITIALIZATION_OVERRIDES = [
+    "model.init_method=unknown",
+    "model.init_method=null",
+    "model.init_distribution=unknown",
+    "model.init_distribution=null",
+    "model.init_std=0",
+    "model.init_std=-0.1",
+    "model.init_std=nan",
+    "model.init_std=inf",
+    "model.init_std=-inf",
+    "model.init_std=null",
+]
 
 
 def _scale_config(
@@ -132,6 +165,51 @@ def test_model_config_defaults():
     assert cfg.norm_kwargs == {}
     assert cfg.pos_emb_kwargs == {}
     assert cfg.residual_kwargs == {}
+    assert cfg.init_method == "fixed"
+    assert cfg.init_distribution == "normal"
+    assert cfg.init_std == 0.02
+
+
+@pytest.mark.parametrize("method", INITIALIZATION_METHODS)
+@pytest.mark.parametrize("distribution", INITIALIZATION_DISTRIBUTIONS)
+def test_model_config_initialization(tmp_path, method, distribution):
+    choices = {
+        "init_method": method,
+        "init_distribution": distribution,
+        "init_std": 0.037,
+    }
+    direct = ModelConfig(**choices)
+    assert {key: getattr(direct, key) for key in choices} == choices
+    assert isinstance(direct.init_std, float)
+    raw = copy.deepcopy(MINIMAL_CONFIG)
+    raw["model"].update(choices)
+    raw["model"]["init_std"] = "0.037"
+    loaded = load_config(_write_yaml(tmp_path, raw))
+    exported = loaded.to_dict()
+    assert {key: exported["model"][key] for key in choices} == choices
+    assert load_config(_write_yaml(tmp_path, exported)).to_dict() == exported
+    overridden = load_config(
+        _write_yaml(tmp_path, MINIMAL_CONFIG),
+        [f"model.{key}={value}" for key, value in choices.items()],
+    )
+    assert {key: getattr(overridden.model, key) for key in choices} == choices
+    raw["model"]["init_std"] = 1
+    overridden = load_config(_write_yaml(tmp_path, raw), ["model.init_std=0.037"])
+    assert overridden.model.init_std == 0.037
+    assert isinstance(overridden.model.init_std, float)
+
+
+@pytest.mark.parametrize("case", INVALID_INITIALIZATION)
+def test_model_config_initialization_raise_error(case):
+    key, value = case
+    with pytest.raises(ValueError):
+        ModelConfig(**{key: value})
+
+
+@pytest.mark.parametrize("override", INVALID_INITIALIZATION_OVERRIDES)
+def test_load_config_initialization_raise_error(tmp_path, override):
+    with pytest.raises(ValueError):
+        load_config(_write_yaml(tmp_path, MINIMAL_CONFIG), [override])
 
 
 # ==================== Loading from YAML ====================
@@ -1098,7 +1176,7 @@ def test_optimizer_config_muon_nested_kwargs(muon_cls, adam_cls):
             "momentum": 0.8,
             "ns_steps": 3,
             "nesterov": True,
-            "adjust_lr_fn": "match_rms_adamw",
+            "adjust_lr_fn": None if muon_cls == "muonh" else "match_rms_adamw",
             "eps": 1e-8,
         },
         "adam_cls": adam_cls,

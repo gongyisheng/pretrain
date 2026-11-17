@@ -1,7 +1,10 @@
+import math
+from functools import partial
+
 import torch.nn as nn
 
 from src.layers.block import TransformerBlock
-from src.layers.mlp import SparseMoEBlock
+from src.layers.mlp import MoERouter, SparseMoEBlock
 from src.layers.norm import NORM_REGISTRY
 from src.layers.pos_emb import POS_EMB_REGISTRY
 from src.utils.config import ModelConfig
@@ -43,23 +46,52 @@ class TransformerLM(nn.Module):
         self.lm_head = nn.Linear(
             config.d_model, self.padded_vocab_size, bias=config.lm_head_bias
         )
+        scaled_weights = set()
+        for block in self.blocks:
+            for component in (block.attn, block.mlp):
+                for module in component.modules():
+                    if isinstance(module, nn.Linear):
+                        scaled_weights.add(module.weight)
+                    elif isinstance(module, SparseMoEBlock):
+                        scaled_weights.update((module.expert_up, module.expert_down))
+                        if module.gated:
+                            scaled_weights.add(module.expert_gate)
+                for module in component.modules():
+                    if isinstance(module, MoERouter):
+                        scaled_weights.discard(module.gate.weight)
+
+        self.apply(partial(self._init_weights, scaled_weights=scaled_weights))
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.token_emb.weight
+            # Retain the legacy final draw for tied embeddings without reinitializing it.
+            self.token_emb.weight = self.lm_head.weight
 
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
+    def _init_weights(self, module, scaled_weights):
+        config = self.config
+        weights = []
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            weights.append(module.weight)
+            if isinstance(module, nn.Linear) and module.bias is not None:
                 nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
         elif isinstance(module, SparseMoEBlock):
-            nn.init.normal_(module.expert_up, mean=0.0, std=0.02)
+            weights.append(module.expert_up)
             if module.gated:
-                nn.init.normal_(module.expert_gate, mean=0.0, std=0.02)
-            nn.init.normal_(module.expert_down, mean=0.0, std=0.02)
+                weights.append(module.expert_gate)
+            weights.append(module.expert_down)
+        for weight in weights:
+            std = config.init_std
+            if weight in scaled_weights and config.init_method != "fixed":
+                fan_out, fan_in = weight.shape[-2:]
+                if config.init_method == "lecun":
+                    std = 1 / math.sqrt(fan_in)
+                elif config.init_method == "xavier":
+                    std = math.sqrt(2 / (fan_in + fan_out))
+                else:
+                    std = math.sqrt(2 / fan_in)
+            if config.init_distribution == "normal":
+                nn.init.normal_(weight, mean=0.0, std=std)
+            else:
+                bound = math.sqrt(3) * std
+                nn.init.uniform_(weight, -bound, bound)
 
     @staticmethod
     def compute_flops(config: ModelConfig, max_seq_len: int) -> int:
