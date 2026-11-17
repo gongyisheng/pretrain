@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run the AdamC weight-decay sweep.
-# Usage: nohup bash experiments/adamc_weight_decay/run.sh > logs/adamc_weight_decay.log 2>&1 &
+# Usage: nohup bash experiments/adamc_weight_decay/run_adamc.sh > logs/adamc_weight_decay_adamc.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
