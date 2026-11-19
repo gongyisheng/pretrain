@@ -80,6 +80,7 @@ class ModelConfig:
     init_method: str = "fixed"
     init_distribution: str = "normal"
     init_std: float = 0.02
+    init_std_gain: float = 1.0
 
     def __post_init__(self):
         self._validate_init()
@@ -89,14 +90,16 @@ class ModelConfig:
     def _validate_init(self) -> None:
         _check_value("init_method", self.init_method, INIT_METHODS)
         _check_value("init_distribution", self.init_distribution, INIT_DISTRIBUTIONS)
-        if (
-            isinstance(self.init_std, bool)
-            or not isinstance(self.init_std, (int, float))
-            or not math.isfinite(self.init_std)
-            or self.init_std <= 0
-        ):
-            raise ValueError("init_std must be a finite positive number")
-        self.init_std = float(self.init_std)
+        for name in ("init_std", "init_std_gain"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a finite positive number")
+            setattr(self, name, float(value))
 
     def _set_default_attn_kwargs(self, attn_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one attn item's kwargs, keyed on attn_cls."""
@@ -615,34 +618,38 @@ class TrainingConfig:
 
 @dataclass
 class OptimizerConfig:
-    optimizer_cls: str = "adamw"  # "adamw" | "adamc" | "lion" | "muonadam"
+    optimizer_cls: str = "adamw"  # "adamw" | "adamc" | "adamh" | "lion" | "muonadam"
     lr: float = 5e-4
     lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
     weight_decay: float = 0.1
     optimizer_kwargs: dict = field(default_factory=dict)
 
-    def _post_init_adam(self, kwargs: dict) -> None:
-        # beta2=0.95 (not torch's 0.999) is the GPT-3/LLaMA setting.
-        kwargs.setdefault("betas", (0.9, 0.95))
+    def _post_init_adam(self, adam_cls: str, kwargs: dict) -> None:
+        kwargs.setdefault("betas", (0.9, 0.99))
         kwargs.setdefault("eps", 1e-8)
-        kwargs.setdefault("fused", True)
+        if adam_cls == "adamh":
+            kwargs["fused"] = False
+        else:
+            kwargs.setdefault("fused", True)
 
     def _post_init_lion(self, kwargs: dict) -> None:
         kwargs.setdefault("betas", (0.9, 0.99))  # Chen et al. 2023 default
         kwargs.setdefault("foreach", True)
 
-    def _post_init_muon(self, kwargs: dict) -> None:
+    def _post_init_muon(self, muon_cls: str, kwargs: dict) -> None:
         kwargs.setdefault("momentum", 0.95)
         kwargs.setdefault("nesterov", True)
         # Rescale Muon's update RMS to AdamW's so both halves share one lr.
         kwargs.setdefault("adjust_lr_fn", "match_rms_adamw")
         kwargs.setdefault("eps", 1e-8)
+        if muon_cls == "muonh":
+            kwargs["adjust_lr_fn"] = None
 
     def __post_init__(self):
         _check_value("optimizer_cls", self.optimizer_cls, OPTIMIZER_REGISTRY)
         kwargs = self.optimizer_kwargs
         if self.optimizer_cls in ADAM_OPTIMIZER_REGISTRY:
-            self._post_init_adam(kwargs)
+            self._post_init_adam(self.optimizer_cls, kwargs)
         elif self.optimizer_cls == "lion":
             self._post_init_lion(kwargs)
         elif self.optimizer_cls == "muonadam":
@@ -652,16 +659,14 @@ class OptimizerConfig:
             if not isinstance(muon_kwargs, dict):
                 muon_kwargs = {}
                 kwargs["muon_kwargs"] = muon_kwargs
-            self._post_init_muon(muon_kwargs)
-            if muon_cls == "muonh":
-                muon_kwargs["adjust_lr_fn"] = None
+            self._post_init_muon(muon_cls, muon_kwargs)
             adam_cls = kwargs.setdefault("adam_cls", "adamw")
             _check_value("adam_cls", adam_cls, ADAM_OPTIMIZER_REGISTRY)
             adam_kwargs = kwargs.setdefault("adam_kwargs", {})
             if not isinstance(adam_kwargs, dict):
                 adam_kwargs = {}
                 kwargs["adam_kwargs"] = adam_kwargs
-            self._post_init_adam(adam_kwargs)
+            self._post_init_adam(adam_cls, adam_kwargs)
 
 
 @dataclass

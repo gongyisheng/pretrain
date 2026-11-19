@@ -18,6 +18,7 @@ from src.utils.config import (
 )
 
 MUON_CLASSES = ["muon", "muonc", "muons", "muonh"]
+ADAM_CLASSES = ["adamw", "adamc", "adamh"]
 
 
 SCALE_TENSORS = ("weight", "act", "grad_out")
@@ -31,15 +32,21 @@ INVALID_INITIALIZATION = [
     ("init_distribution", "unknown"),
     ("init_distribution", []),
     ("init_distribution", None),
-    ("init_std", 0),
-    ("init_std", -0.1),
-    ("init_std", float("nan")),
-    ("init_std", float("inf")),
-    ("init_std", -float("inf")),
-    ("init_std", True),
-    ("init_std", "0.02"),
-    ("init_std", None),
-    ("init_std", []),
+    *[
+        (field, value)
+        for field in ("init_std", "init_std_gain")
+        for value in [
+            0,
+            -0.1,
+            float("nan"),
+            float("inf"),
+            -float("inf"),
+            True,
+            "0.02",
+            None,
+            [],
+        ]
+    ],
 ]
 INVALID_INITIALIZATION_OVERRIDES = [
     "model.init_method=unknown",
@@ -52,6 +59,20 @@ INVALID_INITIALIZATION_OVERRIDES = [
     "model.init_std=inf",
     "model.init_std=-inf",
     "model.init_std=null",
+    *[
+        f"model.init_std_gain={value}"
+        for value in [
+            "0",
+            "-0.1",
+            "nan",
+            "inf",
+            "-inf",
+            "true",
+            "invalid",
+            "null",
+            "[]",
+        ]
+    ],
 ]
 
 
@@ -168,6 +189,8 @@ def test_model_config_defaults():
     assert cfg.init_method == "fixed"
     assert cfg.init_distribution == "normal"
     assert cfg.init_std == 0.02
+    assert cfg.init_std_gain == 1.0
+    assert isinstance(cfg.init_std_gain, float)
 
 
 @pytest.mark.parametrize("method", INITIALIZATION_METHODS)
@@ -177,22 +200,30 @@ def test_model_config_initialization(tmp_path, method, distribution):
         "init_method": method,
         "init_distribution": distribution,
         "init_std": 0.037,
+        "init_std_gain": 0.5,
     }
     direct = ModelConfig(**choices)
     assert {key: getattr(direct, key) for key in choices} == choices
     assert isinstance(direct.init_std, float)
+    assert isinstance(direct.init_std_gain, float)
+    integer_gain = ModelConfig(**(choices | {"init_std_gain": 2}))
+    assert integer_gain.init_std_gain == 2.0
+    assert isinstance(integer_gain.init_std_gain, float)
     raw = copy.deepcopy(MINIMAL_CONFIG)
     raw["model"].update(choices)
     raw["model"]["init_std"] = "0.037"
+    raw["model"]["init_std_gain"] = "0.5"
     loaded = load_config(_write_yaml(tmp_path, raw))
     exported = loaded.to_dict()
     assert {key: exported["model"][key] for key in choices} == choices
+    assert isinstance(exported["model"]["init_std_gain"], float)
     assert load_config(_write_yaml(tmp_path, exported)).to_dict() == exported
     overridden = load_config(
         _write_yaml(tmp_path, MINIMAL_CONFIG),
         [f"model.{key}={value}" for key, value in choices.items()],
     )
     assert {key: getattr(overridden.model, key) for key in choices} == choices
+    assert isinstance(overridden.model.init_std_gain, float)
     raw["model"]["init_std"] = 1
     overridden = load_config(_write_yaml(tmp_path, raw), ["model.init_std=0.037"])
     assert overridden.model.init_std == 0.037
@@ -393,14 +424,14 @@ def test_load_config_optimizer_defaults(tmp_path):
     config = load_config(_write_yaml(tmp_path, raw)).optimizer
     assert (config.optimizer_cls, config.lr) == ("adamw", 5e-4)
     assert config.optimizer_kwargs == {
-        "betas": (0.9, 0.95),
+        "betas": (0.9, 0.99),
         "eps": 1e-8,
         "fused": True,
     }
 
 
 @pytest.mark.parametrize("muon_cls", MUON_CLASSES)
-@pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
+@pytest.mark.parametrize("adam_cls", ADAM_CLASSES)
 def test_load_config_optimizer_nested_kwargs(tmp_path, muon_cls, adam_cls):
     raw = copy.deepcopy(MINIMAL_CONFIG)
     raw["optimizer"] = {
@@ -419,6 +450,7 @@ def test_load_config_optimizer_nested_kwargs(tmp_path, muon_cls, adam_cls):
     assert config.optimizer_kwargs["muon_kwargs"]["eps"] == 1e-6
     assert config.optimizer_kwargs["adam_cls"] == adam_cls
     assert config.optimizer_kwargs["adam_kwargs"]["eps"] == 1e-7
+    assert config.optimizer_kwargs["adam_kwargs"]["fused"] is (adam_cls != "adamh")
 
 
 def test_load_config_overrides(tmp_path):
@@ -1115,8 +1147,9 @@ def test_scheduler_unknown_name_raises():
 
 
 OPTIMIZER_DEFAULT_CASES = [
-    ("adamw", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
-    ("adamc", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
+    ("adamw", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True}),
+    ("adamc", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True}),
+    ("adamh", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": False}),
     ("lion", {"betas": (0.9, 0.99), "foreach": True}),
     (
         "muonadam",
@@ -1130,7 +1163,7 @@ OPTIMIZER_DEFAULT_CASES = [
             },
             "adam_cls": "adamw",
             "adam_kwargs": {
-                "betas": (0.9, 0.95),
+                "betas": (0.9, 0.99),
                 "eps": 1e-8,
                 "fused": True,
             },
@@ -1146,19 +1179,31 @@ def test_optimizer_config_defaults(case):
     optimizer_cls, expected = case
     # Unset kwargs get the pretraining-tuned defaults for the selected optimizer.
     assert OptimizerConfig(optimizer_cls, lr=1e-3).optimizer_kwargs == expected
+    if optimizer_cls == "adamh":
+        assert (
+            OptimizerConfig(
+                optimizer_cls, lr=1e-3, optimizer_kwargs={"fused": False}
+            ).optimizer_kwargs
+            == expected
+        )
     if optimizer_cls == "muonadam":
         return
-    # An explicit value wins; the remaining keys are still filled in.
+    # An explicit value wins, except AdamH always disables fusion.
     for key in expected:
-        cfg = OptimizerConfig(optimizer_cls, lr=1e-3, optimizer_kwargs={key: "set"})
-        assert cfg.optimizer_kwargs == {**expected, key: "set"}
+        value = True if (optimizer_cls, key) == ("adamh", "fused") else "set"
+        cfg = OptimizerConfig(optimizer_cls, lr=1e-3, optimizer_kwargs={key: value})
+        expected_kwargs = {**expected, key: value}
+        if (optimizer_cls, key) == ("adamh", "fused"):
+            expected_kwargs["fused"] = False
+        assert cfg.optimizer_kwargs == expected_kwargs
 
 
 @pytest.mark.parametrize("muon_cls", MUON_CLASSES)
-@pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
+@pytest.mark.parametrize("adam_cls", ADAM_CLASSES)
 def test_optimizer_config_muon_nested_kwargs(muon_cls, adam_cls):
     from src.utils.config import OptimizerConfig
 
+    adam_kwargs = {"betas": (0.8, 0.9), "fused": False}
     cfg = OptimizerConfig(
         "muonadam",
         lr=1e-3,
@@ -1166,7 +1211,7 @@ def test_optimizer_config_muon_nested_kwargs(muon_cls, adam_cls):
             "muon_cls": muon_cls,
             "muon_kwargs": {"momentum": 0.8, "ns_steps": 3},
             "adam_cls": adam_cls,
-            "adam_kwargs": {"betas": (0.8, 0.9), "fused": False},
+            "adam_kwargs": adam_kwargs.copy(),
         },
     )
 
@@ -1180,7 +1225,7 @@ def test_optimizer_config_muon_nested_kwargs(muon_cls, adam_cls):
             "eps": 1e-8,
         },
         "adam_cls": adam_cls,
-        "adam_kwargs": {"betas": (0.8, 0.9), "eps": 1e-8, "fused": False},
+        "adam_kwargs": {**adam_kwargs, "eps": 1e-8},
     }
 
 
@@ -1195,7 +1240,7 @@ INVALID_MUON_KWARGS_CASES = [
             "eps": 1e-8,
         },
     ),
-    ("adam_kwargs", "invalid", {"betas": (0.9, 0.95), "eps": 1e-8, "fused": True}),
+    ("adam_kwargs", "invalid", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True}),
 ]
 
 

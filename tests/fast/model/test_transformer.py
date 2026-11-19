@@ -16,11 +16,13 @@ from tests.fast.layers.helper import (
 
 INITIALIZATION_METHODS = sorted(INIT_METHODS)
 INITIALIZATION_DISTRIBUTIONS = sorted(INIT_DISTRIBUTIONS)
+INITIALIZATION_GAINS = [0.5, 1.0, 2.0]
 
 
 @pytest.mark.parametrize("method", INITIALIZATION_METHODS)
 @pytest.mark.parametrize("distribution", INITIALIZATION_DISTRIBUTIONS)
-def test_transformer_lm_initialization(method, distribution):
+@pytest.mark.parametrize("gain", INITIALIZATION_GAINS)
+def test_transformer_lm_initialization(method, distribution, gain):
     config = ModelConfig(
         d_model=64,
         n_layers=2,
@@ -56,21 +58,18 @@ def test_transformer_lm_initialization(method, distribution):
         norm_cls="layernorm",
         pos_emb_cls="learned",
         residual_cls="attn_res",
-        tie_word_embeddings=True,
+        tie_word_embeddings=False,
         lm_head_bias=True,
         init_method=method,
         init_distribution=distribution,
         init_std=0.037,
+        init_std_gain=gain,
     )
     torch.manual_seed(173)
     model = TransformerLM(config, max_seq_len=16)
+    config.init_std_gain = 1.0
     torch.manual_seed(173)
-    repeated = TransformerLM(config, max_seq_len=16)
-    assert model.token_emb.weight is model.lm_head.weight
-    assert all(
-        torch.equal(value, repeated.state_dict()[name])
-        for name, value in model.state_dict().items()
-    )
+    unit_gain = TransformerLM(config, max_seq_len=16)
 
     config.init_method = "fixed"
     torch.manual_seed(173)
@@ -94,6 +93,9 @@ def test_transformer_lm_initialization(method, distribution):
             assert torch.equal(parameter, expected), name
             continue
         scaled = (".attn." in name or ".mlp." in name) and ".router." not in name
+        unit_parameter = unit_gain.get_parameter(name)
+        expected = unit_parameter * gain if scaled else unit_parameter
+        assert torch.equal(parameter, expected), name
         std = 0.037
         if scaled:
             fan_out, fan_in = parameter.shape[-2:]
@@ -102,16 +104,16 @@ def test_transformer_lm_initialization(method, distribution):
                 "lecun": 1 / math.sqrt(fan_in),
                 "xavier": math.sqrt(2 / (fan_in + fan_out)),
                 "kaiming": math.sqrt(2 / fan_in),
-            }[method]
+            }[method] * gain
         torch.testing.assert_close(
             parameter, reference_parameter * std, atol=4.2e-7, rtol=0, msg=name
         )
         if distribution == "uniform":
             assert parameter.abs().max() <= math.sqrt(3) * std
         if not scaled or method == "fixed":
-            assert torch.equal(parameter, fallback.get_parameter(name)), name
+            assert torch.equal(unit_parameter, fallback.get_parameter(name)), name
         else:
-            assert not torch.equal(parameter, fallback.get_parameter(name)), name
+            assert not torch.equal(unit_parameter, fallback.get_parameter(name)), name
     assert all(
         torch.equal(buffer, reference.get_buffer(name))
         for name, buffer in model.named_buffers()
@@ -125,6 +127,7 @@ def test_transformer_lm_initialization_defaults():
     config.init_method = "fixed"
     config.init_distribution = "normal"
     config.init_std = 0.02
+    config.init_std_gain = 1.0
     torch.manual_seed(173)
     explicit = TransformerLM(config, max_seq_len=16)
     assert all(
@@ -137,7 +140,10 @@ def test_transformer_lm_initialization_forward():
     config = _qwen3_cfg("sdpa")
     config.model.init_method = "kaiming"
     config.model.init_distribution = "uniform"
+    config.model.init_std_gain = 0.5
+    config.model.tie_word_embeddings = True
     model = build_model(config)
+    assert model.token_emb.weight is model.lm_head.weight
     inputs = torch.randint(0, config.model.vocab_size, (2, 8))
     positions = torch.arange(8).expand(2, 8)
     logits, _ = model(inputs, positions, [None] * config.model.n_layers)
