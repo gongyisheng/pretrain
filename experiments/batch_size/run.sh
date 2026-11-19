@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 
 configs=()
 for bs in 64 256 1024; do
-    for lr in 1e-4 2e-4 5e-4 1e-3 2e-3 5e-3; do
+    for lr in 1e-4 2e-4 5e-4 1e-3 2e-3 5e-3 1e-2 2e-2 5e-2; do
         coefficient="${lr%e-*}"
         exponent="${lr#*e-}"
         proportional_min_lr="${coefficient}e-$((exponent + 1))"

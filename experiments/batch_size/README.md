@@ -6,7 +6,13 @@ At a fixed 13.1B-token budget, the best peak and minimum learning rates may depe
 
 ## Setup
 
-Sweep effective batch sizes of 64, 256, and 1024 sequences. For each batch size, sweep peak learning rates `1e-4`, `2e-4`, `5e-4`, `1e-3`, `2e-3`, and `5e-3`, with a minimum learning rate of either 10% of the peak or fixed at `1e-5`. This yields 33 unique runs because both minimum-LR choices are `1e-5` at peak LR `1e-4`.
+For each effective batch size, sweep peak learning rates `1e-4`, `2e-4`, `5e-4`, `1e-3`, `2e-3`, `5e-3`, `1e-2`, `2e-2`, and `5e-2`. Set the minimum learning rate to either 10% of the peak or a fixed `1e-5`. Both policies give `1e-5` at a peak of `1e-4`, yielding 17 runs per batch size and 51 unique runs total.
+
+| Configs | Approx. parameters | Microbatch size | Effective batch size | Accumulation steps | Training steps | Warmup steps |
+|---|---:|---:|---:|---:|---:|---:|
+| `qwen3_51m_bs_64_lr_*.yaml` | 51M | 16 | 64 | 4 | 200,000 | 6,000 |
+| `qwen3_51m_bs_256_lr_*.yaml` | 51M | 16 | 256 | 16 | 50,000 | 1,500 |
+| `qwen3_51m_bs_1024_lr_*.yaml` | 51M | 16 | 1024 | 64 | 12,500 | 375 |
 
 ## Run
 
@@ -39,6 +45,12 @@ uv run python scripts/train.py --config experiments/batch_size/qwen3_51m_bs_256_
 | qwen3_51m_bs_64_lr_2e-3_min_lr_1e-5.yaml | Pending |
 | qwen3_51m_bs_64_lr_5e-3_min_lr_5e-4.yaml | Pending |
 | qwen3_51m_bs_64_lr_5e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_1e-2_min_lr_1e-3.yaml | Pending |
+| qwen3_51m_bs_64_lr_1e-2_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_2e-2_min_lr_2e-3.yaml | Pending |
+| qwen3_51m_bs_64_lr_2e-2_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_64_lr_5e-2_min_lr_5e-3.yaml | Pending |
+| qwen3_51m_bs_64_lr_5e-2_min_lr_1e-5.yaml | Pending |
 | qwen3_51m_bs_256_lr_1e-4_min_lr_1e-5.yaml | Pending |
 | qwen3_51m_bs_256_lr_2e-4_min_lr_2e-5.yaml | Pending |
 | qwen3_51m_bs_256_lr_2e-4_min_lr_1e-5.yaml | Pending |
@@ -50,6 +62,12 @@ uv run python scripts/train.py --config experiments/batch_size/qwen3_51m_bs_256_
 | qwen3_51m_bs_256_lr_2e-3_min_lr_1e-5.yaml | Pending |
 | qwen3_51m_bs_256_lr_5e-3_min_lr_5e-4.yaml | Pending |
 | qwen3_51m_bs_256_lr_5e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_1e-2_min_lr_1e-3.yaml | Pending |
+| qwen3_51m_bs_256_lr_1e-2_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_2e-2_min_lr_2e-3.yaml | Pending |
+| qwen3_51m_bs_256_lr_2e-2_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_256_lr_5e-2_min_lr_5e-3.yaml | Pending |
+| qwen3_51m_bs_256_lr_5e-2_min_lr_1e-5.yaml | Pending |
 | qwen3_51m_bs_1024_lr_1e-4_min_lr_1e-5.yaml | Pending |
 | qwen3_51m_bs_1024_lr_2e-4_min_lr_2e-5.yaml | Pending |
 | qwen3_51m_bs_1024_lr_2e-4_min_lr_1e-5.yaml | Pending |
@@ -61,6 +79,12 @@ uv run python scripts/train.py --config experiments/batch_size/qwen3_51m_bs_256_
 | qwen3_51m_bs_1024_lr_2e-3_min_lr_1e-5.yaml | Pending |
 | qwen3_51m_bs_1024_lr_5e-3_min_lr_5e-4.yaml | Pending |
 | qwen3_51m_bs_1024_lr_5e-3_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_1e-2_min_lr_1e-3.yaml | Pending |
+| qwen3_51m_bs_1024_lr_1e-2_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_2e-2_min_lr_2e-3.yaml | Pending |
+| qwen3_51m_bs_1024_lr_2e-2_min_lr_1e-5.yaml | Pending |
+| qwen3_51m_bs_1024_lr_5e-2_min_lr_5e-3.yaml | Pending |
+| qwen3_51m_bs_1024_lr_5e-2_min_lr_1e-5.yaml | Pending |
 
 ## Notes
 
