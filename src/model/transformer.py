@@ -87,8 +87,6 @@ class TransformerLM(nn.Module):
                     std = math.sqrt(2 / (fan_in + fan_out))
                 else:
                     std = math.sqrt(2 / fan_in)
-            if weight in scaled_weights:
-                std *= config.init_std_gain
             if config.init_distribution == "normal":
                 nn.init.normal_(weight, mean=0.0, std=std)
             else:

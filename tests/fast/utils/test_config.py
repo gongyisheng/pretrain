@@ -33,8 +33,7 @@ INVALID_INITIALIZATION = [
     ("init_distribution", []),
     ("init_distribution", None),
     *[
-        (field, value)
-        for field in ("init_std", "init_std_gain")
+        ("init_std", value)
         for value in [
             0,
             -0.1,
@@ -59,20 +58,6 @@ INVALID_INITIALIZATION_OVERRIDES = [
     "model.init_std=inf",
     "model.init_std=-inf",
     "model.init_std=null",
-    *[
-        f"model.init_std_gain={value}"
-        for value in [
-            "0",
-            "-0.1",
-            "nan",
-            "inf",
-            "-inf",
-            "true",
-            "invalid",
-            "null",
-            "[]",
-        ]
-    ],
 ]
 
 
@@ -189,8 +174,7 @@ def test_model_config_defaults():
     assert cfg.init_method == "fixed"
     assert cfg.init_distribution == "normal"
     assert cfg.init_std == 0.02
-    assert cfg.init_std_gain == 1.0
-    assert isinstance(cfg.init_std_gain, float)
+    assert isinstance(cfg.init_std, float)
 
 
 @pytest.mark.parametrize("method", INITIALIZATION_METHODS)
@@ -200,30 +184,24 @@ def test_model_config_initialization(tmp_path, method, distribution):
         "init_method": method,
         "init_distribution": distribution,
         "init_std": 0.037,
-        "init_std_gain": 0.5,
     }
     direct = ModelConfig(**choices)
     assert {key: getattr(direct, key) for key in choices} == choices
     assert isinstance(direct.init_std, float)
-    assert isinstance(direct.init_std_gain, float)
-    integer_gain = ModelConfig(**(choices | {"init_std_gain": 2}))
-    assert integer_gain.init_std_gain == 2.0
-    assert isinstance(integer_gain.init_std_gain, float)
     raw = copy.deepcopy(MINIMAL_CONFIG)
     raw["model"].update(choices)
     raw["model"]["init_std"] = "0.037"
-    raw["model"]["init_std_gain"] = "0.5"
     loaded = load_config(_write_yaml(tmp_path, raw))
     exported = loaded.to_dict()
     assert {key: exported["model"][key] for key in choices} == choices
-    assert isinstance(exported["model"]["init_std_gain"], float)
+    assert isinstance(exported["model"]["init_std"], float)
     assert load_config(_write_yaml(tmp_path, exported)).to_dict() == exported
     overridden = load_config(
         _write_yaml(tmp_path, MINIMAL_CONFIG),
         [f"model.{key}={value}" for key, value in choices.items()],
     )
     assert {key: getattr(overridden.model, key) for key in choices} == choices
-    assert isinstance(overridden.model.init_std_gain, float)
+    assert isinstance(overridden.model.init_std, float)
     raw["model"]["init_std"] = 1
     overridden = load_config(_write_yaml(tmp_path, raw), ["model.init_std=0.037"])
     assert overridden.model.init_std == 0.037

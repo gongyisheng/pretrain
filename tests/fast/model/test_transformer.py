@@ -16,13 +16,13 @@ from tests.fast.layers.helper import (
 
 INITIALIZATION_METHODS = sorted(INIT_METHODS)
 INITIALIZATION_DISTRIBUTIONS = sorted(INIT_DISTRIBUTIONS)
-INITIALIZATION_GAINS = [0.5, 1.0, 2.0]
+INITIALIZATION_STDS = [0.005, 0.037, 0.08]
 
 
 @pytest.mark.parametrize("method", INITIALIZATION_METHODS)
 @pytest.mark.parametrize("distribution", INITIALIZATION_DISTRIBUTIONS)
-@pytest.mark.parametrize("gain", INITIALIZATION_GAINS)
-def test_transformer_lm_initialization(method, distribution, gain):
+@pytest.mark.parametrize("init_std", INITIALIZATION_STDS)
+def test_transformer_lm_initialization(method, distribution, init_std):
     config = ModelConfig(
         d_model=64,
         n_layers=2,
@@ -62,21 +62,18 @@ def test_transformer_lm_initialization(method, distribution, gain):
         lm_head_bias=True,
         init_method=method,
         init_distribution=distribution,
-        init_std=0.037,
-        init_std_gain=gain,
+        init_std=init_std,
     )
     torch.manual_seed(173)
     model = TransformerLM(config, max_seq_len=16)
-    config.init_std_gain = 1.0
-    torch.manual_seed(173)
-    unit_gain = TransformerLM(config, max_seq_len=16)
-
-    config.init_method = "fixed"
-    torch.manual_seed(173)
-    fallback = TransformerLM(config, max_seq_len=16)
     config.init_std = 1.0
     torch.manual_seed(173)
-    reference = TransformerLM(config, max_seq_len=16)
+    unit_std = TransformerLM(config, max_seq_len=16)
+    reference = unit_std
+    if method != "fixed":
+        config.init_method = "fixed"
+        torch.manual_seed(173)
+        reference = TransformerLM(config, max_seq_len=16)
 
     for name, parameter in model.named_parameters():
         reference_parameter = reference.get_parameter(name)
@@ -92,28 +89,25 @@ def test_transformer_lm_initialization(method, distribution, gain):
             )
             assert torch.equal(parameter, expected), name
             continue
-        scaled = (".attn." in name or ".mlp." in name) and ".router." not in name
-        unit_parameter = unit_gain.get_parameter(name)
-        expected = unit_parameter * gain if scaled else unit_parameter
-        assert torch.equal(parameter, expected), name
-        std = 0.037
-        if scaled:
+        uses_fan_std = (
+            method != "fixed"
+            and (".attn." in name or ".mlp." in name)
+            and ".router." not in name
+        )
+        std = init_std
+        if uses_fan_std:
             fan_out, fan_in = parameter.shape[-2:]
             std = {
-                "fixed": 0.037,
                 "lecun": 1 / math.sqrt(fan_in),
                 "xavier": math.sqrt(2 / (fan_in + fan_out)),
                 "kaiming": math.sqrt(2 / fan_in),
-            }[method] * gain
+            }[method]
+            assert torch.equal(parameter, unit_std.get_parameter(name)), name
         torch.testing.assert_close(
             parameter, reference_parameter * std, atol=4.2e-7, rtol=0, msg=name
         )
         if distribution == "uniform":
             assert parameter.abs().max() <= math.sqrt(3) * std
-        if not scaled or method == "fixed":
-            assert torch.equal(unit_parameter, fallback.get_parameter(name)), name
-        else:
-            assert not torch.equal(unit_parameter, fallback.get_parameter(name)), name
     assert all(
         torch.equal(buffer, reference.get_buffer(name))
         for name, buffer in model.named_buffers()
@@ -127,7 +121,6 @@ def test_transformer_lm_initialization_defaults():
     config.init_method = "fixed"
     config.init_distribution = "normal"
     config.init_std = 0.02
-    config.init_std_gain = 1.0
     torch.manual_seed(173)
     explicit = TransformerLM(config, max_seq_len=16)
     assert all(
@@ -140,7 +133,6 @@ def test_transformer_lm_initialization_forward():
     config = _qwen3_cfg("sdpa")
     config.model.init_method = "kaiming"
     config.model.init_distribution = "uniform"
-    config.model.init_std_gain = 0.5
     config.model.tie_word_embeddings = True
     model = build_model(config)
     assert model.token_emb.weight is model.lm_head.weight

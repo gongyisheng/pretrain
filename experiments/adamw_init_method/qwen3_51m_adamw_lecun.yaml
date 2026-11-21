@@ -23,8 +23,7 @@ model:
   pos_emb_kwargs:
     rope_theta: 10000.0
   dropout_embd: 0.0
-  init_method: kaiming
-  init_std_gain: 2.0
+  init_method: lecun
   init_std: 0.02
   init_distribution: normal
 
@@ -41,7 +40,7 @@ training:
   max_steps: 50000
   mixed_precision: bf16
   grad_clip: 1.0
-  checkpoint_dir: checkpoints/adamw_init_method/qwen3_51m_adamw_kaiming_gain_2/
+  checkpoint_dir: checkpoints/adamw_init_method/qwen3_51m_adamw_lecun/
   checkpoint_every: 5000
   eval_every: 100
   eval_steps: 100
@@ -53,7 +52,7 @@ optimizer:
   optimizer_kwargs:
     betas:
     - 0.9
-    - 0.95
+    - 0.99
     eps: 1e-8
 
 scheduler:
@@ -63,5 +62,5 @@ scheduler:
 
 logging:
   wandb_project: pretrain-adamw-init-method
-  wandb_run_name: qwen3_51m_adamw_kaiming_gain_2
+  wandb_run_name: qwen3_51m_adamw_lecun
   log_every: 10

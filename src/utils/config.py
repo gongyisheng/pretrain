@@ -80,7 +80,6 @@ class ModelConfig:
     init_method: str = "fixed"
     init_distribution: str = "normal"
     init_std: float = 0.02
-    init_std_gain: float = 1.0
 
     def __post_init__(self):
         self._validate_init()
@@ -90,16 +89,14 @@ class ModelConfig:
     def _validate_init(self) -> None:
         _check_value("init_method", self.init_method, INIT_METHODS)
         _check_value("init_distribution", self.init_distribution, INIT_DISTRIBUTIONS)
-        for name in ("init_std", "init_std_gain"):
-            value = getattr(self, name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value <= 0
-            ):
-                raise ValueError(f"{name} must be a finite positive number")
-            setattr(self, name, float(value))
+        if (
+            isinstance(self.init_std, bool)
+            or not isinstance(self.init_std, (int, float))
+            or not math.isfinite(self.init_std)
+            or self.init_std <= 0
+        ):
+            raise ValueError("init_std must be a finite positive number")
+        self.init_std = float(self.init_std)
 
     def _set_default_attn_kwargs(self, attn_cls: str, kwargs: dict) -> None:
         """Fill defaults/validation for one attn item's kwargs, keyed on attn_cls."""
