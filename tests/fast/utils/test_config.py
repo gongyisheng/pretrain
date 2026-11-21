@@ -139,8 +139,7 @@ MINIMAL_CONFIG = {
     "optimizer": {
         "optimizer_cls": "adamw",
         "lr": 1e-3,
-        "weight_decay": 0.1,
-        "optimizer_kwargs": {"betas": [0.9, 0.95], "eps": 1e-8},
+        "optimizer_kwargs": {"betas": [0.9, 0.95], "eps": 1e-8, "weight_decay": 0.1},
     },
     "scheduler": {"name": "cosine", "warmup_steps": 2, "min_lr": 1e-4},
     "logging": {"wandb_project": "test", "wandb_run_name": "test", "log_every": 1},
@@ -405,6 +404,7 @@ def test_load_config_optimizer_defaults(tmp_path):
         "betas": (0.9, 0.99),
         "eps": 1e-8,
         "fused": True,
+        "weight_decay": 0.1,
     }
 
 
@@ -415,19 +415,20 @@ def test_load_config_optimizer_nested_kwargs(tmp_path, muon_cls, adam_cls):
     raw["optimizer"] = {
         "optimizer_cls": "muonadam",
         "lr": 1e-3,
-        "weight_decay": 0.1,
         "optimizer_kwargs": {
             "muon_cls": muon_cls,
-            "muon_kwargs": {"eps": "1e-6"},
+            "muon_kwargs": {"eps": "1e-6", "weight_decay": "2e-2"},
             "adam_cls": adam_cls,
-            "adam_kwargs": {"eps": "1e-7"},
+            "adam_kwargs": {"eps": "1e-7", "weight_decay": "3e-2"},
         },
     }
     config = load_config(_write_yaml(tmp_path, raw)).optimizer
     assert config.optimizer_kwargs["muon_cls"] == muon_cls
     assert config.optimizer_kwargs["muon_kwargs"]["eps"] == 1e-6
+    assert config.optimizer_kwargs["muon_kwargs"]["weight_decay"] == 2e-2
     assert config.optimizer_kwargs["adam_cls"] == adam_cls
     assert config.optimizer_kwargs["adam_kwargs"]["eps"] == 1e-7
+    assert config.optimizer_kwargs["adam_kwargs"]["weight_decay"] == 3e-2
     assert config.optimizer_kwargs["adam_kwargs"]["fused"] is (adam_cls != "adamh")
 
 
@@ -441,6 +442,7 @@ def test_load_config_overrides(tmp_path):
         _write_yaml(tmp_path, config_data),
         overrides=[
             "optimizer.lr=3e-4",
+            "optimizer.optimizer_kwargs.weight_decay=3e-2",
             "training.batch_size=8",
             "quantization.enabled_after_steps=2",
             "quantization.enabled_before_steps=3",
@@ -450,6 +452,7 @@ def test_load_config_overrides(tmp_path):
         ],
     )
     assert config.optimizer.lr == 3e-4
+    assert config.optimizer.optimizer_kwargs["weight_decay"] == 3e-2
     assert config.training.batch_size == 8
     assert config.quantization.enabled_after_steps == 2
     assert config.quantization.enabled_before_steps == 3
@@ -1125,10 +1128,10 @@ def test_scheduler_unknown_name_raises():
 
 
 OPTIMIZER_DEFAULT_CASES = [
-    ("adamw", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True}),
-    ("adamc", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True}),
-    ("adamh", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": False}),
-    ("lion", {"betas": (0.9, 0.99), "foreach": True}),
+    ("adamw", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True, "weight_decay": 0.1}),
+    ("adamc", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True, "weight_decay": 0.1}),
+    ("adamh", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": False, "weight_decay": 0.1}),
+    ("lion", {"betas": (0.9, 0.99), "foreach": True, "weight_decay": 0.1}),
     (
         "muonadam",
         {
@@ -1138,12 +1141,14 @@ OPTIMIZER_DEFAULT_CASES = [
                 "nesterov": True,
                 "adjust_lr_fn": "match_rms_adamw",
                 "eps": 1e-8,
+                "weight_decay": 0.1,
             },
             "adam_cls": "adamw",
             "adam_kwargs": {
                 "betas": (0.9, 0.99),
                 "eps": 1e-8,
                 "fused": True,
+                "weight_decay": 0.1,
             },
         },
     ),
@@ -1201,9 +1206,10 @@ def test_optimizer_config_muon_nested_kwargs(muon_cls, adam_cls):
             "nesterov": True,
             "adjust_lr_fn": None if muon_cls == "muonh" else "match_rms_adamw",
             "eps": 1e-8,
+            "weight_decay": 0.1,
         },
         "adam_cls": adam_cls,
-        "adam_kwargs": {**adam_kwargs, "eps": 1e-8},
+        "adam_kwargs": {**adam_kwargs, "eps": 1e-8, "weight_decay": 0.1},
     }
 
 
@@ -1216,9 +1222,14 @@ INVALID_MUON_KWARGS_CASES = [
             "nesterov": True,
             "adjust_lr_fn": "match_rms_adamw",
             "eps": 1e-8,
+            "weight_decay": 0.1,
         },
     ),
-    ("adam_kwargs", "invalid", {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True}),
+    (
+        "adam_kwargs",
+        "invalid",
+        {"betas": (0.9, 0.99), "eps": 1e-8, "fused": True, "weight_decay": 0.1},
+    ),
 ]
 
 

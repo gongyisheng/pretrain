@@ -59,7 +59,7 @@ class AdamHOptimizer(torch.optim.Adam):
             )
             for index, param in enumerate(param_group["params"])
         ):
-            param_group.update(weight_decay=0.0)
+            param_group["weight_decay"] = 0.0
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -623,7 +623,6 @@ def build_optimizer(
     corrected_optimizers = (AdamCOptimizer, MuonCOptimizer)
     hyperball_optimizers = (AdamHOptimizer, MuonHOptimizer)
     patterns = [(re.compile(k), k) for k in config.optimizer.lr_mult.keys()]
-    wd = config.optimizer.weight_decay
     groups: dict = {}
 
     for param_name, param in model.named_parameters():
@@ -666,10 +665,11 @@ def build_optimizer(
         mult = config.optimizer.lr_mult.get(matched, 1.0) if matched else 1.0
         group = {
             "params": params,
-            "weight_decay": 0.0 if is_no_decay else wd,
             "lr_mult": mult,
             "use_corrected_weight_decay": use_corrected_weight_decay,
         }
+        if is_no_decay:
+            group["weight_decay"] = 0.0
         if group_optimizer in (*corrected_optimizers, *hyperball_optimizers):
             group["lr"] = config.optimizer.lr * mult
         if group_optimizer in corrected_optimizers:

@@ -47,16 +47,17 @@ training:
 optimizer:
   optimizer_cls: muonadam
   lr: 2.5e-4
-  weight_decay: 0.2
   optimizer_kwargs:
     muon_cls: muonc
     muon_kwargs:
+      weight_decay: 0.2
       momentum: 0.95
       nesterov: true
       adjust_lr_fn: match_rms_adamw
       eps: 1e-8
     adam_cls: adamw
     adam_kwargs:
+      weight_decay: 0.2
       betas:
       - 0.9
       - 0.99

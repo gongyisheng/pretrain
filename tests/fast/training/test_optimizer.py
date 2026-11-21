@@ -63,7 +63,6 @@ def _make_cfg(
         optimizer_cls,
         lr=1e-3,
         lr_mult=lr_mult if lr_mult is not None else {"lm_head": 1.0},
-        weight_decay=0.1,
     )
     cfg.scheduler = SchedulerConfig(warmup_steps=10, min_lr=1e-4)
     cfg.training.max_steps = 100
@@ -363,7 +362,7 @@ def test_build_optimizer_adamc_raise_error():
 
 def test_build_optimizer_adamc_corrects_moe_weights():
     cfg = _make_moe_cfg(False)
-    cfg.optimizer = OptimizerConfig("adamc", lr=1e-3, weight_decay=0.1)
+    cfg.optimizer = OptimizerConfig("adamc", lr=1e-3)
     model = build_model(cfg)
     optimizer = build_optimizer(model, cfg)
     groups_by_param = {
@@ -406,7 +405,7 @@ def test_lm_head_mult_untied_creates_lm_head_group():
     assert lm_head_param is model.lm_head.weight
 
     # Weight decay applied (lm_head.weight is 2D).
-    assert lm_head_groups[0]["weight_decay"] == cfg.optimizer.weight_decay
+    assert lm_head_groups[0]["weight_decay"] == 0.1
 
 
 def test_lm_head_mult_tied_is_noop():
@@ -475,7 +474,7 @@ def test_standard_decay_rule_within_matched_group():
     matched = [pg for pg in opt.param_groups if pg["lr_mult"] == 2.0]
     assert len(matched) == 2  # one decay group, one no_decay group
     wds = {pg["weight_decay"] for pg in matched}
-    assert wds == {0.0, cfg.optimizer.weight_decay}
+    assert wds == {0.0, 0.1}
 
     # Every param in these groups comes from blocks.0.*
     for pg in matched:
@@ -498,17 +497,19 @@ def test_all_params_covered_exactly_once():
     assert len(seen) == len(set(seen))  # no duplicates
 
 
-def test_build_optimizer_dispatches_to_lion():
-    cfg = _make_cfg(tie=False, optimizer_cls="lion")
+def test_build_optimizer():
+    cfg = _make_cfg(optimizer_cls="lion")
+    cfg.optimizer.optimizer_kwargs["weight_decay"] = 0.3
     model = build_model(cfg)
-    opt = build_optimizer(model, cfg)
-    assert isinstance(opt, LionOptimizer)
-    # Param grouping (wd filter + lr_mult) still applies.
-    total = sum(len(pg["params"]) for pg in opt.param_groups)
-    assert total == sum(1 for p in model.parameters() if p.requires_grad)
-    # At least one decay group and one no-decay group exist.
-    wds = {pg["weight_decay"] for pg in opt.param_groups}
-    assert 0.0 in wds and cfg.optimizer.weight_decay in wds
+    optimizer = build_optimizer(model, cfg)
+    assert isinstance(optimizer, LionOptimizer)
+    groups_by_param = {
+        id(param): group
+        for group in optimizer.param_groups
+        for param in group["params"]
+    }
+    assert groups_by_param[id(model.lm_head.weight)]["weight_decay"] == 0.3
+    assert groups_by_param[id(model.blocks[0].norm1.weight)]["weight_decay"] == 0.0
 
 
 @pytest.mark.parametrize("muon_cls", MUON_CLASSES)
@@ -544,7 +545,7 @@ def test_build_optimizer_muon_nested_kwargs(muon_cls):
 def test_build_optimizer_muon_ignores_unknown_kwargs():
     cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
     cfg.optimizer = OptimizerConfig(
-        "muonadam", lr=1e-3, weight_decay=0.1, optimizer_kwargs={"betas": (0.9, 0.95)}
+        "muonadam", lr=1e-3, optimizer_kwargs={"betas": (0.9, 0.95)}
     )
     opt = build_optimizer(build_model(cfg), cfg)
 
@@ -595,8 +596,9 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
         lr_mult={"router": lr_mult, "q_proj": lr_mult, "expert_": lr_mult},
         optimizer_kwargs={
             "muon_cls": muon_cls,
+            "muon_kwargs": {"weight_decay": 0.4},
             "adam_cls": adam_cls,
-            "adam_kwargs": {} if adam_cls == "adamh" else {"fused": False},
+            "adam_kwargs": {"weight_decay": 0.3, "fused": False},
         },
     )
     model = build_model(cfg)
@@ -651,10 +653,21 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
         if param.requires_grad and param.ndim >= 2
     }
     selected_ids = muon_ids if muon_cls == "muons" else adam_ids
+    muon_decay = 0.0 if muon_cls == "muonh" else 0.4
     assert id(router) in selected_ids
     assert id(model.token_emb.weight) in selected_ids
     assert id(model.lm_head.weight) in selected_ids
     assert id(model.pos_emb.embedding.weight) in selected_ids
+    assert groups_by_param[id(q_proj)]["weight_decay"] == muon_decay
+    for param in (
+        router,
+        model.token_emb.weight,
+        model.lm_head.weight,
+        model.pos_emb.embedding.weight,
+    ):
+        assert groups_by_param[id(param)]["weight_decay"] == (
+            muon_decay if muon_cls == "muons" else 0.3
+        )
     for param in (model.matrix_bias, model.matrix_ln):
         assert id(param) in (adam_ids if muon_cls == "muonh" else muon_ids)
         assert groups_by_param[id(param)]["weight_decay"] == 0.0
@@ -694,10 +707,6 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
             assert group["weight_decay"] == 0.0
             assert group["adjust_lr_fn"] is None
             assert group["lr"] == cfg.optimizer.lr * group["lr_mult"]
-        for param in (router, model.token_emb.weight, model.pos_emb.embedding.weight):
-            assert (
-                groups_by_param[id(param)]["weight_decay"] == cfg.optimizer.weight_decay
-            )
         if lr_mult == 0.0:
             before = q_proj.detach().clone()
             q_proj.grad = torch.ones_like(q_proj)
@@ -916,13 +925,14 @@ def test_muonhoptimizer_state_dict_roundtrip():
 def test_muonhoptimizer_add_param_group():
     initial = torch.arange(1.0, 7.0).reshape(2, 3)
     projection = torch.nn.Parameter(initial.clone())
+    added = torch.nn.Parameter(initial.clone())
     router = torch.nn.Parameter(initial.clone())
     optimizer = MuonHOptimizer(
         [("proj.weight", projection)], lr=0.1, weight_decay=0.7, adjust_lr_fn="original"
     )
     optimizer.add_param_group(
         {
-            "params": [("router.weight", router)],
+            "params": [("added.weight", added), ("router.weight", router)],
             "weight_decay": 0.2,
             "adjust_lr_fn": "match_rms_adamw",
         }
@@ -936,38 +946,51 @@ def test_muonhoptimizer_add_param_group():
     assert added_group["weight_decay"] == 0.2
     assert added_group["adjust_lr_fn"] == "match_rms_adamw"
 
-    projection.grad = torch.ones_like(projection)
-    router.grad = torch.ones_like(router)
+    for param in (projection, added, router):
+        param.grad = torch.ones_like(param)
     optimizer.step()
     assert not torch.equal(projection, initial)
+    assert torch.equal(added, projection)
     assert torch.equal(router, projection)
     radius = initial.norm(dim=(-2, -1), keepdim=True)
-    assert torch.equal(optimizer.state[projection]["radius"], radius)
-    assert torch.equal(optimizer.state[router]["radius"], radius)
+    for param in (projection, added, router):
+        assert torch.equal(optimizer.state[param]["radius"], radius)
 
 
 def test_adamhoptimizer_step():
     initial = torch.tensor([[1.0, 2.0], [-2.0, 1.0]])
     projection = torch.nn.Parameter(initial.clone())
+    reference_projection = torch.nn.Parameter(initial.clone())
     router = torch.nn.Parameter(torch.ones(2, 2))
-    lr, weight_decay = 0.1, 0.5
+    lr, weight_decay, group_decay = 0.1, 0.5, 0.2
     optimizer = AdamHOptimizer(
-        [("proj.weight", projection), ("router.weight", router)],
+        [
+            {
+                "params": [("proj.weight", projection), ("router.weight", router)],
+                "weight_decay": group_decay,
+            }
+        ],
         lr=lr,
         weight_decay=weight_decay,
     )
+    reference = AdamHOptimizer([reference_projection], lr=lr)
     projection.grad = torch.ones_like(projection)
+    reference_projection.grad = projection.grad.clone()
     router.grad = torch.zeros_like(router)
 
     optimizer.step()
+    reference.step()
 
     radius = initial.norm(dim=(-2, -1), keepdim=True)
     assert not torch.equal(projection, initial)
+    assert torch.equal(projection, reference_projection)
     assert torch.equal(optimizer.state[projection]["radius"], radius)
     torch.testing.assert_close(
         projection.norm(dim=(-2, -1), keepdim=True), radius, atol=5.8e-6, rtol=0
     )
-    assert torch.equal(router, torch.full_like(router, 1 - lr * weight_decay))
+    assert optimizer.defaults["weight_decay"] == weight_decay
+    assert optimizer.param_groups[0]["weight_decay"] == group_decay
+    assert torch.equal(router, torch.full_like(router, 1 - lr * group_decay))
     assert "radius" not in optimizer.state[router]
 
 
@@ -1025,6 +1048,7 @@ def test_adamhoptimizer_add_param_group_weight_decay():
     original = torch.nn.Parameter(initial.clone())
     added = torch.nn.Parameter(initial.clone())
     router = torch.nn.Parameter(initial.clone())
+    reference_router = torch.nn.Parameter(initial.clone())
     lr, weight_decay, added_decay = 0.1, 0.4, 0.2
     optimizer = AdamHOptimizer(
         [("original.weight", original)], lr=lr, weight_decay=weight_decay
@@ -1034,6 +1058,9 @@ def test_adamhoptimizer_add_param_group_weight_decay():
             "params": [("added.weight", added), ("router.weight", router)],
             "weight_decay": added_decay,
         }
+    )
+    reference = AdamHOptimizer(
+        [("router.weight", reference_router)], lr=lr, weight_decay=added_decay
     )
 
     assert optimizer.defaults["weight_decay"] == weight_decay
@@ -1045,8 +1072,18 @@ def test_adamhoptimizer_add_param_group_weight_decay():
     for param in (original, added):
         assert torch.equal(param, initial)
         assert "radius" in optimizer.state[param]
-    assert torch.equal(router, initial * (1 - lr * added_decay))
+    decay_factor = 1 - lr * added_decay
+    after_decay = initial * decay_factor
+    assert torch.equal(router, after_decay)
     assert "radius" not in optimizer.state[router]
+    reference_router.grad = router.grad.clone()
+    reference.step()
+    router.grad = torch.ones_like(router)
+    reference_router.grad = router.grad.clone()
+    optimizer.step()
+    reference.step()
+    assert not torch.equal(router, after_decay * decay_factor)
+    assert torch.equal(router, reference_router)
 
 
 @pytest.mark.parametrize("tie", [False, True])
@@ -1056,7 +1093,7 @@ def test_build_optimizer_adamh_groups(tie, weight_decay):
     cfg.optimizer = OptimizerConfig(
         "adamh",
         lr=0.01,
-        weight_decay=weight_decay,
+        optimizer_kwargs={"weight_decay": weight_decay},
         lr_mult={"q_proj": 0, "router": 0.2},
     )
     model = build_model(cfg)

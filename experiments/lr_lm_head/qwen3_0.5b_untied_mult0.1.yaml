@@ -40,8 +40,8 @@ optimizer:
   lr: 3e-4
   lr_mult:
     lm_head: 0.1
-  weight_decay: 0.1
   optimizer_kwargs:
+    weight_decay: 0.1
     betas:
     - 0.9
     - 0.95

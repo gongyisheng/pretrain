@@ -37,8 +37,8 @@ training:
 optimizer:
   optimizer_cls: lion
   lr: 2e-4
-  weight_decay: 0.5
   optimizer_kwargs:
+    weight_decay: 0.5
     betas:
     - 0.9
     - 0.99

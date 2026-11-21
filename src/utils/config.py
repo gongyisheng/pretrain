@@ -618,12 +618,12 @@ class OptimizerConfig:
     optimizer_cls: str = "adamw"  # "adamw" | "adamc" | "adamh" | "lion" | "muonadam"
     lr: float = 5e-4
     lr_mult: Dict[str, float] = field(default_factory=lambda: {"lm_head": 1.0})
-    weight_decay: float = 0.1
     optimizer_kwargs: dict = field(default_factory=dict)
 
     def _post_init_adam(self, adam_cls: str, kwargs: dict) -> None:
         kwargs.setdefault("betas", (0.9, 0.99))
         kwargs.setdefault("eps", 1e-8)
+        kwargs.setdefault("weight_decay", 0.1)
         if adam_cls == "adamh":
             kwargs["fused"] = False
         else:
@@ -632,6 +632,7 @@ class OptimizerConfig:
     def _post_init_lion(self, kwargs: dict) -> None:
         kwargs.setdefault("betas", (0.9, 0.99))  # Chen et al. 2023 default
         kwargs.setdefault("foreach", True)
+        kwargs.setdefault("weight_decay", 0.1)
 
     def _post_init_muon(self, muon_cls: str, kwargs: dict) -> None:
         kwargs.setdefault("momentum", 0.95)
@@ -639,6 +640,7 @@ class OptimizerConfig:
         # Rescale Muon's update RMS to AdamW's so both halves share one lr.
         kwargs.setdefault("adjust_lr_fn", "match_rms_adamw")
         kwargs.setdefault("eps", 1e-8)
+        kwargs.setdefault("weight_decay", 0.1)
         if muon_cls == "muonh":
             kwargs["adjust_lr_fn"] = None
 
