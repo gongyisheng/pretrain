@@ -17,10 +17,12 @@ from src.utils.config import TrainConfig, ModelConfig, OptimizerConfig, Schedule
 from src.model import build_model
 from src.training.optimizer import (
     AdamCOptimizer,
+    AdamHOptimizer,
     AdamWOptimizer,
     LionOptimizer,
     MuonOptimizer,
     MuonCOptimizer,
+    MuonHOptimizer,
     MuonAdamOptimizer,
     build_optimizer,
     build_scheduler,
@@ -28,7 +30,9 @@ from src.training.optimizer import (
     CosineWarmupScheduler,
 )
 
-MUON_CLASSES = ["muon", "muonc", "muons"]
+MUON_CLASSES = ["muon", "muonc", "muons", "muonh"]
+ADAM_CLASSES = ["adamw", "adamc", "adamh"]
+HYPERBALL_NOOP_CASES = ["zero_lr", "missing_gradient"]
 
 
 # --------------------------------------------------------------------------- #
@@ -528,7 +532,9 @@ def test_build_optimizer_muon_nested_kwargs(muon_cls):
     assert opt.muon.param_groups[0]["momentum"] == 0.8
     assert not opt.muon.param_groups[0]["nesterov"]
     assert opt.muon.param_groups[0]["ns_steps"] == 3
-    assert opt.muon.param_groups[0]["adjust_lr_fn"] == "original"
+    assert opt.muon.param_groups[0]["adjust_lr_fn"] == (
+        None if muon_cls == "muonh" else "original"
+    )
     assert opt.muon.param_groups[0]["eps"] == 1e-7
     assert opt.adam.defaults["betas"] == (0.8, 0.9)
     assert opt.adam.defaults["eps"] == 1e-7
@@ -578,20 +584,44 @@ def _make_moe_cfg(tie: bool) -> TrainConfig:
 
 
 @pytest.mark.parametrize("muon_cls", MUON_CLASSES)
-@pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
+@pytest.mark.parametrize("adam_cls", ADAM_CLASSES)
 @pytest.mark.parametrize("lr_mult", [0.0, 0.5])
 @pytest.mark.parametrize("tie", [False, True])
 def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
     cfg = _make_moe_cfg(tie)
-    cfg.optimizer.lr_mult = {"router": lr_mult, "q_proj": lr_mult, "expert_": lr_mult}
-    cfg.optimizer.optimizer_kwargs.update(muon_cls=muon_cls, adam_cls=adam_cls)
-    cfg.optimizer.optimizer_kwargs["adam_kwargs"]["fused"] = False
+    cfg.optimizer = OptimizerConfig(
+        "muonadam",
+        lr=cfg.optimizer.lr,
+        lr_mult={"router": lr_mult, "q_proj": lr_mult, "expert_": lr_mult},
+        optimizer_kwargs={
+            "muon_cls": muon_cls,
+            "adam_cls": adam_cls,
+            "adam_kwargs": {} if adam_cls == "adamh" else {"fused": False},
+        },
+    )
     model = build_model(cfg)
+    model.matrix_bias = torch.nn.Parameter(torch.ones(2, 3))
+    model.matrix_ln = torch.nn.Parameter(torch.ones(2, 3))
     opt = build_optimizer(model, cfg)
 
     assert isinstance(opt, MuonAdamOptimizer)
-    assert type(opt.muon) is (MuonCOptimizer if muon_cls == "muonc" else MuonOptimizer)
-    assert type(opt.adam) is (AdamWOptimizer if adam_cls == "adamw" else AdamCOptimizer)
+    assert (
+        type(opt.muon)
+        is {
+            "muon": MuonOptimizer,
+            "muonc": MuonCOptimizer,
+            "muons": MuonOptimizer,
+            "muonh": MuonHOptimizer,
+        }[muon_cls]
+    )
+    if adam_cls == "adamh":
+        assert type(opt.adam) is AdamHOptimizer
+        for group in opt.adam.param_groups:
+            assert group["lr"] == cfg.optimizer.lr * group["lr_mult"]
+    else:
+        assert type(opt.adam) is (
+            AdamWOptimizer if adam_cls == "adamw" else AdamCOptimizer
+        )
     assert opt.muon.param_groups[0]["ns_steps"] == 5
     assert opt.muon.param_groups[0]["ns_coefficients"] == (3.4445, -4.7750, 2.0315)
 
@@ -625,6 +655,9 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
     assert id(model.token_emb.weight) in selected_ids
     assert id(model.lm_head.weight) in selected_ids
     assert id(model.pos_emb.embedding.weight) in selected_ids
+    for param in (model.matrix_bias, model.matrix_ln):
+        assert id(param) in (adam_ids if muon_cls == "muonh" else muon_ids)
+        assert groups_by_param[id(param)]["weight_decay"] == 0.0
     if muon_cls == "muons":
         assert muon_ids == expected_matrix_ids
     assert groups_by_param[id(q_proj)]["use_corrected_weight_decay"] == (
@@ -656,7 +689,23 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
                     "router" not in name and "emb" not in name and "lm_head" not in name
                 )
 
+    if muon_cls == "muonh":
+        for group in opt.muon.param_groups:
+            assert group["weight_decay"] == 0.0
+            assert group["adjust_lr_fn"] is None
+            assert group["lr"] == cfg.optimizer.lr * group["lr_mult"]
+        for param in (router, model.token_emb.weight, model.pos_emb.embedding.weight):
+            assert (
+                groups_by_param[id(param)]["weight_decay"] == cfg.optimizer.weight_decay
+            )
+        if lr_mult == 0.0:
+            before = q_proj.detach().clone()
+            q_proj.grad = torch.ones_like(q_proj)
+            opt.step()
+            assert torch.equal(q_proj, before)
+
     for group in opt.param_groups:
+        assert "use_muon" not in group
         if group["use_corrected_weight_decay"]:
             assert group["lr"] == cfg.optimizer.lr * group["lr_mult"]
             assert group["max_lr"] == cfg.optimizer.lr * group["lr_mult"]
@@ -674,6 +723,10 @@ def test_build_optimizer_muonadam_groups(muon_cls, adam_cls, lr_mult, tie):
     opt.step()
     for param in model.parameters():
         assert torch.equal(param, expected[id(param)])
+        if adam_cls == "adamh" and id(param) in adam_ids:
+            assert "radius" not in opt.adam.state[param]
+        if muon_cls == "muonh":
+            assert ("radius" in opt.state[param]) == (id(param) in muon_ids)
 
 
 def test_muon_2d_matches_torch_reference():
@@ -800,12 +853,296 @@ def test_muon_rejects_1d_param():
         MuonOptimizer([p], lr=1e-3)
 
 
+def test_muonhoptimizer_step():
+    initial = torch.arange(1.0, 13.0).reshape(2, 2, 3) / 8
+    param = torch.nn.Parameter(initial.clone())
+    optimizer = MuonHOptimizer([param], lr=0.1)
+    param.grad = torch.ones_like(param)
+
+    optimizer.step()
+
+    radius = initial.norm(dim=(-2, -1), keepdim=True)
+    assert not torch.equal(param, initial)
+    assert torch.equal(optimizer.state[param]["radius"], radius)
+    torch.testing.assert_close(
+        param.norm(dim=(-2, -1), keepdim=True), radius, atol=5.8e-6, rtol=0
+    )
+
+
+@pytest.mark.parametrize("case", HYPERBALL_NOOP_CASES)
+def test_muonhoptimizer_step_noop(case):
+    initial = torch.ones(2, 3)
+    param = torch.nn.Parameter(initial.clone())
+    optimizer = MuonHOptimizer(
+        [param], lr=0.0 if case == "zero_lr" else 0.1, momentum=0.0
+    )
+    if case == "zero_lr":
+        param.grad = torch.ones_like(param)
+    optimizer.step()
+
+    assert torch.equal(param, initial)
+    if case == "zero_lr":
+        assert torch.equal(optimizer.state[param]["momentum_buffer"], param.grad)
+        assert "radius" in optimizer.state[param]
+    else:
+        assert param not in optimizer.state
+
+
+def test_muonhoptimizer_state_dict_roundtrip():
+    torch.manual_seed(10)
+    param = torch.nn.Parameter(torch.randn(2, 3, dtype=torch.bfloat16))
+    optimizer = MuonHOptimizer([param], lr=0.07)
+    param.grad = torch.randn_like(param)
+    optimizer.step()
+    checkpoint = copy.deepcopy(optimizer.state_dict())
+    for state in checkpoint["state"].values():
+        state["radius"] = state["radius"].cpu()
+
+    restored_param = torch.nn.Parameter(param.detach().clone())
+    restored = MuonHOptimizer([restored_param], lr=0.07)
+    restored.load_state_dict(checkpoint)
+    radius = restored.state[restored_param]["radius"]
+    assert radius.dtype == torch.float32
+    assert radius.device == restored_param.device
+    assert torch.equal(radius, optimizer.state[param]["radius"])
+
+    param.grad = torch.randn_like(param)
+    restored_param.grad = param.grad.clone()
+    optimizer.step()
+    restored.step()
+    assert torch.equal(param, restored_param)
+
+
+def test_muonhoptimizer_add_param_group():
+    initial = torch.arange(1.0, 7.0).reshape(2, 3)
+    projection = torch.nn.Parameter(initial.clone())
+    router = torch.nn.Parameter(initial.clone())
+    optimizer = MuonHOptimizer(
+        [("proj.weight", projection)], lr=0.1, weight_decay=0.7, adjust_lr_fn="original"
+    )
+    optimizer.add_param_group(
+        {
+            "params": [("router.weight", router)],
+            "weight_decay": 0.2,
+            "adjust_lr_fn": "match_rms_adamw",
+        }
+    )
+
+    assert optimizer.defaults["weight_decay"] == 0.7
+    assert optimizer.defaults["adjust_lr_fn"] == "original"
+    original_group, added_group = optimizer.param_groups
+    assert original_group["weight_decay"] == 0.0
+    assert original_group["adjust_lr_fn"] is None
+    assert added_group["weight_decay"] == 0.2
+    assert added_group["adjust_lr_fn"] == "match_rms_adamw"
+
+    projection.grad = torch.ones_like(projection)
+    router.grad = torch.ones_like(router)
+    optimizer.step()
+    assert not torch.equal(projection, initial)
+    assert torch.equal(router, projection)
+    radius = initial.norm(dim=(-2, -1), keepdim=True)
+    assert torch.equal(optimizer.state[projection]["radius"], radius)
+    assert torch.equal(optimizer.state[router]["radius"], radius)
+
+
+def test_adamhoptimizer_step():
+    initial = torch.tensor([[1.0, 2.0], [-2.0, 1.0]])
+    projection = torch.nn.Parameter(initial.clone())
+    router = torch.nn.Parameter(torch.ones(2, 2))
+    lr, weight_decay = 0.1, 0.5
+    optimizer = AdamHOptimizer(
+        [("proj.weight", projection), ("router.weight", router)],
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+    projection.grad = torch.ones_like(projection)
+    router.grad = torch.zeros_like(router)
+
+    optimizer.step()
+
+    radius = initial.norm(dim=(-2, -1), keepdim=True)
+    assert not torch.equal(projection, initial)
+    assert torch.equal(optimizer.state[projection]["radius"], radius)
+    torch.testing.assert_close(
+        projection.norm(dim=(-2, -1), keepdim=True), radius, atol=5.8e-6, rtol=0
+    )
+    assert torch.equal(router, torch.full_like(router, 1 - lr * weight_decay))
+    assert "radius" not in optimizer.state[router]
+
+
+@pytest.mark.parametrize("case", HYPERBALL_NOOP_CASES)
+def test_adamhoptimizer_step_noop(case):
+    initial = torch.ones(2, 3)
+    param = torch.nn.Parameter(initial.clone())
+    optimizer = AdamHOptimizer(
+        [param], lr=0.0 if case == "zero_lr" else 0.1, betas=(0.0, 0.0)
+    )
+    if case == "zero_lr":
+        param.grad = torch.ones_like(param)
+    optimizer.step()
+
+    assert torch.equal(param, initial)
+    if case == "zero_lr":
+        assert optimizer.state[param]["step"] == 1
+        assert torch.equal(optimizer.state[param]["exp_avg"], param.grad)
+        assert "radius" in optimizer.state[param]
+    else:
+        assert param not in optimizer.state
+
+
+def test_adamhoptimizer_state_dict_roundtrip():
+    torch.manual_seed(73)
+    param = torch.nn.Parameter(torch.randn(2, 3, dtype=torch.bfloat16))
+    optimizer = AdamHOptimizer([param], lr=0.09)
+    param.grad = torch.randn_like(param)
+    optimizer.step()
+    checkpoint = copy.deepcopy(optimizer.state_dict())
+    for state in checkpoint["state"].values():
+        for key in ("exp_avg", "exp_avg_sq", "radius"):
+            state[key] = state[key].cpu()
+
+    restored_param = torch.nn.Parameter(param.detach().clone())
+    restored = AdamHOptimizer([restored_param], lr=0.01)
+    restored.load_state_dict(checkpoint)
+    assert restored.param_groups[0]["lr"] == optimizer.param_groups[0]["lr"]
+    assert restored.state[restored_param]["step"] == optimizer.state[param]["step"]
+    for key in ("exp_avg", "exp_avg_sq", "radius"):
+        value = restored.state[restored_param][key]
+        assert value.dtype == torch.float32
+        assert value.device == restored_param.device
+        assert torch.equal(value, optimizer.state[param][key])
+
+    param.grad = torch.randn_like(param)
+    restored_param.grad = param.grad.clone()
+    optimizer.step()
+    restored.step()
+    assert torch.equal(param, restored_param)
+
+
+def test_adamhoptimizer_add_param_group_weight_decay():
+    initial = torch.ones(2, 2)
+    original = torch.nn.Parameter(initial.clone())
+    added = torch.nn.Parameter(initial.clone())
+    router = torch.nn.Parameter(initial.clone())
+    lr, weight_decay, added_decay = 0.1, 0.4, 0.2
+    optimizer = AdamHOptimizer(
+        [("original.weight", original)], lr=lr, weight_decay=weight_decay
+    )
+    optimizer.add_param_group(
+        {
+            "params": [("added.weight", added), ("router.weight", router)],
+            "weight_decay": added_decay,
+        }
+    )
+
+    assert optimizer.defaults["weight_decay"] == weight_decay
+    assert optimizer.param_groups[0]["weight_decay"] == 0.0
+    assert optimizer.param_groups[1]["weight_decay"] == added_decay
+    for param in (original, added, router):
+        param.grad = torch.zeros_like(param)
+    optimizer.step()
+    for param in (original, added):
+        assert torch.equal(param, initial)
+        assert "radius" in optimizer.state[param]
+    assert torch.equal(router, initial * (1 - lr * added_decay))
+    assert "radius" not in optimizer.state[router]
+
+
+@pytest.mark.parametrize("tie", [False, True])
+@pytest.mark.parametrize("weight_decay", [0.0, 0.3])
+def test_build_optimizer_adamh_groups(tie, weight_decay):
+    cfg = _make_moe_cfg(tie)
+    cfg.optimizer = OptimizerConfig(
+        "adamh",
+        lr=0.01,
+        weight_decay=weight_decay,
+        lr_mult={"q_proj": 0, "router": 0.2},
+    )
+    model = build_model(cfg)
+    model.matrix_bias = torch.nn.Parameter(torch.ones(2, 3))
+    model.matrix_ln = torch.nn.Parameter(torch.ones(2, 3))
+    optimizer = build_optimizer(model, cfg)
+    assert type(optimizer) is AdamHOptimizer
+    scheduler = build_scheduler(optimizer, cfg)
+    groups = {
+        id(param): group
+        for group in optimizer.param_groups
+        for param in group["params"]
+    }
+    params = dict(model.named_parameters())
+    constrained = (
+        params["blocks.0.attn.q_proj.weight"],
+        params["blocks.0.mlp.shared_expert.gate_proj.weight"],
+    )
+    fallback = (
+        model.token_emb.weight,
+        model.pos_emb.embedding.weight,
+        model.lm_head.weight,
+        params["blocks.0.mlp.router.gate.weight"],
+    )
+    no_decay = (model.matrix_bias, model.matrix_ln, params["blocks.0.norm1.weight"])
+    for param in (constrained[0], *no_decay):
+        assert groups[id(param)]["weight_decay"] == 0.0
+    for param in fallback:
+        assert groups[id(param)]["weight_decay"] == weight_decay
+    assert groups[id(constrained[1])] is groups[id(model.token_emb.weight)]
+    for group in optimizer.param_groups:
+        assert "use_muon" not in group
+        assert group["lr"] == cfg.optimizer.lr * group["lr_mult"]
+
+    before = {
+        param: param.detach().clone() for param in (*constrained, *fallback, *no_decay)
+    }
+    for param in before:
+        param.grad = torch.zeros_like(param)
+    optimizer.step()
+    for param in (*constrained, *no_decay):
+        assert torch.equal(param, before[param])
+    for param in fallback:
+        lr = groups[id(param)]["lr"]
+        assert torch.equal(param, before[param] * (1 - lr * weight_decay))
+
+    for param in params.values():
+        param.grad = torch.randn_like(param)
+    optimizer.step()
+    assert torch.equal(constrained[0], before[constrained[0]])
+    for param in constrained:
+        assert "radius" in optimizer.state[param]
+    for param in (*fallback, *no_decay):
+        assert "radius" not in optimizer.state[param]
+    scheduler.step()
+    for group in optimizer.param_groups:
+        assert group["lr"] == scheduler.get_lr() * group["lr_mult"]
+
+    checkpoint = copy.deepcopy(optimizer.state_dict())
+    for group in checkpoint["param_groups"]:
+        del group["param_names"]
+    restored_model = copy.deepcopy(model)
+    restored = build_optimizer(restored_model, cfg)
+    restored.load_state_dict(checkpoint)
+    for param, restored_param in zip(params.values(), restored_model.parameters()):
+        param.grad = torch.randn_like(param)
+        restored_param.grad = param.grad.clone()
+    optimizer.step()
+    restored.step()
+    for param, restored_param in zip(params.values(), restored_model.parameters()):
+        assert torch.equal(param, restored_param)
+
+
 @pytest.mark.parametrize("muon_cls", MUON_CLASSES)
-@pytest.mark.parametrize("adam_cls", ["adamw", "adamc"])
+@pytest.mark.parametrize("adam_cls", ADAM_CLASSES)
 def test_muonadamoptimizer_state_dict(muon_cls, adam_cls, device):
     cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
-    cfg.optimizer.optimizer_kwargs.update(muon_cls=muon_cls, adam_cls=adam_cls)
-    cfg.optimizer.optimizer_kwargs["adam_kwargs"]["fused"] = device == "cuda"
+    cfg.optimizer = OptimizerConfig(
+        "muonadam",
+        lr=cfg.optimizer.lr,
+        optimizer_kwargs={
+            "muon_cls": muon_cls,
+            "adam_cls": adam_cls,
+            "adam_kwargs": {} if adam_cls == "adamh" else {"fused": device == "cuda"},
+        },
+    )
     model = build_model(cfg)
     opt = build_optimizer(model, cfg)
     scheduler = build_scheduler(opt, cfg)
@@ -840,10 +1177,55 @@ def test_muonadamoptimizer_state_dict(muon_cls, adam_cls, device):
     for param, restored_param in zip(model.parameters(), restored_model.parameters()):
         assert torch.equal(param, restored_param)
         for key, value in opt.state[param].items():
-            assert torch.equal(value, restored.state[restored_param][key])
+            torch.testing.assert_close(
+                value, restored.state[restored_param][key], atol=0, rtol=0
+            )
     for group, restored_group in zip(opt.param_groups, restored.param_groups):
         assert group["weight_decay"] == restored_group["weight_decay"]
         assert group.get("max_lr") == restored_group.get("max_lr")
+
+
+@pytest.mark.parametrize("empty_partition", ["muon", "adam"])
+def test_build_optimizer_muonadam_empty_partition(empty_partition):
+    model = torch.nn.Module()
+    model.proj = torch.nn.Parameter(
+        torch.arange(1.0, 7.0).reshape(2, 3), requires_grad=empty_partition == "adam"
+    )
+    model.lm_head = torch.nn.Parameter(
+        torch.ones(2, 3), requires_grad=empty_partition == "muon"
+    )
+    model.matrix_bias = torch.nn.Parameter(
+        torch.ones(2, 3), requires_grad=empty_partition == "muon"
+    )
+    cfg = TrainConfig(
+        optimizer=OptimizerConfig(
+            "muonadam",
+            lr=0.1,
+            optimizer_kwargs={"muon_cls": "muonh", "adam_kwargs": {"fused": False}},
+        )
+    )
+    optimizer = build_optimizer(model, cfg)
+    before = {name: param.detach().clone() for name, param in model.named_parameters()}
+    for param in model.parameters():
+        if param.requires_grad:
+            param.grad = torch.ones_like(param)
+    optimizer.step()
+    for name, param in model.named_parameters():
+        assert torch.equal(param, before[name]) == (not param.requires_grad)
+        assert (param in optimizer.state) == param.requires_grad
+        if param.requires_grad:
+            assert ("radius" in optimizer.state[param]) == (param is model.proj)
+
+    restored_model = copy.deepcopy(model)
+    restored = build_optimizer(restored_model, cfg)
+    restored.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+    for param, restored_param in zip(model.parameters(), restored_model.parameters()):
+        if param.requires_grad:
+            restored_param.grad = param.grad.clone()
+    optimizer.step()
+    restored.step()
+    for param, restored_param in zip(model.parameters(), restored_model.parameters()):
+        assert torch.equal(param, restored_param)
 
 
 CHECKPOINT_MISMATCH_CASES = [
@@ -851,6 +1233,7 @@ CHECKPOINT_MISMATCH_CASES = [
     ("muon_cls", "muon", "muonc"),
     ("muon_cls", "muons", "muon"),
     ("adam_cls", "adamw", "adamc"),
+    ("adam_cls", "adamh", "adamw"),
 ]
 
 
@@ -858,10 +1241,16 @@ CHECKPOINT_MISMATCH_CASES = [
 def test_muonadamoptimizer_load_state_dict_raise_error(case):
     selector, saved_value, configured_value = case
     base_cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
-    base_cfg.optimizer.optimizer_kwargs[selector] = saved_value
+    base_cfg.optimizer = OptimizerConfig(
+        "muonadam", lr=base_cfg.optimizer.lr, optimizer_kwargs={selector: saved_value}
+    )
     state = build_optimizer(build_model(base_cfg), base_cfg).state_dict()
     mismatched_cfg = _make_cfg(tie=False, optimizer_cls="muonadam")
-    mismatched_cfg.optimizer.optimizer_kwargs[selector] = configured_value
+    mismatched_cfg.optimizer = OptimizerConfig(
+        "muonadam",
+        lr=mismatched_cfg.optimizer.lr,
+        optimizer_kwargs={selector: configured_value},
+    )
 
     with pytest.raises(ValueError):
         build_optimizer(build_model(mismatched_cfg), mismatched_cfg).load_state_dict(

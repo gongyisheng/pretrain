@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -5,12 +7,152 @@ from src.layers.attention import ATTN_REGISTRY, GroupedQueryAttention
 from src.layers.mlp import DenseMLPBlock
 from src.model import build_model
 from src.model.transformer import TransformerLM
-from src.utils.config import ModelConfig, TrainConfig
+from src.utils.config import INIT_DISTRIBUTIONS, INIT_METHODS, ModelConfig, TrainConfig
 from tests.fast.layers.helper import (
     ATTN_IMPLEMENTATION,
     make_attn_mask,
     skip_if_unsupported,
 )
+
+INITIALIZATION_METHODS = sorted(INIT_METHODS)
+INITIALIZATION_DISTRIBUTIONS = sorted(INIT_DISTRIBUTIONS)
+INITIALIZATION_GAINS = [0.5, 1.0, 2.0]
+
+
+@pytest.mark.parametrize("method", INITIALIZATION_METHODS)
+@pytest.mark.parametrize("distribution", INITIALIZATION_DISTRIBUTIONS)
+@pytest.mark.parametrize("gain", INITIALIZATION_GAINS)
+def test_transformer_lm_initialization(method, distribution, gain):
+    config = ModelConfig(
+        d_model=64,
+        n_layers=2,
+        vocab_size=192,
+        attn=[
+            {
+                "attn_cls": "gqa",
+                "attn_kwargs": {
+                    "n_heads": 4,
+                    "n_kv_heads": 2,
+                    "bias": True,
+                    "qk_norm": True,
+                    "attn_gate": "elementwise",
+                    "attn_sink": True,
+                    "attn_implementation": "flex_attention",
+                },
+            }
+        ],
+        mlp=[
+            {
+                "mlp_cls": "moe",
+                "mlp_kwargs": {
+                    "intermediate_size": 96,
+                    "bias": True,
+                    "activation_cls": "swiglu",
+                    "n_routed_experts": 3,
+                    "n_routed_experts_per_token": 2,
+                    "n_shared_experts": 2,
+                    "expert_bias": True,
+                },
+            }
+        ],
+        norm_cls="layernorm",
+        pos_emb_cls="learned",
+        residual_cls="attn_res",
+        tie_word_embeddings=False,
+        lm_head_bias=True,
+        init_method=method,
+        init_distribution=distribution,
+        init_std=0.037,
+        init_std_gain=gain,
+    )
+    torch.manual_seed(173)
+    model = TransformerLM(config, max_seq_len=16)
+    config.init_std_gain = 1.0
+    torch.manual_seed(173)
+    unit_gain = TransformerLM(config, max_seq_len=16)
+
+    config.init_method = "fixed"
+    torch.manual_seed(173)
+    fallback = TransformerLM(config, max_seq_len=16)
+    config.init_std = 1.0
+    torch.manual_seed(173)
+    reference = TransformerLM(config, max_seq_len=16)
+
+    for name, parameter in model.named_parameters():
+        reference_parameter = reference.get_parameter(name)
+        randomized = parameter.ndim >= 2 and (
+            name.endswith(".weight")
+            or name.rsplit(".", 1)[-1] in ("expert_up", "expert_gate", "expert_down")
+        )
+        if not randomized:
+            expected = (
+                torch.ones_like(parameter)
+                if name.endswith(".weight")
+                else torch.zeros_like(parameter)
+            )
+            assert torch.equal(parameter, expected), name
+            continue
+        scaled = (".attn." in name or ".mlp." in name) and ".router." not in name
+        unit_parameter = unit_gain.get_parameter(name)
+        expected = unit_parameter * gain if scaled else unit_parameter
+        assert torch.equal(parameter, expected), name
+        std = 0.037
+        if scaled:
+            fan_out, fan_in = parameter.shape[-2:]
+            std = {
+                "fixed": 0.037,
+                "lecun": 1 / math.sqrt(fan_in),
+                "xavier": math.sqrt(2 / (fan_in + fan_out)),
+                "kaiming": math.sqrt(2 / fan_in),
+            }[method] * gain
+        torch.testing.assert_close(
+            parameter, reference_parameter * std, atol=4.2e-7, rtol=0, msg=name
+        )
+        if distribution == "uniform":
+            assert parameter.abs().max() <= math.sqrt(3) * std
+        if not scaled or method == "fixed":
+            assert torch.equal(unit_parameter, fallback.get_parameter(name)), name
+        else:
+            assert not torch.equal(unit_parameter, fallback.get_parameter(name)), name
+    assert all(
+        torch.equal(buffer, reference.get_buffer(name))
+        for name, buffer in model.named_buffers()
+    )
+
+
+def test_transformer_lm_initialization_defaults():
+    config = _qwen3_cfg("sdpa").model
+    torch.manual_seed(173)
+    default = TransformerLM(config, max_seq_len=16)
+    config.init_method = "fixed"
+    config.init_distribution = "normal"
+    config.init_std = 0.02
+    config.init_std_gain = 1.0
+    torch.manual_seed(173)
+    explicit = TransformerLM(config, max_seq_len=16)
+    assert all(
+        torch.equal(value, explicit.state_dict()[name])
+        for name, value in default.state_dict().items()
+    )
+
+
+def test_transformer_lm_initialization_forward():
+    config = _qwen3_cfg("sdpa")
+    config.model.init_method = "kaiming"
+    config.model.init_distribution = "uniform"
+    config.model.init_std_gain = 0.5
+    config.model.tie_word_embeddings = True
+    model = build_model(config)
+    assert model.token_emb.weight is model.lm_head.weight
+    inputs = torch.randint(0, config.model.vocab_size, (2, 8))
+    positions = torch.arange(8).expand(2, 8)
+    logits, _ = model(inputs, positions, [None] * config.model.n_layers)
+    assert torch.isfinite(logits).all()
+    logits.square().mean().backward()
+    assert all(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in model.parameters()
+    )
 
 
 def _cfg(max_seq_len=32, **model_over):

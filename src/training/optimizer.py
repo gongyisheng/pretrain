@@ -31,9 +31,116 @@ class AdamCOptimizer(torch.optim.AdamW):
                 group["weight_decay"] = weight_decay
 
 
+def _hyperball_step(
+    param: torch.Tensor,
+    direction: torch.Tensor,
+    radius: torch.Tensor,
+    lr: float,
+    eps: float,
+) -> None:
+    direction = direction.to(dtype=radius.dtype)
+    direction_norm = direction.norm(dim=(-2, -1), keepdim=True)
+    direction = direction / direction_norm.clamp_min(eps)
+    trial = param.to(dtype=radius.dtype) - lr * radius * direction
+    trial_norm = trial.norm(dim=(-2, -1), keepdim=True)
+    projected = radius * trial / trial_norm.clamp_min(eps)
+    param.copy_(torch.where((direction_norm > 0) & (trial_norm > 0), projected, param))
+
+
+class AdamHOptimizer(torch.optim.Adam):
+    """Adam on fixed Frobenius spheres. https://arxiv.org/abs/2606.16899"""
+
+    def add_param_group(self, param_group):
+        super().add_param_group(param_group)
+        param_names = param_group.get("param_names")
+        if all(
+            _is_hyperball_param(
+                param_names[index] if param_names is not None else "", param
+            )
+            for index, param in enumerate(param_group["params"])
+        ):
+            param_group.update(weight_decay=0.0)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2 = group["betas"]
+            eps = group["eps"]
+            weight_decay = group["weight_decay"]
+            param_names = group.get("param_names")
+            for index, param in enumerate(group["params"]):
+                if param.grad is None:
+                    continue
+                if param.grad.layout != torch.strided:
+                    raise RuntimeError("AdamH does not support sparse gradients")
+                name = param_names[index] if param_names is not None else ""
+                is_hyperball_param = _is_hyperball_param(name, param)
+                # Keep moments and projection arithmetic at least float32.
+                dtype = torch.promote_types(param.dtype, torch.float32)
+                state = self.state[param]
+                if not state:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(param, dtype=dtype)
+                    state["exp_avg_sq"] = torch.zeros_like(param, dtype=dtype)
+                if "radius" not in state and is_hyperball_param:
+                    state["radius"] = torch.linalg.vector_norm(
+                        param, dim=(-2, -1), keepdim=True, dtype=dtype
+                    )
+                state["step"] += 1
+                grad = param.grad.to(dtype=dtype)
+                exp_avg = state["exp_avg"].lerp_(grad, 1 - beta1)
+                exp_avg_sq = state["exp_avg_sq"].mul_(beta2)
+                exp_avg_sq.addcmul_(grad, grad, value=1 - beta2)
+                if lr == 0.0:
+                    continue
+                step = state["step"]
+                bias_correction = 1 - beta1**step
+                denom = exp_avg_sq.sqrt().div_(math.sqrt(1 - beta2**step)).add_(eps)
+                if eps == 0.0:
+                    denom.masked_fill_(denom == 0, 1.0)
+                if not is_hyperball_param:
+                    weight = param.to(dtype=dtype)
+                    if weight_decay != 0.0:
+                        weight.mul_(1 - lr * weight_decay)
+                    weight.addcdiv_(exp_avg, denom, value=-lr / bias_correction)
+                    if weight is not param:
+                        param.copy_(weight)
+                    continue
+
+                direction = exp_avg.div(denom).div_(bias_correction)
+                _hyperball_step(
+                    param, direction, state["radius"], lr, torch.finfo(dtype).tiny
+                )
+        return loss
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # Restore the saved step counter and unrounded state tensors.
+        for group, saved_group in zip(self.param_groups, state_dict["param_groups"]):
+            for param, saved_id in zip(group["params"], saved_group["params"]):
+                saved_state = state_dict["state"].get(saved_id, {})
+                if "step" in saved_state:
+                    self.state[param]["step"] = int(saved_state["step"])
+                dtype = torch.promote_types(param.dtype, torch.float32)
+                if dtype == param.dtype:
+                    continue
+                for key in ("exp_avg", "exp_avg_sq", "radius"):
+                    if key in saved_state:
+                        self.state[param][key] = saved_state[key].to(
+                            device=param.device, dtype=dtype, copy=True
+                        )
+
+
 ADAM_OPTIMIZER_REGISTRY = {
     "adamw": AdamWOptimizer,
     "adamc": AdamCOptimizer,
+    "adamh": AdamHOptimizer,
 }
 
 
@@ -128,6 +235,10 @@ def _is_muon_param(name: str, param: torch.nn.Parameter) -> bool:
         and "lm_head" not in name
         and "router" not in name
     )
+
+
+def _is_hyperball_param(name: str, param: torch.nn.Parameter) -> bool:
+    return _is_muon_param(name, param) and "ln" not in name and "bias" not in name
 
 
 def _is_muons_param(param: torch.nn.Parameter) -> bool:
@@ -317,15 +428,95 @@ class MuonCOptimizer(MuonOptimizer):
                 group["weight_decay"] = weight_decay
 
 
+class MuonHOptimizer(MuonOptimizer):
+    """Muon on fixed Frobenius spheres. https://arxiv.org/abs/2606.16899"""
+
+    def add_param_group(self, param_group):
+        super().add_param_group(param_group)
+        param_names = param_group.get("param_names")
+        if all(
+            _is_hyperball_param(
+                param_names[index] if param_names is not None else "", param
+            )
+            for index, param in enumerate(param_group["params"])
+        ):
+            param_group.update(weight_decay=0.0, adjust_lr_fn=None)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            momentum = group["momentum"]
+            nesterov = group["nesterov"]
+
+            buckets: dict = {}
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                buckets.setdefault((tuple(p.shape), p.dtype, p.device), []).append(p)
+
+            for params in buckets.values():
+                grads = [p.grad for p in params]
+                momentum_buffers = []
+                for p in params:
+                    state = self.state[p]
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(p.grad)
+                    if "radius" not in state:
+                        state["radius"] = p.float().norm(dim=(-2, -1), keepdim=True)
+                    momentum_buffers.append(state["momentum_buffer"])
+
+                torch._foreach_lerp_(momentum_buffers, grads, 1 - momentum)
+                updates = (
+                    torch._foreach_lerp(grads, momentum_buffers, momentum)
+                    if nesterov
+                    else momentum_buffers
+                )
+
+                if lr == 0.0:
+                    continue
+
+                ortho = _newton_schulz(
+                    torch.stack(updates),
+                    group["ns_coefficients"],
+                    group["ns_max_batch_elems"],
+                    group["ns_steps"],
+                    group["eps"],
+                )
+
+                for p, direction in zip(params, ortho.unbind(0)):
+                    _hyperball_step(
+                        p, direction, self.state[p]["radius"], lr, group["eps"]
+                    )
+        return loss
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # The base loader casts floating state to the parameter dtype.
+        for group, saved_group in zip(self.param_groups, state_dict["param_groups"]):
+            for param, saved_id in zip(group["params"], saved_group["params"]):
+                saved_state = state_dict["state"].get(saved_id, {})
+                if "radius" in saved_state:
+                    self.state[param]["radius"] = saved_state["radius"].to(
+                        device=param.device, dtype=torch.float32, copy=True
+                    )
+
+
 MUON_OPTIMIZER_REGISTRY = {
     "muon": MuonOptimizer,
     "muonc": MuonCOptimizer,
     "muons": MuonOptimizer,
+    "muonh": MuonHOptimizer,
 }
 
 
 class MuonAdamOptimizer:
-    """Muon or MuonC for selected matrices, AdamW or AdamC for other weights.
+    """Muon variants for selected matrices and an Adam variant for other weights.
 
     Muon: https://kellerjordan.github.io/posts/muon/
     MuonS: https://openreview.net/forum?id=ppmyFtr9EW
@@ -347,6 +538,9 @@ class MuonAdamOptimizer:
         adam_optimizer_cls = ADAM_OPTIMIZER_REGISTRY.get(adam_cls)
         if adam_optimizer_cls is None:
             raise ValueError(f"unknown Adam companion: {adam_cls!r}")
+        if muon_groups or adam_groups:
+            muon_groups = muon_groups or [{"params": []}]
+            adam_groups = adam_groups or [{"params": []}]
         self.muon_cls = muon_cls
         muon_kwargs = {} if muon_kwargs is None else muon_kwargs
         self.muon = muon_optimizer_cls(muon_groups, lr=lr, **muon_kwargs)
@@ -416,18 +610,21 @@ def build_optimizer(
 
     The first matching `lr_mult` regex sets each parameter's multiplier.
     """
-    optimizer_cls = config.optimizer.optimizer_cls
-    use_muonadam_optm = optimizer_cls == "muonadam"
-    muon_cls = (
-        config.optimizer.optimizer_kwargs["muon_cls"] if use_muonadam_optm else None
-    )
-    use_muonc_optm = muon_cls == "muonc"
-    use_adamc_optm = optimizer_cls == "adamc" or (
-        use_muonadam_optm and config.optimizer.optimizer_kwargs["adam_cls"] == "adamc"
-    )
+    optimizer_name = config.optimizer.optimizer_cls
+    kwargs = config.optimizer.optimizer_kwargs
+    if optimizer_name == "muonadam":
+        muon_name = kwargs["muon_cls"]
+        muon_optimizer = MUON_OPTIMIZER_REGISTRY[muon_name]
+        default_optimizer = ADAM_OPTIMIZER_REGISTRY[kwargs["adam_cls"]]
+    else:
+        muon_name = None
+        muon_optimizer = None
+        default_optimizer = OPTIMIZER_REGISTRY[optimizer_name]
+    corrected_optimizers = (AdamCOptimizer, MuonCOptimizer)
+    hyperball_optimizers = (AdamHOptimizer, MuonHOptimizer)
     patterns = [(re.compile(k), k) for k in config.optimizer.lr_mult.keys()]
     wd = config.optimizer.weight_decay
-    groups: dict = {}  # (matched key, no decay, Muon, corrected decay) -> [params]
+    groups: dict = {}
 
     for param_name, param in model.named_parameters():
         if not param.requires_grad:
@@ -438,26 +635,32 @@ def build_optimizer(
                 matched = key
                 break
         is_no_decay = param.ndim < 2 or "ln" in param_name or "bias" in param_name
-        if muon_cls in ("muon", "muonc"):
-            use_muon = _is_muon_param(param_name, param)
-        elif muon_cls == "muons":
+        if muon_optimizer is MuonHOptimizer:
+            use_muon = _is_hyperball_param(param_name, param)
+        elif muon_name == "muons":
             use_muon = _is_muons_param(param)
         else:
-            use_muon = False
+            use_muon = muon_optimizer is not None and _is_muon_param(param_name, param)
+        param_optimizer = muon_optimizer if use_muon else default_optimizer
         use_corrected_weight_decay = (
-            (use_muonc_optm if use_muon else use_adamc_optm)
+            param_optimizer in corrected_optimizers
             and not is_no_decay
             and _is_corrected_weight_decay_param(param_name, param)
         )
-        groups.setdefault(
-            (matched, is_no_decay, use_muon, use_corrected_weight_decay), []
-        ).append(param)
+        group_params = groups.setdefault(
+            (matched, is_no_decay, param_optimizer, use_corrected_weight_decay),
+            [],
+        )
+        group_params.append(
+            (param_name, param) if param_optimizer is AdamHOptimizer else param
+        )
 
+    muon_groups = []
     param_groups = []
     for (
         matched,
         is_no_decay,
-        use_muon,
+        group_optimizer,
         use_corrected_weight_decay,
     ), params in groups.items():
         mult = config.optimizer.lr_mult.get(matched, 1.0) if matched else 1.0
@@ -465,28 +668,28 @@ def build_optimizer(
             "params": params,
             "weight_decay": 0.0 if is_no_decay else wd,
             "lr_mult": mult,
-            "use_muon": use_muon,
             "use_corrected_weight_decay": use_corrected_weight_decay,
         }
-        if (use_muonc_optm and use_muon) or (use_adamc_optm and not use_muon):
+        if group_optimizer in (*corrected_optimizers, *hyperball_optimizers):
             group["lr"] = config.optimizer.lr * mult
-            group["max_lr"] = config.optimizer.lr * mult
-        param_groups.append(group)
+        if group_optimizer in corrected_optimizers:
+            group["max_lr"] = group["lr"]
+        if group_optimizer is muon_optimizer:
+            muon_groups.append(group)
+        else:
+            param_groups.append(group)
 
-    kwargs = config.optimizer.optimizer_kwargs
-    if use_muonadam_optm:
+    if optimizer_name == "muonadam":
         return MuonAdamOptimizer(
-            [g for g in param_groups if g["use_muon"]],
-            [g for g in param_groups if not g["use_muon"]],
+            muon_groups,
+            param_groups,
             lr=config.optimizer.lr,
             muon_cls=kwargs["muon_cls"],
             muon_kwargs=kwargs["muon_kwargs"],
             adam_cls=kwargs["adam_cls"],
             adam_kwargs=kwargs["adam_kwargs"],
         )
-    return OPTIMIZER_REGISTRY[optimizer_cls](
-        param_groups, lr=config.optimizer.lr, **kwargs
-    )
+    return default_optimizer(param_groups, lr=config.optimizer.lr, **kwargs)
 
 
 class CosineWarmupScheduler:
