@@ -1,4 +1,7 @@
 #!/bin/bash
+# Run the AdamW initialization method sweep.
+# Usage: nohup bash experiments/adamw_init_method/run.sh > logs/adamw_init_method.log 2>&1 &
+
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
