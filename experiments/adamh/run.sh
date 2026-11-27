@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run the AdamH learning-rate sweep with AdamW and AdamC baselines.
-# Usage: nohup bash experiments/adamh/run.sh > logs/adamh_experiment.log 2>&1 &
+# Usage: nohup bash experiments/adamh/run.sh > logs/adamh.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."

@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run the 200,000-step optimizer comparison.
+# Usage: nohup bash experiments/adamh/run.sh > logs/adamh_200k.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."

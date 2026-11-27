@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run the MuonH learning-rate sweep with MuonW and MuonC baselines.
-# Usage: nohup bash experiments/muonh/run.sh > logs/muonh_experiment.log 2>&1 &
+# Usage: nohup bash experiments/muonh/run.sh > logs/muonh.log 2>&1 &
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
