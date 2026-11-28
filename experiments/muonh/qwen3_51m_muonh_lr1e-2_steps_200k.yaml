@@ -43,7 +43,7 @@ training:
   enable_torch_compile: true
   grad_clip: 1.0
   checkpoint_dir: checkpoints/muonh/qwen3_51m_muonh_lr1e-2_steps_200k/
-  checkpoint_every: 5000
+  checkpoint_every: 20000
   eval_every: 100
   eval_steps: 100
 
@@ -69,10 +69,10 @@ optimizer:
 
 scheduler:
   name: cosine
-  warmup_steps: 1500
+  warmup_steps: 6000
   min_lr: 1e-5
 
 logging:
   wandb_project: pretrain-muonh
   wandb_run_name: qwen3-51m-muonh-lr1e-2-steps-200k
-  log_every: 10
+  log_every: 50
